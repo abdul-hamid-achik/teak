@@ -373,3 +373,12 @@ func (r *Rope) ByteAt(offset int) byte {
 	}
 	return r.right.ByteAt(offset - r.left.len)
 }
+
+// ByteAtSafe returns the byte at the given offset with bounds checking.
+// Returns (byte, true) if the offset is valid, (0, false) otherwise.
+func (r *Rope) ByteAtSafe(offset int) (byte, bool) {
+	if r == nil || offset < 0 || offset >= r.len {
+		return 0, false
+	}
+	return r.ByteAt(offset), true
+}

@@ -2,6 +2,7 @@ package text
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -17,16 +18,28 @@ const (
 	DirDown
 )
 
+// EditChange describes an incremental text change for LSP sync.
+// StartLine/StartCol and EndLine/EndCol are 0-based positions in the
+// document BEFORE the edit. Text is the replacement string.
+type EditChange struct {
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	Text      string
+}
+
 // Buffer wraps a Rope with cursor, selection, undo, and file I/O.
 type Buffer struct {
-	rope      *Rope
-	Cursor    Position
-	Selection *Selection
-	undo      *UndoStack
-	FilePath  string
-	dirty     bool
-	savedRope *Rope
-	version   int
+	rope       *Rope
+	Cursor     Position
+	Selection  *Selection
+	undo       *UndoStack
+	FilePath   string
+	dirty      bool
+	savedRope  *Rope
+	version    int
+	lastChange *EditChange // incremental change from last edit, nil if unknown
 }
 
 // NewBuffer creates an empty buffer.
@@ -132,15 +145,35 @@ func (b *Buffer) Line(line int) []byte {
 // InsertAtCursor inserts text at the current cursor position.
 func (b *Buffer) InsertAtCursor(text []byte) {
 	if b.Selection != nil {
+		// Selection replace: range = selection, text = inserted text
+		start, end := b.Selection.Ordered()
 		b.DeleteSelection()
+		b.undo.Save(b.rope, b.Cursor, false)
+		offset := b.rope.PositionToOffset(b.Cursor)
+		b.rope = b.rope.Insert(offset, text)
+		b.dirty = true
+		b.version++
+		b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+		b.lastChange = &EditChange{
+			StartLine: start.Line, StartCol: start.Col,
+			EndLine: end.Line, EndCol: end.Col,
+			Text: string(text),
+		}
+		return
 	}
 	isCharInsert := len(text) == 1
 	b.undo.Save(b.rope, b.Cursor, isCharInsert)
+	startPos := b.Cursor
 	offset := b.rope.PositionToOffset(b.Cursor)
 	b.rope = b.rope.Insert(offset, text)
 	b.dirty = true
 	b.version++
 	b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+	b.lastChange = &EditChange{
+		StartLine: startPos.Line, StartCol: startPos.Col,
+		EndLine: startPos.Line, EndCol: startPos.Col,
+		Text: string(text),
+	}
 }
 
 // InsertNewline inserts a newline at the cursor.
@@ -167,6 +200,11 @@ func (b *Buffer) DedentLine(tabSize int) {
 	b.dirty = true
 	b.version++
 	b.Cursor.Col = max(0, b.Cursor.Col-n)
+	b.lastChange = &EditChange{
+		StartLine: b.Cursor.Line, StartCol: 0,
+		EndLine: b.Cursor.Line, EndCol: n,
+		Text: "",
+	}
 }
 
 // Backspace deletes the character before the cursor.
@@ -192,11 +230,17 @@ func (b *Buffer) Backspace() {
 			}
 		}
 	}
+	endPos := b.Cursor
 	b.undo.Save(b.rope, b.Cursor, false)
 	b.rope = b.rope.Delete(offset-delLen, delLen)
 	b.dirty = true
 	b.version++
 	b.Cursor = b.rope.OffsetToPosition(offset - delLen)
+	b.lastChange = &EditChange{
+		StartLine: b.Cursor.Line, StartCol: b.Cursor.Col,
+		EndLine: endPos.Line, EndCol: endPos.Col,
+		Text: "",
+	}
 }
 
 // Delete deletes the character at the cursor.
@@ -218,10 +262,17 @@ func (b *Buffer) Delete() {
 			delLen = size
 		}
 	}
+	startPos := b.Cursor
+	endPos := b.rope.OffsetToPosition(offset + delLen)
 	b.undo.Save(b.rope, b.Cursor, false)
 	b.rope = b.rope.Delete(offset, delLen)
 	b.dirty = true
 	b.version++
+	b.lastChange = &EditChange{
+		StartLine: startPos.Line, StartCol: startPos.Col,
+		EndLine: endPos.Line, EndCol: endPos.Col,
+		Text: "",
+	}
 }
 
 // DeleteSelection removes the selected text and clears the selection.
@@ -243,6 +294,11 @@ func (b *Buffer) DeleteSelection() {
 	b.version++
 	b.Cursor = start
 	b.Selection = nil
+	b.lastChange = &EditChange{
+		StartLine: start.Line, StartCol: start.Col,
+		EndLine: end.Line, EndCol: end.Col,
+		Text: "",
+	}
 }
 
 // ReplaceRange replaces text between start and end positions with newText.
@@ -259,6 +315,11 @@ func (b *Buffer) ReplaceRange(start, end Position, newText []byte) {
 	}
 	b.dirty = true
 	b.version++
+	b.lastChange = &EditChange{
+		StartLine: start.Line, StartCol: start.Col,
+		EndLine: end.Line, EndCol: end.Col,
+		Text: string(newText),
+	}
 }
 
 // MoveCursor moves the cursor in the given direction.
@@ -325,13 +386,29 @@ func (b *Buffer) Save() error {
 	return b.SaveAs(b.FilePath)
 }
 
-// SaveAs writes the buffer to the given path.
+// SaveAs writes the buffer to the given path atomically.
+// It writes to a temporary file first, then renames it to the target path.
 func (b *Buffer) SaveAs(path string) error {
 	data := b.rope.Bytes()
-	err := os.WriteFile(path, data, 0644)
-	if err != nil {
-		return err
+
+	// Create temporary file in same directory for atomic rename
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
 	}
+
+	// Ensure data is flushed to disk (fsync)
+	if f, err := os.Open(tmpPath); err == nil {
+		f.Sync()
+		f.Close()
+	}
+
+	// Atomic rename - guarantees file is either old or new, never partial
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath) // Clean up temp file
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+
 	b.FilePath = path
 	b.dirty = false
 	b.savedRope = b.rope
@@ -349,6 +426,7 @@ func (b *Buffer) Undo() {
 	b.Selection = nil
 	b.dirty = b.rope != b.savedRope
 	b.version++
+	b.lastChange = nil // undo: fall back to full sync
 }
 
 // Redo redoes the last undone edit.
@@ -362,6 +440,7 @@ func (b *Buffer) Redo() {
 	b.Selection = nil
 	b.dirty = b.rope != b.savedRope
 	b.version++
+	b.lastChange = nil // redo: fall back to full sync
 }
 
 // Content returns the full buffer content as a string.
@@ -372,6 +451,12 @@ func (b *Buffer) Content() string {
 // Version returns a monotonically increasing version number, incremented on each edit.
 func (b *Buffer) Version() int {
 	return b.version
+}
+
+// LastChange returns the incremental change from the last edit, or nil
+// if the change is unknown (e.g. undo/redo or multi-line indent).
+func (b *Buffer) LastChange() *EditChange {
+	return b.lastChange
 }
 
 // Bytes returns the full buffer content as a byte slice.
@@ -515,6 +600,11 @@ func (b *Buffer) DeleteWord() {
 	b.rope = b.rope.Delete(startOff, n)
 	b.dirty = true
 	b.version++
+	b.lastChange = &EditChange{
+		StartLine: saved.Line, StartCol: saved.Col,
+		EndLine: endPos.Line, EndCol: endPos.Col,
+		Text: "",
+	}
 }
 
 // SelectAll selects the entire buffer content.
@@ -810,6 +900,7 @@ func (b *Buffer) DeleteLine() {
 	b.Cursor.Col = min(b.Cursor.Col, b.rope.LineLen(b.Cursor.Line))
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // complex operation, fall back to full sync
 }
 
 // IndentLines indents the current line or all lines in selection.
@@ -833,6 +924,7 @@ func (b *Buffer) IndentLines(tabSize int) {
 	}
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // multi-line indent: fall back to full sync
 }
 
 // DedentLines removes one level of indentation from the current line or selection.
@@ -859,4 +951,5 @@ func (b *Buffer) DedentLines(tabSize int) {
 	}
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // multi-line dedent: fall back to full sync
 }

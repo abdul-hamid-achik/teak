@@ -194,8 +194,10 @@ func (c *Client) Initialize() error {
 					"contentFormat": []string{"plaintext"},
 				},
 				"synchronization": map[string]any{
-					"didSave": true,
+					"didSave":             true,
 					"dynamicRegistration": false,
+					"willSave":            false,
+					"willSaveWaitUntil":   false,
 				},
 				"references": map[string]any{},
 				"rename": map[string]any{
@@ -246,6 +248,13 @@ func (c *Client) Initialize() error {
 			c.syncKind = SyncKind(int(v))
 		case int:
 			c.syncKind = SyncKind(v)
+		case map[string]any:
+			// TextDocumentSyncOptions object form: { "change": 2, ... }
+			if change, ok := v["change"]; ok {
+				if f, ok := change.(float64); ok {
+					c.syncKind = SyncKind(int(f))
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -309,6 +318,31 @@ func (c *Client) DidChange(uri string, version int, content string) {
 		},
 		"contentChanges": []map[string]any{
 			{"text": content},
+		},
+	})
+}
+
+// DidChangeIncremental notifies the server of an incremental document change.
+// The range (startLine:startCol to endLine:endCol) describes the region in the
+// old document that was replaced by text. All positions are 0-based.
+func (c *Client) DidChangeIncremental(uri string, version int, startLine, startCol, endLine, endCol int, text string) {
+	c.mu.Lock()
+	c.openDocs[uri] = version
+	c.mu.Unlock()
+
+	c.notify("textDocument/didChange", map[string]any{
+		"textDocument": map[string]any{
+			"uri":     uri,
+			"version": version,
+		},
+		"contentChanges": []map[string]any{
+			{
+				"range": map[string]any{
+					"start": map[string]any{"line": startLine, "character": startCol},
+					"end":   map[string]any{"line": endLine, "character": endCol},
+				},
+				"text": text,
+			},
 		},
 	})
 }

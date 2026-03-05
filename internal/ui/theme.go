@@ -111,6 +111,15 @@ type Theme struct {
 	ScrollTrack lipgloss.Style
 	ScrollThumb lipgloss.Style
 
+	// Agent panel
+	AgentHeader       lipgloss.Style
+	AgentUserMsg      lipgloss.Style
+	AgentBorder       lipgloss.Style
+	AgentBorderFocused lipgloss.Style
+	AgentInput        lipgloss.Style
+	AgentToolCall     lipgloss.Style
+	AgentPermission   lipgloss.Style
+
 	// Syntax highlighting colors
 	SyntaxKeyword   color.Color
 	SyntaxFunction  color.Color
@@ -355,6 +364,25 @@ func defaultNordTheme() Theme {
 		ScrollThumb: lipgloss.NewStyle().
 			Background(Nord3),
 
+		// Agent panel
+		AgentHeader: lipgloss.NewStyle().
+			Foreground(Nord8).
+			Bold(true),
+		AgentUserMsg: lipgloss.NewStyle().
+			Foreground(Nord8).
+			Bold(true),
+		AgentBorder: lipgloss.NewStyle().
+			Foreground(Nord3),
+		AgentBorderFocused: lipgloss.NewStyle().
+			Foreground(Nord8),
+		AgentInput: lipgloss.NewStyle().
+			Background(Nord1).
+			Foreground(Nord4),
+		AgentToolCall: lipgloss.NewStyle().
+			Foreground(Nord4),
+		AgentPermission: lipgloss.NewStyle().
+			Foreground(Nord12),
+
 		// Syntax highlighting
 		SyntaxKeyword:   Nord9,
 		SyntaxFunction:  Nord8,
@@ -442,6 +470,13 @@ func buildTheme(p palette) Theme {
 		ReplaceButton: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
 		ScrollTrack: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg1),
 		ScrollThumb: lipgloss.NewStyle().Background(p.bg3).Foreground(p.bg3),
+		AgentHeader:        lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		AgentUserMsg:       lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		AgentBorder:        lipgloss.NewStyle().Foreground(p.bg3),
+		AgentBorderFocused: lipgloss.NewStyle().Foreground(p.cyan),
+		AgentInput:         lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		AgentToolCall:      lipgloss.NewStyle().Foreground(p.fg0),
+		AgentPermission:    lipgloss.NewStyle().Foreground(p.orange),
 		SyntaxKeyword:   p.keyword,
 		SyntaxFunction:  p.function,
 		SyntaxString:    p.str,

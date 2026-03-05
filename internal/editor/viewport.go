@@ -21,8 +21,8 @@ type Viewport struct {
 }
 
 // Render renders the visible portion of the buffer with gutter, syntax highlighting, and diagnostics.
-func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic) string {
-	gutter, gw := RenderGutter(theme, buf.LineCount(), v.ScrollY, v.Height, buf.Cursor.Line, diagnostics)
+func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts) string {
+	gutter, gw := RenderGutter(theme, buf.LineCount(), v.ScrollY, v.Height, buf.Cursor.Line, diagnostics, gutterOpts)
 	v.GutterWidth = gw + 1 // +1 for gutter padding
 
 	gutterLines := strings.Split(gutter, "\n")

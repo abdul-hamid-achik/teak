@@ -4,13 +4,26 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"teak/internal/ui"
 )
 
+// GutterOpts holds optional debug-related gutter state.
+type GutterOpts struct {
+	Breakpoints   map[int]bool // 0-based line numbers with breakpoints
+	ExecLine      int          // 0-based current execution line, -1 if none
+}
+
 // RenderGutter renders line numbers for visible lines with optional diagnostic icons.
 // Returns the rendered gutter string and its width.
-func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, diagnostics []Diagnostic) (string, int) {
-	width := gutterWidth(totalLines)
+func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, diagnostics []Diagnostic, opts *GutterOpts) (string, int) {
+	// Add 2 columns for breakpoint marker when opts provided
+	baseWidth := gutterWidth(totalLines)
+	markerWidth := 0
+	if opts != nil {
+		markerWidth = 2 // "● " or "  "
+	}
+	width := baseWidth + markerWidth
 
 	// Build a map of line -> worst diagnostic severity
 	diagMap := make(map[int]int) // line -> severity (1=error, 2=warn, 3=info, 4=hint)
@@ -24,15 +37,32 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 
 	var sb strings.Builder
 
+	// Styles for breakpoint marker and execution line
+	bpStyle := lipgloss.NewStyle().Foreground(ui.Nord11) // red
+	execStyle := lipgloss.NewStyle().Background(ui.Nord3).Foreground(ui.Nord13) // yellow on dark
+
 	for i := range height {
 		line := scrollY + i
 		if line >= totalLines {
 			sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", width)))
 		} else {
-			numStr := fmt.Sprintf("%*d", width, line+1)
+			// Breakpoint marker column
+			if opts != nil {
+				if opts.Breakpoints[line] {
+					sb.WriteString(bpStyle.Render("● "))
+				} else {
+					sb.WriteString("  ")
+				}
+			}
 
-			// Check for diagnostic icon
-			if sev, ok := diagMap[line]; ok {
+			numStr := fmt.Sprintf("%*d", baseWidth, line+1)
+
+			// Check if this is the current execution line
+			isExecLine := opts != nil && opts.ExecLine == line
+
+			if isExecLine {
+				sb.WriteString(execStyle.Render(numStr))
+			} else if sev, ok := diagMap[line]; ok {
 				switch sev {
 				case 1: // error
 					sb.WriteString(theme.GutterError.Render(numStr))

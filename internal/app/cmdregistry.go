@@ -169,6 +169,29 @@ func (m *Model) commandRegistry() []Command {
 				return commandPaletteMsg{inner: quitMsg{}}
 			},
 		},
+		{
+			ID:       "toggle_agent",
+			Label:    "Toggle Agent Panel",
+			Shortcut: "Ctrl+J",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleAgentMsg{}}
+			},
+		},
+		{
+			ID:       "focus_agent",
+			Label:    "Focus Agent Panel",
+			Shortcut: "Ctrl+'",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: focusAgentMsg{}}
+			},
+		},
+		{
+			ID:       "agent_cancel",
+			Label:    "Cancel Agent",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: agentCancelMsg{}}
+			},
+		},
 	}
 }
 

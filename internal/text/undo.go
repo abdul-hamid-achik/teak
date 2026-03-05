@@ -14,9 +14,9 @@ type undoEntry struct {
 // UndoStack manages undo/redo using rope snapshots.
 // Since ropes are persistent (immutable), snapshots share structure and are cheap.
 type UndoStack struct {
-	undo     []undoEntry
-	redo     []undoEntry
-	lastTime time.Time
+	undo              []undoEntry
+	redo              []undoEntry
+	lastTime          time.Time
 	lastWasCharInsert bool
 }
 
@@ -40,8 +40,8 @@ func (u *UndoStack) Save(rope *Rope, cursor Position, isCharInsert bool) {
 
 	u.undo = append(u.undo, undoEntry{rope: rope, cursor: cursor})
 	if len(u.undo) > maxUndoEntries {
-		copy(u.undo, u.undo[len(u.undo)-maxUndoEntries:])
-		u.undo = u.undo[:maxUndoEntries]
+		// Keep only the most recent entries
+		u.undo = u.undo[len(u.undo)-maxUndoEntries:]
 	}
 	u.redo = nil
 	u.lastTime = now

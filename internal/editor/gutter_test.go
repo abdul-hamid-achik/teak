@@ -10,7 +10,7 @@ import (
 func TestRenderGutter(t *testing.T) {
 	theme := ui.DefaultTheme()
 
-	result, width := RenderGutter(theme, 100, 0, 10, 0, nil)
+	result, width := RenderGutter(theme, 100, 0, 10, 0, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty gutter")
 	}
@@ -27,7 +27,7 @@ func TestRenderGutter(t *testing.T) {
 func TestRenderGutterActiveLine(t *testing.T) {
 	theme := ui.DefaultTheme()
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 5, nil)
+	result, _ := RenderGutter(theme, 100, 0, 10, 5, nil, nil)
 	lines := strings.Split(result, "\n")
 
 	// Line 6 (index 5) should be active
@@ -49,7 +49,7 @@ func TestRenderGutterWithDiagnostics(t *testing.T) {
 		{StartLine: 4, EndLine: 4, Severity: 3, Message: "info"},
 	}
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 0, diagnostics)
+	result, _ := RenderGutter(theme, 100, 0, 10, 0, diagnostics, nil)
 	if result == "" {
 		t.Error("expected non-empty gutter")
 	}
@@ -62,7 +62,7 @@ func TestRenderGutterWithDiagnosticsError(t *testing.T) {
 		{StartLine: 2, EndLine: 2, Severity: 1, Message: "error"},
 	}
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics)
+	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics, nil)
 	lines := strings.Split(result, "\n")
 
 	// Line 3 (index 2) should have error styling
@@ -78,7 +78,7 @@ func TestRenderGutterWithDiagnosticsWarning(t *testing.T) {
 		{StartLine: 2, EndLine: 2, Severity: 2, Message: "warning"},
 	}
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics)
+	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics, nil)
 	lines := strings.Split(result, "\n")
 
 	if len(lines) < 3 {
@@ -89,7 +89,7 @@ func TestRenderGutterWithDiagnosticsWarning(t *testing.T) {
 func TestRenderGutterScroll(t *testing.T) {
 	theme := ui.DefaultTheme()
 
-	result, _ := RenderGutter(theme, 100, 50, 10, 55, nil)
+	result, _ := RenderGutter(theme, 100, 50, 10, 55, nil, nil)
 	lines := strings.Split(result, "\n")
 
 	if len(lines) != 10 {
@@ -105,7 +105,7 @@ func TestRenderGutterScroll(t *testing.T) {
 func TestRenderGutterSmallFile(t *testing.T) {
 	theme := ui.DefaultTheme()
 
-	result, width := RenderGutter(theme, 5, 0, 10, 0, nil)
+	result, width := RenderGutter(theme, 5, 0, 10, 0, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty gutter")
 	}
@@ -123,7 +123,7 @@ func TestRenderGutterSmallFile(t *testing.T) {
 func TestRenderGutterEmptyLines(t *testing.T) {
 	theme := ui.DefaultTheme()
 
-	result, _ := RenderGutter(theme, 5, 0, 10, 0, nil)
+	result, _ := RenderGutter(theme, 5, 0, 10, 0, nil, nil)
 	lines := strings.Split(result, "\n")
 
 	// Lines beyond file should still be rendered
@@ -169,7 +169,7 @@ func TestRenderGutterMultiLineDiagnostics(t *testing.T) {
 		{StartLine: 1, EndLine: 3, Severity: 1, Message: "multi-line error"},
 	}
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 0, diagnostics)
+	result, _ := RenderGutter(theme, 100, 0, 10, 0, diagnostics, nil)
 	lines := strings.Split(result, "\n")
 
 	// Lines 2, 3, 4 (indices 1, 2, 3) should have error styling
@@ -189,7 +189,7 @@ func TestRenderGutterDiagnosticPriority(t *testing.T) {
 		{StartLine: 2, EndLine: 2, Severity: 1, Message: "error"},
 	}
 
-	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics)
+	result, _ := RenderGutter(theme, 100, 0, 10, 2, diagnostics, nil)
 	lines := strings.Split(result, "\n")
 
 	if len(lines) < 3 {

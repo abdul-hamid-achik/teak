@@ -12,6 +12,14 @@ type Config struct {
 	Editor EditorConfig `toml:"editor"`
 	UI     UIConfig     `toml:"ui"`
 	LSP    []LSPConfig  `toml:"lsp"`
+	Agent  AgentConfig  `toml:"agent"`
+}
+
+// AgentConfig configures the ACP agent.
+type AgentConfig struct {
+	Enabled bool     `toml:"enabled"`
+	Command string   `toml:"command"`
+	Args    []string `toml:"args"`
 }
 
 // EditorConfig holds editor-specific settings.
@@ -46,6 +54,11 @@ func DefaultConfig() Config {
 		UI: UIConfig{
 			Theme:    "nord",
 			ShowTree: true,
+		},
+		Agent: AgentConfig{
+			Enabled: true,
+			Command: "opencode",
+			Args:    []string{"acp"},
 		},
 	}
 }
@@ -91,6 +104,13 @@ type userConfig struct {
 	Editor *userEditorConfig `toml:"editor"`
 	UI     *userUIConfig     `toml:"ui"`
 	LSP    []LSPConfig       `toml:"lsp"`
+	Agent  *userAgentConfig  `toml:"agent"`
+}
+
+type userAgentConfig struct {
+	Enabled *bool    `toml:"enabled"`
+	Command *string  `toml:"command"`
+	Args    []string `toml:"args"`
 }
 
 type userEditorConfig struct {
@@ -127,5 +147,16 @@ func merge(cfg *Config, user *userConfig) {
 	}
 	if len(user.LSP) > 0 {
 		cfg.LSP = user.LSP
+	}
+	if user.Agent != nil {
+		if user.Agent.Enabled != nil {
+			cfg.Agent.Enabled = *user.Agent.Enabled
+		}
+		if user.Agent.Command != nil {
+			cfg.Agent.Command = *user.Agent.Command
+		}
+		if user.Agent.Args != nil {
+			cfg.Agent.Args = user.Agent.Args
+		}
 	}
 }

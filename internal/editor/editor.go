@@ -50,6 +50,7 @@ type Editor struct {
 	signatureHelp SignatureHelp
 	contextMenu   ContextMenu
 	HasLSP        bool
+	DebugGutter   *GutterOpts // set by app when debugging
 	lastVersion   int
 	lastClickTime time.Time
 	lastClickPos  text.Position
@@ -552,7 +553,7 @@ func (e Editor) needsRetokenize() bool {
 
 // View renders the editor content.
 func (e Editor) View() string {
-	return e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics)
+	return e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter)
 }
 
 // CursorPosition returns the screen position for the cursor.

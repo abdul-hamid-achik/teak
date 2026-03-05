@@ -264,3 +264,60 @@ func BenchmarkLineStart(b *testing.B) {
 		r.LineStart(5000)
 	}
 }
+
+func TestByteAtBounds(t *testing.T) {
+	r := NewFromString("hello")
+
+	tests := []struct {
+		name     string
+		offset   int
+		wantByte byte
+		wantOK   bool
+	}{
+		{"first byte", 0, 'h', true},
+		{"last byte", 4, 'o', true},
+		{"negative offset", -1, 0, false},
+		{"offset at length", 5, 0, false},
+		{"offset beyond length", 10, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := r.ByteAtSafe(tt.offset)
+			if ok != tt.wantOK {
+				t.Errorf("ByteAtSafe(%d) ok=%v, want %v", tt.offset, ok, tt.wantOK)
+			}
+			if ok && got != tt.wantByte {
+				t.Errorf("ByteAtSafe(%d) = %q, want %q", tt.offset, got, tt.wantByte)
+			}
+		})
+	}
+}
+
+func TestByteAtNilRope(t *testing.T) {
+	var r *Rope
+	got, ok := r.ByteAtSafe(0)
+	if ok {
+		t.Errorf("ByteAtSafe on nil rope should return !ok, got byte %q", got)
+	}
+}
+
+func TestByteAtLargeRope(t *testing.T) {
+	// Test with a multi-node rope
+	large := strings.Repeat("abcdefghij", 100)
+	r := NewFromString(large)
+
+	// Test at various positions
+	positions := []int{0, 50, 99, 500, 999}
+	for _, pos := range positions {
+		got, ok := r.ByteAtSafe(pos)
+		if !ok {
+			t.Errorf("ByteAtSafe(%d) failed unexpectedly", pos)
+			continue
+		}
+		want := large[pos]
+		if got != want {
+			t.Errorf("ByteAtSafe(%d) = %q, want %q", pos, got, want)
+		}
+	}
+}

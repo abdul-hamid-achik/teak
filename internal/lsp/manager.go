@@ -14,6 +14,7 @@ type Manager struct {
 	msgChan chan any
 	mu      sync.Mutex
 	retries map[string]int
+	closed  bool
 }
 
 const maxRetries = 3
@@ -37,8 +38,8 @@ func (m *Manager) MsgChan() <-chan any {
 }
 
 // EnsureClient starts a language server for the given file if not already running.
-// The server is started and registered immediately, but initialization happens
-// asynchronously to avoid blocking the UI. Use ClientForFile to get a ready client.
+// The server is initialized synchronously to ensure it's fully ready before being
+// exposed to other goroutines. Use ClientForFile to get a ready client.
 func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 	cfg := configForFile(m.configs, filePath)
 	if cfg == nil {
@@ -46,37 +47,51 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
-	if client, ok := m.clients[cfg.Command]; ok {
+	// Check if already running and ready
+	if client, ok := m.clients[cfg.Command]; ok && client.IsReady() {
+		m.mu.Unlock()
 		return client, nil
 	}
 
+	// Check if disabled due to too many retries
 	if m.retries[cfg.Command] >= maxRetries {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("language server %s disabled after %d failures", cfg.Command, maxRetries)
 	}
 
+	// Remove any failed/initializing client to retry
+	if _, ok := m.clients[cfg.Command]; ok {
+		delete(m.clients, cfg.Command)
+	}
+
+	m.mu.Unlock()
+
+	// Create client outside lock
 	client, err := NewClient(*cfg, m.rootDir, m.msgChan)
 	if err != nil {
+		m.mu.Lock()
 		m.retries[cfg.Command]++
+		m.mu.Unlock()
 		log.Printf("lsp: failed to start %s (attempt %d/%d): %v", cfg.Command, m.retries[cfg.Command], maxRetries, err)
 		return nil, err
 	}
 
-	// Register client immediately so it shows as "initializing" in the status bar
-	m.clients[cfg.Command] = client
+	// Initialize SYNCHRONOUSLY to ensure client is fully ready before registration
+	// This prevents race conditions where ClientForFile gets an uninitialized client
+	if err := client.Initialize(); err != nil {
+		m.mu.Lock()
+		m.retries[cfg.Command]++
+		m.mu.Unlock()
+		log.Printf("lsp: failed to initialize %s (attempt %d/%d): %v", cfg.Command, m.retries[cfg.Command], maxRetries, err)
+		client.Shutdown()
+		return nil, err
+	}
 
-	// Initialize asynchronously to avoid blocking the UI
-	go func() {
-		if err := client.Initialize(); err != nil {
-			m.mu.Lock()
-			delete(m.clients, cfg.Command)
-			m.retries[cfg.Command]++
-			m.mu.Unlock()
-			log.Printf("lsp: failed to initialize %s (attempt %d/%d): %v", cfg.Command, m.retries[cfg.Command], maxRetries, err)
-			client.Shutdown()
-		}
-	}()
+	// Only register AFTER successful initialization
+	m.mu.Lock()
+	m.clients[cfg.Command] = client
+	m.mu.Unlock()
 
 	return client, nil
 }
@@ -101,11 +116,17 @@ func (m *Manager) ClientForFile(filePath string) *Client {
 func (m *Manager) ShutdownAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		return
+	}
+
 	for name, client := range m.clients {
 		client.Shutdown()
 		delete(m.clients, name)
 	}
 	close(m.msgChan)
+	m.closed = true
 }
 
 // ServerStatus returns the status of the language server for a file.

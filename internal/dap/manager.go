@@ -26,17 +26,10 @@ type Manager struct {
 }
 
 // NewManager creates a new debug manager.
-func NewManager(rootDir string, msgChan chan<- any) *Manager {
-	// Create internal channel and forward messages
-	internalChan := make(chan any, 100)
-	go func() {
-		for msg := range internalChan {
-			msgChan <- msg
-		}
-	}()
+func NewManager(rootDir string) *Manager {
 	return &Manager{
 		rootDir: rootDir,
-		msgChan: internalChan,
+		msgChan: make(chan any, 100),
 		state:   StateInactive,
 	}
 }

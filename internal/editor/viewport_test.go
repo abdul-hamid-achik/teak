@@ -17,7 +17,7 @@ func TestViewportRender(t *testing.T) {
 		Height: 24,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -32,7 +32,7 @@ func TestViewportRenderWithGutter(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	lines := splitLines(result)
 	if len(lines) != 10 {
 		t.Errorf("expected 10 lines, got %d", len(lines))
@@ -53,7 +53,7 @@ func TestViewportRenderWithScroll(t *testing.T) {
 		ScrollY: 5,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -72,7 +72,7 @@ func TestViewportRenderWithSyntaxHighlighting(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, hl, nil)
+	result := viewport.Render(buf, theme, hl, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -92,7 +92,7 @@ func TestViewportRenderWithDiagnostics(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, nil, diagnostics)
+	result := viewport.Render(buf, theme, nil, diagnostics, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -108,7 +108,7 @@ func TestViewportRenderWithSelection(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -124,7 +124,7 @@ func TestViewportRenderWithCursorLine(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
@@ -139,7 +139,7 @@ func TestViewportRenderNarrowWidth(t *testing.T) {
 		Height: 10,
 	}
 
-	result := viewport.Render(buf, theme, nil, nil)
+	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
 	}
