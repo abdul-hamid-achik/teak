@@ -18,11 +18,13 @@ type Manager struct {
 
 const maxRetries = 3
 
-// NewManager creates a new LSP manager.
-func NewManager(rootDir string) *Manager {
+// NewManager creates a new LSP manager. If userConfigs is non-empty, they are
+// merged with the built-in defaults (user entries override by extension match).
+func NewManager(rootDir string, userConfigs []ServerConfig) *Manager {
+	configs := MergeConfigs(DefaultConfigs(), userConfigs)
 	return &Manager{
 		clients: make(map[string]*Client),
-		configs: DefaultConfigs(),
+		configs: configs,
 		rootDir: rootDir,
 		msgChan: make(chan any, 100),
 		retries: make(map[string]int),
@@ -38,7 +40,7 @@ func (m *Manager) MsgChan() <-chan any {
 // The server is started and registered immediately, but initialization happens
 // asynchronously to avoid blocking the UI. Use ClientForFile to get a ready client.
 func (m *Manager) EnsureClient(filePath string) (*Client, error) {
-	cfg := ConfigForFile(filePath)
+	cfg := configForFile(m.configs, filePath)
 	if cfg == nil {
 		return nil, nil // No server for this file type
 	}
@@ -82,7 +84,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 // ClientForFile returns the active and ready LSP client for a given file, or nil.
 // Returns nil if the client exists but is still initializing.
 func (m *Manager) ClientForFile(filePath string) *Client {
-	cfg := ConfigForFile(filePath)
+	cfg := configForFile(m.configs, filePath)
 	if cfg == nil {
 		return nil
 	}
@@ -109,7 +111,7 @@ func (m *Manager) ShutdownAll() {
 // ServerStatus returns the status of the language server for a file.
 // Returns the server command name, whether it's running, and whether it's ready.
 func (m *Manager) ServerStatus(filePath string) (name string, running bool, ready bool) {
-	cfg := ConfigForFile(filePath)
+	cfg := configForFile(m.configs, filePath)
 	if cfg == nil {
 		return "", false, false
 	}

@@ -15,11 +15,13 @@ import (
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"charm.land/bubbles/v2/spinner"
+	"teak/internal/config"
 	"teak/internal/diff"
 	"teak/internal/editor"
 	"teak/internal/filetree"
 	"teak/internal/git"
 	"teak/internal/lsp"
+	"teak/internal/overlay"
 	"teak/internal/search"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -88,26 +90,45 @@ type Model struct {
 	gitContextEntry  *git.StatusEntry      // entry right-clicked in git panel
 	gitContextStaged bool                  // whether the right-clicked entry is in staged section
 	gitContextPath   string                // path of right-clicked entry (file or dir)
+	unsavedConfirm   *overlay.Confirm      // unsaved changes dialog shown on quit
+	overlayStack     overlay.Stack          // stack for picker overlays (quick open, command palette)
+	cachedFiles      []string               // cached file list for quick open
+	cachedFilesReady bool                   // true after file list has been loaded
 }
 
 // NewModel creates a new app model, optionally loading a file.
-func NewModel(filePath string, rootDir string) (Model, error) {
+func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, error) {
 	// Suppress LSP log output from corrupting TUI
 	log.SetOutput(io.Discard)
 
-	theme := ui.DefaultTheme()
-	cfg := editor.DefaultConfig()
+	theme := ui.ThemeByName(appCfg.UI.Theme)
+	cfg := editor.Config{
+		TabSize:    appCfg.Editor.TabSize,
+		InsertTabs: appCfg.Editor.InsertTabs,
+		AutoIndent: appCfg.Editor.AutoIndent,
+	}
 	buf := text.NewBuffer()
 	if filePath != "" {
 		buf.FilePath = filePath
 		cfg.CommentPrefix = editor.CommentPrefixForFile(filePath)
 	}
 
+	// Build LSP configs: merge user overrides with defaults
+	var lspConfigs []lsp.ServerConfig
+	for _, lc := range appCfg.LSP {
+		lspConfigs = append(lspConfigs, lsp.ServerConfig{
+			Extensions: lc.Extensions,
+			Command:    lc.Command,
+			Args:       lc.Args,
+			LanguageID: lc.LanguageID,
+		})
+	}
+
 	m := Model{
 		theme:           theme,
 		rootDir:         rootDir,
 		tabBar:          editor.NewTabBar(theme),
-		lspMgr:          lsp.NewManager(rootDir),
+		lspMgr:          lsp.NewManager(rootDir, lspConfigs),
 		treeContextMenu: editor.NewContextMenu(theme),
 		fileDiagnostics: make(map[string]int),
 		dirDiagnostics:  make(map[string]int),
@@ -135,6 +156,9 @@ func NewModel(filePath string, rootDir string) (Model, error) {
 	}
 	m.tabBar.AddTab(label, filePath)
 	m.activeTab = 0
+
+	// Show tree based on config
+	m.showTree = appCfg.UI.ShowTree
 
 	// Show welcome screen when no file is provided
 	if filePath == "" {
@@ -195,6 +219,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		// Unsaved changes confirm dialog captures all input when visible
+		if m.unsavedConfirm != nil {
+			updated, cmd := m.unsavedConfirm.Update(msg)
+			if updated.IsDismissed() {
+				m.unsavedConfirm = nil
+			} else {
+				m.unsavedConfirm = updated.(*overlay.Confirm)
+			}
+			return m, cmd
+		}
+
+		// Overlay stack (quick open, command palette) captures all input
+		if !m.overlayStack.IsEmpty() {
+			cmd := m.overlayStack.Update(msg)
+			return m, cmd
+		}
+
 		// Branch picker captures all input when visible
 		if m.showBranchPicker {
 			return m.updateBranchPicker(msg)
@@ -295,7 +336,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.welcome != nil && m.welcome.Active && !gitInputFocused {
 			key := msg.String()
 			switch key {
-			case "ctrl+q", "ctrl+b", "ctrl+f", "ctrl+shift+f", "f1":
+			case "ctrl+q", "ctrl+b", "ctrl+f", "ctrl+shift+f", "ctrl+h", "f1":
 				// Let these fall through to normal handling
 			default:
 				m.welcome.Dismiss()
@@ -305,6 +346,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+q":
+			// Check for unsaved files before quitting
+			var dirtyNames []string
+			for i, ed := range m.editors {
+				if ed.Buffer.Dirty() {
+					name := filepath.Base(ed.Buffer.FilePath)
+					if name == "." || ed.Buffer.FilePath == "" {
+						name = m.tabBar.Tabs[i].Label
+					}
+					dirtyNames = append(dirtyNames, name)
+				}
+			}
+			if len(dirtyNames) > 0 {
+				msg := fmt.Sprintf("You have %d unsaved file(s):", len(dirtyNames))
+				confirm := overlay.NewConfirm(
+					"Unsaved Changes",
+					msg,
+					dirtyNames,
+					[]overlay.Button{
+						{Label: "Save All & Quit", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAllAndQuitMsg{}},
+						{Label: "Quit Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: QuitWithoutSavingMsg{}},
+						{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
+					},
+					m.theme,
+				)
+				m.unsavedConfirm = confirm
+				return m, nil
+			}
 			m.lspMgr.ShutdownAll()
 			return m, tea.Quit
 		case "ctrl+s":
@@ -330,6 +398,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+f":
 			return m.openSearch(search.ModeText)
+		case "ctrl+h":
+			return m.openSearchReplace()
 		case "ctrl+shift+f":
 			return m.openSearch(search.ModeSemantic)
 		case "ctrl+space":
@@ -350,6 +420,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.relayout()
 			}
 			return m, nil
+		case "ctrl+p":
+			return m.openQuickOpen()
+		case "ctrl+shift+p":
+			return m.openCommandPalette()
 		case "ctrl+tab":
 			if len(m.editors) > 1 {
 				m.activeTab = (m.activeTab + 1) % len(m.editors)
@@ -365,6 +439,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		// Unsaved changes dialog captures all mouse clicks when visible
+		if m.unsavedConfirm != nil {
+			updated, cmd := m.unsavedConfirm.Update(msg)
+			if updated.IsDismissed() {
+				m.unsavedConfirm = nil
+			} else {
+				m.unsavedConfirm = updated.(*overlay.Confirm)
+			}
+			return m, cmd
+		}
+
+		// Overlay stack captures clicks when active
+		if !m.overlayStack.IsEmpty() {
+			cmd := m.overlayStack.Update(msg)
+			return m, cmd
+		}
+
 		// Branch picker captures clicks when visible
 		if m.showBranchPicker {
 			return m.updateBranchPicker(msg)
@@ -372,6 +463,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Search overlay captures all mouse clicks when visible
 		if m.showSearch {
+			if zone.Get("search-replace-btn").InBounds(msg) {
+				query := m.searchM.Query()
+				replacement := m.searchM.Replacement()
+				if query != "" {
+					return m, func() tea.Msg {
+						return search.ReplaceOneMsg{Query: query, Replacement: replacement}
+					}
+				}
+				return m, nil
+			}
+			if zone.Get("search-replace-all-btn").InBounds(msg) {
+				query := m.searchM.Query()
+				replacement := m.searchM.Replacement()
+				if query != "" {
+					return m, func() tea.Msg {
+						return search.ReplaceAllMsg{Query: query, Replacement: replacement}
+					}
+				}
+				return m, nil
+			}
 			return m.updateSearch(msg)
 		}
 
@@ -528,6 +639,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseWheelMsg:
+		// Overlay stack captures scroll when active
+		if !m.overlayStack.IsEmpty() {
+			cmd := m.overlayStack.Update(msg)
+			return m, cmd
+		}
 		if m.showSearch {
 			return m.updateSearch(msg)
 		}
@@ -589,6 +705,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case search.CloseSearchMsg:
 		m.showSearch = false
 		return m, nil
+
+	case search.ReplaceOneMsg:
+		ed := m.activeEditor()
+		if ed == nil {
+			return m, nil
+		}
+		content := ed.Buffer.Content()
+		cursor := ed.Buffer.Cursor
+		cursorOff := ed.Buffer.Rope().PositionToOffset(cursor)
+		idx := strings.Index(content[cursorOff:], msg.Query)
+		if idx < 0 {
+			// Wrap around: search from beginning
+			idx = strings.Index(content, msg.Query)
+			if idx < 0 {
+				return m, nil
+			}
+		} else {
+			idx += cursorOff
+		}
+		startPos := ed.Buffer.Rope().OffsetToPosition(idx)
+		endPos := ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Query))
+		ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
+		ed.Buffer.Cursor = ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Replacement))
+		version := ed.Buffer.Version()
+		return m, func() tea.Msg {
+			return editor.RetokenizeMsg{Version: version}
+		}
+
+	case search.ReplaceAllMsg:
+		ed := m.activeEditor()
+		if ed == nil {
+			return m, nil
+		}
+		content := ed.Buffer.Content()
+		if !strings.Contains(content, msg.Query) {
+			return m, nil
+		}
+		// Find all matches and replace in reverse order to preserve offsets
+		var offsets []int
+		searchFrom := 0
+		for {
+			idx := strings.Index(content[searchFrom:], msg.Query)
+			if idx < 0 {
+				break
+			}
+			offsets = append(offsets, searchFrom+idx)
+			searchFrom += idx + len(msg.Query)
+		}
+		for i := len(offsets) - 1; i >= 0; i-- {
+			startPos := ed.Buffer.Rope().OffsetToPosition(offsets[i])
+			endPos := ed.Buffer.Rope().OffsetToPosition(offsets[i] + len(msg.Query))
+			ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
+		}
+		version := ed.Buffer.Version()
+		return m, func() tea.Msg {
+			return editor.RetokenizeMsg{Version: version}
+		}
 
 	case search.SearchIndexingMsg:
 		if m.showSearch {
@@ -667,6 +840,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, refreshCmd)
 		}
 		return m, tea.Batch(cmds...)
+
+	case SaveAllAndQuitMsg:
+		var saveCmds []tea.Cmd
+		for i := range m.editors {
+			if m.editors[i].Buffer.Dirty() && m.editors[i].Buffer.FilePath != "" {
+				saveCmds = append(saveCmds, SaveFileCmd(m.editors[i].Buffer.Save, m.editors[i].Buffer.FilePath))
+			}
+		}
+		m.lspMgr.ShutdownAll()
+		saveCmds = append(saveCmds, tea.Quit)
+		return m, tea.Batch(saveCmds...)
+
+	case QuitWithoutSavingMsg:
+		m.lspMgr.ShutdownAll()
+		return m, tea.Quit
+
+	case overlay.PickerSelectMsg:
+		m.overlayStack.Clear()
+		item := msg.Item
+		// Quick Open: item.Value is a relative file path string
+		if relPath, ok := item.Value.(string); ok {
+			absPath := filepath.Join(m.rootDir, relPath)
+			return m.openFilePinned(absPath)
+		}
+		// Command Palette: item.Value is a Command struct
+		if cmd, ok := item.Value.(Command); ok {
+			resultMsg := cmd.Execute()
+			return m.Update(resultMsg)
+		}
+		return m, nil
+
+	case overlay.PickerCloseMsg:
+		m.overlayStack.Clear()
+		return m, nil
+
+	case FileListMsg:
+		m.cachedFiles = msg.Files
+		m.cachedFilesReady = true
+		// If quick open picker is showing, update its items
+		if !m.overlayStack.IsEmpty() {
+			if picker, ok := m.overlayStack.Top().(*overlay.Picker); ok {
+				picker.SetItems(filesToPickerItems(m.cachedFiles))
+			}
+		}
+		return m, nil
+
+	case commandPaletteMsg:
+		return m.handleCommandPaletteAction(msg.inner)
 
 	case git.RefreshMsg:
 		var cmd tea.Cmd
@@ -1015,12 +1236,22 @@ func (m Model) View() tea.View {
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	}
 
+	// Overlay stack (quick open, command palette)
+	if !m.overlayStack.IsEmpty() {
+		content = ui.RenderOverlay(content, m.overlayStack.View(), m.width, m.height)
+	}
+
+	// Unsaved changes confirm dialog (highest priority overlay)
+	if m.unsavedConfirm != nil {
+		content = ui.RenderOverlay(content, m.unsavedConfirm.View(), m.width, m.height)
+	}
+
 	scanned := zone.Scan(content)
 	v := tea.NewView(scanned)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
-	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && !m.isActiveDiffTab() && m.focus == FocusEditor && m.activeEditor() != nil {
+	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && !m.isActiveDiffTab() && m.overlayStack.IsEmpty() && m.unsavedConfirm == nil && m.focus == FocusEditor && m.activeEditor() != nil {
 		cx, cy := m.activeEditor().CursorPosition()
 		if m.showTree {
 			cx += m.treeWidth() + 1
@@ -1597,6 +1828,16 @@ func (m Model) openSearch(mode search.Mode) (tea.Model, tea.Cmd) {
 	m.showSearch = true
 	m.searchMode = mode
 	m.searchM = search.New(m.theme, m.rootDir, mode)
+	m.searchM.SetSize(m.width, m.height-2)
+	cmd := m.searchM.Focus()
+	return m, cmd
+}
+
+func (m Model) openSearchReplace() (tea.Model, tea.Cmd) {
+	m.showSearch = true
+	m.searchMode = search.ModeText
+	m.searchM = search.New(m.theme, m.rootDir, search.ModeText)
+	m.searchM.SetShowReplace(true)
 	m.searchM.SetSize(m.width, m.height-2)
 	cmd := m.searchM.Focus()
 	return m, cmd
@@ -2241,6 +2482,9 @@ func (m Model) handleExternalFileChange(msg FileChangedMsg) (tea.Model, tea.Cmd)
 
 // handleTreeChange refreshes the file tree when the directory structure changes.
 func (m Model) handleTreeChange(msg TreeChangedMsg) (tea.Model, tea.Cmd) {
+	// Invalidate cached file list for quick open
+	m.cachedFilesReady = false
+	m.cachedFiles = nil
 	// Refresh the file tree by rebuilding it
 	m.tree.RefreshDir(msg.Dir)
 	var cmds []tea.Cmd
@@ -2352,4 +2596,82 @@ func lipglossWidth(s string) int {
 		n++
 	}
 	return n
+}
+
+// openQuickOpen pushes a Picker overlay for quick file opening.
+func (m Model) openQuickOpen() (tea.Model, tea.Cmd) {
+	picker := overlay.NewPicker("Open File", nil, m.theme, "quickopen")
+	picker.SetSize(min(m.width-4, 60), m.height-4)
+
+	var cmds []tea.Cmd
+	cmds = append(cmds, picker.Focus())
+
+	if m.cachedFilesReady {
+		picker.SetItems(filesToPickerItems(m.cachedFiles))
+	} else {
+		cmds = append(cmds, quickOpenCmd(m.rootDir))
+	}
+
+	m.overlayStack.Push(picker)
+	return m, tea.Batch(cmds...)
+}
+
+// openCommandPalette pushes a Picker overlay with available commands.
+func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
+	items := m.buildCommandList()
+	picker := overlay.NewPicker("Command Palette", items, m.theme, "cmdpalette")
+	picker.SetSize(min(m.width-4, 60), m.height-4)
+	cmd := picker.Focus()
+	m.overlayStack.Push(picker)
+	return m, cmd
+}
+
+// handleCommandPaletteAction dispatches an action from the command palette.
+func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case saveRequestMsg:
+		if m.activeEditor() == nil {
+			return m, nil
+		}
+		buf := m.activeEditor().Buffer
+		return m, SaveFileCmd(buf.Save, buf.FilePath)
+	case toggleTreeMsg:
+		m.showTree = !m.showTree
+		if m.showTree {
+			m.focus = FocusTree
+		} else {
+			m.focus = FocusEditor
+		}
+		m.relayout()
+		return m, nil
+	case toggleGitMsg:
+		if m.gitPanel.IsGitRepo() {
+			m.showTree = true
+			m.sidebarTab = SidebarGit
+			m.focus = FocusGitPanel
+			m.relayout()
+		}
+		return m, nil
+	case openSearchMsg:
+		innerMsg := msg.(openSearchMsg)
+		return m.openSearch(innerMsg.mode)
+	case openSearchReplaceMsg:
+		return m.openSearchReplace()
+	case goToLineMsg:
+		m.goToLineMode = true
+		m.goToLineInput = ""
+		return m, nil
+	case quickOpenMsg:
+		return m.openQuickOpen()
+	case showHelpMsg:
+		m.showHelp = true
+		m.helpM = editor.NewHelpModel(m.theme)
+		m.helpM.SetSize(m.width, m.height-2)
+		cmd := m.helpM.Focus()
+		return m, cmd
+	case quitMsg:
+		m.lspMgr.ShutdownAll()
+		return m, tea.Quit
+	}
+	return m, nil
 }

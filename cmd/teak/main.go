@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/app"
+	"teak/internal/config"
 )
 
 func main() {
@@ -31,7 +32,12 @@ func main() {
 		}
 	}
 
-	model, err := app.NewModel(filePath, rootDir)
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: config: %v\n", err)
+	}
+
+	model, err := app.NewModel(filePath, rootDir, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
 
@@ -44,6 +45,21 @@ type OpenResultMsg struct {
 // CloseSearchMsg is sent when the search overlay should close.
 type CloseSearchMsg struct{}
 
+// ToggleReplaceMsg is sent to toggle the replace input visibility.
+type ToggleReplaceMsg struct{}
+
+// ReplaceOneMsg requests replacing the first match from cursor.
+type ReplaceOneMsg struct {
+	Query       string
+	Replacement string
+}
+
+// ReplaceAllMsg requests replacing all matches.
+type ReplaceAllMsg struct {
+	Query       string
+	Replacement string
+}
+
 // SearchIndexingMsg is sent when semantic search starts indexing.
 type SearchIndexingMsg struct{}
 
@@ -71,6 +87,10 @@ type Model struct {
 	spinner     spinner.Model
 	errMsg      string
 	debounceGen int // generation counter for debounce
+
+	replaceInput textinput.Model
+	showReplace  bool
+	focusedInput int // 0=search, 1=replace
 }
 
 // New creates a new search model.
@@ -85,18 +105,39 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(ui.Nord13)),
 	)
 
+	ri := textinput.New()
+	ri.Placeholder = "Replace..."
+	ri.CharLimit = 256
+	ri.SetWidth(50)
+
 	return Model{
-		input:   ti,
-		mode:    mode,
-		theme:   theme,
-		rootDir: rootDir,
-		spinner: sp,
+		input:        ti,
+		replaceInput: ri,
+		mode:         mode,
+		theme:        theme,
+		rootDir:      rootDir,
+		spinner:      sp,
 	}
 }
 
 // Focus focuses the text input and returns the cursor blink command.
 func (m *Model) Focus() tea.Cmd {
 	return m.input.Focus()
+}
+
+// SetShowReplace enables or disables the replace input row.
+func (m *Model) SetShowReplace(show bool) {
+	m.showReplace = show
+}
+
+// Query returns the current search query.
+func (m Model) Query() string {
+	return m.input.Value()
+}
+
+// Replacement returns the current replacement text.
+func (m Model) Replacement() string {
+	return m.replaceInput.Value()
 }
 
 // SetSize sets the overlay dimensions.
@@ -106,9 +147,15 @@ func (m *Model) SetSize(width, height int) {
 	m.input.SetWidth(50)
 }
 
-// headerLines is the number of lines before results in the search overlay view.
-// mode toggle + blank + input + blank = 4 lines, plus border padding.
-const headerLines = 6
+// headerLines returns the number of lines before results in the search overlay view.
+func (m Model) headerLines() int {
+	// mode toggle + blank + input + blank = 4 lines, plus border padding ~2
+	n := 6
+	if m.showReplace {
+		n++ // replace row
+	}
+	return n
+}
 
 // Update handles input messages.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
@@ -118,6 +165,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case "esc", "escape":
 			return m, func() tea.Msg { return CloseSearchMsg{} }
 		case "enter":
+			if m.showReplace && m.focusedInput == 1 {
+				query := m.input.Value()
+				replacement := m.replaceInput.Value()
+				if query != "" {
+					return m, func() tea.Msg {
+						return ReplaceOneMsg{Query: query, Replacement: replacement}
+					}
+				}
+				return m, nil
+			}
 			if len(m.results) > 0 && m.cursor < len(m.results) {
 				r := m.results[m.cursor]
 				return m, func() tea.Msg {
@@ -129,7 +186,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		case "ctrl+shift+enter":
+			if m.showReplace {
+				query := m.input.Value()
+				replacement := m.replaceInput.Value()
+				if query != "" {
+					return m, func() tea.Msg {
+						return ReplaceAllMsg{Query: query, Replacement: replacement}
+					}
+				}
+			}
+			return m, nil
 		case "tab":
+			if m.showReplace {
+				if m.focusedInput == 0 {
+					m.focusedInput = 1
+					m.input.Blur()
+					return m, m.replaceInput.Focus()
+				}
+				m.focusedInput = 0
+				m.replaceInput.Blur()
+				return m, m.input.Focus()
+			}
 			if m.mode == ModeText {
 				m.mode = ModeSemantic
 			} else {
@@ -144,12 +222,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up":
+			if m.showReplace && m.focusedInput == 1 {
+				m.focusedInput = 0
+				m.replaceInput.Blur()
+				return m, m.input.Focus()
+			}
 			if m.cursor > 0 {
 				m.cursor--
 				m.ensureCursorVisible()
 			}
 			return m, nil
 		case "down":
+			if m.showReplace && m.focusedInput == 0 {
+				m.focusedInput = 1
+				m.input.Blur()
+				return m, m.replaceInput.Focus()
+			}
 			if m.cursor < len(m.results)-1 {
 				m.cursor++
 				m.ensureCursorVisible()
@@ -160,7 +248,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
-			clickedIdx := m.scrollY + mouse.Y - headerLines
+			clickedIdx := m.scrollY + mouse.Y - m.headerLines()
 			if clickedIdx >= 0 && clickedIdx < len(m.results) {
 				r := m.results[clickedIdx]
 				return m, func() tea.Msg {
@@ -230,7 +318,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Forward to the focused input
 	var cmd tea.Cmd
+	if m.showReplace && m.focusedInput == 1 {
+		m.replaceInput, cmd = m.replaceInput.Update(msg)
+		return m, cmd
+	}
+
 	m.input, cmd = m.input.Update(msg)
 
 	// Check if query changed
@@ -357,6 +451,14 @@ func (m Model) View() string {
 	// Input
 	sb.WriteString(m.input.View())
 	sb.WriteByte('\n')
+	if m.showReplace {
+		arrowStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+		sb.WriteString(arrowStyle.Render("  ⤷ ") + m.replaceInput.View() + " ")
+		sb.WriteString(zone.Mark("search-replace-btn", m.theme.ReplaceButton.Render("Replace")))
+		sb.WriteString(" ")
+		sb.WriteString(zone.Mark("search-replace-all-btn", m.theme.ReplaceButton.Render("All")))
+		sb.WriteByte('\n')
+	}
 	sb.WriteByte('\n')
 
 	if m.indexing {

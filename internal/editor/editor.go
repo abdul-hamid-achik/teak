@@ -14,6 +14,7 @@ import (
 type TokenizeCompleteMsg struct {
 	Version int
 	Lines   [][]highlight.StyledToken
+	Partial bool // true when result is from viewport-only tokenization
 }
 
 // Diagnostic represents a diagnostic message from an LSP server (decoupled from LSP types).
@@ -184,7 +185,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			viewEnd := e.Viewport.ScrollY + e.Viewport.Height
 			return e, func() tea.Msg {
 				lines := hl.TokenizeViewportToLines(content, viewStart, viewEnd)
-				return TokenizeCompleteMsg{Version: version, Lines: lines}
+				return TokenizeCompleteMsg{Version: version, Lines: lines, Partial: true}
 			}
 		}
 		// Edit-triggered: tokenize the full file
@@ -197,7 +198,11 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			return e, nil
 		}
 		if msg.Version == e.lastVersion {
-			e.Highlighter.SetLines(msg.Lines)
+			if msg.Partial {
+				e.Highlighter.MergeLines(msg.Lines)
+			} else {
+				e.Highlighter.SetLines(msg.Lines)
+			}
 		}
 		return e, nil
 	}
@@ -295,6 +300,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	// --- Editing ---
 	case "backspace":
+		// Delete both brackets when backspacing between empty pair
+		if IsBetweenBrackets(e.Buffer, e.Buffer.Cursor) {
+			e.Buffer.Delete()
+		}
 		e.Buffer.Backspace()
 		edited = true
 	case "ctrl+backspace":
@@ -357,7 +366,23 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.hover.Hide()
 	default:
 		if msg.Text != "" {
+			ch := msg.Text[0]
+			// Skip over closing bracket if it's already the next character
+			if len(msg.Text) == 1 && IsCloseBracket(ch) {
+				line := e.Buffer.Line(e.Buffer.Cursor.Line)
+				if e.Buffer.Cursor.Col < len(line) && line[e.Buffer.Cursor.Col] == ch {
+					e.Buffer.MoveCursor(text.DirRight)
+					break
+				}
+			}
 			e.Buffer.InsertAtCursor([]byte(msg.Text))
+			// Auto-close bracket
+			if len(msg.Text) == 1 {
+				if close := AutoClosePair(ch); close != 0 {
+					e.Buffer.InsertAtCursor([]byte{close})
+					e.Buffer.MoveCursor(text.DirLeft)
+				}
+			}
 			edited = true
 		}
 	}

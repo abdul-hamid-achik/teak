@@ -31,6 +31,27 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 		textWidth = 1
 	}
 
+	// Scrollbar calculation
+	totalLines := buf.LineCount()
+	showScrollbar := totalLines > v.Height
+	var thumbStart, thumbEnd int
+	if showScrollbar {
+		textWidth-- // reserve 1 column for scrollbar
+		if textWidth < 1 {
+			textWidth = 1
+		}
+		thumbSize := max(1, v.Height*v.Height/totalLines)
+		maxScroll := totalLines - v.Height
+		if maxScroll < 1 {
+			maxScroll = 1
+		}
+		thumbStart = v.ScrollY * (v.Height - thumbSize) / maxScroll
+		thumbEnd = thumbStart + thumbSize
+	}
+
+	// Find matching bracket pair for highlighting
+	bracketPos1, bracketPos2, hasBracketMatch := v.findBracketHighlights(buf)
+
 	var sb strings.Builder
 	for i := range v.Height {
 		line := v.ScrollY + i
@@ -60,24 +81,134 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 			if hasSelection {
 				sb.WriteString(v.renderLineWithSelection(lineContent, lineBytes, selStart, selEnd, line == buf.Cursor.Line, textWidth, theme))
 			} else if len(tokens) > 0 {
-				sb.WriteString(v.renderLineWithTokens(tokens, line == buf.Cursor.Line, textWidth, theme))
+				rendered := v.renderLineWithTokens(tokens, line == buf.Cursor.Line, textWidth, theme)
+				if hasBracketMatch {
+					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
+				}
+				sb.WriteString(rendered)
 			} else {
 				// plain text rendering
 				displayed := applyScrollX(lineContent, v.ScrollX)
 				displayed = truncateToWidth(displayed, textWidth)
+				padded := displayed + strings.Repeat(" ", max(0, textWidth-displayWidth(displayed)))
 				if line == buf.Cursor.Line {
-					padded := displayed + strings.Repeat(" ", max(0, textWidth-displayWidth(displayed)))
 					sb.WriteString(theme.CursorLine.Render(padded))
 				} else {
-					sb.WriteString(theme.Editor.Render(displayed))
+					sb.WriteString(theme.Editor.Render(padded))
 				}
 			}
 		} else {
 			// empty area below text
 			sb.WriteString(theme.Editor.Render(strings.Repeat(" ", textWidth)))
 		}
+
+		// Scrollbar
+		if showScrollbar {
+			if i >= thumbStart && i < thumbEnd {
+				sb.WriteString(theme.ScrollThumb.Render(" "))
+			} else {
+				sb.WriteString(theme.ScrollTrack.Render(" "))
+			}
+		}
 	}
 	return sb.String()
+}
+
+// findBracketHighlights returns two positions to highlight and whether a match was found.
+func (v *Viewport) findBracketHighlights(buf *text.Buffer) (text.Position, text.Position, bool) {
+	cursor := buf.Cursor
+	line := buf.Line(cursor.Line)
+
+	// Check character at cursor
+	if cursor.Col < len(line) {
+		ch := line[cursor.Col]
+		if IsOpenBracket(ch) || IsCloseBracket(ch) {
+			if match, ok := FindMatchingBracket(buf, cursor); ok {
+				return cursor, match, true
+			}
+		}
+	}
+
+	// Check character before cursor
+	if cursor.Col > 0 && cursor.Col <= len(line) {
+		prevPos := text.Position{Line: cursor.Line, Col: cursor.Col - 1}
+		ch := line[cursor.Col-1]
+		if IsOpenBracket(ch) || IsCloseBracket(ch) {
+			if match, ok := FindMatchingBracket(buf, prevPos); ok {
+				return prevPos, match, true
+			}
+		}
+	}
+
+	return text.Position{}, text.Position{}, false
+}
+
+// applyBracketHighlight applies bracket highlight styling to a rendered line at the matching positions.
+func (v *Viewport) applyBracketHighlight(rendered, lineContent string, lineNum int, pos1, pos2 text.Position, textWidth int, theme ui.Theme) string {
+	// Check if either bracket position is on this line
+	var cols []int
+	if pos1.Line == lineNum {
+		cols = append(cols, pos1.Col)
+	}
+	if pos2.Line == lineNum {
+		cols = append(cols, pos2.Col)
+	}
+	if len(cols) == 0 {
+		return rendered
+	}
+
+	for _, col := range cols {
+		// Convert byte column to display column, accounting for scroll
+		if col >= len(lineContent) {
+			continue
+		}
+		displayCol := displayWidth(lineContent[:col]) - v.ScrollX
+		if displayCol < 0 || displayCol >= textWidth {
+			continue
+		}
+
+		// Get the bracket character
+		ch := lineContent[col]
+		bracketStr := string(ch)
+		styledBracket := theme.BracketMatch.Render(bracketStr)
+
+		// Walk the rendered string (which contains ANSI codes) to find and replace
+		// the bracket at the correct display position
+		rendered = replaceAtDisplayCol(rendered, displayCol, bracketStr, styledBracket)
+	}
+	return rendered
+}
+
+// replaceAtDisplayCol replaces a character at a given display column in an ANSI-styled string.
+func replaceAtDisplayCol(s string, targetCol int, oldChar, replacement string) string {
+	col := 0
+	i := 0
+	for i < len(s) {
+		// Skip ANSI escape sequences
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			if j < len(s) {
+				i = j + 1
+				continue
+			}
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		rw := runewidth.RuneWidth(r)
+		if col == targetCol && string(r) == oldChar {
+			return s[:i] + replacement + s[i+size:]
+		}
+		col += rw
+		i += size
+
+		if col > targetCol {
+			break
+		}
+	}
+	return s
 }
 
 // renderLineWithTokens renders a line using syntax-highlighted tokens.

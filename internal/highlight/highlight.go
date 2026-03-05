@@ -65,25 +65,40 @@ func (h *Highlighter) TokenizeViewportToLines(content []byte, viewStart, viewEnd
 	return h.tokenizeContent(content, viewStart, viewEnd)
 }
 
-// SetLines sets cached lines from an async tokenization result.
-// If the new result is shorter than the existing cache (i.e. a viewport-scoped
-// partial tokenization), it merges the new lines into the existing array so
-// that lines outside the viewport retain their previous highlighting.
+// SetLines sets cached lines from a full tokenization result, replacing the cache entirely.
 func (h *Highlighter) SetLines(lines [][]StyledToken) {
-	if h.lines != nil && len(lines) < len(h.lines) {
-		// Partial result — merge non-empty lines into existing cache.
-		// Viewport-scoped tokenization leaves lines outside the range as nil/empty;
-		// we keep the old data for those.
-		for i, line := range lines {
-			if i < len(h.lines) && len(line) > 0 {
-				h.lines[i] = line
-			}
-		}
-	} else {
+	h.lines = lines
+	h.tokenizedStart = 0
+	h.tokenizedEnd = len(lines)
+	h.dirty = false
+}
+
+// MergeLines merges a partial (viewport-scoped) tokenization result into the
+// existing cache. Lines with tokens in the new result overwrite old data;
+// lines that are nil/empty in the new result keep their old cached tokens.
+func (h *Highlighter) MergeLines(lines [][]StyledToken) {
+	if h.lines == nil {
 		h.lines = lines
 		h.tokenizedStart = 0
 		h.tokenizedEnd = len(lines)
+		h.dirty = false
+		return
 	}
+
+	// Extend cache if the new result covers more lines
+	if len(lines) > len(h.lines) {
+		extended := make([][]StyledToken, len(lines))
+		copy(extended, h.lines)
+		h.lines = extended
+	}
+
+	for i, line := range lines {
+		if len(line) > 0 {
+			h.lines[i] = line
+		}
+	}
+
+	h.tokenizedEnd = len(h.lines)
 	h.dirty = false
 }
 

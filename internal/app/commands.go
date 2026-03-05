@@ -78,6 +78,12 @@ type DiffLoadedMsg struct {
 	Err      error
 }
 
+// SaveAllAndQuitMsg is sent when the user confirms saving all dirty buffers before quitting.
+type SaveAllAndQuitMsg struct{}
+
+// QuitWithoutSavingMsg is sent when the user confirms quitting without saving.
+type QuitWithoutSavingMsg struct{}
+
 // loadDiffCmd runs git diff and parses the result.
 func loadDiffCmd(rootDir, relPath, status string, tabIndex int) tea.Cmd {
 	return func() tea.Msg {
