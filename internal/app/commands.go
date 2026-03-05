@@ -1,9 +1,13 @@
 package app
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/diff"
 )
 
 // FileSavedMsg is sent when a file has been saved successfully.
@@ -64,4 +68,51 @@ func loadFileCmd(path string, tabIndex int, forceNew bool) tea.Cmd {
 // LspReadyMsg is sent when an LSP client finishes initializing.
 type LspReadyMsg struct {
 	FilePath string
+}
+
+// DiffLoadedMsg is sent when a diff has been computed.
+type DiffLoadedMsg struct {
+	Path     string
+	Lines    []diff.DiffLine
+	TabIndex int
+	Err      error
+}
+
+// loadDiffCmd runs git diff and parses the result.
+func loadDiffCmd(rootDir, relPath, status string, tabIndex int) tea.Cmd {
+	return func() tea.Msg {
+		absPath := filepath.Join(rootDir, relPath)
+
+		// Check if path is a directory — skip diff
+		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+			return DiffLoadedMsg{Path: relPath, Err: fmt.Errorf("%s is a directory", relPath), TabIndex: tabIndex}
+		}
+
+		// Untracked files: read file content directly, generate all-added lines
+		if status == "??" || status == "U" {
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				return DiffLoadedMsg{Path: relPath, Err: err, TabIndex: tabIndex}
+			}
+			lines := diff.AllAddedLines(string(data))
+			return DiffLoadedMsg{Path: relPath, Lines: lines, TabIndex: tabIndex}
+		}
+
+		// Run git diff HEAD -- <file>
+		cmd := exec.Command("git", "diff", "HEAD", "--", relPath)
+		cmd.Dir = rootDir
+		out, err := cmd.Output()
+		if err != nil {
+			// Try without HEAD for staged-only changes
+			cmd2 := exec.Command("git", "diff", "--", relPath)
+			cmd2.Dir = rootDir
+			out, err = cmd2.Output()
+			if err != nil {
+				return DiffLoadedMsg{Path: relPath, Err: err, TabIndex: tabIndex}
+			}
+		}
+
+		lines := diff.ParseUnifiedDiff(string(out))
+		return DiffLoadedMsg{Path: relPath, Lines: lines, TabIndex: tabIndex}
+	}
 }

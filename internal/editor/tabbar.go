@@ -9,14 +9,23 @@ import (
 	"teak/internal/ui"
 )
 
+// TabKind indicates the type of content in a tab.
+type TabKind int
+
+const (
+	TabEditor TabKind = iota
+	TabDiff
+)
+
 // Tab represents a single open file tab.
 type Tab struct {
 	ID           int
 	Label        string
 	FilePath     string
 	Dirty        bool
-	DiagSeverity int  // 0=none, 1=error, 2=warning, 3=info, 4=hint
-	Preview      bool // true if this is a preview tab (single-click, not yet pinned)
+	DiagSeverity int     // 0=none, 1=error, 2=warning, 3=info, 4=hint
+	Preview      bool    // true if this is a preview tab (single-click, not yet pinned)
+	Kind         TabKind // TabEditor or TabDiff
 }
 
 // TabBar renders a horizontal tab strip.

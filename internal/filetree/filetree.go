@@ -50,7 +50,8 @@ type Model struct {
 	Height      int
 	theme          ui.Theme
 	cachedFlat     []Entry
-	diagnostics    map[string]int // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	diagnostics    map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	gitStatus      map[string]string // relative path → status ("M", "A", "D", "U")
 	lastClickPath  string
 	lastClickTime  time.Time
 }
@@ -58,6 +59,11 @@ type Model struct {
 // SetDiagnostics sets the diagnostics map (file paths + directory paths → worst severity).
 func (m *Model) SetDiagnostics(diags map[string]int) {
 	m.diagnostics = diags
+}
+
+// SetGitStatus sets the git status map (relative paths → display status).
+func (m *Model) SetGitStatus(status map[string]string) {
+	m.gitStatus = status
 }
 
 // New creates a new file tree model rooted at the given directory.
@@ -357,6 +363,39 @@ func (m Model) View() string {
 			// Calculate used width: indent + icon + space + name
 			usedWidth := len(indent) + iconWidth + 1 + len(nameStr)
 
+			// Git status indicator + color for the filename
+			var gitNameColor color.Color
+			var gitIndicator string // e.g. "M", "A", "D", "U"
+			if m.gitStatus != nil && !entry.IsDir {
+				// Build relative path from root
+				relPath := entry.Path
+				if m.Root != "" && strings.HasPrefix(entry.Path, m.Root) {
+					relPath = strings.TrimPrefix(entry.Path[len(m.Root):], "/")
+					relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+				}
+				if st, ok := m.gitStatus[relPath]; ok {
+					gitIndicator = st
+					switch st {
+					case "M":
+						gitNameColor = ui.Nord13 // yellow
+					case "A":
+						gitNameColor = ui.Nord14 // green
+					case "D":
+						gitNameColor = ui.Nord11 // red
+					case "U":
+						gitNameColor = ui.Nord14 // green for untracked
+					}
+				}
+			}
+
+			// Git status indicator width
+			hasGitInd := gitIndicator != ""
+			gitIndWidth := 0
+			if hasGitInd {
+				gitIndWidth = 2 // " M"
+				usedWidth += gitIndWidth
+			}
+
 			// Diagnostic dot
 			hasDiag := false
 			var diagColor color.Color
@@ -373,6 +412,9 @@ func (m Model) View() string {
 
 			// Truncate name if needed
 			maxNameWidth := m.Width - (len(indent) + iconWidth + 1)
+			if hasGitInd {
+				maxNameWidth -= gitIndWidth
+			}
 			if hasDiag {
 				maxNameWidth -= 2
 			}
@@ -383,7 +425,17 @@ func (m Model) View() string {
 
 			// Render parts with consistent background
 			styledIcon := lipgloss.NewStyle().Foreground(iconColor).Background(bg).Render(icon)
-			styledName := lipgloss.NewStyle().Foreground(baseStyle.GetForeground()).Background(bg).Render(nameStr)
+			nameFg := baseStyle.GetForeground()
+			if gitNameColor != nil {
+				nameFg = gitNameColor
+			}
+			styledName := lipgloss.NewStyle().Foreground(nameFg).Background(bg).Render(nameStr)
+
+			// Git status indicator part
+			var gitIndPart string
+			if hasGitInd {
+				gitIndPart = lipgloss.NewStyle().Foreground(gitNameColor).Background(bg).Render(" " + gitIndicator)
+			}
 
 			var diagPart string
 			if hasDiag {
@@ -392,6 +444,9 @@ func (m Model) View() string {
 
 			// Calculate padding needed
 			contentWidth := len(indent) + iconWidth + 1 + len(nameStr)
+			if hasGitInd {
+				contentWidth += gitIndWidth
+			}
 			if hasDiag {
 				contentWidth += 2
 			}
@@ -407,7 +462,7 @@ func (m Model) View() string {
 			spaceStyled := lipgloss.NewStyle().Background(bg).Render(" ")
 			padStyled := lipgloss.NewStyle().Background(bg).Render(padding)
 
-			line := indentStyled + styledIcon + spaceStyled + styledName + diagPart + padStyled
+			line := indentStyled + styledIcon + spaceStyled + styledName + gitIndPart + diagPart + padStyled
 			sb.WriteString(line)
 		} else {
 			emptyLine := lipgloss.NewStyle().

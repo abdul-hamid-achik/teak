@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"charm.land/bubbles/v2/spinner"
+	"teak/internal/diff"
 	"teak/internal/editor"
 	"teak/internal/filetree"
 	"teak/internal/git"
@@ -31,6 +32,14 @@ const (
 	FocusEditor FocusArea = iota
 	FocusTree
 	FocusGitPanel
+)
+
+// SidebarTab indicates which tab is active in the sidebar.
+type SidebarTab int
+
+const (
+	SidebarFiles SidebarTab = iota
+	SidebarGit
 )
 
 // Model is the root Bubbletea model.
@@ -71,6 +80,14 @@ type Model struct {
 	newItemDir       string         // directory to create new item in
 	deleteConfirm    bool           // confirming deletion
 	deleteTarget     string         // path to delete
+	diffViews        map[int]diff.Model // tab index → diff view model
+	sidebarTab       SidebarTab         // active sidebar tab
+	showBranchPicker bool               // branch picker overlay visible
+	branchPickerM    git.BranchPickerModel // branch picker model
+	gitContextMenu   editor.ContextMenu    // context menu for git panel
+	gitContextEntry  *git.StatusEntry      // entry right-clicked in git panel
+	gitContextStaged bool                  // whether the right-clicked entry is in staged section
+	gitContextPath   string                // path of right-clicked entry (file or dir)
 }
 
 // NewModel creates a new app model, optionally loading a file.
@@ -96,6 +113,8 @@ func NewModel(filePath string, rootDir string) (Model, error) {
 		dirDiagnostics:  make(map[string]int),
 		gitBranch:       detectGitBranch(rootDir),
 		gitPanel:        git.New(rootDir, theme),
+		branchPickerM:   git.NewBranchPicker(theme),
+		gitContextMenu:  editor.NewContextMenu(theme),
 		helpM:           editor.NewHelpModel(theme),
 	}
 
@@ -176,6 +195,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		// Branch picker captures all input when visible
+		if m.showBranchPicker {
+			return m.updateBranchPicker(msg)
+		}
+
 		// Search overlay captures all input when visible
 		if m.showSearch {
 			return m.updateSearch(msg)
@@ -227,6 +251,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Git context menu captures keys
+		if m.gitContextMenu.Visible {
+			switch msg.String() {
+			case "up":
+				m.gitContextMenu.MoveUp()
+				return m, nil
+			case "down":
+				m.gitContextMenu.MoveDown()
+				return m, nil
+			case "enter":
+				if item := m.gitContextMenu.Selected(); item != nil {
+					action := item.Action
+					m.gitContextMenu.Hide()
+					return m.handleGitContextMenuAction(action)
+				}
+				m.gitContextMenu.Hide()
+				return m, nil
+			case "esc", "escape":
+				m.gitContextMenu.Hide()
+				return m, nil
+			default:
+				m.gitContextMenu.Hide()
+				return m, nil
+			}
+		}
+
 		// Help overlay: route input through help model
 		if m.showHelp {
 			key := msg.String()
@@ -239,8 +289,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// Welcome screen: global shortcuts pass through, others dismiss
-		if m.welcome != nil && m.welcome.Active {
+		// Welcome screen: global shortcuts pass through, others dismiss.
+		// Don't dismiss if git panel commit inputs have focus.
+		gitInputFocused := m.focus == FocusGitPanel && (m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused())
+		if m.welcome != nil && m.welcome.Active && !gitInputFocused {
 			key := msg.String()
 			switch key {
 			case "ctrl+q", "ctrl+b", "ctrl+f", "ctrl+shift+f", "f1":
@@ -292,7 +344,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+shift+g":
 			if m.gitPanel.IsGitRepo() {
-				m.gitPanel.ToggleCollapsed()
+				m.showTree = true
+				m.sidebarTab = SidebarGit
+				m.focus = FocusGitPanel
 				m.relayout()
 			}
 			return m, nil
@@ -311,6 +365,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		// Branch picker captures clicks when visible
+		if m.showBranchPicker {
+			return m.updateBranchPicker(msg)
+		}
+
 		// Search overlay captures all mouse clicks when visible
 		if m.showSearch {
 			return m.updateSearch(msg)
@@ -336,6 +395,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.treeContextMenu.Hide()
+			return m, nil
+		}
+
+		// Handle clicks on git context menu
+		if m.gitContextMenu.Visible {
+			mouse0 := msg.Mouse()
+			if mouse0.Button == tea.MouseLeft {
+				relY := mouse0.Y - m.gitContextMenu.Y - 1
+				if item := m.gitContextMenu.SelectAt(relY); item != nil {
+					action := item.Action
+					m.gitContextMenu.Hide()
+					return m.handleGitContextMenuAction(action)
+				}
+			}
+			m.gitContextMenu.Hide()
 			return m, nil
 		}
 
@@ -369,16 +443,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		mouse := msg.Mouse()
 
+		// Status bar branch click → open branch picker
+		if zone.Get("status-bar-branch").InBounds(msg) && m.gitPanel.IsGitRepo() {
+			m.showBranchPicker = true
+			m.branchPickerM.SetSize(m.width, m.height)
+			return m, tea.Batch(
+				git.ListBranchesCmd(m.gitPanel.RootDir()),
+				m.branchPickerM.Focus(),
+			)
+		}
+
 		if m.showTree {
 			treeWidth := m.treeWidth()
 			if mouse.X < treeWidth {
-				// Right-click in tree area
+				// Y==0 is the sidebar tab bar
+				if mouse.Y == 0 {
+					// Check which sidebar tab was clicked
+					if zone.Get("sidebar-tab-files").InBounds(msg) {
+						m.sidebarTab = SidebarFiles
+						m.focus = FocusTree
+					} else if zone.Get("sidebar-tab-git").InBounds(msg) {
+						m.sidebarTab = SidebarGit
+						m.focus = FocusGitPanel
+					}
+					return m, nil
+				}
+				// Y>0: forward to active sidebar panel with Y adjusted by -1
+				if m.sidebarTab == SidebarGit {
+					m.focus = FocusGitPanel
+					if mouse.Button == tea.MouseRight {
+						return m.showGitContextMenu(mouse.X, mouse.Y, mouse.Y-1)
+					}
+					// Pass original msg for zone checks, adjusted Y for positional logic
+					return m.handleGitPanelClick(mouse.Y-1, msg)
+				}
+				mouse.Y -= 1
+				// File tree
 				if mouse.Button == tea.MouseRight {
-					return m.showTreeContextMenu(mouse.X, mouse.Y)
+					return m.showTreeContextMenu(mouse.X, mouse.Y+1) // +1 to restore absolute Y for context menu
 				}
 				m.focus = FocusTree
+				adjusted := tea.MouseClickMsg(mouse)
 				var cmd tea.Cmd
-				m.tree, cmd = m.tree.Update(msg)
+				m.tree, cmd = m.tree.Update(adjusted)
 				return m, cmd
 			} else {
 				m.focus = FocusEditor
@@ -433,8 +540,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showTree {
 			treeWidth := m.treeWidth()
 			if mouse.X < treeWidth {
+				// Route to active sidebar panel (skip tab bar row)
+				mouse.Y -= 1
+				if m.sidebarTab == SidebarGit {
+					adjusted := tea.MouseWheelMsg(mouse)
+					var cmd tea.Cmd
+					m.gitPanel, cmd = m.gitPanel.Update(adjusted)
+					return m, cmd
+				}
+				adjusted := tea.MouseWheelMsg(mouse)
 				var cmd tea.Cmd
-				m.tree, cmd = m.tree.Update(msg)
+				m.tree, cmd = m.tree.Update(adjusted)
 				return m, cmd
 			}
 			if mouse.X >= treeWidth+1 {
@@ -491,12 +607,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
+		var cmds []tea.Cmd
 		if m.showSearch {
 			var cmd tea.Cmd
 			m.searchM, cmd = m.searchM.Update(msg)
-			return m, cmd
+			cmds = append(cmds, cmd)
 		}
-		return m, nil
+		if m.gitPanel.IsSpinning() {
+			var cmd tea.Cmd
+			m.gitPanel, cmd = m.gitPanel.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case SwitchTabMsg:
 		if msg.Index >= 0 && msg.Index < len(m.editors) {
@@ -549,11 +671,92 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case git.RefreshMsg:
 		var cmd tea.Cmd
 		m.gitPanel, cmd = m.gitPanel.Update(msg)
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Git error: %v", msg.Err)
+			return m, cmd
+		}
 		// Also update the status bar branch display
 		if msg.Branch != "" {
 			m.gitBranch = msg.Branch
 		}
+		// Update file tree git status indicators
+		if msg.Err == nil {
+			gitStatusMap := make(map[string]string)
+			for _, e := range msg.Entries {
+				// Use the most visible status (unstaged > staged)
+				if e.IsUnstagedChange() {
+					gitStatusMap[e.Path] = e.DisplayStatus(false)
+				} else if e.IsStagedChange() {
+					gitStatusMap[e.Path] = e.DisplayStatus(true)
+				}
+			}
+			m.tree.SetGitStatus(gitStatusMap)
+		}
 		return m, cmd
+
+	case git.OpenDiffMsg:
+		return m.openDiff(msg.Path, msg.Status)
+
+	case git.CommitResultMsg:
+		m.gitPanel.StopSpinner()
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Commit failed: %v", msg.Err)
+		} else {
+			m.status = "Committed successfully"
+		}
+		return m, m.gitPanel.Refresh()
+
+	case git.PushResultMsg:
+		m.gitPanel.StopSpinner()
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Push failed: %v", msg.Err)
+		} else {
+			m.status = "Pushed successfully"
+		}
+		return m, m.gitPanel.Refresh()
+
+	case git.PullResultMsg:
+		m.gitPanel.StopSpinner()
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Pull failed: %v", msg.Err)
+		} else {
+			m.status = "Pulled successfully"
+		}
+		return m, m.gitPanel.Refresh()
+
+	case git.OpenBranchPickerMsg:
+		m.showBranchPicker = true
+		m.branchPickerM.SetSize(m.width, m.height)
+		return m, tea.Batch(
+			git.ListBranchesCmd(m.gitPanel.RootDir()),
+			m.branchPickerM.Focus(),
+		)
+
+	case git.BranchListMsg:
+		if msg.Err == nil {
+			m.branchPickerM.SetBranches(msg.Branches, msg.Current)
+		}
+		return m, nil
+
+	case git.SwitchBranchMsg:
+		m.showBranchPicker = false
+		return m, git.SwitchBranchCmd(m.gitPanel.RootDir(), msg.Branch)
+
+	case git.SwitchBranchResultMsg:
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Switch failed: %v", msg.Err)
+		} else {
+			m.gitBranch = msg.Branch
+			m.status = fmt.Sprintf("Switched to %s", msg.Branch)
+		}
+		return m, m.gitPanel.Refresh()
+
+	case git.CloseBranchPickerMsg:
+		m.showBranchPicker = false
+		return m, nil
+
+	case DiffLoadedMsg:
+		return m.handleDiffLoaded(msg)
 
 	case FileErrorMsg:
 		m.status = fmt.Sprintf("Error: %v", msg.Err)
@@ -646,6 +849,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Route input to focused panel
 	if m.showTree && m.focus == FocusTree {
+		// Tab switches between sidebar tabs
+		if kp, ok := msg.(tea.KeyPressMsg); ok && kp.String() == "tab" {
+			if m.sidebarTab == SidebarFiles {
+				m.sidebarTab = SidebarGit
+				m.focus = FocusGitPanel
+			} else {
+				m.sidebarTab = SidebarFiles
+				m.focus = FocusTree
+			}
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.tree, cmd = m.tree.Update(msg)
 		return m, cmd
@@ -654,6 +868,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.gitPanel, cmd = m.gitPanel.Update(msg)
 		return m, cmd
+	}
+
+	// Route to diff view if active tab is a diff tab
+	if m.isActiveDiffTab() {
+		if dv, ok := m.diffViews[m.activeTab]; ok {
+			var cmd tea.Cmd
+			dv, cmd = dv.Update(msg)
+			m.diffViews[m.activeTab] = dv
+			return m, cmd
+		}
+		return m, nil
+	}
+
+	if m.activeEditor() == nil {
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -706,6 +935,8 @@ func (m Model) View() tea.View {
 		var editorView string
 		if welcomeActive {
 			editorView = m.welcome.View()
+		} else if m.isActiveDiffTab() {
+			editorView = m.activeDiffView()
 		} else if m.activeEditor() != nil {
 			editorView = m.activeEditor().View()
 		}
@@ -713,7 +944,7 @@ func (m Model) View() tea.View {
 	}
 
 	// Overlay context menus (rendered before help/search so they show in normal view)
-	if m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
+	if !m.isActiveDiffTab() && m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
 		cmView := m.activeEditor().ContextMenuView()
 		cmX, cmY := m.activeEditor().ContextMenuPosition()
 		if m.showTree {
@@ -721,9 +952,18 @@ func (m Model) View() tea.View {
 		}
 		cmY += 1 // +1 for tab bar
 		content = ui.PlaceOverlayAt(content, cmView, cmX, cmY, m.width, m.height)
+	} else if m.gitContextMenu.Visible {
+		cmView := m.gitContextMenu.View()
+		content = ui.PlaceOverlayAt(content, cmView, m.gitContextMenu.X, m.gitContextMenu.Y, m.width, m.height)
 	} else if m.treeContextMenu.Visible {
 		cmView := m.treeContextMenu.View()
 		content = ui.PlaceOverlayAt(content, cmView, m.treeContextMenu.X, m.treeContextMenu.Y, m.width, m.height)
+	}
+
+	// Branch picker overlay
+	if m.showBranchPicker {
+		pickerView := m.branchPickerM.View()
+		content = ui.RenderOverlay(content, pickerView, m.width, m.height)
 	}
 
 	// Overlay help, search, or go-to-line
@@ -780,7 +1020,7 @@ func (m Model) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
-	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && m.focus == FocusEditor && m.activeEditor() != nil {
+	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && !m.isActiveDiffTab() && m.focus == FocusEditor && m.activeEditor() != nil {
 		cx, cy := m.activeEditor().CursorPosition()
 		if m.showTree {
 			cx += m.treeWidth() + 1
@@ -797,6 +1037,20 @@ func (m Model) View() tea.View {
 	return v
 }
 
+func (m Model) isActiveDiffTab() bool {
+	if m.activeTab < len(m.tabBar.Tabs) {
+		return m.tabBar.Tabs[m.activeTab].Kind == editor.TabDiff
+	}
+	return false
+}
+
+func (m Model) activeDiffView() string {
+	if dv, ok := m.diffViews[m.activeTab]; ok {
+		return dv.View()
+	}
+	return ""
+}
+
 func (m *Model) activeEditor() *editor.Editor {
 	if len(m.editors) == 0 {
 		return nil
@@ -809,6 +1063,16 @@ func (m *Model) activeEditor() *editor.Editor {
 
 // forwardToEditor sends an adjusted mouse message to the active editor and handles LSP updates.
 func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Route to diff view if active tab is a diff tab
+	if m.isActiveDiffTab() {
+		if dv, ok := m.diffViews[m.activeTab]; ok {
+			var cmd tea.Cmd
+			dv, cmd = dv.Update(msg)
+			m.diffViews[m.activeTab] = dv
+			return m, cmd
+		}
+		return m, nil
+	}
 	if m.activeEditor() == nil {
 		return m, nil
 	}
@@ -836,13 +1100,14 @@ func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// viewWithTree: tree takes full height (no tab bar above it).
-// Tab bar sits above the editor only.
+// viewWithTree: sidebar tab bar + active panel on left, tab bar + editor on right.
 func (m Model) viewWithTree() string {
 	tabBarView := m.tabBar.View()
 	var editorView string
 	if m.welcome != nil && m.welcome.Active {
 		editorView = m.welcome.View()
+	} else if m.isActiveDiffTab() {
+		editorView = m.activeDiffView()
 	} else if m.activeEditor() != nil {
 		editorView = m.activeEditor().View()
 	}
@@ -850,39 +1115,27 @@ func (m Model) viewWithTree() string {
 	// Editor column: tab bar + editor content
 	editorColumn := tabBarView + "\n" + editorView
 
-	// Build sidebar: tree + optional git panel
+	// Build sidebar: tab bar (1 line) + active panel
 	sidebarHeight := m.height - 2 // minus divider + status bar
-	var sidebarView string
-
-	if m.gitPanel.IsGitRepo() && !m.gitPanel.Collapsed {
-		// Split sidebar between tree and git panel
-		gitPanelHeight := min(8, sidebarHeight/3)
-		if gitPanelHeight < 1 {
-			gitPanelHeight = 1
-		}
-		separatorHeight := 1
-		treeHeight := sidebarHeight - gitPanelHeight - separatorHeight
-		if treeHeight < 1 {
-			treeHeight = 1
-		}
-
-		// Resize tree and git panel
-		tw := m.treeWidth()
-		m.tree.SetSize(tw, treeHeight)
-		m.gitPanel.SetSize(tw, gitPanelHeight)
-
-		separator := m.theme.TreeBorder.Render(strings.Repeat("─", tw))
-		sidebarView = m.tree.View() + "\n" + separator + "\n" + m.gitPanel.View()
-	} else {
-		sidebarView = m.tree.View()
-		if m.gitPanel.IsGitRepo() && m.gitPanel.Collapsed {
-			// Show collapsed header in one line at the bottom
-			tw := m.treeWidth()
-			m.gitPanel.SetSize(tw, 1)
-			separator := m.theme.TreeBorder.Render(strings.Repeat("─", tw))
-			sidebarView = m.tree.View() + "\n" + separator + "\n" + m.gitPanel.View()
-		}
+	panelHeight := sidebarHeight - 1 // minus sidebar tab bar
+	if panelHeight < 1 {
+		panelHeight = 1
 	}
+
+	tw := m.treeWidth()
+	tabBar := m.sidebarTabBar()
+
+	var panelView string
+	switch m.sidebarTab {
+	case SidebarGit:
+		m.gitPanel.SetSize(tw, panelHeight)
+		panelView = m.gitPanel.View()
+	default:
+		m.tree.SetSize(tw, panelHeight)
+		panelView = m.tree.View()
+	}
+
+	sidebarView := tabBar + "\n" + panelView
 
 	// Border column: full height
 	borderLines := make([]string, sidebarHeight)
@@ -892,6 +1145,101 @@ func (m Model) viewWithTree() string {
 	borderCol := strings.Join(borderLines, "\n")
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, borderCol, editorColumn)
+}
+
+// sidebarTabBar renders the 1-line icon bar at the top of the sidebar.
+func (m Model) sidebarTabBar() string {
+	tw := m.treeWidth()
+
+	fileIcon := " \uf413 " // nf-oct-file_directory_fill
+	gitIcon := " \ue725 "  // nf-dev-git_branch
+
+	var fileTab, gitTab string
+	if m.sidebarTab == SidebarFiles {
+		fileTab = m.theme.SidebarTabActive.Render(fileIcon)
+	} else {
+		fileTab = m.theme.SidebarTabInactive.Render(fileIcon)
+	}
+	if m.sidebarTab == SidebarGit {
+		gitTab = m.theme.SidebarTabActive.Render(gitIcon)
+	} else {
+		gitTab = m.theme.SidebarTabInactive.Render(gitIcon)
+	}
+
+	fileTab = zone.Mark("sidebar-tab-files", fileTab)
+	gitTab = zone.Mark("sidebar-tab-git", gitTab)
+
+	bar := fileTab + gitTab
+	// Pad to full sidebar width
+	padWidth := tw - lipgloss.Width(bar)
+	if padWidth > 0 {
+		bar += lipgloss.NewStyle().Background(ui.Nord0).Render(strings.Repeat(" ", padWidth))
+	}
+	return bar
+}
+
+// handleGitPanelClick routes a click in the git panel area.
+// adjustedY is relative to the panel (0-based), originalMsg has absolute coords for zone checks.
+func (m Model) handleGitPanelClick(adjustedY int, originalMsg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	// Check zone-based buttons using original absolute-coordinate message
+	if zone.Get("git-commit-btn").InBounds(originalMsg) {
+		result, cmd := m.gitPanel.DoCommit()
+		m.gitPanel = result
+		return m, cmd
+	}
+	if zone.Get("git-push-btn").InBounds(originalMsg) {
+		spinCmd := m.gitPanel.StartSpinner("Pushing...")
+		return m, tea.Batch(git.PushCmd(m.gitPanel.RootDir()), spinCmd)
+	}
+	if zone.Get("git-pull-btn").InBounds(originalMsg) {
+		spinCmd := m.gitPanel.StartSpinner("Pulling...")
+		return m, tea.Batch(git.PullCmd(m.gitPanel.RootDir()), spinCmd)
+	}
+	if zone.Get("git-stage-all").InBounds(originalMsg) {
+		return m, git.StageAllCmd(m.gitPanel.RootDir())
+	}
+	if zone.Get("git-unstage-all").InBounds(originalMsg) {
+		return m, git.UnstageAllCmd(m.gitPanel.RootDir())
+	}
+	// Click on commit title → focus title input and position cursor
+	if zone.Get("git-commit-title").InBounds(originalMsg) {
+		mouse := originalMsg.Mouse()
+		cmd := m.gitPanel.FocusTitleAt(mouse.X)
+		return m, cmd
+	}
+	// Click on commit body → focus body and position cursor at click location
+	if zone.Get("git-commit-body").InBounds(originalMsg) {
+		mouse := originalMsg.Mouse()
+		m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
+		return m, nil
+	}
+
+	// Positional fallback for commit form clicks (zone may only track last-marked line)
+	switch m.gitPanel.CommitFormHitTest(adjustedY) {
+	case "title":
+		mouse := originalMsg.Mouse()
+		cmd := m.gitPanel.FocusTitleAt(mouse.X)
+		return m, cmd
+	case "body":
+		mouse := originalMsg.Mouse()
+		m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
+		return m, nil
+	}
+
+	// Forward positional click with adjusted Y
+	mouse := originalMsg.Mouse()
+	mouse.Y = adjustedY
+	adjusted := tea.MouseClickMsg(mouse)
+	var cmd tea.Cmd
+	m.gitPanel, cmd = m.gitPanel.Update(adjusted)
+	return m, cmd
+}
+
+// updateBranchPicker handles input when the branch picker is visible.
+func (m Model) updateBranchPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.branchPickerM, cmd = m.branchPickerM.Update(msg)
+	return m, cmd
 }
 
 func (m Model) treeWidth() int {
@@ -926,29 +1274,21 @@ func (m *Model) relayout() {
 			editorHeight = 1
 		}
 
-		// Calculate tree height accounting for git panel
-		treeHeight := sidebarHeight
-		if m.gitPanel.IsGitRepo() {
-			if m.gitPanel.Collapsed {
-				// Collapsed: separator (1) + header (1) = 2
-				treeHeight = sidebarHeight - 2
-			} else {
-				// Expanded: separator (1) + panel height
-				gitPanelHeight := min(8, sidebarHeight/3)
-				if gitPanelHeight < 1 {
-					gitPanelHeight = 1
-				}
-				treeHeight = sidebarHeight - gitPanelHeight - 1
-			}
-			if treeHeight < 1 {
-				treeHeight = 1
-			}
+		// Sidebar tab bar takes 1 line; active panel gets the rest
+		panelHeight := sidebarHeight - 1
+		if panelHeight < 1 {
+			panelHeight = 1
 		}
 
-		m.tree.SetSize(tw, treeHeight)
+		m.tree.SetSize(tw, panelHeight)
+		m.gitPanel.SetSize(tw, panelHeight)
 		m.tabBar.Width = editorWidth
 		for i := range m.editors {
 			m.editors[i].SetSize(editorWidth, editorHeight)
+		}
+		for k, dv := range m.diffViews {
+			dv.SetSize(editorWidth, editorHeight)
+			m.diffViews[k] = dv
 		}
 		if m.welcome != nil {
 			m.welcome.SetSize(editorWidth, editorHeight)
@@ -962,6 +1302,10 @@ func (m *Model) relayout() {
 		for i := range m.editors {
 			m.editors[i].SetSize(m.width, editorHeight)
 		}
+		for k, dv := range m.diffViews {
+			dv.SetSize(m.width, editorHeight)
+			m.diffViews[k] = dv
+		}
 		if m.welcome != nil {
 			m.welcome.SetSize(m.width, editorHeight)
 		}
@@ -973,7 +1317,8 @@ func (m Model) renderStatusBar() string {
 	helpHint := m.theme.TabInactive.Render(" F1 Help ")
 	var branchPart string
 	if m.gitBranch != "" {
-		branchPart = fmt.Sprintf("  %s", m.gitBranch)
+		branchLabel := fmt.Sprintf("  %s", m.gitBranch)
+		branchPart = zone.Mark("status-bar-branch", branchLabel)
 	} else if m.rootDir != "" {
 		branchPart = "  " + filepath.Base(m.rootDir)
 	}
@@ -1214,6 +1559,19 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	m.editors = append(m.editors[:idx], m.editors[idx+1:]...)
 	m.tabBar.RemoveTab(idx)
 	m.activeTab = m.tabBar.ActiveIdx
+
+	// Re-key diff views: remove this index and shift higher indices down
+	delete(m.diffViews, idx)
+	newDiffs := make(map[int]diff.Model)
+	for k, v := range m.diffViews {
+		if k > idx {
+			newDiffs[k-1] = v
+		} else {
+			newDiffs[k] = v
+		}
+	}
+	m.diffViews = newDiffs
+
 	return m, nil
 }
 
@@ -1677,6 +2035,76 @@ func (m Model) handleTreeContextMenuAction(action string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) showGitContextMenu(x, y, panelY int) (tea.Model, tea.Cmd) {
+	node, staged := m.gitPanel.NodeAtY(panelY)
+	if node == nil {
+		return m, nil
+	}
+
+	var items []editor.ContextMenuItem
+	if node.IsDir {
+		// Directory node — offer stage/unstage all files in folder
+		if staged {
+			items = []editor.ContextMenuItem{
+				{Label: "Unstage Folder", Action: "git_unstage_dir"},
+			}
+		} else {
+			items = []editor.ContextMenuItem{
+				{Label: "Stage Folder", Action: "git_stage_dir"},
+			}
+		}
+		m.gitContextEntry = nil
+		m.gitContextStaged = staged
+		m.gitContextPath = node.Path
+	} else if node.Entry != nil {
+		// File node
+		m.gitContextEntry = node.Entry
+		m.gitContextStaged = staged
+		m.gitContextPath = node.Entry.Path
+		if staged {
+			items = []editor.ContextMenuItem{
+				{Label: "Unstage File", Action: "git_unstage"},
+				{Label: "View Diff", Action: "git_diff"},
+			}
+		} else {
+			items = []editor.ContextMenuItem{
+				{Label: "Stage File", Action: "git_stage"},
+				{Label: "View Diff", Action: "git_diff"},
+			}
+		}
+	} else {
+		return m, nil
+	}
+
+	m.gitContextMenu.Show(items, x, y)
+	return m, nil
+}
+
+func (m Model) handleGitContextMenuAction(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "git_stage":
+		if m.gitContextEntry != nil {
+			return m, git.StageCmd(m.gitPanel.RootDir(), m.gitContextEntry.Path)
+		}
+	case "git_unstage":
+		if m.gitContextEntry != nil {
+			return m, git.UnstageCmd(m.gitPanel.RootDir(), m.gitContextEntry.Path)
+		}
+	case "git_diff":
+		if m.gitContextEntry != nil {
+			status := m.gitContextEntry.DisplayStatus(m.gitContextStaged)
+			return m.openDiff(m.gitContextEntry.Path, status)
+		}
+	case "git_stage_dir":
+		// Stage all files under the directory
+		return m, git.StageCmd(m.gitPanel.RootDir(), m.gitContextPath)
+	case "git_unstage_dir":
+		// Unstage all files under the directory
+		return m, git.UnstageCmd(m.gitPanel.RootDir(), m.gitContextPath)
+	}
+	return m, nil
+}
+
 func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
 	// Create a placeholder tab with an empty buffer, then load file async
 	buf := text.NewBuffer()
@@ -1696,6 +2124,86 @@ func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
 	m.relayout()
 
 	return m, loadFileCmd(path, idx, true)
+}
+
+func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
+	// Dismiss welcome screen if active
+	if m.welcome != nil {
+		m.welcome.Dismiss()
+	}
+
+	// Use a synthetic path to avoid collision with normal file tabs
+	diffKey := "diff://" + relPath
+
+	// Check if already open — pin it (double-open behavior)
+	idx := m.tabBar.FindTab(diffKey)
+	if idx >= 0 {
+		m.activeTab = idx
+		m.tabBar.ActiveIdx = idx
+		m.tabBar.PinTab(idx)
+		m.focus = FocusEditor
+		return m, nil
+	}
+
+	// Create a placeholder editor (unused, but keeps editors slice in sync with tabs)
+	buf := text.NewBuffer()
+	ed := editor.New(buf, m.theme, editor.DefaultConfig())
+
+	// Try to reuse a preview tab (same as file opening behavior)
+	var tabIdx int
+	label := "\u0394 " + filepath.Base(relPath)
+	replaceIdx := m.findReplaceableTab()
+	if replaceIdx >= 0 {
+		// Clean up any old diff view for this slot
+		delete(m.diffViews, replaceIdx)
+		m.editors[replaceIdx] = ed
+		m.tabBar.Tabs[replaceIdx].Label = label
+		m.tabBar.Tabs[replaceIdx].FilePath = diffKey
+		m.tabBar.Tabs[replaceIdx].Dirty = false
+		m.tabBar.Tabs[replaceIdx].Preview = true
+		m.tabBar.Tabs[replaceIdx].Kind = editor.TabDiff
+		m.tabBar.Tabs[replaceIdx].DiagSeverity = 0
+		m.activeTab = replaceIdx
+		m.tabBar.ActiveIdx = replaceIdx
+		tabIdx = replaceIdx
+	} else {
+		m.editors = append(m.editors, ed)
+		tabIdx = m.tabBar.AddTab(label, diffKey)
+		m.tabBar.Tabs[tabIdx].Kind = editor.TabDiff
+		m.tabBar.Tabs[tabIdx].Preview = true
+		m.activeTab = tabIdx
+		m.tabBar.ActiveIdx = tabIdx
+	}
+
+	m.focus = FocusEditor
+	m.relayout()
+
+	return m, loadDiffCmd(m.rootDir, relPath, status, tabIdx)
+}
+
+func (m Model) handleDiffLoaded(msg DiffLoadedMsg) (tea.Model, tea.Cmd) {
+	tabIdx := msg.TabIndex
+	if tabIdx < 0 || tabIdx >= len(m.tabBar.Tabs) {
+		return m, nil
+	}
+	// Verify this tab is still a diff tab for the right path
+	if m.tabBar.Tabs[tabIdx].FilePath != "diff://"+msg.Path {
+		return m, nil
+	}
+
+	if msg.Err != nil {
+		m.status = fmt.Sprintf("Diff error: %v", msg.Err)
+		return m, nil
+	}
+
+	dv := diff.New(msg.Path, msg.Lines, m.theme)
+	if m.diffViews == nil {
+		m.diffViews = make(map[int]diff.Model)
+	}
+	m.diffViews[tabIdx] = dv
+	m.relayout()
+	m.status = ""
+	return m, nil
 }
 
 // detectGitBranch returns the current git branch name, or "" if not in a repo.

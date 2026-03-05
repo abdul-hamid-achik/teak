@@ -78,6 +78,24 @@ type Theme struct {
 	GitModified  lipgloss.Style
 	GitDeleted   lipgloss.Style
 	GitUntracked lipgloss.Style
+
+	// Diff view
+	DiffRemoved    lipgloss.Style
+	DiffAdded      lipgloss.Style
+	DiffEmpty      lipgloss.Style
+	DiffGutter     lipgloss.Style
+	DiffBorder     lipgloss.Style
+	DiffHunkHeader lipgloss.Style
+
+	// Sidebar tabs
+	SidebarTabActive   lipgloss.Style
+	SidebarTabInactive lipgloss.Style
+
+	// Git action buttons
+	GitActionButton lipgloss.Style
+	GitSectionHeader lipgloss.Style
+	GitBranch        lipgloss.Style
+	GitCommitInput   lipgloss.Style
 }
 
 // DefaultTheme returns the Nord-themed styles.
@@ -222,5 +240,50 @@ func DefaultTheme() Theme {
 			Foreground(Nord11),
 		GitUntracked: lipgloss.NewStyle().
 			Foreground(Nord3),
+
+		// Diff view
+		DiffRemoved: lipgloss.NewStyle().
+			Background(lipgloss.Color("#3B2C2E")).
+			Foreground(Nord4),
+		DiffAdded: lipgloss.NewStyle().
+			Background(lipgloss.Color("#2E3B2E")).
+			Foreground(Nord4),
+		DiffEmpty: lipgloss.NewStyle().
+			Background(Nord1).
+			Foreground(Nord3),
+		DiffGutter: lipgloss.NewStyle().
+			Background(Nord0).
+			Foreground(Nord3),
+		DiffBorder: lipgloss.NewStyle().
+			Foreground(Nord3),
+		DiffHunkHeader: lipgloss.NewStyle().
+			Foreground(Nord8).
+			Bold(true),
+
+		// Sidebar tabs
+		SidebarTabActive: lipgloss.NewStyle().
+			Background(Nord1).
+			Foreground(Nord8).
+			Bold(true).
+			Padding(0, 1),
+		SidebarTabInactive: lipgloss.NewStyle().
+			Background(Nord0).
+			Foreground(Nord3).
+			Padding(0, 1),
+
+		// Git action buttons & sections
+		GitActionButton: lipgloss.NewStyle().
+			Background(Nord2).
+			Foreground(Nord6).
+			Padding(0, 1),
+		GitSectionHeader: lipgloss.NewStyle().
+			Foreground(Nord8).
+			Bold(true),
+		GitBranch: lipgloss.NewStyle().
+			Foreground(Nord15).
+			Bold(true),
+		GitCommitInput: lipgloss.NewStyle().
+			Background(Nord1).
+			Foreground(Nord4),
 	}
 }
