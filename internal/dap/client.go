@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+
+	log "github.com/charmbracelet/log"
 )
 
 // Client manages communication with a DAP debug adapter.
@@ -35,61 +36,61 @@ type callResult struct {
 
 // Request represents a DAP request.
 type Request struct {
-	Seq   int    `json:"seq"`
-	Type  string `json:"type"`
-	Command string `json:"command"`
-	Arguments any `json:"arguments,omitempty"`
+	Seq       int    `json:"seq"`
+	Type      string `json:"type"`
+	Command   string `json:"command"`
+	Arguments any    `json:"arguments,omitempty"`
 }
 
 // Event represents a DAP event.
 type Event struct {
-	Seq  int    `json:"seq"`
-	Type string `json:"type"`
+	Seq   int    `json:"seq"`
+	Type  string `json:"type"`
 	Event string `json:"event"`
-	Body any    `json:"body,omitempty"`
+	Body  any    `json:"body,omitempty"`
 }
 
 // Response represents a DAP response.
 type Response struct {
-	Seq      int           `json:"seq"`
-	Type     string        `json:"type"`
-	RequestSeq int         `json:"request_seq"`
-	Command  string        `json:"command"`
-	Success  bool          `json:"success"`
-	Message  string        `json:"message,omitempty"`
-	Body     json.RawMessage `json:"body,omitempty"`
+	Seq        int             `json:"seq"`
+	Type       string          `json:"type"`
+	RequestSeq int             `json:"request_seq"`
+	Command    string          `json:"command"`
+	Success    bool            `json:"success"`
+	Message    string          `json:"message,omitempty"`
+	Body       json.RawMessage `json:"body,omitempty"`
 }
 
 // ErrorResponse represents an error in a DAP response.
 type ErrorResponse struct {
-	Id       int    `json:"id"`
-	Format   string `json:"format"`
-	Message  string `json:"message"`
-	SendTelemetry bool `json:"sendTelemetry"`
-	ShowUser   bool   `json:"showUser"`
-	VariablesReference int `json:"variablesReference"`
+	Id                 int    `json:"id"`
+	Format             string `json:"format"`
+	Message            string `json:"message"`
+	SendTelemetry      bool   `json:"sendTelemetry"`
+	ShowUser           bool   `json:"showUser"`
+	VariablesReference int    `json:"variablesReference"`
 }
 
 // InitializeRequest arguments
 type InitializeRequestArgs struct {
-	AdapterID     string `json:"adapterID"`
-	PathFormat    string `json:"pathFormat,omitempty"`
-	LinesStartAt1 bool   `json:"linesStartAt1,omitempty"`
-	ColumnsStartAt1 bool `json:"columnsStartAt1,omitempty"`
+	AdapterID       string `json:"adapterID"`
+	PathFormat      string `json:"pathFormat,omitempty"`
+	LinesStartAt1   bool   `json:"linesStartAt1,omitempty"`
+	ColumnsStartAt1 bool   `json:"columnsStartAt1,omitempty"`
 }
 
 // LaunchRequest arguments
 type LaunchRequestArgs struct {
-	Program string `json:"program"`
-	Mode    string `json:"mode,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Cwd     string `json:"cwd,omitempty"`
+	Program string            `json:"program"`
+	Mode    string            `json:"mode,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 }
 
 // SetBreakpointsRequest arguments
 type SetBreakpointsRequestArgs struct {
-	Source     Source `json:"source"`
+	Source      Source             `json:"source"`
 	Breakpoints []SourceBreakpoint `json:"breakpoints"`
 }
 
@@ -101,7 +102,7 @@ type Source struct {
 
 // SourceBreakpoint represents a breakpoint in source code.
 type SourceBreakpoint struct {
-	Line int `json:"line"`
+	Line   int `json:"line"`
 	Column int `json:"column,omitempty"`
 }
 
@@ -116,9 +117,9 @@ type Breakpoint struct {
 
 // StackTraceRequest arguments
 type StackTraceRequestArgs struct {
-	ThreadId      int `json:"threadId"`
-	StartFrame    int `json:"startFrame,omitempty"`
-	Levels        int `json:"levels,omitempty"`
+	ThreadId   int `json:"threadId"`
+	StartFrame int `json:"startFrame,omitempty"`
+	Levels     int `json:"levels,omitempty"`
 }
 
 // StackTraceResponse body
@@ -129,11 +130,11 @@ type StackTraceResponseBody struct {
 
 // StackFrame represents a stack frame.
 type StackFrame struct {
-	Id         int    `json:"id"`
-	Name       string `json:"name"`
-	Source     Source `json:"source,omitempty"`
-	Line       int    `json:"line"`
-	Column     int    `json:"column"`
+	Id               int    `json:"id"`
+	Name             string `json:"name"`
+	Source           Source `json:"source,omitempty"`
+	Line             int    `json:"line"`
+	Column           int    `json:"column"`
 	PresentationHint string `json:"presentationHint,omitempty"`
 }
 
@@ -210,11 +211,11 @@ type ExitedEventBody struct {
 
 // OutputEvent body
 type OutputEventBody struct {
-	Category   string `json:"category,omitempty"`
-	Output     string `json:"output"`
-	Source     Source `json:"source,omitempty"`
-	Line       int    `json:"line,omitempty"`
-	Column     int    `json:"column,omitempty"`
+	Category string `json:"category,omitempty"`
+	Output   string `json:"output"`
+	Source   Source `json:"source,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
 }
 
 // NewClient creates a new DAP client and starts the debug adapter process.
@@ -267,9 +268,9 @@ func (c *Client) nextSeq() int {
 // Initialize sends the initialize request.
 func (c *Client) Initialize() error {
 	args := InitializeRequestArgs{
-		AdapterID:     "teak",
-		PathFormat:    "path",
-		LinesStartAt1: true,
+		AdapterID:       "teak",
+		PathFormat:      "path",
+		LinesStartAt1:   true,
 		ColumnsStartAt1: true,
 	}
 
@@ -432,7 +433,7 @@ func (c *Client) Variables(variablesReference int) ([]Variable, error) {
 // Disconnect stops the debug session.
 func (c *Client) Disconnect() error {
 	args := map[string]bool{
-		"restart": false,
+		"restart":           false,
 		"terminateDebuggee": true,
 	}
 	return c.sendRequest("disconnect", args, nil)
@@ -469,9 +470,9 @@ func (c *Client) sendRequest(command string, args any, result *json.RawMessage) 
 	c.mu.Unlock()
 
 	req := Request{
-		Seq:     c.nextSeq(),
-		Type:    "request",
-		Command: command,
+		Seq:       c.nextSeq(),
+		Type:      "request",
+		Command:   command,
 		Arguments: args,
 	}
 
@@ -524,7 +525,7 @@ func (c *Client) send(msg any) error {
 
 func (c *Client) readLoop() {
 	reader := bufio.NewReader(c.stdout)
-	
+
 	for {
 		// Read Content-Length header
 		var contentLength int
@@ -534,33 +535,33 @@ func (c *Client) readLoop() {
 				if err == io.EOF {
 					return
 				}
-				log.Printf("dap: read error: %v", err)
+				log.Error("dap: read error", "err", err)
 				return
 			}
-			
+
 			line = strings.TrimSpace(line)
 			if line == "" {
 				break
 			}
-			
+
 			if strings.HasPrefix(line, "Content-Length:") {
 				lengthStr := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
 				contentLength, err = strconv.Atoi(lengthStr)
 				if err != nil {
-					log.Printf("dap: invalid content length: %v", err)
+					log.Error("dap: invalid content length", "err", err)
 					return
 				}
 			}
 		}
-		
+
 		// Read content
 		content := make([]byte, contentLength)
 		_, err := io.ReadFull(reader, content)
 		if err != nil {
-			log.Printf("dap: read content error: %v", err)
+			log.Error("dap: read content error", "err", err)
 			return
 		}
-		
+
 		c.handleMessage(content)
 	}
 }
@@ -572,7 +573,7 @@ func (c *Client) handleMessage(data []byte) {
 		c.mu.Lock()
 		ch, ok := c.pending[resp.RequestSeq]
 		c.mu.Unlock()
-		
+
 		if ok {
 			var errResp *ErrorResponse
 			if !resp.Success {
@@ -587,7 +588,7 @@ func (c *Client) handleMessage(data []byte) {
 		}
 		return
 	}
-	
+
 	// Try to parse as event
 	var event Event
 	if err := json.Unmarshal(data, &event); err == nil && event.Type == "event" {
@@ -600,7 +601,7 @@ func (c *Client) handleEvent(event *Event) {
 	if c.msgChan == nil {
 		return
 	}
-	
+
 	switch event.Event {
 	case "stopped":
 		if body, ok := event.Body.(map[string]any); ok {
@@ -614,7 +615,7 @@ func (c *Client) handleEvent(event *Event) {
 	case "continued":
 		if body, ok := event.Body.(map[string]any); ok {
 			c.msgChan <- ContinuedEventMsg{
-				ThreadId:          getInt(body, "threadId"),
+				ThreadId:            getInt(body, "threadId"),
 				AllThreadsContinued: getBool(body, "allThreadsContinued"),
 			}
 		}

@@ -18,7 +18,8 @@ All code must compile and pass tests before being considered complete.
 - **Go 1.24+** — use standard library where possible
 - **0-based indexing** for lines and columns throughout the entire codebase
 - **Immutable rope** — `Insert` and `Delete` on `*Rope` return a new `*Rope`, never mutate in place
-- **Return errors, don't panic** — no `panic()` or `log.Fatal()` in library code
+- **Return errors, don't panic** — no `panic()`, `log.Fatal()`, or `log.Panic()` in library code
+- **Logging** — use `github.com/charmbracelet/log` for structured logging. Prefer `log.Error()` with key-value pairs over `log.Printf()`.
 - **Table-driven tests** in `_test.go` files alongside source
 - **No unnecessary abstractions** — keep things simple, avoid premature generalization
 

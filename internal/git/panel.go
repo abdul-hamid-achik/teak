@@ -5,9 +5,9 @@ import (
 	"os/exec"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
@@ -225,12 +225,12 @@ type Model struct {
 	unstagedTree []*GitTreeNode
 
 	// Commit form
-	commitTitle textinput.Model // single-line title (required)
-	commitBody  []string        // multi-line body (optional)
-	bodyLine    int             // cursor line within body
-	bodyCol     int             // cursor col within body
-	bodyScrollY int             // vertical scroll offset for body view
-	bodyScrollX int             // horizontal scroll offset for body view
+	commitTitle  textinput.Model // single-line title (required)
+	commitBody   []string        // multi-line body (optional)
+	bodyLine     int             // cursor line within body
+	bodyCol      int             // cursor col within body
+	bodyScrollY  int             // vertical scroll offset for body view
+	bodyScrollX  int             // horizontal scroll offset for body view
 	titleFocused bool
 	bodyFocused  bool
 
@@ -1232,25 +1232,36 @@ func (m Model) View() string {
 
 	// 3. Commit form area — rendered as a bordered box at the bottom
 	// Calculate how much space we have left for the commit form
-	// We need: 1 (top border) + 1 (title) + bodyHeight (body) + 1 (bottom border) + 1 (buttons)
+	// We need: 1 (push/pull buttons) + 1 (top border) + 1 (title) + bodyHeight (body) + 1 (bottom border) + 1 (commit button)
 	bodyHeight := m.bodyViewHeight()
-	formMinHeight := 1 + 1 + bodyHeight + 1 + 1
+	formMinHeight := 1 + 1 + 1 + bodyHeight + 1 + 1
 	remaining := m.Height - linesUsed
-	if remaining < 4 {
-		// Not enough space, just show buttons
+	if remaining < 3 {
+		// Not enough space, show spinner only
 		sb.WriteByte('\n')
 		linesUsed++
-		sb.WriteByte('\n')
 		if m.spinning {
 			sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
 		} else {
-			commitBtn := zone.Mark("git-commit-btn",
-				m.theme.GitActionButton.Render("\uf417 Commit"))
-			pushBtn := zone.Mark("git-push-btn",
-				m.theme.GitActionButton.Render("\uf0ee Push"))
-			pullBtn := zone.Mark("git-pull-btn",
-				m.theme.GitActionButton.Render("\uf0ed Pull"))
-			sb.WriteString(" " + commitBtn + " " + pushBtn + " " + pullBtn)
+			// Show compact single row of buttons with manual spacing
+			availWidth := m.Width - 2
+			if availWidth < 10 {
+				availWidth = 10
+			}
+			// Split available width into 3 parts: commit gets 1/2, push/pull get 1/4 each
+			commitW := availWidth / 2
+			halfW := availWidth / 4
+			commitContent := "\uf417 Commit"
+			pushContent := "\uf0ee Push"
+			pullContent := "\uf0ed Pull"
+			// Pad each to their section width
+			commitPadded := commitContent + strings.Repeat(" ", commitW-len(commitContent))
+			pushPadded := pushContent + strings.Repeat(" ", halfW-len(pushContent))
+			pullPadded := pullContent + strings.Repeat(" ", halfW-len(pullContent))
+			commitBtn := zone.Mark("git-commit-btn", m.theme.GitActionButton.Render(commitPadded))
+			pushBtn := zone.Mark("git-push-btn", m.theme.GitActionButton.Render(pushPadded))
+			pullBtn := zone.Mark("git-pull-btn", m.theme.GitActionButton.Render(pullPadded))
+			sb.WriteString(" " + commitBtn + pushBtn + pullBtn)
 		}
 		linesUsed++
 		for linesUsed < m.Height {
@@ -1262,17 +1273,45 @@ func (m Model) View() string {
 
 	// Adjust body height if not enough space
 	if formMinHeight > remaining {
-		bodyHeight = remaining - 4 // 1 top border + 1 title + 1 bottom border + 1 buttons
+		bodyHeight = remaining - 4 // 1 (push/pull) + 1 top + 1 title + 1 bottom + 1 commit
 		if bodyHeight < 1 {
 			bodyHeight = 1
 		}
 	}
 
 	// Pad before the commit form — push it toward the bottom
-	padLines := remaining - (1 + 1 + bodyHeight + 1 + 1)
+	padLines := remaining - (1 + 1 + bodyHeight + 1 + 1 + 1) // push/pull + top + title + body + bottom + commit
 	for range padLines {
 		sb.WriteByte('\n')
 		linesUsed++
+	}
+
+	// Push and Pull buttons — rendered above the commit form
+	if linesUsed < m.Height {
+		if m.spinning {
+			sb.WriteByte('\n')
+			linesUsed++
+			sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
+		} else {
+			sb.WriteByte('\n')
+			linesUsed++
+			availWidth := m.Width - 2
+			if availWidth < 10 {
+				availWidth = 10
+			}
+			gap := 1
+			btnWidth := (availWidth - gap) / 2
+			btnWidthR := availWidth - gap - btnWidth
+			pushContent := "\uf0ee Push"
+			pullContent := "\uf0ed Pull"
+			pushPadded := centerText(pushContent, btnWidth, ' ')
+			pullPadded := centerText(pullContent, btnWidthR, ' ')
+			pushBtn := zone.Mark("git-push-btn",
+				m.theme.GitPushPullButton.Render(pushPadded))
+			pullBtn := zone.Mark("git-pull-btn",
+				m.theme.GitPushPullButton.Render(pullPadded))
+			sb.WriteString(" " + pushBtn + " " + pullBtn)
+		}
 	}
 
 	// Commit form with box border
@@ -1390,19 +1429,26 @@ func (m Model) View() string {
 	}
 
 	// Action buttons with icons (or spinner when busy)
-	sb.WriteByte('\n')
 	if m.spinning {
+		sb.WriteByte('\n')
+		linesUsed++
 		sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
 	} else {
+		// Calculate available width for buttons (1-space padding on each side)
+		availWidth := m.Width - 2
+		if availWidth < 10 {
+			availWidth = 10
+		}
+
+		// Row 1: Commit button full width
+		sb.WriteByte('\n')
+		linesUsed++
+		commitContent := "\uf417 Commit"
+		commitPadded := centerText(commitContent, availWidth, ' ')
 		commitBtn := zone.Mark("git-commit-btn",
-			m.theme.GitActionButton.Render("\uf417 Commit"))
-		pushBtn := zone.Mark("git-push-btn",
-			m.theme.GitActionButton.Render("\uf0ee Push"))
-		pullBtn := zone.Mark("git-pull-btn",
-			m.theme.GitActionButton.Render("\uf0ed Pull"))
-		sb.WriteString(" " + commitBtn + " " + pushBtn + " " + pullBtn)
+			m.theme.GitCommitButton.Render(commitPadded))
+		sb.WriteString(" " + commitBtn)
 	}
-	linesUsed++
 
 	// Pad remaining height
 	for linesUsed < m.Height {
@@ -1486,7 +1532,6 @@ func (m Model) renderTreeNode(node *GitTreeNode, idx int, staged bool) string {
 	return m.theme.GitEntry.Render(styledPrefix + nameStr)
 }
 
-
 func (m Model) statusStyleForByte(status string) lipgloss.Style {
 	switch status {
 	case "U":
@@ -1507,4 +1552,18 @@ func truncPath(path string, maxLen int) string {
 		return path
 	}
 	return "..." + path[len(path)-maxLen+3:]
+}
+
+// centerText pads a string with spaces to center it within a given width.
+func centerText(s string, width int, pad rune) string {
+	if width <= 0 {
+		return s
+	}
+	sLen := len(s)
+	if sLen >= width {
+		return s[:width]
+	}
+	left := (width - sLen) / 2
+	right := width - sLen - left
+	return strings.Repeat(string(pad), left) + s + strings.Repeat(string(pad), right)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
 )
 
@@ -318,7 +318,7 @@ func (m *Manager) Stop() {
 			// Process reaped successfully
 		case <-time.After(5 * time.Second):
 			// Timeout - process may be stuck, continue anyway
-			log.Printf("acp: process wait timeout, may be zombie")
+			log.Warn("acp: process wait timeout, may be zombie")
 		}
 	}
 
@@ -330,14 +330,14 @@ func (m *Manager) Stop() {
 func (m *Manager) loadMcpServers() []sdk.McpServer {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Printf("acp: cannot determine home directory: %v", err)
+		log.Error("acp: cannot determine home directory", "err", err)
 		return []sdk.McpServer{}
 	}
 
 	configPath := filepath.Join(home, ".config", "opencode", "opencode.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		log.Printf("acp: no opencode config found at %s", configPath)
+		log.Info("acp: no opencode config found", "path", configPath)
 		return []sdk.McpServer{}
 	}
 
@@ -349,7 +349,7 @@ func (m *Manager) loadMcpServers() []sdk.McpServer {
 		} `json:"mcp"`
 	}
 	if err := json.Unmarshal(data, &ocConfig); err != nil {
-		log.Printf("acp: failed to parse opencode config: %v", err)
+		log.Error("acp: failed to parse opencode config", "err", err)
 		return []sdk.McpServer{}
 	}
 
@@ -377,11 +377,11 @@ func (m *Manager) loadMcpServers() []sdk.McpServer {
 				Env:     []sdk.EnvVariable{},
 			},
 		})
-		log.Printf("acp: loaded MCP server %q: %s", name, cmd)
+		log.Info("acp: loaded MCP server", "name", name, "command", cmd)
 	}
 
 	if len(skipped) > 0 {
-		log.Printf("acp: skipped %d MCP servers: %v", len(skipped), skipped)
+		log.Warn("acp: skipped MCP servers", "count", len(skipped), "servers", skipped)
 	}
 
 	return servers

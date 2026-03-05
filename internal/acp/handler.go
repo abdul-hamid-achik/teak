@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
 )
 
@@ -50,7 +50,7 @@ func (h *ClientHandler) sendNonBlocking(msg tea.Msg) {
 	select {
 	case h.msgChan <- msg:
 	case <-time.After(msgChanTimeout):
-		log.Printf("acp: dropped message, channel full for %T", msg)
+		log.Warn("acp: dropped message (channel full)", "type", fmt.Sprintf("%T", msg))
 	}
 }
 

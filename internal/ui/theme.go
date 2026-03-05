@@ -99,7 +99,9 @@ type Theme struct {
 	SidebarTabInactive lipgloss.Style
 
 	// Git action buttons
-	GitActionButton lipgloss.Style
+	GitActionButton  lipgloss.Style
+	GitCommitButton  lipgloss.Style
+	GitPushPullButton lipgloss.Style
 	GitSectionHeader lipgloss.Style
 	GitBranch        lipgloss.Style
 	GitCommitInput   lipgloss.Style
@@ -342,6 +344,15 @@ func defaultNordTheme() Theme {
 			Background(Nord2).
 			Foreground(Nord6).
 			Padding(0, 1),
+		GitCommitButton: lipgloss.NewStyle().
+			Background(Nord14).
+			Foreground(Nord0).
+			Padding(0, 1).
+			Bold(true),
+		GitPushPullButton: lipgloss.NewStyle().
+			Background(Nord10).
+			Foreground(Nord6).
+			Padding(0, 1),
 		GitSectionHeader: lipgloss.NewStyle().
 			Foreground(Nord8).
 			Bold(true),
@@ -464,6 +475,8 @@ func buildTheme(p palette) Theme {
 		SidebarTabActive: lipgloss.NewStyle().Background(p.bg1).Foreground(p.cyan).Bold(true).Padding(0, 1),
 		SidebarTabInactive: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
 		GitActionButton: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
+		GitCommitButton: lipgloss.NewStyle().Background(p.green).Foreground(p.bg0).Padding(0, 1).Bold(true),
+		GitPushPullButton: lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
 		GitSectionHeader: lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
 		GitBranch: lipgloss.NewStyle().Foreground(p.purple).Bold(true),
 		GitCommitInput: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),

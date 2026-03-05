@@ -2,8 +2,9 @@ package lsp
 
 import (
 	"fmt"
-	"log"
 	"sync"
+
+	log "github.com/charmbracelet/log"
 )
 
 // Manager manages multiple LSP clients, one per language server.
@@ -73,7 +74,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 		m.mu.Lock()
 		m.retries[cfg.Command]++
 		m.mu.Unlock()
-		log.Printf("lsp: failed to start %s (attempt %d/%d): %v", cfg.Command, m.retries[cfg.Command], maxRetries, err)
+		log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
 		return nil, err
 	}
 
@@ -83,7 +84,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 		m.mu.Lock()
 		m.retries[cfg.Command]++
 		m.mu.Unlock()
-		log.Printf("lsp: failed to initialize %s (attempt %d/%d): %v", cfg.Command, m.retries[cfg.Command], maxRetries, err)
+		log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
 		client.Shutdown()
 		return nil, err
 	}

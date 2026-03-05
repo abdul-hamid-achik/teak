@@ -15,6 +15,32 @@ tasks:
     cmds:
       - go test ./...
 
+  demos:
+    desc: Generate VHS demo videos
+    deps: [build]
+    dir: examples/vhs
+    cmds:
+      - for: ["teak-basic-demo.tape", "teak-filetree-demo.tape", "teak-features-demo.tape"]
+        cmd: vhs {{ .ITEM }}
+
+  demo-basic:
+    desc: Generate basic usage demo
+    deps: [build]
+    cmds:
+      - vhs examples/vhs/teak-basic-demo.tape
+
+  demo-filetree:
+    desc: Generate file tree demo
+    deps: [build]
+    cmds:
+      - vhs examples/vhs/teak-filetree-demo.tape
+
+  demo-features:
+    desc: Generate features demo
+    deps: [build]
+    cmds:
+      - vhs examples/vhs/teak-features-demo.tape
+
   run:
     desc: Build and run teak
     deps: [build]

@@ -2,8 +2,6 @@ package app
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/acp"
@@ -128,8 +127,13 @@ type ClosedTab struct {
 
 // NewModel creates a new app model, optionally loading a file.
 func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, error) {
-	// Suppress LSP log output from corrupting TUI
-	log.SetOutput(io.Discard)
+	// Configure charmbracelet logger
+	logger := log.NewWithOptions(os.Stderr, log.Options{
+		Prefix:     "teak",
+		Level:      log.InfoLevel,
+		TimeFormat: "15:04:05",
+	})
+	log.SetDefault(logger)
 
 	theme := ui.ThemeByName(appCfg.UI.Theme)
 	cfg := editor.Config{
@@ -786,7 +790,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mouse.Y -= 1
 				// File tree
 				if mouse.Button == tea.MouseRight {
-					return m.showTreeContextMenu(mouse.X, mouse.Y+1) // +1 to restore absolute Y for context menu
+					return m.showTreeContextMenu(mouse.X, mouse.Y) // mouse.Y is already 0-based after adjustment
 				}
 				m.focus = FocusTree
 				adjusted := tea.MouseClickMsg(mouse)

@@ -7,28 +7,29 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strconv"
 	"sync"
 	"time"
+
+	log "github.com/charmbracelet/log"
 )
 
 // Client manages communication with a single LSP server process.
 type Client struct {
-	cmd         *exec.Cmd
-	stdin       io.WriteCloser
-	stdout      io.ReadCloser
-	mu          sync.Mutex
-	requestID   int
-	pending     map[int]chan callResult
-	rootURI     string
-	openDocs    map[string]int // uri -> version
-	running     bool
-	initialized bool
-	msgChan     chan<- any
-	cancelRead  context.CancelFunc
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	mu           sync.Mutex
+	requestID    int
+	pending      map[int]chan callResult
+	rootURI      string
+	openDocs     map[string]int // uri -> version
+	running      bool
+	initialized  bool
+	msgChan      chan<- any
+	cancelRead   context.CancelFunc
 	capabilities ServerCapabilities // server capabilities from initialize
 	syncKind     SyncKind           // document sync mode (negotiated)
 }
@@ -169,7 +170,7 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 func (c *Client) Initialize() error {
 	// Get actual process ID instead of nil
 	processID := os.Getpid()
-	
+
 	params := map[string]any{
 		"processId": processID,
 		"rootUri":   c.rootURI,
@@ -205,9 +206,9 @@ func (c *Client) Initialize() error {
 				},
 			},
 			"workspace": map[string]any{
-				"applyEdit":      true,
+				"applyEdit":        true,
 				"workspaceFolders": true,
-				"configuration":  true,
+				"configuration":    true,
 			},
 			"window": map[string]any{
 				"workDoneProgress": true,
@@ -237,7 +238,7 @@ func (c *Client) Initialize() error {
 	if err := json.Unmarshal(result, &initResult); err != nil {
 		return fmt.Errorf("parse initialize result: %w", err)
 	}
-	
+
 	c.mu.Lock()
 	c.capabilities = initResult.Capabilities
 	// Negotiate sync kind from server capabilities
@@ -917,7 +918,7 @@ func parseMessage(data []byte) (json.RawMessage, []byte, bool) {
 	for numStart < len(data) && (data[numStart] == ' ' || data[numStart] == '\t') {
 		numStart++
 	}
-	
+
 	numEnd := numStart
 	for numEnd < len(data) && data[numEnd] >= '0' && data[numEnd] <= '9' {
 		numEnd++
@@ -930,10 +931,10 @@ func parseMessage(data []byte) (json.RawMessage, []byte, bool) {
 	if err != nil {
 		return nil, data, false
 	}
-	
+
 	// Reject excessively large messages to prevent memory exhaustion
 	if contentLength > maxMessageSize {
-		log.Printf("LSP: rejecting message of size %d (max %d)", contentLength, maxMessageSize)
+		log.Warn("lsp: rejecting message (too large)", "size", contentLength, "max", maxMessageSize)
 		return nil, data, false
 	}
 
@@ -1024,7 +1025,7 @@ func (c *Client) handleLogMessage(params json.RawMessage) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return
 	}
-	log.Printf("LSP log [%d]: %s", p.Type, p.Message)
+	log.Info("lsp server message", "type", p.Type, "message", p.Message)
 }
 
 func (c *Client) handleProgress(params json.RawMessage) {
@@ -1062,7 +1063,7 @@ func (c *Client) handleWorkspaceFolders(id *int) {
 func (c *Client) sendResponse(id int, result any) {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
-		log.Printf("LSP: failed to marshal response: %v", err)
+		log.Error("lsp: failed to marshal response", "err", err)
 		return
 	}
 	resp := jsonrpcResponse{
@@ -1093,7 +1094,7 @@ func (c *Client) handleDiagnostics(params json.RawMessage) {
 		} `json:"diagnostics"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
-		log.Printf("lsp: parse diagnostics: %v", err)
+		log.Error("lsp: failed to parse diagnostics", "err", err)
 		return
 	}
 
