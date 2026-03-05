@@ -22,9 +22,13 @@ import (
 	"teak/internal/git"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
+	"teak/internal/problems"
 	"teak/internal/search"
+	"teak/internal/settings"
 	"teak/internal/text"
 	"teak/internal/ui"
+	"teak/internal/dap"
+	"teak/internal/debugger"
 )
 
 // FocusArea indicates which panel has focus.
@@ -34,6 +38,8 @@ const (
 	FocusEditor FocusArea = iota
 	FocusTree
 	FocusGitPanel
+	FocusProblems
+	FocusDebugger
 )
 
 // SidebarTab indicates which tab is active in the sidebar.
@@ -42,6 +48,8 @@ type SidebarTab int
 const (
 	SidebarFiles SidebarTab = iota
 	SidebarGit
+	SidebarProblems
+	SidebarDebugger
 )
 
 // Model is the root Bubbletea model.
@@ -94,6 +102,18 @@ type Model struct {
 	overlayStack     overlay.Stack          // stack for picker overlays (quick open, command palette)
 	cachedFiles      []string               // cached file list for quick open
 	cachedFilesReady bool                   // true after file list has been loaded
+	problemsPanel    problems.Model         // problems panel for diagnostics
+	showSettings     bool                   // settings overlay visible
+	settingsM        settings.Model         // settings editor model
+	closedTabs       []ClosedTab            // history of closed tabs for reopening
+	debuggerPanel    debugger.Model         // debugger panel
+	debugMgr         *dap.Manager           // debug session manager
+}
+
+// ClosedTab stores information about a closed tab for reopening.
+type ClosedTab struct {
+	FilePath string
+	Label    string
 }
 
 // NewModel creates a new app model, optionally loading a file.
@@ -137,6 +157,10 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		branchPickerM:   git.NewBranchPicker(theme),
 		gitContextMenu:  editor.NewContextMenu(theme),
 		helpM:           editor.NewHelpModel(theme),
+		problemsPanel:   problems.New(theme, rootDir),
+		settingsM:       settings.New(theme, appCfg, config.ConfigPath()),
+		debuggerPanel:   debugger.New(theme),
+		debugMgr:        dap.NewManager(rootDir, make(chan any, 100)),
 	}
 
 	if rootDir != "" {
@@ -330,6 +354,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Settings overlay: captures all input when visible
+		if m.showSettings {
+			return m.updateSettings(msg)
+		}
+
 		// Welcome screen: global shortcuts pass through, others dismiss.
 		// Don't dismiss if git panel commit inputs have focus.
 		gitInputFocused := m.focus == FocusGitPanel && (m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused())
@@ -404,10 +433,75 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openSearch(search.ModeSemantic)
 		case "ctrl+space":
 			return m, m.requestCompletion()
+		case "k":
+			// Show hover tooltip (K for Knowledge/Documentation)
+			if m.focus == FocusEditor {
+				return m, m.requestHover()
+			}
+			return m, nil
+		case "ctrl+k":
+			// Code actions (quick fixes)
+			if m.focus == FocusEditor {
+				return m, m.requestCodeActions()
+			}
+			return m, nil
 		case "f12":
 			return m, m.requestDefinition()
+		case "ctrl+alt+f":
+			// Format document
+			if m.focus == FocusEditor {
+				return m, m.requestFormatting()
+			}
+			return m, nil
+		case "ctrl+shift+o":
+			// Document symbols (outline)
+			if m.focus == FocusEditor {
+				return m, m.requestDocumentSymbols()
+			}
+			return m, nil
+		case "f5":
+			// Start debugging
+			if m.activeEditor() != nil && m.activeEditor().Buffer.FilePath != "" {
+				program := m.activeEditor().Buffer.FilePath
+				config := dap.ConfigForProgram(program)
+				if config.Command == "" {
+					m.status = "No debugger configured for this file type"
+					return m, nil
+				}
+				if err := m.debugMgr.Start(config); err != nil {
+					m.status = fmt.Sprintf("Debug error: %v", err)
+					return m, nil
+				}
+				if err := m.debugMgr.Launch(); err != nil {
+					m.status = fmt.Sprintf("Launch error: %v", err)
+					return m, nil
+				}
+				m.debuggerPanel.SetState(dap.StateRunning)
+				m.showTree = true
+				m.sidebarTab = SidebarDebugger
+				m.focus = FocusDebugger
+				m.status = "Debugging started"
+				m.relayout()
+			}
+			return m, nil
+		case "shift+f5":
+			// Stop debugging
+			if m.debugMgr.IsRunning() {
+				m.debugMgr.Stop()
+				m.debuggerPanel.SetState(dap.StateInactive)
+				m.status = "Debugging stopped"
+			}
+			return m, nil
 		case "ctrl+w":
 			return m.closeCurrentTab()
+		case "ctrl+shift+t":
+			// Reopen last closed tab
+			if len(m.closedTabs) > 0 {
+				lastClosed := m.closedTabs[len(m.closedTabs)-1]
+				m.closedTabs = m.closedTabs[:len(m.closedTabs)-1]
+				return m.openFilePinned(lastClosed.FilePath)
+			}
+			return m, nil
 		case "ctrl+g":
 			m.goToLineMode = true
 			m.goToLineInput = ""
@@ -434,6 +528,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.editors) > 1 {
 				m.activeTab = (m.activeTab - 1 + len(m.editors)) % len(m.editors)
 				m.tabBar.ActiveIdx = m.activeTab
+			}
+			return m, nil
+		case "ctrl+,":
+			// Open settings
+			m.showSettings = true
+			m.settingsM.SetSize(m.width, m.height-4)
+			return m, nil
+		case "f8":
+			// Navigate to next problem
+			if m.problemsPanel.ProblemCount() > 0 {
+				m.problemsPanel.SelectNext()
+				if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+					pos := text.Position{Line: prob.Line, Col: prob.Col}
+					m.pendingCursor = &pos
+					model, cmd := m.openFile(prob.FilePath)
+					m2 := model.(Model)
+					m2.status = fmt.Sprintf("Problem %d/%d", m2.problemsPanel.SelectedIndex()+1, m2.problemsPanel.ProblemCount())
+					return m2, cmd
+				}
+			}
+			return m, nil
+		case "shift+f8":
+			// Navigate to previous problem
+			if m.problemsPanel.ProblemCount() > 0 {
+				m.problemsPanel.SelectPrev()
+				if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+					pos := text.Position{Line: prob.Line, Col: prob.Col}
+					m.pendingCursor = &pos
+					model, cmd := m.openFile(prob.FilePath)
+					m2 := model.(Model)
+					m2.status = fmt.Sprintf("Problem %d/%d", m2.problemsPanel.SelectedIndex()+1, m2.problemsPanel.ProblemCount())
+					return m2, cmd
+				}
 			}
 			return m, nil
 		}
@@ -576,6 +703,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if zone.Get("sidebar-tab-git").InBounds(msg) {
 						m.sidebarTab = SidebarGit
 						m.focus = FocusGitPanel
+					} else if zone.Get("sidebar-tab-problems").InBounds(msg) {
+						m.sidebarTab = SidebarProblems
+						m.focus = FocusProblems
+					} else if zone.Get("sidebar-tab-debugger").InBounds(msg) {
+						m.sidebarTab = SidebarDebugger
+						m.focus = FocusDebugger
 					}
 					return m, nil
 				}
@@ -821,6 +954,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editors[m.activeTab] = updated
 		return m, cmd
 
+	case editor.RequestCompletionCmd:
+		return m, m.requestCompletion()
+
 	case FileSavedMsg:
 		m.status = fmt.Sprintf("Saved %s", msg.Path)
 		if m.activeTab < len(m.tabBar.Tabs) {
@@ -1021,6 +1157,89 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case lsp.SignatureHelpResultMsg:
+		if msg.Help != nil && m.activeEditor() != nil {
+			// Convert to editor.SignatureData
+			sigData := &editor.SignatureData{
+				ActiveSignature: msg.Help.ActiveSignature,
+				ActiveParameter: msg.Help.ActiveParameter,
+			}
+			for _, sig := range msg.Help.Signatures {
+				var params []editor.ParameterInfo
+				for _, p := range sig.Parameters {
+					label := ""
+					switch v := p.Label.(type) {
+					case string:
+						label = v
+					case []any:
+						if len(v) >= 2 {
+							label = sig.Label
+						}
+					}
+					params = append(params, editor.ParameterInfo{
+						Label:         label,
+						Documentation: p.Documentation,
+					})
+				}
+				sigData.Signatures = append(sigData.Signatures, editor.SignatureInfo{
+					Label:         sig.Label,
+					Documentation: sig.Documentation,
+					Parameters:    params,
+				})
+			}
+			m.activeEditor().ShowSignatureHelp(sigData)
+			m.editors[m.activeTab] = *m.activeEditor()
+		}
+		return m, nil
+
+	case lsp.FormatResultMsg:
+		if len(msg.Edits) > 0 && m.activeEditor() != nil {
+			buf := m.activeEditor().Buffer
+			// Apply edits in reverse order
+			for i := len(msg.Edits) - 1; i >= 0; i-- {
+				ed := msg.Edits[i]
+				start := text.Position{Line: ed.StartLine, Col: ed.StartCol}
+				end := text.Position{Line: ed.EndLine, Col: ed.EndCol}
+				buf.ReplaceRange(start, end, []byte(ed.NewText))
+			}
+			m.status = "Document formatted"
+			m.editors[m.activeTab] = *m.activeEditor()
+		}
+		return m, nil
+
+	case lsp.CodeActionResultMsg:
+		if len(msg.Actions) > 0 {
+			// For now, apply the first action's edit if available
+			action := msg.Actions[0]
+			if action.Edit != nil && action.Edit.Changes != nil {
+				model, cmd := m.applyRenameEdits(action.Edit.Changes)
+				m2 := model.(Model)
+				m2.status = fmt.Sprintf("Applied: %s", action.Title)
+				return m2, cmd
+			}
+			m.status = fmt.Sprintf("Code action: %s (no edit available)", action.Title)
+		}
+		return m, nil
+
+	case lsp.DocumentSymbolResultMsg:
+		if len(msg.Symbols) > 0 {
+			// Show symbol picker - for now just jump to first symbol
+			// Future: show a picker overlay with all symbols
+			symbol := msg.Symbols[0]
+			m.status = fmt.Sprintf("%d symbol(s): %s", len(msg.Symbols), symbol.Name)
+			// Jump to first symbol
+			ed := m.activeEditor()
+			if ed != nil {
+				ed.Buffer.Cursor.Line = symbol.Range.Start.Line
+				ed.Buffer.Cursor.Col = symbol.Range.Start.Character
+				ed.Viewport.EnsureCursorVisible(ed.Buffer.Cursor, ed.Buffer.LineCount())
+				m.editors[m.activeTab] = *ed
+			}
+		} else {
+			m.status = "No symbols found"
+		}
+		return m, nil
+
 	case lsp.DefinitionResultMsg:
 		if len(msg.Locations) > 0 {
 			loc := msg.Locations[0]
@@ -1059,6 +1278,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("LSP error [%s]: %s (code %d)", msg.Method, msg.Message, msg.Code)
 		return m, nil
 
+	case lsp.LspShowMessageMsg:
+		// Display server message in status bar
+		prefix := ""
+		switch msg.Type {
+		case 1:
+			prefix = "Error: "
+		case 2:
+			prefix = "Warning: "
+		case 3:
+			prefix = "Info: "
+		}
+		m.status = prefix + msg.Message
+		return m, nil
+
+	case lsp.LspProgressMsg:
+		// Progress reporting - can be extended to show in UI
+		// For now, just log it
+		return m, nil
+
 	case lspMsg:
 		if msg.msg == nil {
 			return m, m.listenLSP()
@@ -1075,6 +1313,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.sidebarTab == SidebarFiles {
 				m.sidebarTab = SidebarGit
 				m.focus = FocusGitPanel
+			} else if m.sidebarTab == SidebarGit {
+				m.sidebarTab = SidebarProblems
+				m.focus = FocusProblems
+			} else if m.sidebarTab == SidebarProblems {
+				m.sidebarTab = SidebarDebugger
+				m.focus = FocusDebugger
 			} else {
 				m.sidebarTab = SidebarFiles
 				m.focus = FocusTree
@@ -1089,6 +1333,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.gitPanel, cmd = m.gitPanel.Update(msg)
 		return m, cmd
+	}
+	if m.focus == FocusProblems {
+		return m.updateProblems(msg)
+	}
+	if m.focus == FocusDebugger {
+		return m.updateDebugger(msg)
 	}
 
 	// Route to diff view if active tab is a diff tab
@@ -1191,6 +1441,37 @@ func (m Model) View() tea.View {
 	if m.showHelp {
 		helpContent := m.helpM.View()
 		content = ui.RenderOverlay(content, helpContent, m.width, m.height)
+	} else if m.showSettings {
+		// Settings overlay with fixed size and centered position
+		settingsView := m.settingsM.View()
+		// Add hint at the bottom
+		hint := m.theme.Gutter.Render("\n\nPress 'r' to reset, '+'/'-' to change, ESC to close")
+		settingsView += hint
+		
+		// Fixed modal dimensions
+		modalWidth := 72
+		modalHeight := 22
+		
+		// Center the modal
+		centerX := (m.width - modalWidth) / 2
+		centerY := (m.height - modalHeight) / 2
+		if centerX < 0 {
+			centerX = 0
+		}
+		if centerY < 0 {
+			centerY = 0
+		}
+		
+		// Wrap in a box with border
+		settingsBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ui.Nord3).
+			Background(ui.Nord1).
+			Padding(1, 2).
+			Width(modalWidth).
+			Render(settingsView)
+		
+		content = ui.PlaceOverlayAt(content, settingsBox, centerX, centerY, m.width, m.height)
 	} else if m.showSearch {
 		searchView := m.searchM.View()
 		content = ui.RenderOverlay(content, searchView, m.width, m.height)
@@ -1360,10 +1641,16 @@ func (m Model) viewWithTree() string {
 	switch m.sidebarTab {
 	case SidebarGit:
 		m.gitPanel.SetSize(tw, panelHeight)
-		panelView = m.gitPanel.View()
+		panelView = lipgloss.NewStyle().Width(tw).Render(m.gitPanel.View())
+	case SidebarProblems:
+		m.problemsPanel.SetSize(tw, panelHeight)
+		panelView = lipgloss.NewStyle().Width(tw).Render(m.problemsPanel.View())
+	case SidebarDebugger:
+		m.debuggerPanel.SetSize(tw, panelHeight)
+		panelView = lipgloss.NewStyle().Width(tw).Render(m.debuggerPanel.View())
 	default:
 		m.tree.SetSize(tw, panelHeight)
-		panelView = m.tree.View()
+		panelView = lipgloss.NewStyle().Width(tw).Render(m.tree.View())
 	}
 
 	sidebarView := tabBar + "\n" + panelView
@@ -1384,8 +1671,10 @@ func (m Model) sidebarTabBar() string {
 
 	fileIcon := " \uf413 " // nf-oct-file_directory_fill
 	gitIcon := " \ue725 "  // nf-dev-git_branch
+	problemsIcon := " \uea88 "  // nf-cod-problems
+	debuggerIcon := " \ueb0c "  // nf-cod-debug
 
-	var fileTab, gitTab string
+	var fileTab, gitTab, problemsTab, debuggerTab string
 	if m.sidebarTab == SidebarFiles {
 		fileTab = m.theme.SidebarTabActive.Render(fileIcon)
 	} else {
@@ -1396,11 +1685,23 @@ func (m Model) sidebarTabBar() string {
 	} else {
 		gitTab = m.theme.SidebarTabInactive.Render(gitIcon)
 	}
+	if m.sidebarTab == SidebarProblems {
+		problemsTab = m.theme.SidebarTabActive.Render(problemsIcon)
+	} else {
+		problemsTab = m.theme.SidebarTabInactive.Render(problemsIcon)
+	}
+	if m.sidebarTab == SidebarDebugger {
+		debuggerTab = m.theme.SidebarTabActive.Render(debuggerIcon)
+	} else {
+		debuggerTab = m.theme.SidebarTabInactive.Render(debuggerIcon)
+	}
 
 	fileTab = zone.Mark("sidebar-tab-files", fileTab)
 	gitTab = zone.Mark("sidebar-tab-git", gitTab)
+	problemsTab = zone.Mark("sidebar-tab-problems", problemsTab)
+	debuggerTab = zone.Mark("sidebar-tab-debugger", debuggerTab)
 
-	bar := fileTab + gitTab
+	bar := fileTab + gitTab + problemsTab + debuggerTab
 	// Pad to full sidebar width
 	padWidth := tw - lipgloss.Width(bar)
 	if padWidth > 0 {
@@ -1474,14 +1775,24 @@ func (m Model) updateBranchPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) treeWidth() int {
-	tw := m.width / 4
-	if tw > 30 {
-		tw = 30
+	// Fixed sidebar width for consistency across all tabs
+	// This ensures the sidebar doesn't change width when switching tabs
+	const fixedWidth = 25
+	
+	// Respect screen size constraints
+	if m.width < 80 {
+		// On small screens, use proportional width
+		tw := m.width / 4
+		if tw < 15 {
+			return 15
+		}
+		if tw > fixedWidth {
+			return fixedWidth
+		}
+		return tw
 	}
-	if tw < 15 {
-		tw = 15
-	}
-	return tw
+	
+	return fixedWidth
 }
 
 func (m *Model) relayout() {
@@ -1561,9 +1872,10 @@ func (m Model) renderStatusBar() string {
 		tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
 		scrollPos := m.scrollIndicator()
 		lspStatus := m.lspIndicator()
+		problemsStatus := m.problemsStatus()
 		right = m.theme.StatusText.Render(
-			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s ",
-				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus),
+			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s%s ",
+				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus, problemsStatus),
 		)
 	}
 
@@ -1624,6 +1936,30 @@ func (m Model) lspIndicator() string {
 		return "  " + name + " ◐"
 	}
 	return "  " + name + " ○"
+}
+
+// problemsStatus returns a string showing the problem count for the status bar.
+func (m Model) problemsStatus() string {
+	errors := m.problemsPanel.ErrorCount()
+	warnings := m.problemsPanel.WarningCount()
+	total := m.problemsPanel.ProblemCount()
+
+	if total == 0 {
+		return ""
+	}
+
+	parts := []string{}
+	if errors > 0 {
+		parts = append(parts, fmt.Sprintf("✗ %d", errors))
+	}
+	if warnings > 0 {
+		parts = append(parts, fmt.Sprintf("⚠ %d", warnings))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("ℹ %d", total))
+	}
+
+	return "  " + strings.Join(parts, "  ")
 }
 
 func (m Model) openFile(path string) (tea.Model, tea.Cmd) {
@@ -1768,6 +2104,19 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Save closed tab to history for reopening
+	tab := m.tabBar.Tabs[idx]
+	if tab.FilePath != "" {
+		m.closedTabs = append(m.closedTabs, ClosedTab{
+			FilePath: tab.FilePath,
+			Label:    tab.Label,
+		})
+		// Keep only last 20 closed tabs
+		if len(m.closedTabs) > 20 {
+			m.closedTabs = m.closedTabs[1:]
+		}
+	}
+
 	buf := m.editors[idx].Buffer
 	if buf.FilePath != "" {
 		if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
@@ -1849,6 +2198,190 @@ func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateProblems handles input for the Problems panel.
+func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "up":
+			m.problemsPanel.SelectPrev()
+			return m, nil
+		case "down":
+			m.problemsPanel.SelectNext()
+			return m, nil
+		case "pgup":
+			m.problemsPanel.ScrollUp(m.problemsPanel.Height())
+			return m, nil
+		case "pgdown":
+			m.problemsPanel.ScrollDown(m.problemsPanel.Height())
+			return m, nil
+		case "enter":
+			// Open the selected problem location
+			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+				pos := text.Position{Line: prob.Line, Col: prob.Col}
+				m.pendingCursor = &pos
+				return m.openFilePinned(prob.FilePath)
+			}
+			return m, nil
+		case "esc", "escape":
+			// Switch back to editor focus
+			m.focus = FocusEditor
+			return m, nil
+		}
+	case tea.MouseWheelMsg:
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseWheelUp {
+			m.problemsPanel.ScrollUp(3)
+		} else if mouse.Button == tea.MouseWheelDown {
+			m.problemsPanel.ScrollDown(3)
+		}
+		return m, nil
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseLeft {
+			// Select item at click position
+			clickIdx := m.problemsPanel.ScrollY() + mouse.Y - 1 // -1 for tab bar
+			if clickIdx >= 0 && clickIdx < m.problemsPanel.ProblemCount() {
+				// Set selection to clicked item
+				for i := 0; i < clickIdx-m.problemsPanel.ScrollY(); i++ {
+					m.problemsPanel.SelectNext()
+				}
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+// updateDebugger handles input for the Debugger panel.
+func (m Model) updateDebugger(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc", "escape":
+			// Switch back to editor focus
+			m.focus = FocusEditor
+			return m, nil
+		case "c":
+			// Continue debugging
+			if m.debugMgr.IsRunning() {
+				if err := m.debugMgr.Continue(); err != nil {
+					m.status = fmt.Sprintf("Debug error: %v", err)
+				}
+			}
+			return m, nil
+		case "n":
+			// Step over
+			if m.debugMgr.IsRunning() {
+				if err := m.debugMgr.Next(); err != nil {
+					m.status = fmt.Sprintf("Debug error: %v", err)
+				}
+			}
+			return m, nil
+		case "i":
+			// Step in
+			if m.debugMgr.IsRunning() {
+				if err := m.debugMgr.StepIn(); err != nil {
+					m.status = fmt.Sprintf("Debug error: %v", err)
+				}
+			}
+			return m, nil
+		case "o":
+			// Step out
+			if m.debugMgr.IsRunning() {
+				if err := m.debugMgr.StepOut(); err != nil {
+					m.status = fmt.Sprintf("Debug error: %v", err)
+				}
+			}
+			return m, nil
+		case "q":
+			// Stop debugging
+			if m.debugMgr.IsRunning() {
+				m.debugMgr.Stop()
+				m.debuggerPanel.SetState(dap.StateInactive)
+				m.status = "Debugging stopped"
+			}
+			return m, nil
+		}
+	case tea.MouseClickMsg:
+		// Debugger panel captures clicks but doesn't pass them to file tree
+		// Clicks are handled here to prevent accidental file switching
+		return m, nil
+	case tea.MouseWheelMsg:
+		// Scroll support for future use
+		return m, nil
+	}
+	return m, nil
+}
+
+// updateSettings handles input for the Settings overlay.
+func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc", "escape", "ctrl+,":
+			// Close settings
+			m.showSettings = false
+			return m, nil
+		case "up":
+			m.settingsM.SelectPrevSetting()
+			return m, nil
+		case "down":
+			m.settingsM.SelectNextSetting()
+			return m, nil
+		case "left":
+			m.settingsM.SelectPrevCategory()
+			return m, nil
+		case "right":
+			m.settingsM.SelectNextCategory()
+			return m, nil
+		case "tab":
+			// Toggle between categories and settings
+			// For now, just move to next category
+			m.settingsM.SelectNextCategory()
+			return m, nil
+		case "enter":
+			// Toggle boolean value or edit string/int
+			setting := m.settingsM.SelectedSetting()
+			if setting != nil {
+				switch setting.Type {
+				case settings.TypeBool:
+					m.settingsM.ToggleBoolValue()
+				case settings.TypeInt:
+					// Could open input dialog, for now just increment
+					m.settingsM.IncrementIntValue()
+				}
+			}
+			return m, nil
+		case "+":
+			// Increment integer value
+			m.settingsM.IncrementIntValue()
+			return m, nil
+		case "-":
+			// Decrement integer value
+			m.settingsM.DecrementIntValue()
+			return m, nil
+		case " ":
+			// Toggle boolean
+			m.settingsM.ToggleBoolValue()
+			return m, nil
+		case "r":
+			// Reset to default
+			m.settingsM.ResetCurrentValue()
+			return m, nil
+		}
+	case tea.MouseWheelMsg:
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseWheelUp {
+			m.settingsM.SelectPrevSetting()
+		} else if mouse.Button == tea.MouseWheelDown {
+			m.settingsM.SelectNextSetting()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 	path := lsp.URIToPath(msg.URI)
 
@@ -1902,6 +2435,9 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 	}
 	m.tree.SetDiagnostics(merged)
 
+	// Update problems panel
+	m.updateProblemsPanel()
+
 	return m, nil
 }
 
@@ -1915,6 +2451,58 @@ func (m *Model) updateDirDiagnostics() {
 				m.dirDiagnostics[dir] = sev
 			}
 			dir = filepath.Dir(dir)
+		}
+	}
+}
+
+// updateProblemsPanel rebuilds the problems panel from file diagnostics.
+func (m *Model) updateProblemsPanel() {
+	// Collect all problems from editor diagnostics
+	var allProblems []problems.Problem
+	for _, ed := range m.editors {
+		if ed.Buffer.FilePath == "" {
+			continue
+		}
+		for _, d := range ed.Diagnostics {
+			allProblems = append(allProblems, problems.Problem{
+				FilePath: ed.Buffer.FilePath,
+				Line:     d.StartLine,
+				Col:      d.StartCol,
+				EndLine:  d.EndLine,
+				EndCol:   d.EndCol,
+				Severity: d.Severity,
+				Message:  d.Message,
+			})
+		}
+	}
+
+	// Sort problems by severity (errors first), then by file path, then by line
+	sortProblems(allProblems)
+	m.problemsPanel.SetProblems(allProblems)
+}
+
+// sortProblems sorts problems by severity, path, and line.
+func sortProblems(probs []problems.Problem) {
+	for i := 0; i < len(probs)-1; i++ {
+		for j := i + 1; j < len(probs); j++ {
+			// Sort by severity first (lower = more severe)
+			if probs[i].Severity != probs[j].Severity {
+				if probs[i].Severity > probs[j].Severity {
+					probs[i], probs[j] = probs[j], probs[i]
+				}
+				continue
+			}
+			// Then by file path
+			if probs[i].FilePath != probs[j].FilePath {
+				if probs[i].FilePath > probs[j].FilePath {
+					probs[i], probs[j] = probs[j], probs[i]
+				}
+				continue
+			}
+			// Then by line number
+			if probs[i].Line > probs[j].Line {
+				probs[i], probs[j] = probs[j], probs[i]
+			}
 		}
 	}
 }
@@ -2010,6 +2598,174 @@ func (m Model) requestDefinition() tea.Cmd {
 			return nil
 		}
 		return lsp.DefinitionResultMsg{Locations: locs}
+	}
+}
+
+func (m Model) requestHover() tea.Cmd {
+	ed := m.activeEditor()
+	if ed.Buffer.FilePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	filePath := ed.Buffer.FilePath
+	line := ed.Buffer.Cursor.Line
+	col := ed.Buffer.Cursor.Col
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		result, err := client.Hover(lsp.FileURI(filePath), line, col)
+		if err != nil || result == nil {
+			return nil
+		}
+		return lsp.HoverResultMsg{Content: result.Content}
+	}
+}
+
+func (m Model) requestHoverDelayed() tea.Cmd {
+	// Debounce hover requests to avoid flickering
+	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+		return hoverTriggerMsg{}
+	})
+}
+
+type hoverTriggerMsg struct{}
+
+func (m Model) handleHoverTrigger() (tea.Model, tea.Cmd) {
+	// Only show hover if we're not in the middle of typing
+	ed := m.activeEditor()
+	if ed == nil || ed.Buffer.FilePath == "" {
+		return m, nil
+	}
+	return m, m.requestHover()
+}
+
+func (m Model) requestSignatureHelp() tea.Cmd {
+	ed := m.activeEditor()
+	if ed.Buffer.FilePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	filePath := ed.Buffer.FilePath
+	line := ed.Buffer.Cursor.Line
+	col := ed.Buffer.Cursor.Col
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		help, err := client.SignatureHelp(lsp.FileURI(filePath), line, col)
+		if err != nil || help == nil {
+			return nil
+		}
+		// Convert to editor.SignatureData
+		sigData := &editor.SignatureData{
+			ActiveSignature: help.ActiveSignature,
+			ActiveParameter: help.ActiveParameter,
+		}
+		for _, sig := range help.Signatures {
+			var params []editor.ParameterInfo
+			for _, p := range sig.Parameters {
+				label := ""
+				switch v := p.Label.(type) {
+				case string:
+					label = v
+				case []any:
+					// Handle [start, end] format
+					if len(v) >= 2 {
+						label = sig.Label // Use full label for now
+					}
+				}
+				params = append(params, editor.ParameterInfo{
+					Label:         label,
+					Documentation: p.Documentation,
+				})
+			}
+			sigData.Signatures = append(sigData.Signatures, editor.SignatureInfo{
+				Label:         sig.Label,
+				Documentation: sig.Documentation,
+				Parameters:    params,
+			})
+		}
+		return lsp.SignatureHelpResultMsg{Help: help}
+	}
+}
+
+func (m Model) requestFormatting() tea.Cmd {
+	ed := m.activeEditor()
+	if ed.Buffer.FilePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	filePath := ed.Buffer.FilePath
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		edits, err := client.Formatting(lsp.FileURI(filePath))
+		if err != nil || len(edits) == 0 {
+			return nil
+		}
+		return lsp.FormatResultMsg{Edits: edits}
+	}
+}
+
+func (m Model) requestCodeActions() tea.Cmd {
+	ed := m.activeEditor()
+	if ed.Buffer.FilePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	filePath := ed.Buffer.FilePath
+	line := ed.Buffer.Cursor.Line
+	col := ed.Buffer.Cursor.Col
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		// Get diagnostics at cursor position
+		var diags []lsp.Diagnostic
+		for _, d := range ed.Diagnostics {
+			if line >= d.StartLine && line <= d.EndLine {
+				diags = append(diags, lsp.Diagnostic{
+					Range: lsp.DiagRange{
+						Start: lsp.DiagPosition{Line: d.StartLine, Character: d.StartCol},
+						End:   lsp.DiagPosition{Line: d.EndLine, Character: d.EndCol},
+					},
+					Severity: lsp.DiagSeverity(d.Severity),
+					Message:  d.Message,
+					Source:   "",
+				})
+			}
+		}
+		actions, err := client.CodeAction(lsp.FileURI(filePath), line, col, line, col, diags)
+		if err != nil || len(actions) == 0 {
+			return nil
+		}
+		return lsp.CodeActionResultMsg{Actions: actions}
+	}
+}
+
+func (m Model) requestDocumentSymbols() tea.Cmd {
+	ed := m.activeEditor()
+	if ed.Buffer.FilePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	filePath := ed.Buffer.FilePath
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		symbols, err := client.DocumentSymbol(lsp.FileURI(filePath))
+		if err != nil || len(symbols) == 0 {
+			return nil
+		}
+		return lsp.DocumentSymbolResultMsg{Symbols: symbols}
 	}
 }
 
@@ -2153,11 +2909,13 @@ func (m Model) applyRenameEdits(edits map[string][]lsp.TextEdit) (tea.Model, tea
 				// Apply edits in reverse order to preserve positions
 				sortedEdits := make([]lsp.TextEdit, len(textEdits))
 				copy(sortedEdits, textEdits)
-				// Sort reverse by position (later edits first)
+				// Sort in descending order by position (later edits first)
+				// This ensures that applying earlier edits doesn't shift positions of later edits
 				for a := 0; a < len(sortedEdits); a++ {
 					for b := a + 1; b < len(sortedEdits); b++ {
-						if sortedEdits[a].StartLine < sortedEdits[b].StartLine ||
-							(sortedEdits[a].StartLine == sortedEdits[b].StartLine && sortedEdits[a].StartCol < sortedEdits[b].StartCol) {
+						// Swap if b comes after a (we want descending order)
+						if sortedEdits[b].StartLine > sortedEdits[a].StartLine ||
+							(sortedEdits[b].StartLine == sortedEdits[a].StartLine && sortedEdits[b].StartCol > sortedEdits[a].StartCol) {
 							sortedEdits[a], sortedEdits[b] = sortedEdits[b], sortedEdits[a]
 						}
 					}
@@ -2652,6 +3410,12 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.relayout()
 		}
 		return m, nil
+	case toggleProblemsMsg:
+		m.showTree = true
+		m.sidebarTab = SidebarProblems
+		m.focus = FocusProblems
+		m.relayout()
+		return m, nil
 	case openSearchMsg:
 		innerMsg := msg.(openSearchMsg)
 		return m.openSearch(innerMsg.mode)
@@ -2669,6 +3433,52 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helpM.SetSize(m.width, m.height-2)
 		cmd := m.helpM.Focus()
 		return m, cmd
+	case openSettingsMsg:
+		m.showSettings = true
+		m.settingsM.SetSize(m.width, m.height-4)
+		return m, nil
+	case reopenTabMsg:
+		// Reopen last closed tab
+		if len(m.closedTabs) > 0 {
+			lastClosed := m.closedTabs[len(m.closedTabs)-1]
+			m.closedTabs = m.closedTabs[:len(m.closedTabs)-1]
+			return m.openFilePinned(lastClosed.FilePath)
+		}
+		m.status = "No closed tabs to reopen"
+		return m, nil
+	case debugStartMsg:
+		// Start debugging
+		if m.activeEditor() != nil && m.activeEditor().Buffer.FilePath != "" {
+			program := m.activeEditor().Buffer.FilePath
+			config := dap.ConfigForProgram(program)
+			if config.Command == "" {
+				m.status = "No debugger configured for this file type"
+				return m, nil
+			}
+			if err := m.debugMgr.Start(config); err != nil {
+				m.status = fmt.Sprintf("Debug error: %v", err)
+				return m, nil
+			}
+			if err := m.debugMgr.Launch(); err != nil {
+				m.status = fmt.Sprintf("Launch error: %v", err)
+				return m, nil
+			}
+			m.debuggerPanel.SetState(dap.StateRunning)
+			m.showTree = true
+			m.sidebarTab = SidebarDebugger
+			m.focus = FocusDebugger
+			m.status = "Debugging started"
+			m.relayout()
+		}
+		return m, nil
+	case debugStopMsg:
+		// Stop debugging
+		if m.debugMgr.IsRunning() {
+			m.debugMgr.Stop()
+			m.debuggerPanel.SetState(dap.StateInactive)
+			m.status = "Debugging stopped"
+		}
+		return m, nil
 	case quitMsg:
 		m.lspMgr.ShutdownAll()
 		return m, tea.Quit

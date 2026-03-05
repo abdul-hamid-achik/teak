@@ -17,6 +17,9 @@ type TokenizeCompleteMsg struct {
 	Partial bool // true when result is from viewport-only tokenization
 }
 
+// RequestCompletionCmd is a command that triggers completion from the app layer.
+type RequestCompletionCmd struct{}
+
 // Diagnostic represents a diagnostic message from an LSP server (decoupled from LSP types).
 type Diagnostic struct {
 	StartLine int
@@ -44,6 +47,7 @@ type Editor struct {
 	Diagnostics   []Diagnostic
 	autocomplete  Autocomplete
 	hover         Hover
+	signatureHelp SignatureHelp
 	contextMenu   ContextMenu
 	HasLSP        bool
 	lastVersion   int
@@ -70,6 +74,7 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		Highlighter:  hl,
 		autocomplete: NewAutocomplete(theme),
 		hover:        NewHover(theme),
+		signatureHelp: NewSignatureHelp(theme),
 		contextMenu:  NewContextMenu(theme),
 		lastVersion:  -1,
 	}
@@ -364,6 +369,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	case "esc", "escape":
 		e.hover.Hide()
+		e.signatureHelp.Hide()
 	default:
 		if msg.Text != "" {
 			ch := msg.Text[0]
@@ -389,12 +395,48 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
 	if edited {
 		e.hover.Hide()
+		e.signatureHelp.Hide()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
 		}
-		return e, e.scheduleRetokenize()
+		return e, tea.Batch(e.scheduleRetokenize(), e.TriggerCompletion())
 	}
 	return e, nil
+}
+
+// TriggerCompletion returns a command that triggers completion if appropriate.
+// Call this after text input to show completions automatically.
+func (e Editor) TriggerCompletion() tea.Cmd {
+	// Only trigger if we're in a valid file with LSP
+	if !e.HasLSP || e.Buffer.FilePath == "" {
+		return nil
+	}
+	
+	// Check if we're at a position that should trigger completion
+	line := e.Buffer.Line(e.Buffer.Cursor.Line)
+	if e.Buffer.Cursor.Col <= 0 || e.Buffer.Cursor.Col > len(line) {
+		return nil
+	}
+	
+	// Get the character before cursor
+	prevCol := e.Buffer.Cursor.Col - 1
+	if prevCol < 0 {
+		return nil
+	}
+	ch := rune(line[prevCol])
+	
+	// Trigger on identifier characters (a-z, A-Z, 0-9, _)
+	if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || 
+	   (ch >= '0' && ch <= '9') || ch == '_' {
+		return func() tea.Msg { return RequestCompletionCmd{} }
+	}
+	
+	// Trigger on common trigger characters (., ->, ::, etc.)
+	if ch == '.' || ch == ':' {
+		return func() tea.Msg { return RequestCompletionCmd{} }
+	}
+	
+	return nil
 }
 
 func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
@@ -546,6 +588,21 @@ func (e *Editor) ShowHover(content string) {
 // HideHover dismisses the hover popup.
 func (e *Editor) HideHover() {
 	e.hover.Hide()
+}
+
+// ShowSignatureHelp displays signature help.
+func (e *Editor) ShowSignatureHelp(help *SignatureData) {
+	e.signatureHelp.Show(help)
+}
+
+// HideSignatureHelp dismisses the signature help popup.
+func (e *Editor) HideSignatureHelp() {
+	e.signatureHelp.Hide()
+}
+
+// SignatureHelpView returns the signature help popup rendering if visible.
+func (e Editor) SignatureHelpView() string {
+	return e.signatureHelp.View()
 }
 
 // AutocompleteView returns the autocomplete popup rendering if visible.

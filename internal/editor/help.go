@@ -26,6 +26,7 @@ var helpGroups = []bindingGroup{
 			{"Ctrl+Q", "Quit"},
 			{"Ctrl+S", "Save file"},
 			{"F1", "Toggle help"},
+			{"Ctrl+,", "Open settings"},
 		},
 	},
 	{
@@ -97,6 +98,35 @@ var helpGroups = []bindingGroup{
 			{"Ctrl+Shift+G", "Toggle git panel"},
 			{"Ctrl+Tab", "Next tab"},
 			{"Ctrl+Shift+Tab", "Previous tab"},
+			{"Tab", "Switch sidebar panels"},
+		},
+	},
+	{
+		title: "Tabs",
+		bindings: []keybinding{
+			{"Ctrl+W", "Close tab"},
+			{"Ctrl+Shift+T", "Reopen closed tab"},
+		},
+	},
+	{
+		title: "Debugging",
+		bindings: []keybinding{
+			{"F5", "Start debugging"},
+			{"Shift+F5", "Stop debugging"},
+			{"C", "Continue"},
+			{"N", "Step over"},
+			{"I", "Step in"},
+			{"O", "Step out"},
+			{"Q", "Stop (in debugger)"},
+		},
+	},
+	{
+		title: "Problems Panel",
+		bindings: []keybinding{
+			{"F8", "Next problem"},
+			{"Shift+F8", "Previous problem"},
+			{"Up/Down", "Navigate problems"},
+			{"Enter", "Go to problem"},
 		},
 	},
 }

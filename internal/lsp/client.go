@@ -1,13 +1,16 @@
 package lsp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -26,6 +29,8 @@ type Client struct {
 	initialized bool
 	msgChan     chan<- any
 	cancelRead  context.CancelFunc
+	capabilities ServerCapabilities // server capabilities from initialize
+	syncKind     SyncKind           // document sync mode (negotiated)
 }
 
 // IsReady returns whether the client has completed initialization.
@@ -35,16 +40,68 @@ func (c *Client) IsReady() bool {
 	return c.initialized
 }
 
+// SupportsHover returns whether the server supports hover requests.
+func (c *Client) SupportsHover() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capabilities.HoverProvider
+}
+
+// SupportsCompletion returns whether the server supports completion requests.
+func (c *Client) SupportsCompletion() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capabilities.CompletionProvider != nil
+}
+
+// SupportsDefinition returns whether the server supports go-to-definition.
+func (c *Client) SupportsDefinition() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capabilities.DefinitionProvider
+}
+
+// SupportsReferences returns whether the server supports find-references.
+func (c *Client) SupportsReferences() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capabilities.ReferencesProvider
+}
+
+// SupportsRename returns whether the server supports rename.
+func (c *Client) SupportsRename() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capabilities.RenameProvider
+}
+
+// GetCompletionTriggerCharacters returns the trigger characters for completion.
+func (c *Client) GetCompletionTriggerCharacters() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.capabilities.CompletionProvider != nil {
+		return c.capabilities.CompletionProvider.TriggerCharacters
+	}
+	return nil
+}
+
+// GetSyncKind returns the negotiated document sync mode.
+func (c *Client) GetSyncKind() SyncKind {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.syncKind
+}
+
 type callResult struct {
 	Result json.RawMessage
 	Error  *jsonrpcError
 }
 
 type jsonrpcRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      int         `json:"id,omitempty"`
-	Method  string      `json:"method"`
-	Params  any `json:"params,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
 }
 
 type jsonrpcNotification struct {
@@ -63,6 +120,7 @@ type jsonrpcResponse struct {
 type jsonrpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"` // Optional additional error information
 }
 
 // NewClient creates a new LSP client and starts the server process.
@@ -109,9 +167,22 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 
 // Initialize sends the initialize request to the server.
 func (c *Client) Initialize() error {
+	// Get actual process ID instead of nil
+	processID := os.Getpid()
+	
 	params := map[string]any{
-		"processId": nil,
+		"processId": processID,
 		"rootUri":   c.rootURI,
+		"clientInfo": map[string]string{
+			"name":    "teak",
+			"version": "1.0.0",
+		},
+		"workspaceFolders": []map[string]string{
+			{
+				"uri":  c.rootURI,
+				"name": "workspace",
+			},
+		},
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
 				"completion": map[string]any{
@@ -124,22 +195,60 @@ func (c *Client) Initialize() error {
 				},
 				"synchronization": map[string]any{
 					"didSave": true,
+					"dynamicRegistration": false,
 				},
 				"references": map[string]any{},
 				"rename": map[string]any{
 					"prepareSupport": false,
 				},
 			},
+			"workspace": map[string]any{
+				"applyEdit":      true,
+				"workspaceFolders": true,
+				"configuration":  true,
+			},
+			"window": map[string]any{
+				"workDoneProgress": true,
+				"showMessage": map[string]any{
+					"messageActionItem": map[string]any{
+						"additionalPropertiesSupport": false,
+					},
+				},
+			},
+			"general": map[string]any{
+				"positionEncodings": []string{"utf-16", "utf-8", "utf-32"},
+			},
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := c.call(ctx, "initialize", params)
+	// Get initialize result and store capabilities
+	result, err := c.call(ctx, "initialize", params)
 	if err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
+
+	// Parse and store server capabilities
+	var initResult InitializeResult
+	if err := json.Unmarshal(result, &initResult); err != nil {
+		return fmt.Errorf("parse initialize result: %w", err)
+	}
+	
+	c.mu.Lock()
+	c.capabilities = initResult.Capabilities
+	// Negotiate sync kind from server capabilities
+	c.syncKind = SyncFull // default to full sync
+	if sync := initResult.Capabilities.TextDocumentSync; sync != nil {
+		switch v := sync.(type) {
+		case float64:
+			c.syncKind = SyncKind(int(v))
+		case int:
+			c.syncKind = SyncKind(v)
+		}
+	}
+	c.mu.Unlock()
 
 	// Send initialized notification
 	if err := c.notify("initialized", map[string]any{}); err != nil {
@@ -520,6 +629,150 @@ func (c *Client) Rename(uri string, line, character int, newName string) (map[st
 	return edits, nil
 }
 
+// SignatureHelp requests signature help at the given position.
+func (c *Client) SignatureHelp(uri string, line, character int) (*SignatureHelp, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := c.call(ctx, "textDocument/signatureHelp", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     map[string]any{"line": line, "character": character},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var help SignatureHelp
+	if err := json.Unmarshal(result, &help); err != nil {
+		return nil, err
+	}
+
+	return &help, nil
+}
+
+// Formatting requests formatting for a document.
+func (c *Client) Formatting(uri string) ([]TextEdit, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := c.call(ctx, "textDocument/formatting", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"options": map[string]any{
+			"tabSize":      4,
+			"insertSpaces": true,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var edits []struct {
+		Range struct {
+			Start struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"start"`
+			End struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"end"`
+		} `json:"range"`
+		NewText string `json:"newText"`
+	}
+	if err := json.Unmarshal(result, &edits); err != nil {
+		return nil, err
+	}
+
+	var textEdits []TextEdit
+	for _, ed := range edits {
+		textEdits = append(textEdits, TextEdit{
+			StartLine: ed.Range.Start.Line,
+			StartCol:  ed.Range.Start.Character,
+			EndLine:   ed.Range.End.Line,
+			EndCol:    ed.Range.End.Character,
+			NewText:   ed.NewText,
+		})
+	}
+	return textEdits, nil
+}
+
+// CodeAction requests code actions for a range with diagnostics.
+func (c *Client) CodeAction(uri string, startLine, startCol, endLine, endCol int, diagnostics []Diagnostic) ([]CodeAction, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Convert diagnostics to LSP format
+	var lspDiags []map[string]any
+	for _, d := range diagnostics {
+		lspDiags = append(lspDiags, map[string]any{
+			"range": map[string]any{
+				"start": map[string]any{"line": d.Range.Start.Line, "character": d.Range.Start.Character},
+				"end":   map[string]any{"line": d.Range.End.Line, "character": d.Range.End.Character},
+			},
+			"severity": d.Severity,
+			"message":  d.Message,
+			"source":   d.Source,
+		})
+	}
+
+	result, err := c.call(ctx, "textDocument/codeAction", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"range": map[string]any{
+			"start": map[string]any{"line": startLine, "character": startCol},
+			"end":   map[string]any{"line": endLine, "character": endCol},
+		},
+		"context": map[string]any{
+			"diagnostics": lspDiags,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var actions []CodeAction
+	if err := json.Unmarshal(result, &actions); err != nil {
+		return nil, err
+	}
+
+	return actions, nil
+}
+
+// DocumentSymbol requests document symbols.
+func (c *Client) DocumentSymbol(uri string) ([]DocumentSymbol, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := c.call(ctx, "textDocument/documentSymbol", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var symbols []DocumentSymbol
+	if err := json.Unmarshal(result, &symbols); err != nil {
+		return nil, err
+	}
+
+	return symbols, nil
+}
+
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
 	if !c.running {
@@ -612,60 +865,59 @@ func (c *Client) readLoop(ctx context.Context) {
 	}
 }
 
+const (
+	maxMessageSize = 10 * 1024 * 1024 // 10MB maximum message size
+)
+
 func parseMessage(data []byte) (json.RawMessage, []byte, bool) {
-	// Look for Content-Length header
-	header := "Content-Length: "
-	idx := 0
-	for idx < len(data) {
-		// Find header start
-		headerStart := -1
-		for i := idx; i < len(data)-len(header); i++ {
-			if string(data[i:i+len(header)]) == header {
-				headerStart = i
-				break
-			}
-		}
-		if headerStart < 0 {
-			return nil, data, false
-		}
-
-		// Parse content length
-		numStart := headerStart + len(header)
-		numEnd := numStart
-		for numEnd < len(data) && data[numEnd] >= '0' && data[numEnd] <= '9' {
-			numEnd++
-		}
-		if numEnd == numStart {
-			return nil, data, false
-		}
-
-		contentLength := 0
-		for i := numStart; i < numEnd; i++ {
-			contentLength = contentLength*10 + int(data[i]-'0')
-		}
-
-		// Find end of headers (\r\n\r\n)
-		headerEnd := -1
-		for i := numEnd; i < len(data)-3; i++ {
-			if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
-				headerEnd = i + 4
-				break
-			}
-		}
-		if headerEnd < 0 {
-			return nil, data, false
-		}
-
-		// Check if we have enough data
-		if headerEnd+contentLength > len(data) {
-			return nil, data, false
-		}
-
-		content := data[headerEnd : headerEnd+contentLength]
-		rest := data[headerEnd+contentLength:]
-		return json.RawMessage(content), rest, true
+	// Look for Content-Length header using bytes.Index (efficient)
+	header := []byte("Content-Length:")
+	idx := bytes.Index(data, header)
+	if idx < 0 {
+		return nil, data, false
 	}
-	return nil, data, false
+
+	// Parse content length
+	numStart := idx + len(header)
+	// Skip any whitespace after the colon
+	for numStart < len(data) && (data[numStart] == ' ' || data[numStart] == '\t') {
+		numStart++
+	}
+	
+	numEnd := numStart
+	for numEnd < len(data) && data[numEnd] >= '0' && data[numEnd] <= '9' {
+		numEnd++
+	}
+	if numEnd == numStart {
+		return nil, data, false
+	}
+
+	contentLength, err := strconv.Atoi(string(data[numStart:numEnd]))
+	if err != nil {
+		return nil, data, false
+	}
+	
+	// Reject excessively large messages to prevent memory exhaustion
+	if contentLength > maxMessageSize {
+		log.Printf("LSP: rejecting message of size %d (max %d)", contentLength, maxMessageSize)
+		return nil, data, false
+	}
+
+	// Find end of headers (\r\n\r\n)
+	headerEnd := bytes.Index(data[numEnd:], []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		return nil, data, false
+	}
+	headerEnd += numEnd + 4 // offset + length of header terminator
+
+	// Check if we have enough data
+	if headerEnd+contentLength > len(data) {
+		return nil, data, false
+	}
+
+	content := data[headerEnd : headerEnd+contentLength]
+	rest := data[headerEnd+contentLength:]
+	return json.RawMessage(content), rest, true
 }
 
 func (c *Client) handleMessage(data json.RawMessage) {
@@ -697,9 +949,94 @@ func (c *Client) handleMessage(data json.RawMessage) {
 	}
 
 	// Server notification
-	if peek.Method == "textDocument/publishDiagnostics" {
+	switch peek.Method {
+	case "textDocument/publishDiagnostics":
 		c.handleDiagnostics(peek.Params)
+	case "window/showMessage":
+		c.handleShowMessage(peek.Params)
+	case "window/logMessage":
+		c.handleLogMessage(peek.Params)
+	case "$/progress":
+		c.handleProgress(peek.Params)
+	case "workspace/configuration":
+		c.handleWorkspaceConfiguration(peek.ID, peek.Params)
+	case "workspace/workspaceFolders":
+		c.handleWorkspaceFolders(peek.ID)
 	}
+}
+
+func (c *Client) handleShowMessage(params json.RawMessage) {
+	var p struct {
+		Type    int    `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	// Send to message channel for display in status bar
+	if c.msgChan != nil {
+		c.msgChan <- LspShowMessageMsg{
+			Type:    p.Type,
+			Message: p.Message,
+		}
+	}
+}
+
+func (c *Client) handleLogMessage(params json.RawMessage) {
+	var p struct {
+		Type    int    `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	log.Printf("LSP log [%d]: %s", p.Type, p.Message)
+}
+
+func (c *Client) handleProgress(params json.RawMessage) {
+	var p struct {
+		Token any `json:"token"`
+		Value any `json:"value"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+	// Progress reporting - can be extended to show in UI
+	if c.msgChan != nil {
+		c.msgChan <- LspProgressMsg{Token: p.Token, Value: p.Value}
+	}
+}
+
+func (c *Client) handleWorkspaceConfiguration(id *int, params json.RawMessage) {
+	// Respond with empty configuration for now
+	// Can be extended to read from settings
+	if id != nil && c.msgChan != nil {
+		c.sendResponse(*id, []any{})
+	}
+}
+
+func (c *Client) handleWorkspaceFolders(id *int) {
+	// Respond with current workspace folder
+	if id != nil {
+		folders := []map[string]string{
+			{"uri": c.rootURI, "name": "workspace"},
+		}
+		c.sendResponse(*id, folders)
+	}
+}
+
+func (c *Client) sendResponse(id int, result any) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Printf("LSP: failed to marshal response: %v", err)
+		return
+	}
+	resp := jsonrpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  resultJSON,
+	}
+	c.send(resp)
 }
 
 func (c *Client) handleDiagnostics(params json.RawMessage) {
