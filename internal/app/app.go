@@ -256,6 +256,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lspMgr.ShutdownAll()
 			return m, tea.Quit
 		case "ctrl+s":
+			if m.activeEditor() == nil {
+				return m, nil
+			}
 			buf := m.activeEditor().Buffer
 			return m, SaveFileCmd(buf.Save, buf.FilePath)
 		case "f1":
@@ -338,7 +341,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Handle clicks on editor context menu
 		mouse0 := msg.Mouse()
-		if mouse0.Button == tea.MouseLeft && m.activeEditor().IsContextMenuVisible() {
+		if mouse0.Button == tea.MouseLeft && m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
 			_, cmY := m.activeEditor().ContextMenuPosition()
 			cmY += 1 // +1 for tab bar
 			// Account for the border (1 line top border from RoundedBorder)
@@ -506,12 +509,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.closeTab(msg.Index)
 
 	case editor.RetokenizeMsg:
+		if m.activeEditor() == nil {
+			return m, nil
+		}
 		ed := m.activeEditor()
 		updated, cmd := ed.Update(msg)
 		m.editors[m.activeTab] = updated
 		return m, cmd
 
 	case editor.TokenizeCompleteMsg:
+		if m.activeEditor() == nil {
+			return m, nil
+		}
 		ed := m.activeEditor()
 		updated, cmd := ed.Update(msg)
 		m.editors[m.activeTab] = updated
@@ -522,11 +531,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab < len(m.tabBar.Tabs) {
 			m.tabBar.Tabs[m.activeTab].Dirty = false
 		}
-		buf := m.activeEditor().Buffer
 		var cmds []tea.Cmd
-		if buf.FilePath != "" {
-			if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
-				client.DidSave(lsp.FileURI(buf.FilePath))
+		if m.activeEditor() != nil {
+			buf := m.activeEditor().Buffer
+			if buf.FilePath != "" {
+				if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
+					client.DidSave(lsp.FileURI(buf.FilePath))
+				}
 			}
 		}
 		// Refresh git panel after save
@@ -573,12 +584,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				InsertText: item.InsertText,
 			}
 		}
-		m.activeEditor().ShowAutocomplete(items)
-		m.editors[m.activeTab] = *m.activeEditor()
+		if m.activeEditor() != nil {
+			m.activeEditor().ShowAutocomplete(items)
+			m.editors[m.activeTab] = *m.activeEditor()
+		}
 		return m, nil
 
 	case lsp.HoverResultMsg:
-		if msg.Content != "" {
+		if msg.Content != "" && m.activeEditor() != nil {
 			m.activeEditor().ShowHover(msg.Content)
 			m.editors[m.activeTab] = *m.activeEditor()
 		}
@@ -693,14 +706,14 @@ func (m Model) View() tea.View {
 		var editorView string
 		if welcomeActive {
 			editorView = m.welcome.View()
-		} else {
+		} else if m.activeEditor() != nil {
 			editorView = m.activeEditor().View()
 		}
 		content = tabBarView + "\n" + editorView + "\n" + statusBar
 	}
 
 	// Overlay context menus (rendered before help/search so they show in normal view)
-	if m.activeEditor().IsContextMenuVisible() {
+	if m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
 		cmView := m.activeEditor().ContextMenuView()
 		cmX, cmY := m.activeEditor().ContextMenuPosition()
 		if m.showTree {
@@ -767,7 +780,7 @@ func (m Model) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
-	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && m.focus == FocusEditor {
+	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && m.focus == FocusEditor && m.activeEditor() != nil {
 		cx, cy := m.activeEditor().CursorPosition()
 		if m.showTree {
 			cx += m.treeWidth() + 1
@@ -785,6 +798,9 @@ func (m Model) View() tea.View {
 }
 
 func (m *Model) activeEditor() *editor.Editor {
+	if len(m.editors) == 0 {
+		return nil
+	}
 	if m.activeTab < len(m.editors) {
 		return &m.editors[m.activeTab]
 	}
@@ -793,6 +809,9 @@ func (m *Model) activeEditor() *editor.Editor {
 
 // forwardToEditor sends an adjusted mouse message to the active editor and handles LSP updates.
 func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.activeEditor() == nil {
+		return m, nil
+	}
 	ed := *m.activeEditor()
 	if ed.Buffer.FilePath != "" {
 		ed.HasLSP = m.lspMgr.ClientForFile(ed.Buffer.FilePath) != nil
@@ -824,7 +843,7 @@ func (m Model) viewWithTree() string {
 	var editorView string
 	if m.welcome != nil && m.welcome.Active {
 		editorView = m.welcome.View()
-	} else {
+	} else if m.activeEditor() != nil {
 		editorView = m.activeEditor().View()
 	}
 
@@ -950,9 +969,6 @@ func (m *Model) relayout() {
 }
 
 func (m Model) renderStatusBar() string {
-	ed := m.activeEditor()
-	buf := ed.Buffer
-
 	// Left: F1 Help + git branch (or project name fallback)
 	helpHint := m.theme.TabInactive.Render(" F1 Help ")
 	var branchPart string
@@ -963,14 +979,17 @@ func (m Model) renderStatusBar() string {
 	}
 	left := helpHint + branchPart
 
-	// Right: line:col + indicators + LSP status
-	tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
-	scrollPos := m.scrollIndicator()
-	lspStatus := m.lspIndicator()
-	right := m.theme.StatusText.Render(
-		fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s ",
-			buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus),
-	)
+	var right string
+	if ed := m.activeEditor(); ed != nil {
+		buf := ed.Buffer
+		tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
+		scrollPos := m.scrollIndicator()
+		lspStatus := m.lspIndicator()
+		right = m.theme.StatusText.Render(
+			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s ",
+				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus),
+		)
+	}
 
 	// Center: status message
 	center := m.status
@@ -987,6 +1006,9 @@ func (m Model) renderStatusBar() string {
 }
 
 func (m Model) scrollIndicator() string {
+	if m.activeEditor() == nil {
+		return ""
+	}
 	ed := m.activeEditor()
 	buf := ed.Buffer
 	totalLines := buf.LineCount()
@@ -1008,6 +1030,9 @@ func (m Model) scrollIndicator() string {
 }
 
 func (m Model) lspIndicator() string {
+	if m.activeEditor() == nil {
+		return ""
+	}
 	buf := m.activeEditor().Buffer
 	if buf.FilePath == "" {
 		return ""
@@ -1174,14 +1199,10 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// If closing the last tab, show the welcome screen
+	// If closing the last tab, show the welcome screen with no tabs
 	if len(m.editors) <= 1 {
-		newBuf := text.NewBuffer()
-		cfg := editor.DefaultConfig()
-		ed := editor.New(newBuf, m.theme, cfg)
-		m.editors = []editor.Editor{ed}
+		m.editors = nil
 		m.tabBar.Tabs = nil
-		m.tabBar.AddTab("untitled", "")
 		m.activeTab = 0
 		m.tabBar.ActiveIdx = 0
 		w := editor.NewWelcome(m.theme)
