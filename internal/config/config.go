@@ -59,6 +59,11 @@ func configPath() string {
 	return filepath.Join(home, ".config", "teak", "config.toml")
 }
 
+// ConfigPath returns the path to the config file (exported).
+func ConfigPath() string {
+	return configPath()
+}
+
 // Load reads configuration from ~/.config/teak/config.toml, falling back to defaults.
 func Load() (Config, error) {
 	cfg := DefaultConfig()

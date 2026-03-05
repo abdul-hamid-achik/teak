@@ -58,6 +58,14 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:       "reopen_tab",
+			Label:    "Reopen Closed Tab",
+			Shortcut: "Ctrl+Shift+T",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: reopenTabMsg{}}
+			},
+		},
+		{
 			ID:       "toggle_tree",
 			Label:    "Toggle File Tree",
 			Shortcut: "Ctrl+B",
@@ -71,6 +79,14 @@ func (m *Model) commandRegistry() []Command {
 			Shortcut: "Ctrl+Shift+G",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: toggleGitMsg{}}
+			},
+		},
+		{
+			ID:       "toggle_problems",
+			Label:    "Toggle Problems Panel",
+			Shortcut: "F8",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleProblemsMsg{}}
 			},
 		},
 		{
@@ -122,6 +138,30 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:       "settings",
+			Label:    "Open Settings",
+			Shortcut: "Ctrl+,",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: openSettingsMsg{}}
+			},
+		},
+		{
+			ID:       "debug_start",
+			Label:    "Start Debugging",
+			Shortcut: "F5",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: debugStartMsg{}}
+			},
+		},
+		{
+			ID:       "debug_stop",
+			Label:    "Stop Debugging",
+			Shortcut: "Shift+F5",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: debugStopMsg{}}
+			},
+		},
+		{
 			ID:       "quit",
 			Label:    "Quit",
 			Shortcut: "Ctrl+Q",
@@ -137,10 +177,15 @@ type (
 	saveRequestMsg      struct{}
 	toggleTreeMsg       struct{}
 	toggleGitMsg        struct{}
+	toggleProblemsMsg   struct{}
 	openSearchMsg       struct{ mode search.Mode }
 	openSearchReplaceMsg struct{}
 	goToLineMsg         struct{}
 	quickOpenMsg        struct{}
 	showHelpMsg         struct{}
+	openSettingsMsg     struct{}
+	reopenTabMsg        struct{}
+	debugStartMsg       struct{}
+	debugStopMsg        struct{}
 	quitMsg             struct{}
 )
