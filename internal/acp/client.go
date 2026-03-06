@@ -28,6 +28,7 @@ type Manager struct {
 	mu         sync.Mutex
 	running    bool
 	cancelFunc context.CancelFunc
+	done       chan struct{} // closed when process exits
 
 	// Session state
 	models       []sdk.ModelInfo
@@ -139,12 +140,14 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("new session: %w", err)
 	}
 
+	done := make(chan struct{})
 	m.mu.Lock()
 	m.conn = conn
 	m.cmd = cmd
 	m.handler = handler
 	m.sessionID = sessResp.SessionId
 	m.cancelFunc = cancel
+	m.done = done
 	m.running = true
 
 	// Parse session model/mode state
@@ -172,6 +175,7 @@ func (m *Manager) Start() error {
 		m.mu.Lock()
 		m.running = false
 		m.mu.Unlock()
+		close(done)
 		m.msgChan <- AgentStoppedMsg{Err: err}
 	}()
 
@@ -251,7 +255,7 @@ func (m *Manager) SetModel(modelId sdk.ModelId) tea.Cmd {
 			ModelId:   modelId,
 		})
 		if err != nil {
-			return nil
+			return AgentErrorMsg{Err: fmt.Errorf("set model: %w", err)}
 		}
 		return AgentModelChangedMsg{ModelId: modelId}
 	}
@@ -275,9 +279,9 @@ func (m *Manager) SetMode(modeId sdk.SessionModeId) tea.Cmd {
 			ModeId:    modeId,
 		})
 		if err != nil {
-			return nil
+			return AgentErrorMsg{Err: fmt.Errorf("set mode: %w", err)}
 		}
-		return nil
+		return AgentModeChangedMsg{ModeId: modeId}
 	}
 }
 
@@ -301,29 +305,30 @@ func (m *Manager) Cancel() {
 // Stop shuts down the agent subprocess gracefully.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.cancelFunc != nil {
 		m.cancelFunc()
 		m.cancelFunc = nil
 	}
+	done := m.done
+	proc := m.cmd
+	m.mu.Unlock()
 
-	if m.cmd != nil && m.cmd.Process != nil {
-		m.cmd.Process.Kill()
-		// Wait with timeout to reap zombie process
-		done := make(chan error, 1)
-		go func() { done <- m.cmd.Wait() }()
-		select {
-		case <-done:
-			// Process reaped successfully
-		case <-time.After(5 * time.Second):
-			// Timeout - process may be stuck, continue anyway
-			log.Warn("acp: process wait timeout, may be zombie")
+	if proc != nil && proc.Process != nil {
+		proc.Process.Kill()
+		// Wait for the existing Start() goroutine to reap the process
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Warn("acp: process wait timeout, may be zombie")
+			}
 		}
 	}
 
+	m.mu.Lock()
 	m.running = false
 	m.conn = nil
+	m.mu.Unlock()
 }
 
 // loadMcpServers reads MCP server config from opencode config if available.

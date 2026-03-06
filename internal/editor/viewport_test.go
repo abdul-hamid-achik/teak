@@ -334,7 +334,7 @@ func TestViewportScreenToBufferPosition(t *testing.T) {
 		ScrollY: 0,
 	}
 
-	pos := viewport.ScreenToBufferPosition(10, 0, buf)
+	pos := viewport.ScreenToBufferPosition(10, 0, buf, 4, nil)
 	if pos.Line != 0 {
 		t.Errorf("expected line 0, got %d", pos.Line)
 	}
@@ -352,7 +352,7 @@ func TestViewportScreenToBufferPositionScrollY(t *testing.T) {
 		ScrollY: 2,
 	}
 
-	pos := viewport.ScreenToBufferPosition(5, 0, buf)
+	pos := viewport.ScreenToBufferPosition(5, 0, buf, 4, nil)
 	if pos.Line != 2 {
 		t.Errorf("expected line 2, got %d", pos.Line)
 	}
@@ -366,19 +366,19 @@ func TestViewportScreenToBufferPositionBounds(t *testing.T) {
 	}
 
 	// Test negative Y
-	pos := viewport.ScreenToBufferPosition(5, -5, buf)
+	pos := viewport.ScreenToBufferPosition(5, -5, buf, 4, nil)
 	if pos.Line != 0 {
 		t.Errorf("expected line 0, got %d", pos.Line)
 	}
 
 	// Test beyond buffer
-	pos = viewport.ScreenToBufferPosition(5, 100, buf)
+	pos = viewport.ScreenToBufferPosition(5, 100, buf, 4, nil)
 	if pos.Line != 0 {
 		t.Errorf("expected line 0, got %d", pos.Line)
 	}
 
 	// Test negative X
-	pos = viewport.ScreenToBufferPosition(-5, 0, buf)
+	pos = viewport.ScreenToBufferPosition(-5, 0, buf, 4, nil)
 	if pos.Col != 0 {
 		t.Errorf("expected col 0, got %d", pos.Col)
 	}

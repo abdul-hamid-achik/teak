@@ -9,13 +9,14 @@ import (
 
 // Manager manages multiple LSP clients, one per language server.
 type Manager struct {
-	clients map[string]*Client // keyed by server command
-	configs []ServerConfig
-	rootDir string
-	msgChan chan any
-	mu      sync.Mutex
-	retries map[string]int
-	closed  bool
+	clients  map[string]*Client // keyed by server command
+	configs  []ServerConfig
+	rootDir  string
+	msgChan  chan any
+	mu       sync.Mutex
+	retries  map[string]int
+	starting map[string]bool // guards against concurrent starts
+	closed   bool
 }
 
 const maxRetries = 3
@@ -25,11 +26,12 @@ const maxRetries = 3
 func NewManager(rootDir string, userConfigs []ServerConfig) *Manager {
 	configs := MergeConfigs(DefaultConfigs(), userConfigs)
 	return &Manager{
-		clients: make(map[string]*Client),
-		configs: configs,
-		rootDir: rootDir,
-		msgChan: make(chan any, 100),
-		retries: make(map[string]int),
+		clients:  make(map[string]*Client),
+		configs:  configs,
+		rootDir:  rootDir,
+		msgChan:  make(chan any, 100),
+		retries:  make(map[string]int),
+		starting: make(map[string]bool),
 	}
 }
 
@@ -66,6 +68,13 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 		delete(m.clients, cfg.Command)
 	}
 
+	// Guard against concurrent starts for the same server
+	if m.starting[cfg.Command] {
+		m.mu.Unlock()
+		return nil, nil
+	}
+	m.starting[cfg.Command] = true
+
 	m.mu.Unlock()
 
 	// Create client outside lock
@@ -73,6 +82,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 	if err != nil {
 		m.mu.Lock()
 		m.retries[cfg.Command]++
+		delete(m.starting, cfg.Command)
 		m.mu.Unlock()
 		log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
 		return nil, err
@@ -83,6 +93,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 	if err := client.Initialize(); err != nil {
 		m.mu.Lock()
 		m.retries[cfg.Command]++
+		delete(m.starting, cfg.Command)
 		m.mu.Unlock()
 		log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
 		client.Shutdown()
@@ -92,6 +103,7 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 	// Only register AFTER successful initialization
 	m.mu.Lock()
 	m.clients[cfg.Command] = client
+	delete(m.starting, cfg.Command)
 	m.mu.Unlock()
 
 	return client, nil

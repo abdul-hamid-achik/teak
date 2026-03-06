@@ -85,8 +85,9 @@ type ServerCapabilities struct {
 	RenameProvider        bool `json:"renameProvider,omitempty"`
 	DocumentSymbolProvider bool `json:"documentSymbolProvider,omitempty"`
 	CodeActionProvider    any  `json:"codeActionProvider,omitempty"` // bool or CodeActionOptions
-	FormattingProvider    bool `json:"documentFormattingProvider,omitempty"`
+	FormattingProvider      bool `json:"documentFormattingProvider,omitempty"`
 	RangeFormattingProvider bool `json:"documentRangeFormattingProvider,omitempty"`
+	FoldingRangeProvider    bool `json:"foldingRangeProvider,omitempty"`
 	SignatureHelpProvider *struct {
 		TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 	} `json:"signatureHelpProvider,omitempty"`
@@ -171,6 +172,21 @@ type ParameterInformation struct {
 // SignatureHelpResultMsg is sent when signature help arrives.
 type SignatureHelpResultMsg struct {
 	Help *SignatureHelp
+}
+
+// FoldingRange represents a folding range from the server.
+type FoldingRange struct {
+	StartLine      int    `json:"startLine"`
+	StartCharacter int    `json:"startCharacter,omitempty"`
+	EndLine        int    `json:"endLine"`
+	EndCharacter   int    `json:"endCharacter,omitempty"`
+	Kind           string `json:"kind,omitempty"` // "comment", "imports", "region"
+}
+
+// FoldingRangeResultMsg is sent when folding ranges arrive.
+type FoldingRangeResultMsg struct {
+	FilePath string
+	Ranges   []FoldingRange
 }
 
 // FormatResultMsg is sent when formatting result arrives.

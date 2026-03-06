@@ -30,6 +30,9 @@ type Diagnostic struct {
 	Message   string
 }
 
+// BreakpointClickMsg is emitted when the user clicks the line number gutter.
+type BreakpointClickMsg struct{ Line int }
+
 // RetokenizeMsg triggers syntax re-tokenization after edits.
 type RetokenizeMsg struct {
 	Version      int
@@ -49,8 +52,11 @@ type Editor struct {
 	hover         Hover
 	signatureHelp SignatureHelp
 	contextMenu   ContextMenu
-	HasLSP        bool
-	DebugGutter   *GutterOpts // set by app when debugging
+	HasLSP            bool
+	TriggerCharacters []string     // from LSP server capabilities
+	DebugGutter       *GutterOpts  // set by app when debugging
+	Folds             FoldState    // code folding state
+	Wrap              *WrapLayout  // word wrap layout (nil when disabled)
 	lastVersion   int
 	lastClickTime time.Time
 	lastClickPos  text.Position
@@ -101,6 +107,15 @@ func (e Editor) ScheduleInitialTokenize() tea.Cmd {
 func (e *Editor) SetSize(width, height int) {
 	e.Viewport.Width = width
 	e.Viewport.Height = height
+	if e.Config.WordWrap && e.Buffer != nil {
+		textWidth := width - gutterWidth(e.Buffer.LineCount()) - 1
+		if textWidth < 1 {
+			textWidth = 1
+		}
+		if e.Wrap == nil || e.Wrap.Width() != textWidth {
+			e.Wrap = NewWrapLayout(e.Buffer.Line, e.Buffer.LineCount(), textWidth)
+		}
+	}
 }
 
 // Update handles input messages, returns updated editor and optional command.
@@ -290,16 +305,16 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	// --- Clipboard ---
 	case "ctrl+c":
 		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			clipboard.Copy(string(sel))
+			_ = clipboard.Copy(string(sel))
 		}
 	case "ctrl+x":
 		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			clipboard.Copy(string(sel))
+			_ = clipboard.Copy(string(sel))
 			e.Buffer.DeleteSelection()
 			edited = true
 		}
 	case "ctrl+v":
-		if content := clipboard.Paste(); content != "" {
+		if content, _ := clipboard.Paste(); content != "" {
 			e.Buffer.InsertAtCursor([]byte(content))
 			edited = true
 		}
@@ -412,31 +427,41 @@ func (e Editor) TriggerCompletion() tea.Cmd {
 	if !e.HasLSP || e.Buffer.FilePath == "" {
 		return nil
 	}
-	
+
 	// Check if we're at a position that should trigger completion
 	line := e.Buffer.Line(e.Buffer.Cursor.Line)
 	if e.Buffer.Cursor.Col <= 0 || e.Buffer.Cursor.Col > len(line) {
 		return nil
 	}
-	
+
 	// Get the character before cursor
 	prevCol := e.Buffer.Cursor.Col - 1
 	if prevCol < 0 {
 		return nil
 	}
 	ch := rune(line[prevCol])
-	
+
 	// Trigger on identifier characters (a-z, A-Z, 0-9, _)
-	if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || 
-	   (ch >= '0' && ch <= '9') || ch == '_' {
+	if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') || ch == '_' {
 		return func() tea.Msg { return RequestCompletionCmd{} }
 	}
-	
-	// Trigger on common trigger characters (., ->, ::, etc.)
-	if ch == '.' || ch == ':' {
-		return func() tea.Msg { return RequestCompletionCmd{} }
+
+	// Check LSP-advertised trigger characters first
+	if len(e.TriggerCharacters) > 0 {
+		s := string(ch)
+		for _, tc := range e.TriggerCharacters {
+			if s == tc {
+				return func() tea.Msg { return RequestCompletionCmd{} }
+			}
+		}
+	} else {
+		// Fallback: trigger on common characters when no LSP info available
+		if ch == '.' || ch == ':' {
+			return func() tea.Msg { return RequestCompletionCmd{} }
+		}
 	}
-	
+
 	return nil
 }
 
@@ -451,7 +476,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 
 	// Right-click opens context menu
 	if m.Button == tea.MouseRight {
-		pos := e.Viewport.ScreenToBufferPosition(m.X, m.Y, e.Buffer)
+		pos := e.screenToBuffer(m.X, m.Y)
 		// Only move cursor if no selection (preserve selection for cut/copy)
 		if e.Buffer.Selection == nil || e.Buffer.Selection.IsEmpty() {
 			e.Buffer.Cursor = pos
@@ -461,7 +486,33 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 	}
 
 	if m.Button == tea.MouseLeft {
-		pos := e.Viewport.ScreenToBufferPosition(m.X, m.Y, e.Buffer)
+		// Compute gutter column boundaries
+		markerW := 0
+		if e.DebugGutter != nil {
+			markerW = 3 // 1 leading space + 2-cell icon + 1 trailing space
+		}
+		baseW := gutterWidth(e.Buffer.LineCount())
+		foldW := 0
+		if len(e.Folds.Regions) > 0 {
+			foldW = 2 // 2-cell Nerd Font chevron
+		}
+		foldCol := markerW + baseW // start of fold column
+		gutterEnd := foldCol + foldW // end of gutter (before padding)
+
+		// Click on fold indicator column → toggle fold
+		if foldW > 0 && m.X >= foldCol && m.X < gutterEnd {
+			pos := e.screenToBuffer(m.X, m.Y)
+			e.Folds.Toggle(pos.Line)
+			return e, nil
+		}
+
+		// Click on marker or line number area → toggle breakpoint
+		if m.X < foldCol {
+			pos := e.screenToBuffer(m.X, m.Y)
+			return e, func() tea.Msg { return BreakpointClickMsg{Line: pos.Line} }
+		}
+
+		pos := e.screenToBuffer(m.X, m.Y)
 		if m.Mod == tea.ModShift {
 			anchor := e.Buffer.Cursor
 			if e.Buffer.Selection != nil {
@@ -492,7 +543,7 @@ func (e Editor) handleMouseMotion(msg tea.MouseMotionMsg) (Editor, tea.Cmd) {
 		return e, nil
 	}
 	m := msg.Mouse()
-	pos := e.Viewport.ScreenToBufferPosition(m.X, m.Y, e.Buffer)
+	pos := e.screenToBuffer(m.X, m.Y)
 	anchor := e.Buffer.Cursor
 	if e.Buffer.Selection != nil {
 		anchor = e.Buffer.Selection.Anchor
@@ -553,20 +604,81 @@ func (e Editor) needsRetokenize() bool {
 
 // View renders the editor content.
 func (e Editor) View() string {
+	if e.Wrap != nil && e.Config.WordWrap {
+		return e.Viewport.RenderWithWrap(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap)
+	}
+	if len(e.Folds.Regions) > 0 {
+		return e.Viewport.RenderWithFolds(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds)
+	}
 	return e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter)
+}
+
+// effectiveGutterWidth computes the total gutter width matching what Render produces.
+func (e Editor) effectiveGutterWidth() int {
+	w := gutterWidth(e.Buffer.LineCount())
+	if e.DebugGutter != nil {
+		w += 3 // breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
+	}
+	if len(e.Folds.Regions) > 0 {
+		w += 2 // fold indicator column (2-cell Nerd Font chevron)
+	}
+	return w + 1 // +1 for gutter padding
+}
+
+// visibleLinesForClick returns the visible lines slice when folds are active, nil otherwise.
+func (e Editor) visibleLinesForClick() []int {
+	if len(e.Folds.Regions) == 0 {
+		return nil
+	}
+	startLine := e.Viewport.foldedScrollStart(&e.Folds, e.Buffer.LineCount())
+	return e.Folds.VisibleLines(startLine, e.Viewport.Height, e.Buffer.LineCount())
+}
+
+// screenToBuffer maps screen coordinates to buffer position, handling wrap/fold modes.
+func (e Editor) screenToBuffer(screenX, screenY int) text.Position {
+	gw := e.effectiveGutterWidth()
+	if e.Wrap != nil && e.Config.WordWrap {
+		return e.Viewport.ScreenToBufferPositionWrap(screenX, screenY, e.Buffer, gw, e.Wrap)
+	}
+	return e.Viewport.ScreenToBufferPosition(screenX, screenY, e.Buffer, gw, e.visibleLinesForClick())
 }
 
 // CursorPosition returns the screen position for the cursor.
 func (e Editor) CursorPosition() (int, int) {
-	gw := gutterWidth(e.Buffer.LineCount()) + 1 // +1 for gutter padding
-	// Compute display width of content before cursor (Col is byte offset)
+	gw := e.effectiveGutterWidth()
 	lineContent := e.Buffer.Line(e.Buffer.Cursor.Line)
 	col := e.Buffer.Cursor.Col
 	if col > len(lineContent) {
 		col = len(lineContent)
 	}
 	displayCol := displayWidth(string(lineContent[:col]))
+
+	// Word wrap mode: cursor position accounts for wrapped visual rows
+	if e.Wrap != nil && e.Config.WordWrap {
+		textWidth := e.Viewport.Width - gw
+		if textWidth < 1 {
+			textWidth = 1
+		}
+		wrapRow := 0
+		if textWidth > 0 {
+			wrapRow = displayCol / textWidth
+		}
+		x := displayCol - wrapRow*textWidth + gw
+		visualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow - e.Wrap.VisualRow(e.Viewport.ScrollY)
+		return x, visualRow
+	}
+
 	x := displayCol - e.Viewport.ScrollX + gw
+
+	// When folds are active, map buffer line to screen row via visible lines
+	if len(e.Folds.Regions) > 0 {
+		visLines := e.visibleLinesForClick()
+		for i, vl := range visLines {
+			if vl == e.Buffer.Cursor.Line {
+				return x, i
+			}
+		}
+	}
 	y := e.Buffer.Cursor.Line - e.Viewport.ScrollY
 	return x, y
 }
@@ -696,7 +808,7 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 	switch action {
 	case "cut":
 		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			clipboard.Copy(string(sel))
+			_ = clipboard.Copy(string(sel))
 			e.Buffer.DeleteSelection()
 			e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
 			if e.Highlighter != nil {
@@ -707,11 +819,11 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 		return e, nil
 	case "copy":
 		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			clipboard.Copy(string(sel))
+			_ = clipboard.Copy(string(sel))
 		}
 		return e, nil
 	case "paste":
-		if content := clipboard.Paste(); content != "" {
+		if content, _ := clipboard.Paste(); content != "" {
 			e.Buffer.InsertAtCursor([]byte(content))
 			e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
 			if e.Highlighter != nil {

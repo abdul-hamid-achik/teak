@@ -130,6 +130,11 @@ func (m *Model) SetShowReplace(show bool) {
 	m.showReplace = show
 }
 
+// Results returns the current search results.
+func (m Model) Results() []Result {
+	return m.results
+}
+
 // Query returns the current search query.
 func (m Model) Query() string {
 	return m.input.Value()

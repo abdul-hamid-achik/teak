@@ -9,10 +9,17 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	Editor EditorConfig `toml:"editor"`
-	UI     UIConfig     `toml:"ui"`
-	LSP    []LSPConfig  `toml:"lsp"`
-	Agent  AgentConfig  `toml:"agent"`
+	Editor  EditorConfig  `toml:"editor"`
+	UI      UIConfig      `toml:"ui"`
+	LSP     []LSPConfig   `toml:"lsp"`
+	Agent   AgentConfig   `toml:"agent"`
+	Session SessionConfig `toml:"session"`
+}
+
+// SessionConfig configures session restore.
+type SessionConfig struct {
+	Enabled          bool `toml:"enabled"`
+	AutoSaveInterval int  `toml:"auto_save_interval"` // seconds
 }
 
 // AgentConfig configures the ACP agent.
@@ -24,9 +31,11 @@ type AgentConfig struct {
 
 // EditorConfig holds editor-specific settings.
 type EditorConfig struct {
-	TabSize    int  `toml:"tab_size"`
-	InsertTabs bool `toml:"insert_tabs"`
-	AutoIndent bool `toml:"auto_indent"`
+	TabSize      int  `toml:"tab_size"`
+	InsertTabs   bool `toml:"insert_tabs"`
+	AutoIndent   bool `toml:"auto_indent"`
+	FormatOnSave bool `toml:"format_on_save"`
+	WordWrap     bool `toml:"word_wrap"`
 }
 
 // UIConfig holds UI-related settings.
@@ -59,6 +68,10 @@ func DefaultConfig() Config {
 			Enabled: true,
 			Command: "opencode",
 			Args:    []string{"acp"},
+		},
+		Session: SessionConfig{
+			Enabled:          true,
+			AutoSaveInterval: 30,
 		},
 	}
 }
@@ -101,10 +114,16 @@ func Load() (Config, error) {
 
 // userConfig mirrors Config but with pointer fields for merge detection.
 type userConfig struct {
-	Editor *userEditorConfig `toml:"editor"`
-	UI     *userUIConfig     `toml:"ui"`
-	LSP    []LSPConfig       `toml:"lsp"`
-	Agent  *userAgentConfig  `toml:"agent"`
+	Editor  *userEditorConfig  `toml:"editor"`
+	UI      *userUIConfig      `toml:"ui"`
+	LSP     []LSPConfig        `toml:"lsp"`
+	Agent   *userAgentConfig   `toml:"agent"`
+	Session *userSessionConfig `toml:"session"`
+}
+
+type userSessionConfig struct {
+	Enabled          *bool `toml:"enabled"`
+	AutoSaveInterval *int  `toml:"auto_save_interval"`
 }
 
 type userAgentConfig struct {
@@ -114,9 +133,11 @@ type userAgentConfig struct {
 }
 
 type userEditorConfig struct {
-	TabSize    *int  `toml:"tab_size"`
-	InsertTabs *bool `toml:"insert_tabs"`
-	AutoIndent *bool `toml:"auto_indent"`
+	TabSize      *int  `toml:"tab_size"`
+	InsertTabs   *bool `toml:"insert_tabs"`
+	AutoIndent   *bool `toml:"auto_indent"`
+	FormatOnSave *bool `toml:"format_on_save"`
+	WordWrap     *bool `toml:"word_wrap"`
 }
 
 type userUIConfig struct {
@@ -136,6 +157,12 @@ func merge(cfg *Config, user *userConfig) {
 		if user.Editor.AutoIndent != nil {
 			cfg.Editor.AutoIndent = *user.Editor.AutoIndent
 		}
+		if user.Editor.FormatOnSave != nil {
+			cfg.Editor.FormatOnSave = *user.Editor.FormatOnSave
+		}
+		if user.Editor.WordWrap != nil {
+			cfg.Editor.WordWrap = *user.Editor.WordWrap
+		}
 	}
 	if user.UI != nil {
 		if user.UI.Theme != nil {
@@ -147,6 +174,14 @@ func merge(cfg *Config, user *userConfig) {
 	}
 	if len(user.LSP) > 0 {
 		cfg.LSP = user.LSP
+	}
+	if user.Session != nil {
+		if user.Session.Enabled != nil {
+			cfg.Session.Enabled = *user.Session.Enabled
+		}
+		if user.Session.AutoSaveInterval != nil {
+			cfg.Session.AutoSaveInterval = *user.Session.AutoSaveInterval
+		}
 	}
 	if user.Agent != nil {
 		if user.Agent.Enabled != nil {

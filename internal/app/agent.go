@@ -30,11 +30,6 @@ type focusAgentMsg struct{}
 // agentCancelMsg is sent to cancel the current agent operation.
 type agentCancelMsg struct{}
 
-// agentSetModelMsg is sent when the user selects a model from the picker.
-type agentSetModelMsg struct {
-	ModelId string
-}
-
 // agentModelPickerSelectMsg is sent when a model is selected from the overlay picker.
 type agentModelPickerSelectMsg struct {
 	ModelId string
@@ -95,6 +90,14 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			Models:       m.agentPanel.AvailableModels(),
 			CurrentModel: inner.ModelId,
 		})
+	case acp.AgentModeChangedMsg:
+		m.agentPanel, _ = m.agentPanel.Update(acp.AgentSessionInfoMsg{
+			Modes:       m.agentPanel.AvailableModes(),
+			CurrentMode: inner.ModeId,
+		})
+		m.agentPanel.AddSystemMessage("Mode changed to " + string(inner.ModeId))
+	case acp.AgentErrorMsg:
+		m.agentPanel.AddSystemMessage("Error: " + inner.Err.Error())
 	case acp.AgentStartedMsg:
 		m.agentPanel.SetConnected(true)
 	case acp.AgentStoppedMsg:
@@ -115,20 +118,20 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 // responding on the request channel. This runs in the Bubbletea loop
 // for goroutine safety (no racing with editor buffer mutations).
 func (m Model) handleFileReadRequest(req acp.FileReadRequestMsg) (tea.Model, tea.Cmd) {
-	go func() {
-		// Try open buffers first
-		for i := range m.editors {
-			buf := m.editors[i].Buffer
-			if buf.FilePath == req.Path {
-				content := buf.Content()
-				if req.Line != nil || req.Limit != nil {
-					content = filterLines(content, req.Line, req.Limit)
-				}
-				req.ResultCh <- acp.FileReadResult{Content: content}
-				return
+	// Check open buffers synchronously (safe: runs in Bubbletea loop)
+	for i := range m.editors {
+		buf := m.editors[i].Buffer
+		if buf.FilePath == req.Path {
+			content := buf.Content()
+			if req.Line != nil || req.Limit != nil {
+				content = filterLines(content, req.Line, req.Limit)
 			}
+			req.ResultCh <- acp.FileReadResult{Content: content}
+			return m, m.listenACP()
 		}
-		// Fall back to disk
+	}
+	// Disk fallback in goroutine (no shared state accessed)
+	go func() {
 		content, err := acp.ReadFileFromDisk(req.Path, req.Line, req.Limit)
 		req.ResultCh <- acp.FileReadResult{Content: content, Err: err}
 	}()

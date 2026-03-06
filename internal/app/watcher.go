@@ -43,6 +43,19 @@ func newFileWatcher(rootDir string) (*fileWatcher, error) {
 	// Watch root directory for tree changes
 	if rootDir != "" {
 		fw.watchDirRecursive(rootDir, 0)
+		// Watch .git directory for commit/push/branch changes
+		gitDir := filepath.Join(rootDir, ".git")
+		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+			_ = fw.watcher.Add(gitDir)
+			refsDir := filepath.Join(gitDir, "refs")
+			if info, err := os.Stat(refsDir); err == nil && info.IsDir() {
+				_ = fw.watcher.Add(refsDir)
+				headsDir := filepath.Join(refsDir, "heads")
+				if info, err := os.Stat(headsDir); err == nil && info.IsDir() {
+					_ = fw.watcher.Add(headsDir)
+				}
+			}
+		}
 	}
 	go fw.listen()
 	return fw, nil
@@ -95,6 +108,12 @@ func (fw *fileWatcher) listen() {
 			}
 			fw.debounce[event.Name] = now
 
+			// Detect .git directory changes (commit, push, branch switch)
+			if isGitInternalPath(event.Name, fw.rootDir) {
+				fw.msgChan <- TreeChangedMsg{Dir: fw.rootDir}
+				continue
+			}
+
 			if event.Has(fsnotify.Write) {
 				// File modified externally — read new content
 				data, err := os.ReadFile(event.Name)
@@ -136,4 +155,10 @@ func (fw *fileWatcher) listenCmd() tea.Cmd {
 // Close shuts down the watcher.
 func (fw *fileWatcher) Close() {
 	fw.watcher.Close()
+}
+
+// isGitInternalPath returns true if the path is inside the .git directory.
+func isGitInternalPath(path, rootDir string) bool {
+	gitDir := filepath.Join(rootDir, ".git")
+	return path == gitDir || strings.HasPrefix(path, gitDir+string(filepath.Separator))
 }

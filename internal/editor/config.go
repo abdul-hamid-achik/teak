@@ -6,6 +6,7 @@ type Config struct {
 	InsertTabs    bool
 	AutoIndent    bool
 	CommentPrefix string
+	WordWrap      bool
 }
 
 // DefaultConfig returns the default editor configuration.

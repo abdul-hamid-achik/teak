@@ -1,9 +1,11 @@
 package editor
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"teak/internal/highlight"
@@ -22,7 +24,20 @@ type Viewport struct {
 
 // Render renders the visible portion of the buffer with gutter, syntax highlighting, and diagnostics.
 func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts) string {
-	gutter, gw := RenderGutter(theme, buf.LineCount(), v.ScrollY, v.Height, buf.Cursor.Line, diagnostics, gutterOpts)
+	return v.RenderWithFolds(buf, theme, hl, diagnostics, gutterOpts, nil)
+}
+
+// RenderWithFolds renders the visible portion of the buffer with optional code folding.
+func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, folds *FoldState) string {
+	// Compute visible lines accounting for folds
+	var visibleLines []int
+	totalVisibleLines := buf.LineCount()
+	if folds != nil && len(folds.Regions) > 0 {
+		totalVisibleLines = folds.TotalVisibleLines(buf.LineCount())
+		visibleLines = folds.VisibleLines(v.foldedScrollStart(folds, buf.LineCount()), v.Height, buf.LineCount())
+	}
+
+	gutter, gw := RenderGutterWithFolds(theme, buf.LineCount(), v.ScrollY, v.Height, buf.Cursor.Line, diagnostics, gutterOpts, folds, visibleLines)
 	v.GutterWidth = gw + 1 // +1 for gutter padding
 
 	gutterLines := strings.Split(gutter, "\n")
@@ -32,16 +47,15 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 	}
 
 	// Scrollbar calculation
-	totalLines := buf.LineCount()
-	showScrollbar := totalLines > v.Height
+	showScrollbar := totalVisibleLines > v.Height
 	var thumbStart, thumbEnd int
 	if showScrollbar {
 		textWidth-- // reserve 1 column for scrollbar
 		if textWidth < 1 {
 			textWidth = 1
 		}
-		thumbSize := max(1, v.Height*v.Height/totalLines)
-		maxScroll := totalLines - v.Height
+		thumbSize := max(1, v.Height*v.Height/totalVisibleLines)
+		maxScroll := totalVisibleLines - v.Height
 		if maxScroll < 1 {
 			maxScroll = 1
 		}
@@ -54,7 +68,14 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 
 	var sb strings.Builder
 	for i := range v.Height {
-		line := v.ScrollY + i
+		var line int
+		if len(visibleLines) > 0 && i < len(visibleLines) {
+			line = visibleLines[i]
+		} else if len(visibleLines) > 0 {
+			line = buf.LineCount() // past end
+		} else {
+			line = v.ScrollY + i
+		}
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
@@ -62,6 +83,7 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 		if i < len(gutterLines) {
 			sb.WriteString(gutterLines[i])
 		}
+		sb.WriteByte(' ') // padding between gutter and text
 		// text content
 		if line < buf.LineCount() {
 			lineBytes := buf.Line(line)
@@ -112,6 +134,251 @@ func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highli
 		}
 	}
 	return sb.String()
+}
+
+// RenderWithWrap renders the viewport with word wrap enabled.
+func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, wrap *WrapLayout) string {
+	// Compute gutter width
+	baseWidth := gutterWidth(buf.LineCount())
+	markerWidth := 0
+	if gutterOpts != nil {
+		markerWidth = 3 // 1 leading space + 2-cell icon + 1 trailing space
+	}
+	gwTotal := baseWidth + markerWidth
+	v.GutterWidth = gwTotal + 1 // +1 for padding
+
+	textWidth := v.Width - v.GutterWidth
+	if textWidth < 1 {
+		textWidth = 1
+	}
+
+	// Scrollbar based on total visual rows
+	totalRows := wrap.TotalRows()
+	showScrollbar := totalRows > v.Height
+	var thumbStart, thumbEnd int
+	if showScrollbar {
+		textWidth--
+		if textWidth < 1 {
+			textWidth = 1
+		}
+		thumbSize := max(1, v.Height*v.Height/totalRows)
+		visualScrollY := wrap.VisualRow(v.ScrollY)
+		maxScroll := totalRows - v.Height
+		if maxScroll < 1 {
+			maxScroll = 1
+		}
+		thumbStart = visualScrollY * (v.Height - thumbSize) / maxScroll
+		thumbEnd = thumbStart + thumbSize
+	}
+
+	// Build diagnostic map
+	diagMap := make(map[int]int)
+	for _, d := range diagnostics {
+		for line := d.StartLine; line <= d.EndLine; line++ {
+			if existing, ok := diagMap[line]; !ok || d.Severity < existing {
+				diagMap[line] = d.Severity
+			}
+		}
+	}
+
+	// Build visual rows starting from ScrollY
+	var sb strings.Builder
+	visualRow := 0
+	bufLine := v.ScrollY
+	wrapOffset := 0
+
+	for visualRow < v.Height {
+		if visualRow > 0 {
+			sb.WriteByte('\n')
+		}
+
+		if bufLine < buf.LineCount() {
+			// Gutter: show line number on first wrap row, blank on continuation
+			if wrapOffset == 0 {
+				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagMap, bufLine, baseWidth, markerWidth))
+			} else {
+				sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", gwTotal)))
+			}
+			// Padding between gutter and text
+			sb.WriteByte(' ')
+
+			lineContent := string(buf.Line(bufLine))
+			segment := wrapSegment(lineContent, wrapOffset, textWidth)
+
+			// Apply syntax highlighting to segment if available
+			rendered := v.renderWrapSegment(theme, hl, buf, bufLine, segment, wrapOffset, textWidth)
+			padLen := max(0, textWidth-displayWidth(segment))
+
+			if bufLine == buf.Cursor.Line {
+				sb.WriteString(rendered)
+				if padLen > 0 {
+					sb.WriteString(theme.CursorLine.Render(strings.Repeat(" ", padLen)))
+				}
+			} else {
+				sb.WriteString(rendered)
+				if padLen > 0 {
+					sb.WriteString(theme.Editor.Render(strings.Repeat(" ", padLen)))
+				}
+			}
+
+			wrapOffset++
+			if wrapOffset >= wrap.LineRows(bufLine) {
+				bufLine++
+				wrapOffset = 0
+			}
+		} else {
+			sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", gwTotal)))
+			sb.WriteByte(' ')
+			sb.WriteString(theme.Editor.Render(strings.Repeat(" ", textWidth)))
+		}
+
+		// Scrollbar
+		if showScrollbar {
+			if visualRow >= thumbStart && visualRow < thumbEnd {
+				sb.WriteString(theme.ScrollThumb.Render(" "))
+			} else {
+				sb.WriteString(theme.ScrollTrack.Render(" "))
+			}
+		}
+
+		visualRow++
+	}
+	return sb.String()
+}
+
+// renderWrapGutterLine renders a single gutter line for wrap mode.
+func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutterOpts *GutterOpts, diagMap map[int]int, line, baseWidth, markerWidth int) string {
+	var sb strings.Builder
+
+	// Breakpoint marker (1 leading space + 2-cell icon + 1 trailing space)
+	if gutterOpts != nil {
+		switch gutterOpts.Breakpoints[line] {
+		case BPActive:
+			bpStyle := lipgloss.NewStyle().Foreground(ui.Nord11)
+			sb.WriteByte(' ')
+			sb.WriteString(bpStyle.Render("\U000f0765"))
+		case BPDisabled:
+			bpStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+			sb.WriteByte(' ')
+			sb.WriteString(bpStyle.Render("\U000f0765"))
+		default:
+			sb.WriteString("   ")
+		}
+	}
+
+	numStr := fmt.Sprintf("%*d", baseWidth, line+1)
+
+	isExecLine := gutterOpts != nil && gutterOpts.ExecLine == line
+	if isExecLine {
+		execStyle := lipgloss.NewStyle().Background(ui.Nord3).Foreground(ui.Nord13)
+		sb.WriteString(execStyle.Render(numStr))
+	} else if sev, ok := diagMap[line]; ok {
+		switch sev {
+		case 1:
+			sb.WriteString(theme.GutterError.Render(numStr))
+		case 2:
+			sb.WriteString(theme.GutterWarn.Render(numStr))
+		default:
+			if line == buf.Cursor.Line {
+				sb.WriteString(theme.GutterActive.Render(numStr))
+			} else {
+				sb.WriteString(theme.Gutter.Render(numStr))
+			}
+		}
+	} else if line == buf.Cursor.Line {
+		sb.WriteString(theme.GutterActive.Render(numStr))
+	} else {
+		sb.WriteString(theme.Gutter.Render(numStr))
+	}
+	return sb.String()
+}
+
+// renderWrapSegment renders a wrap segment with syntax highlighting when available.
+func (v *Viewport) renderWrapSegment(theme ui.Theme, hl *highlight.Highlighter, buf *text.Buffer, bufLine int, segment string, wrapOffset, textWidth int) string {
+	defaultStyle := theme.Editor
+	if bufLine == buf.Cursor.Line {
+		defaultStyle = theme.CursorLine
+	}
+
+	if hl == nil || segment == "" {
+		return defaultStyle.Render(segment)
+	}
+
+	tokens := hl.Line(bufLine)
+	if len(tokens) == 0 {
+		return defaultStyle.Render(segment)
+	}
+
+	// Map segment back to the full line using display-width offsets
+	segStartWidth := wrapOffset * textWidth
+	segEndWidth := segStartWidth + textWidth
+
+	var sb strings.Builder
+	currentWidth := 0
+	segWritten := 0
+
+	for _, tok := range tokens {
+		for _, r := range tok.Text {
+			rw := runewidth.RuneWidth(r)
+			if currentWidth >= segStartWidth && currentWidth < segEndWidth {
+				style := tok.Style
+				if bufLine == buf.Cursor.Line {
+					style = style.Background(defaultStyle.GetBackground())
+				}
+				sb.WriteString(style.Render(string(r)))
+				segWritten += rw
+			}
+			currentWidth += rw
+			if currentWidth >= segEndWidth {
+				break
+			}
+		}
+		if currentWidth >= segEndWidth {
+			break
+		}
+	}
+
+	if segWritten == 0 && segment != "" {
+		return defaultStyle.Render(segment)
+	}
+
+	return sb.String()
+}
+
+// wrapSegment extracts the Nth segment of a line when wrapped at the given width.
+func wrapSegment(line string, segIdx, width int) string {
+	if width < 1 || segIdx < 0 {
+		return ""
+	}
+	// Walk through the string counting display width
+	startWidth := segIdx * width
+	endWidth := startWidth + width
+
+	currentWidth := 0
+	startByte := -1
+	endByte := len(line)
+
+	for i, r := range line {
+		w := runewidth.RuneWidth(r)
+		if currentWidth >= startWidth && startByte < 0 {
+			startByte = i
+		}
+		if currentWidth >= endWidth {
+			endByte = i
+			break
+		}
+		currentWidth += w
+	}
+	if startByte < 0 {
+		return ""
+	}
+	return line[startByte:endByte]
+}
+
+// foldedScrollStart converts the visual scroll position to the buffer line
+// that should start the visible region, accounting for collapsed folds.
+func (v *Viewport) foldedScrollStart(folds *FoldState, totalLines int) int {
+	return folds.VisualLineToBuffer(v.ScrollY, totalLines)
 }
 
 // findBracketHighlights returns two positions to highlight and whether a match was found.
@@ -394,18 +661,22 @@ func applyScrollXCount(s string, scrollX int) (string, int) {
 }
 
 // ScreenToBufferPosition maps screen coordinates to buffer position.
-func (v *Viewport) ScreenToBufferPosition(screenX, screenY int, buf *text.Buffer) text.Position {
-	line := v.ScrollY + screenY
+// gw is the effective gutter width (from Editor.effectiveGutterWidth).
+// visibleLines is optional — when folds are active, pass the visible lines slice
+// so screen rows map to the correct buffer lines.
+func (v *Viewport) ScreenToBufferPosition(screenX, screenY int, buf *text.Buffer, gw int, visibleLines []int) text.Position {
+	var line int
+	if len(visibleLines) > 0 && screenY >= 0 && screenY < len(visibleLines) {
+		line = visibleLines[screenY]
+	} else {
+		line = v.ScrollY + screenY
+	}
 	if line < 0 {
 		line = 0
 	}
 	if line >= buf.LineCount() {
 		line = buf.LineCount() - 1
 	}
-
-	// Compute gutter width directly instead of relying on cached GutterWidth,
-	// since View() uses a value receiver and the mutation from Render() is lost.
-	gw := gutterWidth(buf.LineCount()) + 1 // +1 for gutter padding
 	screenCol := screenX - gw
 	if screenCol < 0 {
 		screenCol = 0
@@ -430,6 +701,50 @@ func (v *Viewport) ScreenToBufferPosition(screenX, screenY int, buf *text.Buffer
 		col = len(lineContent)
 	}
 	return text.Position{Line: line, Col: col}
+}
+
+// ScreenToBufferPositionWrap maps screen coordinates to buffer position in word-wrap mode.
+func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Buffer, gw int, wrap *WrapLayout) text.Position {
+	// Convert screen Y to visual row relative to scroll position
+	visualRow := wrap.VisualRow(v.ScrollY) + screenY
+	bufLine, wrapOffset := wrap.BufferLine(visualRow)
+
+	if bufLine < 0 {
+		bufLine = 0
+	}
+	if bufLine >= buf.LineCount() {
+		bufLine = buf.LineCount() - 1
+	}
+
+	screenCol := screenX - gw
+	if screenCol < 0 {
+		screenCol = 0
+	}
+
+	textWidth := v.Width - gw
+	if textWidth < 1 {
+		textWidth = 1
+	}
+
+	// Target display-width offset within the full line
+	targetWidth := wrapOffset*textWidth + screenCol
+
+	lineContent := buf.Line(bufLine)
+	w := 0
+	col := 0
+	for i, r := range string(lineContent) {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > targetWidth {
+			col = i
+			return text.Position{Line: bufLine, Col: col}
+		}
+		w += rw
+		col = i + utf8.RuneLen(r)
+	}
+	if col > len(lineContent) {
+		col = len(lineContent)
+	}
+	return text.Position{Line: bufLine, Col: col}
 }
 
 // EnsureCursorVisible scrolls to keep the cursor in view.

@@ -101,49 +101,74 @@ func (h *ClientHandler) SessionUpdate(_ context.Context, params sdk.SessionNotif
 
 // ReadTextFile sends a read request through the Bubbletea loop and blocks
 // until the result is available.
-func (h *ClientHandler) ReadTextFile(_ context.Context, params sdk.ReadTextFileRequest) (sdk.ReadTextFileResponse, error) {
+func (h *ClientHandler) ReadTextFile(ctx context.Context, params sdk.ReadTextFileRequest) (sdk.ReadTextFileResponse, error) {
 	resultCh := make(chan FileReadResult, 1)
-	h.msgChan <- FileReadRequestMsg{
+	select {
+	case h.msgChan <- FileReadRequestMsg{
 		Path:     params.Path,
 		Line:     params.Line,
 		Limit:    params.Limit,
 		ResultCh: resultCh,
+	}:
+	case <-ctx.Done():
+		return sdk.ReadTextFileResponse{}, ctx.Err()
 	}
 
-	result := <-resultCh
-	if result.Err != nil {
-		return sdk.ReadTextFileResponse{}, result.Err
+	select {
+	case result := <-resultCh:
+		if result.Err != nil {
+			return sdk.ReadTextFileResponse{}, result.Err
+		}
+		return sdk.ReadTextFileResponse{Content: result.Content}, nil
+	case <-ctx.Done():
+		return sdk.ReadTextFileResponse{}, ctx.Err()
 	}
-	return sdk.ReadTextFileResponse{Content: result.Content}, nil
 }
 
 // WriteTextFile sends a write proposal through the Bubbletea loop and blocks
 // until the user accepts or rejects.
-func (h *ClientHandler) WriteTextFile(_ context.Context, params sdk.WriteTextFileRequest) (sdk.WriteTextFileResponse, error) {
+func (h *ClientHandler) WriteTextFile(ctx context.Context, params sdk.WriteTextFileRequest) (sdk.WriteTextFileResponse, error) {
 	responseCh := make(chan error, 1)
-	h.msgChan <- AgentWriteFileMsg{
+	select {
+	case h.msgChan <- AgentWriteFileMsg{
 		Path:       params.Path,
 		Content:    params.Content,
 		ResponseCh: responseCh,
+	}:
+	case <-ctx.Done():
+		return sdk.WriteTextFileResponse{}, ctx.Err()
 	}
 
-	if err := <-responseCh; err != nil {
-		return sdk.WriteTextFileResponse{}, err
+	select {
+	case err := <-responseCh:
+		if err != nil {
+			return sdk.WriteTextFileResponse{}, err
+		}
+		return sdk.WriteTextFileResponse{}, nil
+	case <-ctx.Done():
+		return sdk.WriteTextFileResponse{}, ctx.Err()
 	}
-	return sdk.WriteTextFileResponse{}, nil
 }
 
 // RequestPermission sends a permission prompt through the Bubbletea loop.
-func (h *ClientHandler) RequestPermission(_ context.Context, params sdk.RequestPermissionRequest) (sdk.RequestPermissionResponse, error) {
+func (h *ClientHandler) RequestPermission(ctx context.Context, params sdk.RequestPermissionRequest) (sdk.RequestPermissionResponse, error) {
 	responseCh := make(chan sdk.RequestPermissionResponse, 1)
-	h.msgChan <- AgentPermissionRequestMsg{
+	select {
+	case h.msgChan <- AgentPermissionRequestMsg{
 		ToolCall:   params.ToolCall,
 		Options:    params.Options,
 		ResponseCh: responseCh,
+	}:
+	case <-ctx.Done():
+		return sdk.RequestPermissionResponse{}, ctx.Err()
 	}
 
-	resp := <-responseCh
-	return resp, nil
+	select {
+	case resp := <-responseCh:
+		return resp, nil
+	case <-ctx.Done():
+		return sdk.RequestPermissionResponse{}, ctx.Err()
+	}
 }
 
 // CreateTerminal spawns a subprocess and tracks it.

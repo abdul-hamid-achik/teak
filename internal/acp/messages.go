@@ -96,3 +96,13 @@ type AgentStartedMsg struct{}
 type AgentStoppedMsg struct {
 	Err error
 }
+
+// AgentModeChangedMsg indicates the mode was changed successfully.
+type AgentModeChangedMsg struct {
+	ModeId sdk.SessionModeId
+}
+
+// AgentErrorMsg indicates an error from the agent.
+type AgentErrorMsg struct {
+	Err error
+}

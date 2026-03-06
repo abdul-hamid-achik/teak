@@ -243,6 +243,8 @@ func (r *Rope) Delete(offset, n int) *Rope {
 }
 
 // buildLineIndex walks the full rope content and populates the lineIndex cache.
+// Note: this mutates the receiver's lineIndex field as a lazy-init cache.
+// This is safe because Rope is only accessed from the single Bubbletea goroutine.
 func (r *Rope) buildLineIndex() {
 	idx := make([]int, 0, r.newlines+1)
 	idx = append(idx, 0)

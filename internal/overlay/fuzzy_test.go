@@ -110,6 +110,74 @@ func TestFuzzyMatchScoreOrdering(t *testing.T) {
 	}
 }
 
+func TestFuzzyMatchSpecialCharacters(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		candidate string
+		wantMatch bool
+	}{
+		{"dot in query", "a.g", "app.go", true},
+		{"slash in query", "i/a", "internal/app", true},
+		{"underscore in query", "m_f", "my_func", true},
+		{"hyphen in query", "f-b", "foo-bar", true},
+		{"backslash separator", "a\\b", "a\\b", true},
+		{"numbers", "123", "file123.go", true},
+		{"mixed symbols", "f.g", "foo.go", true},
+		{"no match with special", "x.y", "abc", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, matched := FuzzyMatch(tt.query, tt.candidate)
+			if matched != tt.wantMatch {
+				t.Errorf("FuzzyMatch(%q, %q) matched=%v, want %v", tt.query, tt.candidate, matched, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestFuzzyMatchUnicode(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		candidate string
+		wantMatch bool
+	}{
+		{"ascii skips multibyte", "hllo", "héllo", true}, // byte-level matching: h matches, then l,l,o found
+		{"same ascii chars", "abc", "abc_日本語", true},
+		{"pure ascii subset", "file", "file_名前.go", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, matched := FuzzyMatch(tt.query, tt.candidate)
+			if matched != tt.wantMatch {
+				t.Errorf("FuzzyMatch(%q, %q) matched=%v, want %v", tt.query, tt.candidate, matched, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestFuzzyMatchSeparatorBonus(t *testing.T) {
+	// Characters after separators should score higher
+	scoreSep, _ := FuzzyMatch("ag", "app.go")
+	scoreNoSep, _ := FuzzyMatch("ag", "abcgo")
+	if scoreSep <= scoreNoSep {
+		t.Errorf("separator match (%d) should score higher than non-separator (%d)", scoreSep, scoreNoSep)
+	}
+}
+
+func TestFuzzyMatchBothEmpty(t *testing.T) {
+	score, matched := FuzzyMatch("", "")
+	if !matched {
+		t.Error("empty query on empty candidate should match")
+	}
+	if score != 0 {
+		t.Errorf("score = %d, want 0", score)
+	}
+}
+
 func TestMatchPositions(t *testing.T) {
 	tests := []struct {
 		name      string

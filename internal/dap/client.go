@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/charmbracelet/log"
 )
@@ -19,7 +22,6 @@ type Client struct {
 	stdin       io.WriteCloser
 	stdout      io.ReadCloser
 	mu          sync.Mutex
-	requestID   int
 	pending     map[int]chan callResult
 	running     bool
 	initialized bool
@@ -218,14 +220,44 @@ type OutputEventBody struct {
 	Column   int    `json:"column,omitempty"`
 }
 
+// resolveCommand tries to find a command in PATH, then in common Go binary locations.
+func resolveCommand(command string) string {
+	if p, err := exec.LookPath(command); err == nil {
+		return p
+	}
+	// Check GOBIN and GOPATH/bin
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		if p := filepath.Join(gobin, command); fileExists(p) {
+			return p
+		}
+	}
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		if p := filepath.Join(gopath, "bin", command); fileExists(p) {
+			return p
+		}
+	}
+	// Check ~/go/bin as fallback
+	if home, err := os.UserHomeDir(); err == nil {
+		if p := filepath.Join(home, "go", "bin", command); fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
 // NewClient creates a new DAP client and starts the debug adapter process.
 func NewClient(command string, args []string, msgChan chan<- any) (*Client, error) {
-	_, err := exec.LookPath(command)
-	if err != nil {
-		return nil, fmt.Errorf("debug adapter %q not found: %w", command, err)
+	resolved := resolveCommand(command)
+	if resolved == "" {
+		return nil, fmt.Errorf("debug adapter %q not found in PATH. Install with: go install github.com/go-delve/delve/cmd/dlv@latest", command)
 	}
 
-	cmd := exec.Command(command, args...)
+	cmd := exec.Command(resolved, args...)
 	cmd.Dir = "."
 
 	stdin, err := cmd.StdinPipe()
@@ -285,7 +317,11 @@ func (c *Client) Initialize() error {
 	c.mu.Unlock()
 
 	// Send initialized event
-	return c.sendEvent("initialized", map[string]any{})
+	if err := c.sendEvent("initialized", map[string]any{}); err != nil {
+		return fmt.Errorf("initialized event: %w", err)
+	}
+	// DAP spec: configurationDone must follow initialized
+	return c.sendRequest("configurationDone", nil, nil)
 }
 
 // Launch starts debugging the specified program.
@@ -462,15 +498,14 @@ func (c *Client) IsReady() bool {
 }
 
 func (c *Client) sendRequest(command string, args any, result *json.RawMessage) error {
+	seq := c.nextSeq()
 	c.mu.Lock()
-	c.requestID++
-	id := c.requestID
 	ch := make(chan callResult, 1)
-	c.pending[id] = ch
+	c.pending[seq] = ch
 	c.mu.Unlock()
 
 	req := Request{
-		Seq:       c.nextSeq(),
+		Seq:       seq,
 		Type:      "request",
 		Command:   command,
 		Arguments: args,
@@ -478,14 +513,22 @@ func (c *Client) sendRequest(command string, args any, result *json.RawMessage) 
 
 	if err := c.send(req); err != nil {
 		c.mu.Lock()
-		delete(c.pending, id)
+		delete(c.pending, seq)
 		c.mu.Unlock()
 		return err
 	}
 
-	res := <-ch
+	var res callResult
+	select {
+	case res = <-ch:
+	case <-time.After(30 * time.Second):
+		c.mu.Lock()
+		delete(c.pending, seq)
+		c.mu.Unlock()
+		return fmt.Errorf("DAP request %q timed out after 30s", command)
+	}
 	c.mu.Lock()
-	delete(c.pending, id)
+	delete(c.pending, seq)
 	c.mu.Unlock()
 
 	if res.Error != nil {
@@ -579,6 +622,21 @@ func (c *Client) handleMessage(data []byte) {
 			if !resp.Success {
 				errResp = &ErrorResponse{
 					Message: resp.Message,
+				}
+				// Try to parse structured error from body
+				if len(resp.Body) > 0 {
+					var bodyErr struct {
+						Error *ErrorResponse `json:"error"`
+					}
+					if json.Unmarshal(resp.Body, &bodyErr) == nil && bodyErr.Error != nil {
+						errResp = bodyErr.Error
+						if errResp.Message == "" {
+							errResp.Message = resp.Message
+						}
+						if errResp.Format != "" && errResp.Message == "" {
+							errResp.Message = errResp.Format
+						}
+					}
 				}
 			}
 			ch <- callResult{

@@ -23,11 +23,13 @@ import (
 	"teak/internal/diff"
 	"teak/internal/editor"
 	"teak/internal/filetree"
+	"teak/internal/highlight"
 	"teak/internal/git"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
 	"teak/internal/problems"
 	"teak/internal/search"
+	"teak/internal/session"
 	"teak/internal/settings"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -111,12 +113,22 @@ type Model struct {
 	closedTabs       []ClosedTab           // history of closed tabs for reopening
 	debuggerPanel    debugger.Model        // debugger panel
 	debugMgr         *dap.Manager          // debug session manager
-	breakpoints      map[string][]int      // file path → sorted line numbers (0-based)
+	breakpoints      map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
 	currentExecFile  string                // file with current execution point
 	currentExecLine  int                   // current execution line (0-based), -1 when not paused
 	showAgent        bool                  // agent panel visible
 	agentPanel       agent.Model           // agent chat panel
 	acpMgr           *acp.Manager          // ACP agent manager
+	logFile          *os.File              // log file handle for cleanup
+	rawDiagnostics   map[string][]lsp.Diagnostic // path → full diagnostics from LSP
+	pendingCloseTab  int                  // tab index pending close-unsaved confirm (-1 = none)
+	untitledCounter  int                  // counter for "Untitled-N" tabs
+	saveAsMode       bool                 // save-as input mode
+	saveAsInput      string               // save-as path input buffer
+	lastSearchResults []search.Result     // saved results from last search
+	lastSearchIndex  int                  // current index in lastSearchResults
+	pendingSaveAfterFormat bool           // save file after formatting completes
+	appCfg           config.Config        // app config for feature flags
 }
 
 // ClosedTab stores information about a closed tab for reopening.
@@ -127,8 +139,18 @@ type ClosedTab struct {
 
 // NewModel creates a new app model, optionally loading a file.
 func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, error) {
-	// Configure charmbracelet logger
-	logger := log.NewWithOptions(os.Stderr, log.Options{
+	// Configure charmbracelet logger to file (not stderr, which Bubbletea owns)
+	logDir := filepath.Join(os.Getenv("HOME"), ".local", "state", "teak")
+	_ = os.MkdirAll(logDir, 0o755)
+	logFile, err := os.OpenFile(filepath.Join(logDir, "teak.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		logFile = nil // fall back to discarding logs rather than corrupting TUI
+	}
+	var logWriter *os.File
+	if logFile != nil {
+		logWriter = logFile
+	}
+	logger := log.NewWithOptions(logWriter, log.Options{
 		Prefix:     "teak",
 		Level:      log.InfoLevel,
 		TimeFormat: "15:04:05",
@@ -140,6 +162,7 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		TabSize:    appCfg.Editor.TabSize,
 		InsertTabs: appCfg.Editor.InsertTabs,
 		AutoIndent: appCfg.Editor.AutoIndent,
+		WordWrap:   appCfg.Editor.WordWrap,
 	}
 	buf := text.NewBuffer()
 	if filePath != "" {
@@ -166,6 +189,10 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		treeContextMenu: editor.NewContextMenu(theme),
 		fileDiagnostics: make(map[string]int),
 		dirDiagnostics:  make(map[string]int),
+		logFile:         logFile,
+		rawDiagnostics:  make(map[string][]lsp.Diagnostic),
+		pendingCloseTab: -1,
+		appCfg:          appCfg,
 		gitBranch:       detectGitBranch(rootDir),
 		gitPanel:        git.New(rootDir, theme),
 		branchPickerM:   git.NewBranchPicker(theme),
@@ -175,7 +202,7 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		settingsM:       settings.New(theme, appCfg, config.ConfigPath()),
 		debuggerPanel:   debugger.New(theme),
 		debugMgr:        dap.NewManager(rootDir),
-		breakpoints:     make(map[string][]int),
+		breakpoints:     make(map[string][]breakpointEntry),
 		currentExecLine: -1,
 		agentPanel:      agent.New(theme),
 	}
@@ -208,6 +235,13 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 
 	// Show welcome screen when no file is provided
 	if filePath == "" {
+		// Try to restore session
+		if appCfg.Session.Enabled {
+			if state, err := session.Load(); err == nil && state.RootDir == rootDir && len(state.Tabs) > 0 {
+				m.restoreSession(state)
+				return m, nil
+			}
+		}
 		w := editor.NewWelcome(theme)
 		m.welcome = &w
 		m.showTree = true
@@ -217,13 +251,109 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 	return m, nil
 }
 
+// cleanup closes resources before quitting.
+func (m *Model) cleanup() {
+	if m.acpMgr != nil {
+		m.acpMgr.Stop()
+	}
+	if m.debugMgr != nil {
+		m.debugMgr.Stop()
+	}
+	m.saveSession()
+	if m.logFile != nil {
+		m.logFile.Close()
+	}
+	if m.watcher != nil {
+		m.watcher.Close()
+	}
+}
+
+// saveSession writes session state to disk.
+func (m *Model) saveSession() {
+	if !m.appCfg.Session.Enabled {
+		return
+	}
+	state := session.State{
+		Version:   1,
+		RootDir:   m.rootDir,
+		ActiveTab: m.activeTab,
+	}
+	for i, ed := range m.editors {
+		fp := ed.Buffer.FilePath
+		if fp == "" {
+			continue // skip untitled/diff tabs
+		}
+		if _, isDiff := m.diffViews[i]; isDiff {
+			continue
+		}
+		state.Tabs = append(state.Tabs, session.TabState{
+			FilePath:   fp,
+			CursorLine: ed.Buffer.Cursor.Line,
+			CursorCol:  ed.Buffer.Cursor.Col,
+			ScrollY:    ed.Viewport.ScrollY,
+			Pinned:     i < len(m.tabBar.Tabs) && !m.tabBar.Tabs[i].Preview,
+		})
+	}
+	_ = session.Save(state)
+}
+
+type sessionAutoSaveMsg struct{}
+
+// restoreSession rebuilds tabs from a saved session state.
+// Called from NewModel, sets up editors that Init() will load asynchronously.
+func (m *Model) restoreSession(state session.State) {
+	// Clear the initial empty editor
+	m.editors = nil
+	m.tabBar.Tabs = nil
+
+	for _, tab := range state.Tabs {
+		// Skip files that no longer exist
+		if _, err := os.Stat(tab.FilePath); err != nil {
+			continue
+		}
+		buf := text.NewBuffer()
+		buf.FilePath = tab.FilePath
+		cfg := editor.DefaultConfig()
+		cfg.TabSize = m.appCfg.Editor.TabSize
+		cfg.InsertTabs = m.appCfg.Editor.InsertTabs
+		cfg.AutoIndent = m.appCfg.Editor.AutoIndent
+		cfg.CommentPrefix = editor.CommentPrefixForFile(tab.FilePath)
+		ed := editor.New(buf, m.theme, cfg)
+		m.editors = append(m.editors, ed)
+		idx := len(m.editors) - 1
+		m.tabBar.AddTab(filepath.Base(tab.FilePath), tab.FilePath)
+		if tab.Pinned {
+			m.tabBar.PinTab(idx)
+		}
+	}
+	if len(m.editors) > 0 {
+		activeIdx := state.ActiveTab
+		if activeIdx >= len(m.editors) {
+			activeIdx = 0
+		}
+		m.activeTab = activeIdx
+		m.tabBar.ActiveIdx = activeIdx
+		m.focus = FocusEditor
+		// Set pending cursor for active tab
+		if activeIdx < len(state.Tabs) {
+			tab := state.Tabs[activeIdx]
+			if tab.CursorLine > 0 || tab.CursorCol > 0 {
+				pos := text.Position{Line: tab.CursorLine, Col: tab.CursorCol}
+				m.pendingCursor = &pos
+			}
+		}
+	}
+}
+
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Load initial file content asynchronously
-	if len(m.editors) > 0 && m.editors[0].Buffer.FilePath != "" {
-		cmds = append(cmds, loadFileCmd(m.editors[0].Buffer.FilePath, 0, false))
+	for i, ed := range m.editors {
+		if ed.Buffer.FilePath != "" {
+			cmds = append(cmds, loadFileCmd(ed.Buffer.FilePath, i, i > 0))
+		}
 	}
 
 	// Start listening for LSP messages
@@ -242,6 +372,14 @@ func (m Model) Init() tea.Cmd {
 	// Start welcome animation if active
 	if m.welcome != nil && m.welcome.Active {
 		cmds = append(cmds, m.welcome.Init())
+	}
+
+	// Start periodic session auto-save
+	if m.appCfg.Session.Enabled && m.appCfg.Session.AutoSaveInterval > 0 {
+		interval := time.Duration(m.appCfg.Session.AutoSaveInterval) * time.Second
+		cmds = append(cmds, tea.Tick(interval, func(t time.Time) tea.Msg {
+			return sessionAutoSaveMsg{}
+		}))
 	}
 
 	// Start DAP event listener
@@ -308,6 +446,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Rename mode captures all input
 		if m.renameMode {
 			return m.handleRenameInput(msg)
+		}
+
+		// Save-as mode captures all input
+		if m.saveAsMode {
+			return m.handleSaveAsInput(msg)
 		}
 
 		// New file/folder mode captures all input
@@ -433,13 +576,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.lspMgr.ShutdownAll()
+			m.cleanup()
 			return m, tea.Quit
 		case "ctrl+s":
 			if m.activeEditor() == nil {
 				return m, nil
 			}
 			buf := m.activeEditor().Buffer
+			if buf.FilePath == "" {
+				// No path yet — trigger save-as
+				m.saveAsMode = true
+				m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+				return m, nil
+			}
+			if m.appCfg.Editor.FormatOnSave {
+				if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
+					m.pendingSaveAfterFormat = true
+					return m, m.requestFormatting()
+				}
+			}
 			return m, SaveFileCmd(buf.Save, buf.FilePath)
+		case "ctrl+shift+s":
+			if m.activeEditor() == nil {
+				return m, nil
+			}
+			m.saveAsMode = true
+			if m.activeEditor().Buffer.FilePath != "" {
+				m.saveAsInput = m.activeEditor().Buffer.FilePath
+			} else {
+				m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+			}
+			return m, nil
 		case "f1":
 			m.showHelp = true
 			m.helpM = editor.NewHelpModel(m.theme)
@@ -463,8 +630,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openSearch(search.ModeSemantic)
 		case "ctrl+space":
 			return m, m.requestCompletion()
-		case "k":
-			// Show hover tooltip (K for Knowledge/Documentation)
+		case "alt+k":
+			// Show hover tooltip (Alt+K for Knowledge/Documentation)
 			if m.focus == FocusEditor {
 				return m, m.requestHover()
 			}
@@ -477,6 +644,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "f12":
 			return m, m.requestDefinition()
+		case "ctrl+shift+[":
+			// Fold at cursor line
+			if ed := m.activeEditor(); ed != nil {
+				ed.Folds.Fold(ed.Buffer.Cursor.Line)
+				m.editors[m.activeTab] = *ed
+			}
+			return m, nil
+		case "ctrl+shift+]":
+			// Unfold at cursor line
+			if ed := m.activeEditor(); ed != nil {
+				ed.Folds.Unfold(ed.Buffer.Cursor.Line)
+				m.editors[m.activeTab] = *ed
+			}
+			return m, nil
+		case "ctrl+shift+[0]":
+			// Fold all
+			if ed := m.activeEditor(); ed != nil {
+				ed.Folds.FoldAll()
+				m.editors[m.activeTab] = *ed
+				m.status = "All regions folded"
+			}
+			return m, nil
+		case "ctrl+shift+[j]":
+			// Unfold all
+			if ed := m.activeEditor(); ed != nil {
+				ed.Folds.UnfoldAll()
+				m.editors[m.activeTab] = *ed
+				m.status = "All regions unfolded"
+			}
+			return m, nil
 		case "ctrl+alt+f":
 			// Format document
 			if m.focus == FocusEditor {
@@ -532,7 +729,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+w":
-			return m.closeCurrentTab()
+			return m.closeCurrentTabSafe()
 		case "ctrl+shift+t":
 			// Reopen last closed tab
 			if len(m.closedTabs) > 0 {
@@ -541,6 +738,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.openFilePinned(lastClosed.FilePath)
 			}
 			return m, nil
+		case "f3":
+			return m.findNext()
+		case "shift+f3":
+			return m.findPrev()
+		case "ctrl+n":
+			return m.newUntitledTab()
 		case "ctrl+g":
 			m.goToLineMode = true
 			m.goToLineInput = ""
@@ -913,6 +1116,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.openFilePinned(filePath)
 
 	case search.CloseSearchMsg:
+		// Save results for F3/Shift+F3 navigation
+		if results := m.searchM.Results(); len(results) > 0 {
+			m.lastSearchResults = results
+			m.lastSearchIndex = 0
+		}
 		m.showSearch = false
 		return m, nil
 
@@ -989,6 +1197,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sessionAutoSaveMsg:
+		m.saveSession()
+		if m.appCfg.Session.Enabled && m.appCfg.Session.AutoSaveInterval > 0 {
+			interval := time.Duration(m.appCfg.Session.AutoSaveInterval) * time.Second
+			return m, tea.Tick(interval, func(t time.Time) tea.Msg {
+				return sessionAutoSaveMsg{}
+			})
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
 		if m.showSearch {
@@ -1016,7 +1234,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case CloseTabMsg:
+		idx := msg.Index
+		if idx == -1 {
+			idx = m.activeTab
+		}
+		return m.closeTabSafe(idx)
+
+	case ForceCloseTabMsg:
 		return m.closeTab(msg.Index)
+
+	case SaveAndCloseTabMsg:
+		if msg.Index >= 0 && msg.Index < len(m.editors) {
+			buf := m.editors[msg.Index].Buffer
+			idx := msg.Index
+			return m, tea.Batch(
+				SaveFileCmd(buf.Save, buf.FilePath),
+				func() tea.Msg { return ForceCloseTabMsg{Index: idx} },
+			)
+		}
+		return m, nil
 
 	case editor.RetokenizeMsg:
 		if m.activeEditor() == nil {
@@ -1067,11 +1303,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.lspMgr.ShutdownAll()
+		m.cleanup()
 		saveCmds = append(saveCmds, tea.Quit)
 		return m, tea.Batch(saveCmds...)
 
 	case QuitWithoutSavingMsg:
 		m.lspMgr.ShutdownAll()
+		m.cleanup()
 		return m, tea.Quit
 
 	case overlay.PickerSelectMsg:
@@ -1319,6 +1557,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Document formatted"
 			m.editors[m.activeTab] = *m.activeEditor()
 		}
+		if m.pendingSaveAfterFormat {
+			m.pendingSaveAfterFormat = false
+			if m.activeEditor() != nil {
+				buf := m.activeEditor().Buffer
+				return m, SaveFileCmd(buf.Save, buf.FilePath)
+			}
+		}
 		return m, nil
 
 	case lsp.CodeActionResultMsg:
@@ -1386,8 +1631,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editor.ContextMenuActionMsg:
 		return m.handleContextMenuAction(msg.Action)
 
+	case editor.BreakpointClickMsg:
+		if ed := m.activeEditor(); ed != nil && ed.Buffer.FilePath != "" {
+			cmd := m.toggleBreakpoint(ed.Buffer.FilePath, msg.Line)
+			return m, cmd
+		}
+		return m, nil
+
 	case LspReadyMsg:
-		// LSP finished initializing — trigger a re-render so indicator updates
+		// LSP finished initializing — set trigger characters on matching editors
+		if client := m.lspMgr.ClientForFile(msg.FilePath); client != nil {
+			if chars := client.GetCompletionTriggerCharacters(); len(chars) > 0 {
+				for i := range m.editors {
+					if m.editors[i].Buffer.FilePath == msg.FilePath {
+						m.editors[i].TriggerCharacters = chars
+					}
+				}
+			}
+		}
+		// Request folding ranges from LSP
+		return m, m.requestFoldingRanges(msg.FilePath)
+
+	case lsp.FoldingRangeResultMsg:
+		for i := range m.editors {
+			if m.editors[i].Buffer.FilePath == msg.FilePath {
+				regions := make([]editor.FoldRegion, len(msg.Ranges))
+				for j, r := range msg.Ranges {
+					regions[j] = editor.FoldRegion{
+						StartLine: r.StartLine,
+						EndLine:   r.EndLine,
+					}
+				}
+				m.editors[i].Folds.SetRegions(regions)
+			}
+		}
 		return m, nil
 
 	case lsp.LspErrorMsg:
@@ -1631,11 +1908,15 @@ func (m Model) View() tea.View {
 	// Set debug gutter state on active editor
 	if ed := m.activeEditor(); ed != nil {
 		filePath := ed.Buffer.FilePath
-		bpLines := m.breakpoints[filePath]
-		if len(bpLines) > 0 || m.currentExecLine >= 0 {
-			bpMap := make(map[int]bool, len(bpLines))
-			for _, l := range bpLines {
-				bpMap[l] = true
+		bpEntries := m.breakpoints[filePath]
+		if len(bpEntries) > 0 || m.currentExecLine >= 0 {
+			bpMap := make(map[int]editor.BreakpointState, len(bpEntries))
+			for _, bp := range bpEntries {
+				if bp.Enabled {
+					bpMap[bp.Line] = editor.BPActive
+				} else {
+					bpMap[bp.Line] = editor.BPDisabled
+				}
 			}
 			execLine := -1
 			if m.currentExecFile == filePath {
@@ -1778,6 +2059,14 @@ func (m Model) View() tea.View {
 			Background(ui.Nord1).
 			Padding(0, 1).
 			Render(fmt.Sprintf("Delete %s? (y/N)", filepath.Base(m.deleteTarget)))
+		content = ui.RenderOverlay(content, box, m.width, m.height)
+	} else if m.saveAsMode {
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ui.Nord3).
+			Background(ui.Nord1).
+			Padding(0, 1).
+			Render(fmt.Sprintf("Save As: %s_", m.saveAsInput))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	}
 
@@ -2363,6 +2652,11 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 		m.watcher.WatchFile(msg.Path)
 	}
 
+	// Detect fold regions (indent-based fallback; LSP foldingRange will override)
+	buf := m.editors[tabIdx].Buffer
+	regions := editor.DetectIndentRegions(buf.Line, buf.LineCount())
+	m.editors[tabIdx].Folds.SetRegions(regions)
+
 	// Async tokenize + LSP open
 	return m, tea.Batch(
 		m.editors[tabIdx].ScheduleInitialTokenize(),
@@ -2388,6 +2682,43 @@ func (m Model) findReplaceableTab() int {
 
 func (m Model) closeCurrentTab() (tea.Model, tea.Cmd) {
 	return m.closeTab(m.activeTab)
+}
+
+func (m Model) closeCurrentTabSafe() (tea.Model, tea.Cmd) {
+	return m.closeTabSafe(m.activeTab)
+}
+
+func (m Model) closeTabSafe(idx int) (tea.Model, tea.Cmd) {
+	if idx < 0 || idx >= len(m.editors) {
+		return m, nil
+	}
+	buf := m.editors[idx].Buffer
+	if buf.Dirty() {
+		name := filepath.Base(buf.FilePath)
+		if name == "." || buf.FilePath == "" {
+			name = m.tabBar.Tabs[idx].Label
+		}
+		m.pendingCloseTab = idx
+		buttons := []overlay.Button{
+			{Label: "Close Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: ForceCloseTabMsg{Index: idx}},
+			{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
+		}
+		if buf.FilePath != "" {
+			buttons = append([]overlay.Button{
+				{Label: "Save & Close", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAndCloseTabMsg{Index: idx}},
+			}, buttons...)
+		}
+		confirm := overlay.NewConfirm(
+			"Unsaved Changes",
+			fmt.Sprintf("%q has unsaved changes.", name),
+			nil,
+			buttons,
+			m.theme,
+		)
+		m.unsavedConfirm = confirm
+		return m, nil
+	}
+	return m.closeTab(idx)
 }
 
 func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
@@ -2446,11 +2777,112 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) findNext() (tea.Model, tea.Cmd) {
+	if len(m.lastSearchResults) == 0 {
+		m.status = "No search results"
+		return m, nil
+	}
+	// Find next result after current cursor
+	ed := m.activeEditor()
+	if ed != nil {
+		curFile := ed.Buffer.FilePath
+		curLine := ed.Buffer.Cursor.Line
+		curCol := ed.Buffer.Cursor.Col
+		for i := 0; i < len(m.lastSearchResults); i++ {
+			idx := (m.lastSearchIndex + 1 + i) % len(m.lastSearchResults)
+			r := m.lastSearchResults[idx]
+			rPath := r.FilePath
+			if !filepath.IsAbs(rPath) {
+				rPath = filepath.Join(m.rootDir, rPath)
+			}
+			if rPath == curFile && (r.Line > curLine || (r.Line == curLine && r.Col > curCol)) {
+				m.lastSearchIndex = idx
+				pos := text.Position{Line: r.Line, Col: r.Col}
+				m.pendingCursor = &pos
+				m.status = fmt.Sprintf("Match %d/%d", idx+1, len(m.lastSearchResults))
+				return m.openFilePinned(rPath)
+			}
+		}
+	}
+	// Wrap around: use next index
+	m.lastSearchIndex = (m.lastSearchIndex + 1) % len(m.lastSearchResults)
+	r := m.lastSearchResults[m.lastSearchIndex]
+	rPath := r.FilePath
+	if !filepath.IsAbs(rPath) {
+		rPath = filepath.Join(m.rootDir, rPath)
+	}
+	pos := text.Position{Line: r.Line, Col: r.Col}
+	m.pendingCursor = &pos
+	m.status = fmt.Sprintf("Match %d/%d (wrapped)", m.lastSearchIndex+1, len(m.lastSearchResults))
+	return m.openFilePinned(rPath)
+}
+
+func (m Model) findPrev() (tea.Model, tea.Cmd) {
+	if len(m.lastSearchResults) == 0 {
+		m.status = "No search results"
+		return m, nil
+	}
+	ed := m.activeEditor()
+	if ed != nil {
+		curFile := ed.Buffer.FilePath
+		curLine := ed.Buffer.Cursor.Line
+		curCol := ed.Buffer.Cursor.Col
+		for i := 0; i < len(m.lastSearchResults); i++ {
+			idx := (m.lastSearchIndex - 1 - i + len(m.lastSearchResults)) % len(m.lastSearchResults)
+			r := m.lastSearchResults[idx]
+			rPath := r.FilePath
+			if !filepath.IsAbs(rPath) {
+				rPath = filepath.Join(m.rootDir, rPath)
+			}
+			if rPath == curFile && (r.Line < curLine || (r.Line == curLine && r.Col < curCol)) {
+				m.lastSearchIndex = idx
+				pos := text.Position{Line: r.Line, Col: r.Col}
+				m.pendingCursor = &pos
+				m.status = fmt.Sprintf("Match %d/%d", idx+1, len(m.lastSearchResults))
+				return m.openFilePinned(rPath)
+			}
+		}
+	}
+	m.lastSearchIndex = (m.lastSearchIndex - 1 + len(m.lastSearchResults)) % len(m.lastSearchResults)
+	r := m.lastSearchResults[m.lastSearchIndex]
+	rPath := r.FilePath
+	if !filepath.IsAbs(rPath) {
+		rPath = filepath.Join(m.rootDir, rPath)
+	}
+	pos := text.Position{Line: r.Line, Col: r.Col}
+	m.pendingCursor = &pos
+	m.status = fmt.Sprintf("Match %d/%d (wrapped)", m.lastSearchIndex+1, len(m.lastSearchResults))
+	return m.openFilePinned(rPath)
+}
+
+func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
+	if m.welcome != nil {
+		m.welcome.Dismiss()
+	}
+	m.untitledCounter++
+	label := fmt.Sprintf("Untitled-%d", m.untitledCounter)
+	buf := text.NewBuffer()
+	cfg := editor.DefaultConfig()
+	if len(m.editors) > 0 {
+		cfg = m.editors[0].Config
+	}
+	ed := editor.New(buf, m.theme, cfg)
+	m.editors = append(m.editors, ed)
+	idx := len(m.editors) - 1
+	m.tabBar.AddTab(label, "")
+	m.tabBar.PinTab(idx)
+	m.activeTab = idx
+	m.tabBar.ActiveIdx = idx
+	m.focus = FocusEditor
+	m.relayout()
+	return m, nil
+}
+
 func (m Model) handleTabBarClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	// Check close buttons first
 	for i, tab := range m.tabBar.Tabs {
 		if zone.Get(editor.TabCloseZoneID(tab)).InBounds(msg) {
-			return m.closeTab(i)
+			return m.closeTabSafe(i)
 		}
 	}
 	// Then check label zones for switching
@@ -2704,7 +3136,14 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Update centralized file diagnostics map
+	// Store full diagnostics for problems panel
+	if len(msg.Diagnostics) == 0 {
+		delete(m.rawDiagnostics, path)
+	} else {
+		m.rawDiagnostics[path] = msg.Diagnostics
+	}
+
+	// Update centralized file diagnostics map (worst severity only)
 	if len(msg.Diagnostics) == 0 {
 		delete(m.fileDiagnostics, path)
 	} else {
@@ -2756,23 +3195,20 @@ func (m *Model) updateDirDiagnostics() {
 	}
 }
 
-// updateProblemsPanel rebuilds the problems panel from file diagnostics.
+// updateProblemsPanel rebuilds the problems panel from all received diagnostics.
 func (m *Model) updateProblemsPanel() {
-	// Collect all problems from editor diagnostics
 	var allProblems []problems.Problem
-	for _, ed := range m.editors {
-		if ed.Buffer.FilePath == "" {
-			continue
-		}
-		for _, d := range ed.Diagnostics {
+	for path, diags := range m.rawDiagnostics {
+		for _, d := range diags {
 			allProblems = append(allProblems, problems.Problem{
-				FilePath: ed.Buffer.FilePath,
-				Line:     d.StartLine,
-				Col:      d.StartCol,
-				EndLine:  d.EndLine,
-				EndCol:   d.EndCol,
-				Severity: d.Severity,
+				FilePath: path,
+				Line:     d.Range.Start.Line,
+				Col:      d.Range.Start.Character,
+				EndLine:  d.Range.End.Line,
+				EndCol:   d.Range.End.Character,
+				Severity: int(d.Severity),
 				Message:  d.Message,
+				Source:   d.Source,
 			})
 		}
 	}
@@ -2837,46 +3273,57 @@ func (m Model) listenLSP() tea.Cmd {
 
 // DAP helpers
 
+type breakpointEntry struct {
+	Line    int
+	Enabled bool
+}
+
 type dapMsg struct {
 	msg any
 }
 
-// toggleBreakpoint toggles a breakpoint at the given file and line (0-based).
+// toggleBreakpoint cycles breakpoint state: none → active → disabled → removed.
 func (m *Model) toggleBreakpoint(filePath string, line int) tea.Cmd {
-	lines := m.breakpoints[filePath]
+	entries := m.breakpoints[filePath]
 
 	// Check if breakpoint already exists at this line
 	idx := -1
-	for i, l := range lines {
-		if l == line {
+	for i, bp := range entries {
+		if bp.Line == line {
 			idx = i
 			break
 		}
 	}
 
 	if idx >= 0 {
-		// Remove breakpoint
-		lines = append(lines[:idx], lines[idx+1:]...)
+		if entries[idx].Enabled {
+			// Active → disabled
+			entries[idx].Enabled = false
+		} else {
+			// Disabled → remove
+			entries = append(entries[:idx], entries[idx+1:]...)
+		}
 	} else {
-		// Add breakpoint in sorted position
+		// Add breakpoint (active) in sorted position
+		bp := breakpointEntry{Line: line, Enabled: true}
 		inserted := false
-		for i, l := range lines {
-			if line < l {
-				lines = append(lines[:i+1], lines[i:]...)
-				lines[i] = line
+		for i, e := range entries {
+			if line < e.Line {
+				entries = append(entries[:i+1], entries[i:]...)
+				entries[i] = bp
 				inserted = true
 				break
 			}
 		}
 		if !inserted {
-			lines = append(lines, line)
+			entries = append(entries, bp)
 		}
 	}
 
-	if len(lines) == 0 {
+	if len(entries) == 0 {
 		delete(m.breakpoints, filePath)
 	} else {
-		m.breakpoints[filePath] = lines
+		m.breakpoints[filePath] = entries
 	}
 
 	// Update debugger panel breakpoint display
@@ -2892,12 +3339,12 @@ func (m *Model) toggleBreakpoint(filePath string, line int) tea.Cmd {
 // syncDebuggerBreakpoints updates the debugger panel's breakpoint list.
 func (m *Model) syncDebuggerBreakpoints() {
 	var bps []debugger.Breakpoint
-	for fp, lines := range m.breakpoints {
-		for _, line := range lines {
+	for fp, entries := range m.breakpoints {
+		for _, bp := range entries {
 			bps = append(bps, debugger.Breakpoint{
 				FilePath: fp,
-				Line:     line,
-				Enabled:  true,
+				Line:     bp.Line,
+				Enabled:  bp.Enabled,
 			})
 		}
 	}
@@ -2907,11 +3354,13 @@ func (m *Model) syncDebuggerBreakpoints() {
 // sendBreakpointsToDAP sends breakpoints for a file to the DAP adapter.
 func (m Model) sendBreakpointsToDAP(filePath string) tea.Cmd {
 	mgr := m.debugMgr
-	lines := m.breakpoints[filePath]
-	// DAP uses 1-based lines
-	dapLines := make([]int, len(lines))
-	for i, l := range lines {
-		dapLines[i] = l + 1
+	entries := m.breakpoints[filePath]
+	// DAP uses 1-based lines; only send enabled breakpoints
+	var dapLines []int
+	for _, bp := range entries {
+		if bp.Enabled {
+			dapLines = append(dapLines, bp.Line+1)
+		}
 	}
 	return func() tea.Msg {
 		mgr.SetBreakpoints(filePath, dapLines)
@@ -3200,6 +3649,24 @@ func (m Model) requestFormatting() tea.Cmd {
 	}
 }
 
+func (m Model) requestFoldingRanges(filePath string) tea.Cmd {
+	if filePath == "" {
+		return nil
+	}
+	mgr := m.lspMgr
+	return func() tea.Msg {
+		client := mgr.ClientForFile(filePath)
+		if client == nil {
+			return nil
+		}
+		ranges, err := client.FoldingRange(lsp.FileURI(filePath))
+		if err != nil || len(ranges) == 0 {
+			return nil
+		}
+		return lsp.FoldingRangeResultMsg{FilePath: filePath, Ranges: ranges}
+	}
+}
+
 func (m Model) requestCodeActions() tea.Cmd {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
@@ -3297,6 +3764,85 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		if msg.Text != "" && msg.Text >= "0" && msg.Text <= "9" {
 			m.goToLineInput += msg.Text
+		}
+		return m, nil
+	}
+}
+
+func (m Model) handleSaveAsInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "escape":
+		m.saveAsMode = false
+		m.saveAsInput = ""
+		return m, nil
+	case "enter":
+		m.saveAsMode = false
+		newPath := m.saveAsInput
+		m.saveAsInput = ""
+		if newPath == "" {
+			return m, nil
+		}
+		ed := m.activeEditor()
+		if ed == nil {
+			return m, nil
+		}
+		oldPath := ed.Buffer.FilePath
+		oldURI := ""
+		if oldPath != "" {
+			oldURI = lsp.FileURI(oldPath)
+		}
+		// Save to new path
+		if err := ed.Buffer.SaveAs(newPath); err != nil {
+			m.status = fmt.Sprintf("Save-As error: %v", err)
+			return m, nil
+		}
+		// Update tab label and path
+		m.tabBar.Tabs[m.activeTab].Label = filepath.Base(newPath)
+		m.tabBar.Tabs[m.activeTab].FilePath = newPath
+		m.tabBar.Tabs[m.activeTab].Dirty = false
+		m.tabBar.PinTab(m.activeTab)
+		// Update highlighter if extension changed
+		ext := filepath.Ext(newPath)
+		oldExt := filepath.Ext(oldPath)
+		if ext != oldExt || ed.Highlighter == nil {
+			ed.Highlighter = nil
+			newEd := editor.New(ed.Buffer, m.theme, ed.Config)
+			newEd.Highlighter = nil
+			if newPath != "" {
+				hl := highlight.New(newPath, m.theme)
+				hl.TokenizePrefix(ed.Buffer.Bytes(), 60)
+				newEd.Highlighter = hl
+			}
+			newEd.SetSize(ed.Viewport.Width, ed.Viewport.Height)
+			newEd.HasLSP = ed.HasLSP
+			m.editors[m.activeTab] = newEd
+		} else {
+			m.editors[m.activeTab] = *ed
+		}
+		// Update watcher
+		if m.watcher != nil {
+			m.watcher.WatchFile(newPath)
+		}
+		// LSP: close old, open new
+		if oldURI != "" {
+			if client := m.lspMgr.ClientForFile(oldPath); client != nil {
+				client.DidClose(oldURI)
+			}
+		}
+		// Re-open via lspDidOpen which handles EnsureClient + DidOpen
+		lspCmd := m.lspDidOpen(m.editors[m.activeTab].Buffer)
+		// Update editor comment prefix
+		m.editors[m.activeTab].Config.CommentPrefix = editor.CommentPrefixForFile(newPath)
+		m.status = fmt.Sprintf("Saved as %s", newPath)
+		return m, lspCmd
+	case "backspace":
+		if len(m.saveAsInput) > 0 {
+			m.saveAsInput = m.saveAsInput[:len(m.saveAsInput)-1]
+		}
+		return m, nil
+	default:
+		if msg.Text != "" {
+			m.saveAsInput += msg.Text
 		}
 		return m, nil
 	}
@@ -4074,8 +4620,26 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Debugging stopped"
 		}
 		return m, nil
+	case newFileMsg:
+		return m.newUntitledTab()
+	case saveAsMsg:
+		if m.activeEditor() == nil {
+			return m, nil
+		}
+		m.saveAsMode = true
+		if m.activeEditor().Buffer.FilePath != "" {
+			m.saveAsInput = m.activeEditor().Buffer.FilePath
+		} else {
+			m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+		}
+		return m, nil
+	case FindNextMsg:
+		return m.findNext()
+	case FindPrevMsg:
+		return m.findPrev()
 	case quitMsg:
 		m.lspMgr.ShutdownAll()
+		m.cleanup()
 		return m, tea.Quit
 	}
 	return m, nil

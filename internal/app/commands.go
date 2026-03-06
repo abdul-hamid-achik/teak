@@ -84,6 +84,22 @@ type SaveAllAndQuitMsg struct{}
 // QuitWithoutSavingMsg is sent when the user confirms quitting without saving.
 type QuitWithoutSavingMsg struct{}
 
+// ForceCloseTabMsg closes a tab without saving.
+type ForceCloseTabMsg struct {
+	Index int
+}
+
+// SaveAndCloseTabMsg saves a tab then closes it.
+type SaveAndCloseTabMsg struct {
+	Index int
+}
+
+// FindNextMsg navigates to the next search result.
+type FindNextMsg struct{}
+
+// FindPrevMsg navigates to the previous search result.
+type FindPrevMsg struct{}
+
 // loadDiffCmd runs git diff and parses the result.
 func loadDiffCmd(rootDir, relPath, status string, tabIndex int) tea.Cmd {
 	return func() tea.Msg {

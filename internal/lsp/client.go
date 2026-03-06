@@ -286,6 +286,7 @@ func (c *Client) Shutdown() {
 	c.call(ctx, "shutdown", nil)
 	c.notify("exit", nil)
 	c.cancelRead()
+	c.stdout.Close() // unblocks readLoop's Read() call
 	c.stdin.Close()
 	c.cmd.Wait()
 }
@@ -737,6 +738,35 @@ func (c *Client) Formatting(uri string) ([]TextEdit, error) {
 		})
 	}
 	return textEdits, nil
+}
+
+// FoldingRange requests folding ranges for a document.
+func (c *Client) FoldingRange(uri string) ([]FoldingRange, error) {
+	c.mu.Lock()
+	supported := c.capabilities.FoldingRangeProvider
+	c.mu.Unlock()
+	if !supported {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := c.call(ctx, "textDocument/foldingRange", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if string(result) == "null" {
+		return nil, nil
+	}
+
+	var ranges []FoldingRange
+	if err := json.Unmarshal(result, &ranges); err != nil {
+		return nil, err
+	}
+	return ranges, nil
 }
 
 // CodeAction requests code actions for a range with diagnostics.

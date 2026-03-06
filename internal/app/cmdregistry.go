@@ -162,6 +162,38 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:       "new_file",
+			Label:    "New File",
+			Shortcut: "Ctrl+N",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: newFileMsg{}}
+			},
+		},
+		{
+			ID:       "save_as",
+			Label:    "Save As...",
+			Shortcut: "Ctrl+Shift+S",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: saveAsMsg{}}
+			},
+		},
+		{
+			ID:       "find_next",
+			Label:    "Find Next",
+			Shortcut: "F3",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: FindNextMsg{}}
+			},
+		},
+		{
+			ID:       "find_prev",
+			Label:    "Find Previous",
+			Shortcut: "Shift+F3",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: FindPrevMsg{}}
+			},
+		},
+		{
 			ID:       "quit",
 			Label:    "Quit",
 			Shortcut: "Ctrl+Q",
@@ -197,18 +229,20 @@ func (m *Model) commandRegistry() []Command {
 
 // Internal message types for command palette actions.
 type (
-	saveRequestMsg      struct{}
-	toggleTreeMsg       struct{}
-	toggleGitMsg        struct{}
-	toggleProblemsMsg   struct{}
-	openSearchMsg       struct{ mode search.Mode }
+	saveRequestMsg       struct{}
+	toggleTreeMsg        struct{}
+	toggleGitMsg         struct{}
+	toggleProblemsMsg    struct{}
+	openSearchMsg        struct{ mode search.Mode }
 	openSearchReplaceMsg struct{}
-	goToLineMsg         struct{}
-	quickOpenMsg        struct{}
-	showHelpMsg         struct{}
-	openSettingsMsg     struct{}
-	reopenTabMsg        struct{}
-	debugStartMsg       struct{}
-	debugStopMsg        struct{}
-	quitMsg             struct{}
+	goToLineMsg          struct{}
+	quickOpenMsg         struct{}
+	showHelpMsg          struct{}
+	openSettingsMsg      struct{}
+	reopenTabMsg         struct{}
+	debugStartMsg        struct{}
+	debugStopMsg         struct{}
+	quitMsg              struct{}
+	newFileMsg           struct{}
+	saveAsMsg            struct{}
 )
