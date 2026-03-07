@@ -82,7 +82,11 @@ func configPath() string {
 	if dir, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(dir, "teak", "config.toml")
 	}
-	home, _ := os.UserHomeDir()
+	// Fallback to temp directory for CI environments
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "teak", "config.toml")
+	}
 	return filepath.Join(home, ".config", "teak", "config.toml")
 }
 

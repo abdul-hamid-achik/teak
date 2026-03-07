@@ -335,8 +335,9 @@ func (m *Manager) Stop() {
 func (m *Manager) loadMcpServers() []sdk.McpServer {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Error("acp: cannot determine home directory", "err", err)
-		return []sdk.McpServer{}
+		// Fallback to temp directory for CI environments
+		home = os.TempDir()
+		log.Info("acp: using temp directory as home", "path", home)
 	}
 
 	configPath := filepath.Join(home, ".config", "opencode", "opencode.json")

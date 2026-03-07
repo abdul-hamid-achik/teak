@@ -25,7 +25,12 @@ type State struct {
 
 // Path returns the session file path.
 func Path() string {
-	home, _ := os.UserHomeDir()
+	// In CI or when home dir is not available, use temp directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to temp directory for CI environments
+		return filepath.Join(os.TempDir(), "teak", "session.json")
+	}
 	return filepath.Join(home, ".local", "state", "teak", "session.json")
 }
 
