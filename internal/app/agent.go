@@ -428,6 +428,11 @@ func (m *Model) applyAgentWrite(path, content string) tea.Cmd {
 
 // validatePathStrict performs stricter validation including symlink resolution
 func validatePathStrict(rootDir, path string) (string, error) {
+	// Reject absolute paths
+	if filepath.IsAbs(path) {
+		return "", fmt.Errorf("absolute paths are not allowed: %q", path)
+	}
+
 	cleanPath := filepath.Clean(path)
 
 	absPath, err := filepath.Abs(filepath.Join(rootDir, cleanPath))

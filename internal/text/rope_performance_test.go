@@ -1,3 +1,6 @@
+//go:build !race
+// +build !race
+
 package text
 
 import (
@@ -90,15 +93,15 @@ func TestRopeLineOperationsPerformance(t *testing.T) {
 	// Test random line access (simulates scrolling)
 	rand.Seed(time.Now().UnixNano())
 	start := time.Now()
-	
+
 	for i := 0; i < 1000; i++ {
 		lineNum := rand.Intn(10000)
 		_ = r.LineStart(lineNum)
 		_ = r.Line(lineNum)
 	}
-	
+
 	accessDuration := time.Since(start)
-	
+
 	// 1000 random accesses should be fast (< 50ms)
 	if accessDuration > 50*time.Millisecond {
 		t.Errorf("1000 line accesses took %v, expected < 50ms", accessDuration)
@@ -113,7 +116,7 @@ func TestRopePositionConversionPerformance(t *testing.T) {
 
 	// Test many position conversions (simulates cursor movement)
 	start := time.Now()
-	
+
 	for line := 0; line < 10000; line++ {
 		for col := 0; col < 79; col += 10 {
 			pos := Position{Line: line, Col: col}
@@ -121,9 +124,9 @@ func TestRopePositionConversionPerformance(t *testing.T) {
 			_ = r.OffsetToPosition(offset)
 		}
 	}
-	
+
 	convertDuration := time.Since(start)
-	
+
 	// ~80k conversions should complete in < 500ms
 	if convertDuration > 500*time.Millisecond {
 		t.Errorf("position conversions took %v, expected < 500ms", convertDuration)
