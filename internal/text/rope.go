@@ -1,6 +1,9 @@
 package text
 
-import "bytes"
+import (
+	"bytes"
+	"sync"
+)
 
 const maxLeaf = 512
 
@@ -13,7 +16,8 @@ type Rope struct {
 	len       int
 	newlines  int
 	depth     int
-	lineIndex []int // lazy cache of byte offsets for each line start
+	lineIndex []int   // lazy cache of byte offsets for each line start
+	initOnce  sync.Once // ensures lineIndex is built only once
 }
 
 // fibonacci numbers for rebalancing threshold
@@ -243,8 +247,7 @@ func (r *Rope) Delete(offset, n int) *Rope {
 }
 
 // buildLineIndex walks the full rope content and populates the lineIndex cache.
-// Note: this mutates the receiver's lineIndex field as a lazy-init cache.
-// This is safe because Rope is only accessed from the single Bubbletea goroutine.
+// This is safe for concurrent access via sync.Once.
 func (r *Rope) buildLineIndex() {
 	idx := make([]int, 0, r.newlines+1)
 	idx = append(idx, 0)
@@ -257,14 +260,18 @@ func (r *Rope) buildLineIndex() {
 	r.lineIndex = idx
 }
 
+// ensureLineIndex ensures the lineIndex cache is initialized.
+// Safe for concurrent access.
+func (r *Rope) ensureLineIndex() {
+	r.initOnce.Do(r.buildLineIndex)
+}
+
 // LineStart returns the byte offset of the start of the given line (0-based).
 func (r *Rope) LineStart(line int) ByteOffset {
 	if line <= 0 {
 		return 0
 	}
-	if r.lineIndex == nil {
-		r.buildLineIndex()
-	}
+	r.ensureLineIndex()
 	if line < len(r.lineIndex) {
 		return r.lineIndex[line]
 	}
@@ -312,9 +319,7 @@ func (r *Rope) Line(line int) []byte {
 
 // LineLen returns the length in bytes of the given line, excluding the newline.
 func (r *Rope) LineLen(line int) int {
-	if r.lineIndex == nil {
-		r.buildLineIndex()
-	}
+	r.ensureLineIndex()
 	start := r.LineStart(line)
 	// Check if there is a next line in the index (meaning this line ends with \n)
 	if line+1 < len(r.lineIndex) {
