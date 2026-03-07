@@ -23,8 +23,8 @@ import (
 	"teak/internal/diff"
 	"teak/internal/editor"
 	"teak/internal/filetree"
-	"teak/internal/highlight"
 	"teak/internal/git"
+	"teak/internal/highlight"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
 	"teak/internal/problems"
@@ -59,76 +59,83 @@ const (
 
 // Model is the root Bubbletea model.
 type Model struct {
-	editors          []editor.Editor
-	activeTab        int
-	tabBar           editor.TabBar
-	tree             filetree.Model
-	theme            ui.Theme
-	status           string
-	width            int
-	height           int
-	showHelp         bool
-	helpM            editor.HelpModel
-	showTree         bool
-	showSearch       bool
-	searchMode       search.Mode
-	searchM          search.Model
-	focus            FocusArea
-	rootDir          string
-	lspMgr           *lsp.Manager
-	goToLineMode     bool
-	goToLineInput    string
-	welcome          *editor.Welcome
-	treeContextMenu  editor.ContextMenu
-	treeContextPath  string
-	renameMode       bool
-	renameInput      string
-	pendingCursor    *text.Position        // cursor to set after async file load
-	fileDiagnostics  map[string]int        // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
-	dirDiagnostics   map[string]int        // dir path → worst child severity
-	gitBranch        string                // current git branch name
-	gitPanel         git.Model             // git sidebar panel
-	watcher          *fileWatcher          // watches files/dirs for external changes
-	newFileMode      bool                  // input mode for new file name
-	newFolderMode    bool                  // input mode for new folder name
-	newItemInput     string                // input buffer for new file/folder name
-	newItemDir       string                // directory to create new item in
-	deleteConfirm    bool                  // confirming deletion
-	deleteTarget     string                // path to delete
-	diffViews        map[int]diff.Model    // tab index → diff view model
-	sidebarTab       SidebarTab            // active sidebar tab
-	showBranchPicker bool                  // branch picker overlay visible
-	branchPickerM    git.BranchPickerModel // branch picker model
-	gitContextMenu   editor.ContextMenu    // context menu for git panel
-	gitContextEntry  *git.StatusEntry      // entry right-clicked in git panel
-	gitContextStaged bool                  // whether the right-clicked entry is in staged section
-	gitContextPath   string                // path of right-clicked entry (file or dir)
-	unsavedConfirm   *overlay.Confirm      // unsaved changes dialog shown on quit
-	overlayStack     overlay.Stack         // stack for picker overlays (quick open, command palette)
-	cachedFiles      []string              // cached file list for quick open
-	cachedFilesReady bool                  // true after file list has been loaded
-	problemsPanel    problems.Model        // problems panel for diagnostics
-	showSettings     bool                  // settings overlay visible
-	settingsM        settings.Model        // settings editor model
-	closedTabs       []ClosedTab           // history of closed tabs for reopening
-	debuggerPanel    debugger.Model        // debugger panel
-	debugMgr         *dap.Manager          // debug session manager
-	breakpoints      map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
-	currentExecFile  string                // file with current execution point
-	currentExecLine  int                   // current execution line (0-based), -1 when not paused
-	showAgent        bool                  // agent panel visible
-	agentPanel       agent.Model           // agent chat panel
-	acpMgr           *acp.Manager          // ACP agent manager
-	coordinator      *Coordinator          // orchestrates LSP/DAP/ACP coordinators
-	logFile          *os.File              // log file handle for cleanup
-	pendingCloseTab  int                  // tab index pending close-unsaved confirm (-1 = none)
-	untitledCounter  int                  // counter for "Untitled-N" tabs
-	saveAsMode       bool                 // save-as input mode
-	saveAsInput      string               // save-as path input buffer
-	lastSearchResults []search.Result     // saved results from last search
-	lastSearchIndex  int                  // current index in lastSearchResults
-	pendingSaveAfterFormat bool           // save file after formatting completes
-	appCfg           config.Config        // app config for feature flags
+	editors                []editor.Editor
+	activeTab              int
+	tabBar                 editor.TabBar
+	tree                   filetree.Model
+	theme                  ui.Theme
+	status                 string
+	width                  int
+	height                 int
+	showHelp               bool
+	helpM                  editor.HelpModel
+	showTree               bool
+	showSearch             bool
+	searchMode             search.Mode
+	searchM                search.Model
+	focus                  FocusArea
+	rootDir                string
+	lspMgr                 *lsp.Manager
+	goToLineMode           bool
+	goToLineInput          string
+	welcome                *editor.Welcome
+	treeContextMenu        editor.ContextMenu
+	treeContextPath        string
+	renameMode             bool
+	renameInput            string
+	pendingCursor          *text.Position               // cursor to set after async file load
+	fileDiagnostics        map[string]int               // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	dirDiagnostics         map[string]int               // dir path → worst child severity
+	gitBranch              string                       // current git branch name
+	gitPanel               git.Model                    // git sidebar panel
+	watcher                *fileWatcher                 // watches files/dirs for external changes
+	newFileMode            bool                         // input mode for new file name
+	newFolderMode          bool                         // input mode for new folder name
+	newItemInput           string                       // input buffer for new file/folder name
+	newItemDir             string                       // directory to create new item in
+	deleteConfirm          bool                         // confirming deletion
+	deleteTarget           string                       // path to delete
+	diffViews              map[int]diff.Model           // tab index → diff view model
+	sidebarTab             SidebarTab                   // active sidebar tab
+	showBranchPicker       bool                         // branch picker overlay visible
+	branchPickerM          git.BranchPickerModel        // branch picker model
+	gitContextMenu         editor.ContextMenu           // context menu for git panel
+	gitContextEntry        *git.StatusEntry             // entry right-clicked in git panel
+	gitContextStaged       bool                         // whether the right-clicked entry is in staged section
+	gitContextPath         string                       // path of right-clicked entry (file or dir)
+	unsavedConfirm         *overlay.Confirm             // unsaved changes dialog shown on quit
+	overlayStack           overlay.Stack                // stack for picker overlays (quick open, command palette)
+	cachedFiles            []string                     // cached file list for quick open
+	cachedFilesReady       bool                         // true after file list has been loaded
+	problemsPanel          problems.Model               // problems panel for diagnostics
+	showSettings           bool                         // settings overlay visible
+	settingsM              settings.Model               // settings editor model
+	closedTabs             []ClosedTab                  // history of closed tabs for reopening
+	debuggerPanel          debugger.Model               // debugger panel
+	debugMgr               *dap.Manager                 // debug session manager
+	breakpoints            map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
+	currentExecFile        string                       // file with current execution point
+	currentExecLine        int                          // current execution line (0-based), -1 when not paused
+	showAgent              bool                         // agent panel visible
+	agentPanel             agent.Model                  // agent chat panel
+	acpMgr                 *acp.Manager                 // ACP agent manager
+	coordinator            *Coordinator                 // orchestrates LSP/DAP/ACP coordinators
+	logFile                *os.File                     // log file handle for cleanup
+	pendingCloseTab        int                          // tab index pending close-unsaved confirm (-1 = none)
+	untitledCounter        int                          // counter for "Untitled-N" tabs
+	saveAsMode             bool                         // save-as input mode
+	saveAsInput            string                       // save-as path input buffer
+	lastSearchResults      []search.Result              // saved results from last search
+	lastSearchIndex        int                          // current index in lastSearchResults
+	pendingSaveAfterFormat bool                         // save file after formatting completes
+	appCfg                 config.Config                // app config for feature flags
+
+	// Managers (refactoring in progress)
+	tabMgr      *TabManager
+	sidebarMgr  *SidebarManager
+	overlayMgr  *OverlayManager
+	layoutMgr   *LayoutManager
+	protocolMgr *ProtocolManager
 }
 
 // ClosedTab stores information about a closed tab for reopening.
@@ -213,6 +220,14 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 
 	// Create coordinator to orchestrate LSP/DAP/ACP
 	m.coordinator = NewCoordinator(m.lspMgr, m.debugMgr, m.acpMgr)
+
+	// Initialize managers (refactoring in progress)
+	m.tabMgr = NewTabManager(theme)
+	m.sidebarMgr = NewSidebarManager(rootDir, theme)
+	m.overlayMgr = NewOverlayManager(theme, rootDir)
+	m.layoutMgr = NewLayoutManager(theme)
+	m.protocolMgr = NewProtocolManager(rootDir, appCfg, theme)
+	m.protocolMgr.SetCoordinator(m.coordinator)
 
 	if rootDir != "" {
 		m.tree = filetree.New(rootDir, theme)
@@ -2135,6 +2150,14 @@ func (m Model) activeDiffView() string {
 }
 
 func (m *Model) activeEditor() *editor.Editor {
+	// Try using TabManager first (new way)
+	if m.tabMgr != nil {
+		if ed := m.tabMgr.GetActiveEditor(); ed != nil {
+			return ed
+		}
+	}
+
+	// Fallback to legacy fields during transition
 	if len(m.editors) == 0 {
 		return nil
 	}
@@ -3214,7 +3237,7 @@ func (m *Model) updateDirDiagnostics() {
 // updateProblemsPanel rebuilds the problems panel from all received diagnostics.
 func (m *Model) updateProblemsPanel() {
 	var allProblems []problems.Problem
-	
+
 	// Get diagnostics from LSP coordinator (single source of truth)
 	if m.coordinator != nil {
 		lspCoord := m.coordinator.GetLSPCoordinator()
