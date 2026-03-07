@@ -8,3 +8,6 @@ bin/
 coverage.out
 .DS_Store
 .task/
+.opencode/
+.crush/
+.claude/

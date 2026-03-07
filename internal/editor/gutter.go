@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"teak/internal/ui"
 )
 
@@ -13,7 +12,7 @@ type BreakpointState int
 
 const (
 	BPActive   BreakpointState = iota + 1 // red filled circle — will pause
-	BPDisabled                             // grey circle — muted, won't pause
+	BPDisabled                            // grey circle — muted, won't pause
 )
 
 // GutterOpts holds optional debug-related gutter state.
@@ -45,10 +44,10 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 
 	var sb strings.Builder
 
-	// Styles for breakpoint marker and execution line
-	bpActiveStyle := lipgloss.NewStyle().Foreground(ui.Nord11)  // red
-	bpDisabledStyle := lipgloss.NewStyle().Foreground(ui.Nord3) // grey
-	execStyle := lipgloss.NewStyle().Background(ui.Nord3).Foreground(ui.Nord13) // yellow on dark
+	// Use pre-cached theme styles instead of creating new styles each render
+	bpActiveStyle := theme.BreakpointActive
+	bpDisabledStyle := theme.BreakpointDisabled
+	execStyle := theme.ExecLineMarker
 
 	for i := range height {
 		line := scrollY + i
@@ -128,11 +127,12 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 	}
 
 	var sb strings.Builder
-	bpActiveStyle := lipgloss.NewStyle().Foreground(ui.Nord11)
-	bpDisabledStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
-	execStyle := lipgloss.NewStyle().Background(ui.Nord3).Foreground(ui.Nord13)
-	foldCollapsedStyle := lipgloss.NewStyle().Foreground(ui.Nord13) // yellow for collapsed
-	foldExpandedStyle := lipgloss.NewStyle().Foreground(ui.Nord3)   // dim for expanded
+	// Use pre-cached theme styles instead of creating new styles each render
+	bpActiveStyle := theme.BreakpointActive
+	bpDisabledStyle := theme.BreakpointDisabled
+	execStyle := theme.ExecLineMarker
+	foldCollapsedStyle := theme.FoldCollapsed
+	foldExpandedStyle := theme.FoldExpanded
 
 	for i := range height {
 		var line int

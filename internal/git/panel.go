@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -226,11 +227,7 @@ type Model struct {
 
 	// Commit form
 	commitTitle  textinput.Model // single-line title (required)
-	commitBody   []string        // multi-line body (optional)
-	bodyLine     int             // cursor line within body
-	bodyCol      int             // cursor col within body
-	bodyScrollY  int             // vertical scroll offset for body view
-	bodyScrollX  int             // horizontal scroll offset for body view
+	commitBody   textarea.Model  // multi-line body (optional) - using bubbles textarea
 	titleFocused bool
 	bodyFocused  bool
 
@@ -247,6 +244,29 @@ func New(rootDir string, theme ui.Theme) Model {
 	ti.CharLimit = 72
 	ti.Prompt = ""
 
+	// Initialize textarea for commit body
+	ta := textarea.New()
+	ta.Placeholder = "Description (optional)"
+	ta.SetHeight(5)
+	ta.SetWidth(50)
+	ta.CharLimit = 10000
+
+	// Apply theme styling to textarea
+	taStyles := ta.Styles()
+	taStyles.Focused.Text = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord6)
+	taStyles.Focused.Placeholder = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	taStyles.Blurred.Text = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	taStyles.Blurred.Placeholder = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	ta.SetStyles(taStyles)
+
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	sp.Style = lipgloss.NewStyle().Foreground(ui.Nord8)
 
@@ -254,7 +274,7 @@ func New(rootDir string, theme ui.Theme) Model {
 		theme:       theme,
 		rootDir:     rootDir,
 		commitTitle: ti,
-		commitBody:  []string{""},
+		commitBody:  ta,
 		spinner:     sp,
 	}
 	// Check if inside a git repo
@@ -407,48 +427,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.bodyFocused || m.CommitFormHitTest(mouse.Y) == "body" {
-			switch mouse.Button {
-			case tea.MouseWheelUp:
-				if m.bodyScrollY > 0 {
-					m.bodyScrollY--
-				}
-			case tea.MouseWheelDown:
-				maxScroll := len(m.commitBody) - m.bodyViewHeight()
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				if m.bodyScrollY < maxScroll {
-					m.bodyScrollY++
-				}
-			case tea.MouseWheelLeft:
-				if m.bodyScrollX > 0 {
-					m.bodyScrollX -= 3
-					if m.bodyScrollX < 0 {
-						m.bodyScrollX = 0
-					}
-				}
-			case tea.MouseWheelRight:
-				// Find the longest visible line to limit scroll
-				maxLen := 0
-				for _, line := range m.commitBody {
-					if len(line) > maxLen {
-						maxLen = len(line)
-					}
-				}
-				maxScrollX := maxLen - m.bodyContentWidth() + 1
-				if maxScrollX < 0 {
-					maxScrollX = 0
-				}
-				if m.bodyScrollX < maxScrollX {
-					m.bodyScrollX += 3
-					if m.bodyScrollX > maxScrollX {
-						m.bodyScrollX = maxScrollX
-					}
-				}
-			}
-			return m, nil
-		}
+		// Body scrolling is handled internally by textarea component
+		// No need for manual scroll handling here
 		flat := m.activeFlatTree()
 		if len(flat) > 0 && !m.Collapsed {
 			if mouse.Button == tea.MouseWheelUp {
@@ -577,100 +557,25 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Body editing captures keys when focused
+	// Body editing captures keys when focused - delegate to textarea
 	if m.bodyFocused {
 		switch msg.String() {
 		case "esc", "escape":
 			m.bodyFocused = false
+			m.commitBody.Blur()
 			m.activeSection = SectionUnstaged
 			return m, nil
 		case "tab":
 			m.bodyFocused = false
+			m.commitBody.Blur()
 			m.activeSection = SectionUnstaged
 			m.Cursor = 0
 			return m, nil
-		case "enter":
-			// Insert newline in body
-			line := m.commitBody[m.bodyLine]
-			before := line[:m.bodyCol]
-			after := line[m.bodyCol:]
-			m.commitBody[m.bodyLine] = before
-			rest := make([]string, len(m.commitBody)-m.bodyLine-1)
-			copy(rest, m.commitBody[m.bodyLine+1:])
-			m.commitBody = append(m.commitBody[:m.bodyLine+1], after)
-			m.commitBody = append(m.commitBody, rest...)
-			m.bodyLine++
-			m.bodyCol = 0
-			m.scrollBodyIntoView()
-			return m, nil
-		case "backspace":
-			if m.bodyCol > 0 {
-				line := m.commitBody[m.bodyLine]
-				m.commitBody[m.bodyLine] = line[:m.bodyCol-1] + line[m.bodyCol:]
-				m.bodyCol--
-			} else if m.bodyLine > 0 {
-				// Merge with previous line
-				prevLen := len(m.commitBody[m.bodyLine-1])
-				m.commitBody[m.bodyLine-1] += m.commitBody[m.bodyLine]
-				m.commitBody = append(m.commitBody[:m.bodyLine], m.commitBody[m.bodyLine+1:]...)
-				m.bodyLine--
-				m.bodyCol = prevLen
-			}
-			m.scrollBodyIntoView()
-			return m, nil
-		case "up":
-			if m.bodyLine > 0 {
-				m.bodyLine--
-				if m.bodyCol > len(m.commitBody[m.bodyLine]) {
-					m.bodyCol = len(m.commitBody[m.bodyLine])
-				}
-				m.scrollBodyIntoView()
-			}
-			return m, nil
-		case "down":
-			if m.bodyLine < len(m.commitBody)-1 {
-				m.bodyLine++
-				if m.bodyCol > len(m.commitBody[m.bodyLine]) {
-					m.bodyCol = len(m.commitBody[m.bodyLine])
-				}
-				m.scrollBodyIntoView()
-			}
-			return m, nil
-		case "left":
-			if m.bodyCol > 0 {
-				m.bodyCol--
-				m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-			}
-			return m, nil
-		case "right":
-			if m.bodyCol < len(m.commitBody[m.bodyLine]) {
-				m.bodyCol++
-				m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-			}
-			return m, nil
-		case "home":
-			m.bodyCol = 0
-			m.bodyScrollX = 0
-			return m, nil
-		case "end":
-			m.bodyCol = len(m.commitBody[m.bodyLine])
-			m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-			return m, nil
 		default:
-			// Insert character
-			key := msg.String()
-			if len(key) == 1 && key[0] >= 32 {
-				line := m.commitBody[m.bodyLine]
-				m.commitBody[m.bodyLine] = line[:m.bodyCol] + key + line[m.bodyCol:]
-				m.bodyCol++
-				m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-			} else if key == "space" {
-				line := m.commitBody[m.bodyLine]
-				m.commitBody[m.bodyLine] = line[:m.bodyCol] + " " + line[m.bodyCol:]
-				m.bodyCol++
-				m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-			}
-			return m, nil
+			// Delegate all key handling to textarea
+			var cmd tea.Cmd
+			m.commitBody, cmd = m.commitBody.Update(msg)
+			return m, cmd
 		}
 	}
 
@@ -771,41 +676,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) scrollBodyIntoView() {
-	bodyViewHeight := m.bodyViewHeight()
-	if m.bodyLine < m.bodyScrollY {
-		m.bodyScrollY = m.bodyLine
-	}
-	if m.bodyLine >= m.bodyScrollY+bodyViewHeight {
-		m.bodyScrollY = m.bodyLine - bodyViewHeight + 1
-	}
-	m.bodyScrollX = scrollBodyHorizontally(m.bodyCol, m.bodyScrollX, m.bodyContentWidth())
-}
-
-// scrollBodyHorizontally adjusts the horizontal scroll so the cursor is visible.
-func scrollBodyHorizontally(bodyCol, bodyScrollX, viewWidth int) int {
-	if viewWidth <= 0 {
-		return bodyScrollX
-	}
-	if bodyCol < bodyScrollX {
-		bodyScrollX = bodyCol
-	}
-	if bodyCol >= bodyScrollX+viewWidth {
-		bodyScrollX = bodyCol - viewWidth + 1
-	}
-	return bodyScrollX
-}
-
-// bodyContentWidth returns the visible character width inside the body area.
-// The body is rendered between │...│ border chars, so visible width = Width - 2.
-func (m Model) bodyContentWidth() int {
-	w := m.Width - 2
-	if w < 1 {
-		w = 1
-	}
-	return w
-}
-
+// bodyViewHeight returns the visible height for the textarea component.
 func (m Model) bodyViewHeight() int {
 	h := 3 // default visible lines for body
 	if m.Height > 20 {
@@ -825,19 +696,17 @@ func (m Model) DoCommit() (Model, tea.Cmd) {
 		return m, nil
 	}
 	// Build commit message: title + optional body
-	body := strings.TrimSpace(strings.Join(m.commitBody, "\n"))
+	body := strings.TrimSpace(m.commitBody.Value())
 	msg := title
 	if body != "" {
 		msg = title + "\n\n" + body
 	}
 	m.commitTitle.SetValue("")
-	m.commitBody = []string{""}
-	m.bodyLine = 0
-	m.bodyCol = 0
-	m.bodyScrollY = 0
+	m.commitBody.SetValue("")
 	m.titleFocused = false
 	m.bodyFocused = false
 	m.commitTitle.Blur()
+	m.commitBody.Blur()
 	spinCmd := m.StartSpinner("Committing...")
 	return m, tea.Batch(CommitCmd(m.rootDir, msg), spinCmd)
 }
@@ -921,51 +790,14 @@ func (m Model) commitFormStartY() int {
 	return line
 }
 
-// FocusBodyAt focuses the body and positions the cursor at the clicked location.
-// panelY is relative to the git panel (0-based), panelX is relative to the sidebar.
+// FocusBodyAt focuses the body at the clicked location.
+// Note: With textarea component, precise cursor positioning on click is handled internally.
 func (m *Model) FocusBodyAt(panelY, panelX int) {
-	wasFocused := m.bodyFocused
-	prevBodyLine := m.bodyLine
-	prevBodyCol := m.bodyCol
-
 	m.activeSection = SectionCommitBody
 	m.bodyFocused = true
 	m.titleFocused = false
 	m.commitTitle.Blur()
-
-	formY := m.commitFormStartY()
-	if formY < 0 {
-		return
-	}
-
-	// Body starts at formY + 2 (top border + title)
-	bodyStartY := formY + 2
-	clickedLine := (panelY - bodyStartY) + m.bodyScrollY
-	if clickedLine < 0 {
-		clickedLine = 0
-	}
-	if clickedLine >= len(m.commitBody) {
-		clickedLine = len(m.commitBody) - 1
-	}
-	m.bodyLine = clickedLine
-
-	// Column: panelX minus left border char (1) + horizontal scroll offset
-	clickedCol := (panelX - 1) + m.bodyScrollX
-	if clickedCol < 0 {
-		clickedCol = 0
-	}
-
-	// When the body was already focused and the click is on the cursor line,
-	// the rendered "█" block cursor occupies 1 extra cell, shifting all text
-	// after it right by 1. Compensate so the cursor lands where clicked.
-	if wasFocused && clickedLine == prevBodyLine && clickedCol > prevBodyCol {
-		clickedCol--
-	}
-
-	if clickedCol > len(m.commitBody[m.bodyLine]) {
-		clickedCol = len(m.commitBody[m.bodyLine])
-	}
-	m.bodyCol = clickedCol
+	// Textarea handles cursor positioning internally when focused
 }
 
 // FocusTitleAt focuses the title and positions the cursor near the click X.
@@ -1356,64 +1188,41 @@ func (m Model) View() string {
 	if m.bodyFocused {
 		bodyBg = ui.Nord2
 	}
-	bodyStyle := lipgloss.NewStyle().
-		Background(bodyBg).
-		Foreground(ui.Nord4).
-		Width(innerWidth).MaxWidth(innerWidth)
-	bodyDimStyle := lipgloss.NewStyle().
-		Background(bodyBg).
-		Foreground(ui.Nord4).
-		Width(innerWidth).MaxWidth(innerWidth)
 
-	hasContent := len(m.commitBody) > 1 || m.commitBody[0] != ""
-	bodyViewW := m.bodyContentWidth()
+	// Body lines using textarea component
+	m.commitBody.SetWidth(innerWidth)
+	m.commitBody.SetHeight(bodyHeight)
 
-	for i := m.bodyScrollY; i < m.bodyScrollY+bodyHeight; i++ {
+	// Apply border background to textarea styles
+	taStyles := m.commitBody.Styles()
+	if m.bodyFocused {
+		taStyles.Focused.Text = lipgloss.NewStyle().
+			Background(bodyBg).
+			Foreground(ui.Nord6)
+		taStyles.Focused.Placeholder = lipgloss.NewStyle().
+			Background(bodyBg).
+			Foreground(ui.Nord4)
+	} else {
+		taStyles.Blurred.Text = lipgloss.NewStyle().
+			Background(bodyBg).
+			Foreground(ui.Nord4)
+		taStyles.Blurred.Placeholder = lipgloss.NewStyle().
+			Background(bodyBg).
+			Foreground(ui.Nord4)
+	}
+	m.commitBody.SetStyles(taStyles)
+
+	// Render textarea view
+	bodyView := m.commitBody.View()
+	bodyLines := strings.Split(bodyView, "\n")
+	for i := 0; i < bodyHeight; i++ {
 		sb.WriteByte('\n')
 		sb.WriteString(borderStyle.Render("│"))
 		linesUsed++
-		if i < len(m.commitBody) {
-			line := m.commitBody[i]
-			if m.bodyFocused && i == m.bodyLine {
-				// Apply horizontal scroll: show text from bodyScrollX
-				visCol := m.bodyCol - m.bodyScrollX // cursor position in view
-				if visCol < 0 {
-					visCol = 0
-				}
-				scrolled := line
-				if m.bodyScrollX < len(scrolled) {
-					scrolled = scrolled[m.bodyScrollX:]
-				} else {
-					scrolled = ""
-				}
-				// Truncate to view width (leaving room for cursor block)
-				if len(scrolled) > bodyViewW-1 {
-					scrolled = scrolled[:bodyViewW-1]
-				}
-				if visCol > len(scrolled) {
-					visCol = len(scrolled)
-				}
-				rendered := scrolled[:visCol] + "█" + scrolled[visCol:]
-				sb.WriteString(zone.Mark("git-commit-body", bodyStyle.Render(rendered)))
-			} else {
-				if i == 0 && !hasContent && !m.bodyFocused {
-					sb.WriteString(zone.Mark("git-commit-body", bodyDimStyle.Render("Description (optional)")))
-				} else {
-					// Apply horizontal scroll for non-focused lines too
-					scrolled := line
-					if m.bodyScrollX < len(scrolled) {
-						scrolled = scrolled[m.bodyScrollX:]
-					} else {
-						scrolled = ""
-					}
-					if len(scrolled) > bodyViewW {
-						scrolled = scrolled[:bodyViewW]
-					}
-					sb.WriteString(zone.Mark("git-commit-body", bodyStyle.Render(scrolled)))
-				}
-			}
+		if i < len(bodyLines) {
+			sb.WriteString(bodyLines[i])
 		} else {
-			sb.WriteString(bodyStyle.Render(""))
+			sb.WriteString(strings.Repeat(" ", innerWidth))
 		}
 		sb.WriteString(borderStyle.Render("│"))
 	}

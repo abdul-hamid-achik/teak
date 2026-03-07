@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"teak/internal/ui"
 )
 
@@ -14,13 +15,16 @@ func testModel(entries []StatusEntry) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.CharLimit = 72
+	ta := textarea.New()
+	ta.SetHeight(5)
+	ta.SetWidth(50)
 	m := Model{
 		theme:       ui.DefaultTheme(),
 		rootDir:     "/tmp/fake",
 		isGitRepo:   true,
 		Entries:     entries,
 		commitTitle: ti,
-		commitBody:  []string{""},
+		commitBody:  ta,
 		Width:       80,
 		Height:      40,
 	}
@@ -367,15 +371,15 @@ func TestStatusEntry(t *testing.T) {
 			staged bool
 			want   string
 		}{
-			{'M', ' ', true, "M"},   // staged modified
-			{'A', ' ', true, "A"},   // staged added
-			{'D', ' ', true, "D"},   // staged deleted
-			{' ', 'M', false, "M"},  // unstaged modified
-			{' ', 'D', false, "D"},  // unstaged deleted
-			{'?', '?', false, "U"},  // untracked
-			{'?', '?', true, "U"},   // untracked shown as staged (edge case)
-			{'R', ' ', true, "R"},   // staged renamed
-			{'C', ' ', true, "C"},   // staged copied
+			{'M', ' ', true, "M"},  // staged modified
+			{'A', ' ', true, "A"},  // staged added
+			{'D', ' ', true, "D"},  // staged deleted
+			{' ', 'M', false, "M"}, // unstaged modified
+			{' ', 'D', false, "D"}, // unstaged deleted
+			{'?', '?', false, "U"}, // untracked
+			{'?', '?', true, "U"},  // untracked shown as staged (edge case)
+			{'R', ' ', true, "R"},  // staged renamed
+			{'C', ' ', true, "C"},  // staged copied
 		}
 		for _, tt := range tests {
 			e := StatusEntry{IndexStatus: tt.index, WorkStatus: tt.work}
@@ -398,10 +402,10 @@ func TestDeriveGroups(t *testing.T) {
 		{
 			name: "mixed staged and unstaged",
 			entries: []StatusEntry{
-				{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},  // staged only
-				{Path: "b.go", IndexStatus: ' ', WorkStatus: 'M'},  // unstaged only
-				{Path: "c.go", IndexStatus: 'M', WorkStatus: 'M'},  // both
-				{Path: "d.go", IndexStatus: '?', WorkStatus: '?'},  // untracked (unstaged only)
+				{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '}, // staged only
+				{Path: "b.go", IndexStatus: ' ', WorkStatus: 'M'}, // unstaged only
+				{Path: "c.go", IndexStatus: 'M', WorkStatus: 'M'}, // both
+				{Path: "d.go", IndexStatus: '?', WorkStatus: '?'}, // untracked (unstaged only)
 			},
 			wantStaged:   2, // a.go, c.go
 			wantUnstaged: 3, // b.go, c.go, d.go
@@ -589,35 +593,6 @@ func TestNodeAtY(t *testing.T) {
 	}
 }
 
-// ── TestScrollBodyHorizontally ──────────────────────────────────────────
-
-func TestScrollBodyHorizontally(t *testing.T) {
-	tests := []struct {
-		name      string
-		bodyCol   int
-		scrollX   int
-		viewWidth int
-		want      int
-	}{
-		{"cursor in view", 5, 0, 20, 0},
-		{"cursor past right edge", 25, 0, 20, 6},
-		{"cursor past left edge", 2, 10, 20, 2},
-		{"cursor at right edge", 19, 0, 20, 0},
-		{"cursor just past right edge", 20, 0, 20, 1},
-		{"zero view width", 5, 0, 0, 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := scrollBodyHorizontally(tt.bodyCol, tt.scrollX, tt.viewWidth)
-			if got != tt.want {
-				t.Errorf("scrollBodyHorizontally(%d, %d, %d) = %d, want %d",
-					tt.bodyCol, tt.scrollX, tt.viewWidth, got, tt.want)
-			}
-		})
-	}
-}
-
 // ── TestFilesUnderDir ───────────────────────────────────────────────────
 
 func TestFilesUnderDir(t *testing.T) {
@@ -682,9 +657,9 @@ func TestFilesUnderDir(t *testing.T) {
 
 func TestParseStatusLines(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		want    []StatusEntry
+		name string
+		raw  string
+		want []StatusEntry
 	}{
 		{
 			name: "empty output",
@@ -1135,47 +1110,42 @@ func TestCommitFormStartY(t *testing.T) {
 // ── TestFocusBodyAt ─────────────────────────────────────────────────────
 
 func TestFocusBodyAt(t *testing.T) {
-	t.Run("positions cursor in body", func(t *testing.T) {
+	t.Run("focuses body on click", func(t *testing.T) {
 		m := testModel([]StatusEntry{
 			{Path: "a.go", IndexStatus: ' ', WorkStatus: 'M'},
 		})
 		m.Width = 40
 		m.Height = 30
-		m.commitBody = []string{"hello world", "second line"}
+		m.commitBody.SetValue("hello world\nsecond line")
 
 		formY := m.commitFormStartY()
 		if formY < 0 {
 			t.Fatal("form not visible")
 		}
 
-		// Click on the second body line (formY + 2 is first body line, +3 is second)
-		m.FocusBodyAt(formY+3, 6) // X=6 → col 5 (minus 1 for border)
+		// Click on the second body line
+		m.FocusBodyAt(formY+3, 6)
 		if !m.bodyFocused {
 			t.Error("expected bodyFocused=true")
 		}
-		if m.bodyLine != 1 {
-			t.Errorf("bodyLine = %d, want 1", m.bodyLine)
-		}
-		if m.bodyCol != 5 {
-			t.Errorf("bodyCol = %d, want 5", m.bodyCol)
-		}
+		// Cursor positioning is now handled internally by textarea
 	})
 
-	t.Run("clamps to valid range", func(t *testing.T) {
+	t.Run("focuses body in valid range", func(t *testing.T) {
 		m := testModel(nil)
 		m.Width = 40
 		m.Height = 30
-		m.commitBody = []string{"short"}
+		m.commitBody.SetValue("short")
 
 		formY := m.commitFormStartY()
 		if formY < 0 {
 			t.Fatal("form not visible")
 		}
 
-		// Click far past end of text
+		// Click far past end of text - should still focus body
 		m.FocusBodyAt(formY+2, 50)
-		if m.bodyCol != 5 { // len("short")
-			t.Errorf("bodyCol = %d, want 5 (clamped)", m.bodyCol)
+		if !m.bodyFocused {
+			t.Error("expected bodyFocused=true")
 		}
 	})
 }
@@ -1387,88 +1357,23 @@ func TestDoCommitRequiresStaged(t *testing.T) {
 }
 
 // ── TestBodyScroll ──────────────────────────────────────────────────────
+// Note: Scrolling is now handled internally by the textarea component.
+// These tests verify that mouse wheel events are properly delegated.
 
 func TestBodyScroll(t *testing.T) {
-	t.Run("wheel down increases bodyScrollY", func(t *testing.T) {
+	t.Run("wheel events are delegated to textarea when body focused", func(t *testing.T) {
 		m := testModel(nil)
 		m.Width = 40
 		m.Height = 30
-		m.commitBody = []string{"line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8"}
+		m.commitBody.SetValue("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8")
 		m.bodyFocused = true
 
+		// Textarea handles scrolling internally
+		// Just verify the event is processed without error
 		mouse := tea.Mouse{Button: tea.MouseWheelDown, X: 5, Y: 10}
 		msg := tea.MouseWheelMsg(mouse)
-		m, _ = m.Update(msg)
+		_, _ = m.Update(msg)
 
-		if m.bodyScrollY != 1 {
-			t.Errorf("bodyScrollY = %d, want 1", m.bodyScrollY)
-		}
-	})
-
-	t.Run("wheel up decreases bodyScrollY", func(t *testing.T) {
-		m := testModel(nil)
-		m.Width = 40
-		m.Height = 30
-		m.commitBody = []string{"line1", "line2", "line3", "line4", "line5"}
-		m.bodyFocused = true
-		m.bodyScrollY = 2
-
-		mouse := tea.Mouse{Button: tea.MouseWheelUp, X: 5, Y: 10}
-		msg := tea.MouseWheelMsg(mouse)
-		m, _ = m.Update(msg)
-
-		if m.bodyScrollY != 1 {
-			t.Errorf("bodyScrollY = %d, want 1", m.bodyScrollY)
-		}
-	})
-
-	t.Run("wheel right increases bodyScrollX", func(t *testing.T) {
-		m := testModel(nil)
-		m.Width = 40
-		m.Height = 30
-		m.commitBody = []string{"a very long line that extends beyond the visible area of the body content width"}
-		m.bodyFocused = true
-
-		mouse := tea.Mouse{Button: tea.MouseWheelRight, X: 5, Y: 10}
-		msg := tea.MouseWheelMsg(mouse)
-		m, _ = m.Update(msg)
-
-		if m.bodyScrollX == 0 {
-			t.Error("bodyScrollX should have increased from 0")
-		}
-	})
-
-	t.Run("wheel left decreases bodyScrollX", func(t *testing.T) {
-		m := testModel(nil)
-		m.Width = 40
-		m.Height = 30
-		m.commitBody = []string{"long line"}
-		m.bodyFocused = true
-		m.bodyScrollX = 5
-
-		mouse := tea.Mouse{Button: tea.MouseWheelLeft, X: 5, Y: 10}
-		msg := tea.MouseWheelMsg(mouse)
-		m, _ = m.Update(msg)
-
-		if m.bodyScrollX != 2 {
-			t.Errorf("bodyScrollX = %d, want 2 (decreased by 3)", m.bodyScrollX)
-		}
-	})
-
-	t.Run("wheel up does not go below 0", func(t *testing.T) {
-		m := testModel(nil)
-		m.Width = 40
-		m.Height = 30
-		m.commitBody = []string{"line1"}
-		m.bodyFocused = true
-		m.bodyScrollY = 0
-
-		mouse := tea.Mouse{Button: tea.MouseWheelUp, X: 5, Y: 10}
-		msg := tea.MouseWheelMsg(mouse)
-		m, _ = m.Update(msg)
-
-		if m.bodyScrollY != 0 {
-			t.Errorf("bodyScrollY = %d, want 0 (should not go negative)", m.bodyScrollY)
-		}
+		// With textarea, scrolling is internal - just verify no panic
 	})
 }

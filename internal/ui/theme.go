@@ -99,12 +99,12 @@ type Theme struct {
 	SidebarTabInactive lipgloss.Style
 
 	// Git action buttons
-	GitActionButton  lipgloss.Style
-	GitCommitButton  lipgloss.Style
+	GitActionButton   lipgloss.Style
+	GitCommitButton   lipgloss.Style
 	GitPushPullButton lipgloss.Style
-	GitSectionHeader lipgloss.Style
-	GitBranch        lipgloss.Style
-	GitCommitInput   lipgloss.Style
+	GitSectionHeader  lipgloss.Style
+	GitBranch         lipgloss.Style
+	GitCommitInput    lipgloss.Style
 
 	// Replace button
 	ReplaceButton lipgloss.Style
@@ -114,13 +114,20 @@ type Theme struct {
 	ScrollThumb lipgloss.Style
 
 	// Agent panel
-	AgentHeader       lipgloss.Style
-	AgentUserMsg      lipgloss.Style
-	AgentBorder       lipgloss.Style
+	AgentHeader        lipgloss.Style
+	AgentUserMsg       lipgloss.Style
+	AgentBorder        lipgloss.Style
 	AgentBorderFocused lipgloss.Style
-	AgentInput        lipgloss.Style
-	AgentToolCall     lipgloss.Style
-	AgentPermission   lipgloss.Style
+	AgentInput         lipgloss.Style
+	AgentToolCall      lipgloss.Style
+	AgentPermission    lipgloss.Style
+
+	// Debug/Breakpoint styles (pre-cached for gutter rendering)
+	BreakpointActive   lipgloss.Style
+	BreakpointDisabled lipgloss.Style
+	ExecLineMarker     lipgloss.Style
+	FoldCollapsed      lipgloss.Style
+	FoldExpanded       lipgloss.Style
 
 	// Syntax highlighting colors
 	SyntaxKeyword   color.Color
@@ -394,6 +401,19 @@ func defaultNordTheme() Theme {
 		AgentPermission: lipgloss.NewStyle().
 			Foreground(Nord12),
 
+		// Debug/Breakpoint styles (pre-cached for gutter rendering)
+		BreakpointActive: lipgloss.NewStyle().
+			Foreground(Nord11), // red
+		BreakpointDisabled: lipgloss.NewStyle().
+			Foreground(Nord3), // grey
+		ExecLineMarker: lipgloss.NewStyle().
+			Background(Nord3).
+			Foreground(Nord13), // yellow on dark
+		FoldCollapsed: lipgloss.NewStyle().
+			Foreground(Nord13), // yellow
+		FoldExpanded: lipgloss.NewStyle().
+			Foreground(Nord3), // dim
+
 		// Syntax highlighting
 		SyntaxKeyword:   Nord9,
 		SyntaxFunction:  Nord8,
@@ -409,96 +429,101 @@ func defaultNordTheme() Theme {
 
 // palette holds the base colors for building a theme.
 type palette struct {
-	bg0, bg1, bg2, bg3     color.Color
-	fg0, fg1, fg2          color.Color
-	red, orange, yellow    color.Color
-	green, cyan, blue      color.Color
-	purple                 color.Color
-	keyword, function      color.Color
-	str, number, comment   color.Color
-	typ, operator, tag     color.Color
-	attribute              color.Color
-	diffRemovedBg          color.Color
-	diffAddedBg            color.Color
-	accent                 color.Color
+	bg0, bg1, bg2, bg3   color.Color
+	fg0, fg1, fg2        color.Color
+	red, orange, yellow  color.Color
+	green, cyan, blue    color.Color
+	purple               color.Color
+	keyword, function    color.Color
+	str, number, comment color.Color
+	typ, operator, tag   color.Color
+	attribute            color.Color
+	diffRemovedBg        color.Color
+	diffAddedBg          color.Color
+	accent               color.Color
 }
 
 func buildTheme(p palette) Theme {
 	return Theme{
-		Editor: lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
-		Gutter: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).PaddingRight(1),
-		GutterActive: lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
-		Selection: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		CursorLine: lipgloss.NewStyle().Background(p.bg1),
-		StatusBar: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		StatusText: lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
-		HelpBorder: lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
-		HelpTitle: lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		HelpKey: lipgloss.NewStyle().Foreground(p.yellow),
-		TreeEntry: lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
-		TreeCursor: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		TreeBorder: lipgloss.NewStyle().Foreground(p.bg3),
-		TabActive: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg2).Padding(0, 1).Bold(true),
-		TabInactive: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
-		TabCloseActive: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		TabCloseInactive: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
-		TabBar: lipgloss.NewStyle().Background(p.bg0),
-		SearchBox: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1).Padding(1, 2),
-		SearchInput: lipgloss.NewStyle().Foreground(p.fg0),
-		SearchResult: lipgloss.NewStyle().Foreground(p.fg0),
-		SearchActive: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		DiagError: lipgloss.NewStyle().Foreground(p.red).Underline(true),
-		DiagWarning: lipgloss.NewStyle().Foreground(p.yellow).Underline(true),
-		DiagInfo: lipgloss.NewStyle().Foreground(p.cyan).Underline(true),
-		DiagHint: lipgloss.NewStyle().Foreground(p.green).Underline(true),
-		GutterError: lipgloss.NewStyle().Background(p.bg0).Foreground(p.red).PaddingRight(1),
-		GutterWarn: lipgloss.NewStyle().Background(p.bg0).Foreground(p.yellow).PaddingRight(1),
-		AutocompleteItem: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		AutocompleteCursor: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		AutocompleteBox: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1),
-		HoverBox: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1).Foreground(p.fg0).Padding(0, 1),
-		BracketMatch: lipgloss.NewStyle().Background(p.bg2).Foreground(p.cyan),
+		Editor:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
+		Gutter:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).PaddingRight(1),
+		GutterActive:        lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
+		Selection:           lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		CursorLine:          lipgloss.NewStyle().Background(p.bg1),
+		StatusBar:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		StatusText:          lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
+		HelpBorder:          lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
+		HelpTitle:           lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		HelpKey:             lipgloss.NewStyle().Foreground(p.yellow),
+		TreeEntry:           lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
+		TreeCursor:          lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		TreeBorder:          lipgloss.NewStyle().Foreground(p.bg3),
+		TabActive:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg2).Padding(0, 1).Bold(true),
+		TabInactive:         lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
+		TabCloseActive:      lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		TabCloseInactive:    lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
+		TabBar:              lipgloss.NewStyle().Background(p.bg0),
+		SearchBox:           lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1).Padding(1, 2),
+		SearchInput:         lipgloss.NewStyle().Foreground(p.fg0),
+		SearchResult:        lipgloss.NewStyle().Foreground(p.fg0),
+		SearchActive:        lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		DiagError:           lipgloss.NewStyle().Foreground(p.red).Underline(true),
+		DiagWarning:         lipgloss.NewStyle().Foreground(p.yellow).Underline(true),
+		DiagInfo:            lipgloss.NewStyle().Foreground(p.cyan).Underline(true),
+		DiagHint:            lipgloss.NewStyle().Foreground(p.green).Underline(true),
+		GutterError:         lipgloss.NewStyle().Background(p.bg0).Foreground(p.red).PaddingRight(1),
+		GutterWarn:          lipgloss.NewStyle().Background(p.bg0).Foreground(p.yellow).PaddingRight(1),
+		AutocompleteItem:    lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		AutocompleteCursor:  lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		AutocompleteBox:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1),
+		HoverBox:            lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1).Foreground(p.fg0).Padding(0, 1),
+		BracketMatch:        lipgloss.NewStyle().Background(p.bg2).Foreground(p.cyan),
 		ContextMenuDisabled: lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
-		GitHeader: lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		GitEntry: lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
-		GitCursor: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		GitAdded: lipgloss.NewStyle().Foreground(p.green),
-		GitModified: lipgloss.NewStyle().Foreground(p.yellow),
-		GitDeleted: lipgloss.NewStyle().Foreground(p.red),
-		GitUntracked: lipgloss.NewStyle().Foreground(p.bg3),
-		DiffRemoved: lipgloss.NewStyle().Background(p.diffRemovedBg).Foreground(p.fg0),
-		DiffAdded: lipgloss.NewStyle().Background(p.diffAddedBg).Foreground(p.fg0),
-		DiffEmpty: lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
-		DiffGutter: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
-		DiffBorder: lipgloss.NewStyle().Foreground(p.bg3),
-		DiffHunkHeader: lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		SidebarTabActive: lipgloss.NewStyle().Background(p.bg1).Foreground(p.cyan).Bold(true).Padding(0, 1),
-		SidebarTabInactive: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
-		GitActionButton: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
-		GitCommitButton: lipgloss.NewStyle().Background(p.green).Foreground(p.bg0).Padding(0, 1).Bold(true),
-		GitPushPullButton: lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
-		GitSectionHeader: lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		GitBranch: lipgloss.NewStyle().Foreground(p.purple).Bold(true),
-		GitCommitInput: lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		ReplaceButton: lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
-		ScrollTrack: lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg1),
-		ScrollThumb: lipgloss.NewStyle().Background(p.bg3).Foreground(p.bg3),
-		AgentHeader:        lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		AgentUserMsg:       lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
-		AgentBorder:        lipgloss.NewStyle().Foreground(p.bg3),
-		AgentBorderFocused: lipgloss.NewStyle().Foreground(p.cyan),
-		AgentInput:         lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		AgentToolCall:      lipgloss.NewStyle().Foreground(p.fg0),
-		AgentPermission:    lipgloss.NewStyle().Foreground(p.orange),
-		SyntaxKeyword:   p.keyword,
-		SyntaxFunction:  p.function,
-		SyntaxString:    p.str,
-		SyntaxNumber:    p.number,
-		SyntaxComment:   p.comment,
-		SyntaxType:      p.typ,
-		SyntaxOperator:  p.operator,
-		SyntaxTag:       p.tag,
-		SyntaxAttribute: p.attribute,
+		GitHeader:           lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		GitEntry:            lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
+		GitCursor:           lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		GitAdded:            lipgloss.NewStyle().Foreground(p.green),
+		GitModified:         lipgloss.NewStyle().Foreground(p.yellow),
+		GitDeleted:          lipgloss.NewStyle().Foreground(p.red),
+		GitUntracked:        lipgloss.NewStyle().Foreground(p.bg3),
+		DiffRemoved:         lipgloss.NewStyle().Background(p.diffRemovedBg).Foreground(p.fg0),
+		DiffAdded:           lipgloss.NewStyle().Background(p.diffAddedBg).Foreground(p.fg0),
+		DiffEmpty:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
+		DiffGutter:          lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
+		DiffBorder:          lipgloss.NewStyle().Foreground(p.bg3),
+		DiffHunkHeader:      lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		SidebarTabActive:    lipgloss.NewStyle().Background(p.bg1).Foreground(p.cyan).Bold(true).Padding(0, 1),
+		SidebarTabInactive:  lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
+		GitActionButton:     lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
+		GitCommitButton:     lipgloss.NewStyle().Background(p.green).Foreground(p.bg0).Padding(0, 1).Bold(true),
+		GitPushPullButton:   lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
+		GitSectionHeader:    lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		GitBranch:           lipgloss.NewStyle().Foreground(p.purple).Bold(true),
+		GitCommitInput:      lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		ReplaceButton:       lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
+		ScrollTrack:         lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg1),
+		ScrollThumb:         lipgloss.NewStyle().Background(p.bg3).Foreground(p.bg3),
+		AgentHeader:         lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		AgentUserMsg:        lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		AgentBorder:         lipgloss.NewStyle().Foreground(p.bg3),
+		AgentBorderFocused:  lipgloss.NewStyle().Foreground(p.cyan),
+		AgentInput:          lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
+		AgentToolCall:       lipgloss.NewStyle().Foreground(p.fg0),
+		AgentPermission:     lipgloss.NewStyle().Foreground(p.orange),
+		BreakpointActive:    lipgloss.NewStyle().Foreground(p.red),
+		BreakpointDisabled:  lipgloss.NewStyle().Foreground(p.bg3),
+		ExecLineMarker:      lipgloss.NewStyle().Background(p.bg3).Foreground(p.yellow),
+		FoldCollapsed:       lipgloss.NewStyle().Foreground(p.yellow),
+		FoldExpanded:        lipgloss.NewStyle().Foreground(p.bg3),
+		SyntaxKeyword:       p.keyword,
+		SyntaxFunction:      p.function,
+		SyntaxString:        p.str,
+		SyntaxNumber:        p.number,
+		SyntaxComment:       p.comment,
+		SyntaxType:          p.typ,
+		SyntaxOperator:      p.operator,
+		SyntaxTag:           p.tag,
+		SyntaxAttribute:     p.attribute,
 	}
 }
 
@@ -512,12 +537,12 @@ func DraculaTheme() Theme {
 		red: lipgloss.Color("#FF5555"), orange: lipgloss.Color("#FFB86C"),
 		yellow: lipgloss.Color("#F1FA8C"), green: lipgloss.Color("#50FA7B"),
 		cyan: lipgloss.Color("#8BE9FD"), blue: lipgloss.Color("#6272A4"),
-		purple: lipgloss.Color("#BD93F9"),
+		purple:  lipgloss.Color("#BD93F9"),
 		keyword: lipgloss.Color("#FF79C6"), function: lipgloss.Color("#50FA7B"),
 		str: lipgloss.Color("#F1FA8C"), number: lipgloss.Color("#BD93F9"),
 		comment: lipgloss.Color("#6272A4"), typ: lipgloss.Color("#8BE9FD"),
 		operator: lipgloss.Color("#FF79C6"), tag: lipgloss.Color("#FF79C6"),
-		attribute: lipgloss.Color("#50FA7B"),
+		attribute:     lipgloss.Color("#50FA7B"),
 		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
 		accent: lipgloss.Color("#BD93F9"),
 	})
@@ -533,12 +558,12 @@ func CatppuccinTheme() Theme {
 		red: lipgloss.Color("#F38BA8"), orange: lipgloss.Color("#FAB387"),
 		yellow: lipgloss.Color("#F9E2AF"), green: lipgloss.Color("#A6E3A1"),
 		cyan: lipgloss.Color("#94E2D5"), blue: lipgloss.Color("#89B4FA"),
-		purple: lipgloss.Color("#CBA6F7"),
+		purple:  lipgloss.Color("#CBA6F7"),
 		keyword: lipgloss.Color("#CBA6F7"), function: lipgloss.Color("#89B4FA"),
 		str: lipgloss.Color("#A6E3A1"), number: lipgloss.Color("#FAB387"),
 		comment: lipgloss.Color("#585B70"), typ: lipgloss.Color("#94E2D5"),
 		operator: lipgloss.Color("#89DCEB"), tag: lipgloss.Color("#CBA6F7"),
-		attribute: lipgloss.Color("#89B4FA"),
+		attribute:     lipgloss.Color("#89B4FA"),
 		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
 		accent: lipgloss.Color("#CBA6F7"),
 	})
@@ -554,12 +579,12 @@ func SolarizedDarkTheme() Theme {
 		red: lipgloss.Color("#DC322F"), orange: lipgloss.Color("#CB4B16"),
 		yellow: lipgloss.Color("#B58900"), green: lipgloss.Color("#859900"),
 		cyan: lipgloss.Color("#2AA198"), blue: lipgloss.Color("#268BD2"),
-		purple: lipgloss.Color("#6C71C4"),
+		purple:  lipgloss.Color("#6C71C4"),
 		keyword: lipgloss.Color("#859900"), function: lipgloss.Color("#268BD2"),
 		str: lipgloss.Color("#2AA198"), number: lipgloss.Color("#D33682"),
 		comment: lipgloss.Color("#586E75"), typ: lipgloss.Color("#B58900"),
 		operator: lipgloss.Color("#859900"), tag: lipgloss.Color("#268BD2"),
-		attribute: lipgloss.Color("#B58900"),
+		attribute:     lipgloss.Color("#B58900"),
 		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
 		accent: lipgloss.Color("#268BD2"),
 	})
@@ -575,12 +600,12 @@ func OneDarkTheme() Theme {
 		red: lipgloss.Color("#E06C75"), orange: lipgloss.Color("#D19A66"),
 		yellow: lipgloss.Color("#E5C07B"), green: lipgloss.Color("#98C379"),
 		cyan: lipgloss.Color("#56B6C2"), blue: lipgloss.Color("#61AFEF"),
-		purple: lipgloss.Color("#C678DD"),
+		purple:  lipgloss.Color("#C678DD"),
 		keyword: lipgloss.Color("#C678DD"), function: lipgloss.Color("#61AFEF"),
 		str: lipgloss.Color("#98C379"), number: lipgloss.Color("#D19A66"),
 		comment: lipgloss.Color("#5C6370"), typ: lipgloss.Color("#E5C07B"),
 		operator: lipgloss.Color("#56B6C2"), tag: lipgloss.Color("#E06C75"),
-		attribute: lipgloss.Color("#D19A66"),
+		attribute:     lipgloss.Color("#D19A66"),
 		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
 		accent: lipgloss.Color("#61AFEF"),
 	})

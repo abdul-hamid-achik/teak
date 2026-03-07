@@ -315,34 +315,71 @@ func (v *Viewport) renderWrapSegment(theme ui.Theme, hl *highlight.Highlighter, 
 
 	var sb strings.Builder
 	currentWidth := 0
-	segWritten := 0
 
+	// Process tokens and accumulate segments with the same style
+	// instead of styling each rune individually
 	for _, tok := range tokens {
-		for _, r := range tok.Text {
-			rw := runewidth.RuneWidth(r)
-			if currentWidth >= segStartWidth && currentWidth < segEndWidth {
-				style := tok.Style
-				if bufLine == buf.Cursor.Line {
-					style = style.Background(defaultStyle.GetBackground())
-				}
-				sb.WriteString(style.Render(string(r)))
-				segWritten += rw
-			}
-			currentWidth += rw
-			if currentWidth >= segEndWidth {
-				break
-			}
+		tokText := tok.Text
+		tokWidth := runewidth.StringWidth(tokText)
+		tokEndWidth := currentWidth + tokWidth
+
+		// Skip tokens completely before the segment
+		if tokEndWidth <= segStartWidth {
+			currentWidth = tokEndWidth
+			continue
 		}
+
+		// Stop if we've passed the segment
 		if currentWidth >= segEndWidth {
+			break
+		}
+
+		// Calculate overlap with visible segment
+		overlapStart := max(0, segStartWidth-currentWidth)
+		overlapEnd := min(tokWidth, segEndWidth-currentWidth)
+
+		if overlapStart < overlapEnd {
+			// Extract overlapping text portion efficiently
+			overlapText := extractWidthRange(tokText, overlapStart, overlapEnd)
+
+			// Apply style (with cursor line background if needed)
+			style := tok.Style
+			if bufLine == buf.Cursor.Line {
+				style = style.Background(defaultStyle.GetBackground())
+			}
+
+			// Style the entire overlapping segment at once (not rune-by-rune)
+			sb.WriteString(style.Render(overlapText))
+		}
+
+		currentWidth = tokEndWidth
+	}
+
+	result := sb.String()
+	if result == "" && segment != "" {
+		return defaultStyle.Render(segment)
+	}
+	return result
+}
+
+// extractWidthRange extracts a substring by display width range
+// This is more efficient than styling each rune individually
+func extractWidthRange(text string, startWidth, endWidth int) string {
+	var result strings.Builder
+	currentWidth := 0
+
+	for _, r := range text {
+		rw := runewidth.RuneWidth(r)
+		if currentWidth >= startWidth && currentWidth < endWidth {
+			result.WriteRune(r)
+		}
+		currentWidth += rw
+		if currentWidth >= endWidth {
 			break
 		}
 	}
 
-	if segWritten == 0 && segment != "" {
-		return defaultStyle.Render(segment)
-	}
-
-	return sb.String()
+	return result.String()
 }
 
 // wrapSegment extracts the Nth segment of a line when wrapped at the given width.

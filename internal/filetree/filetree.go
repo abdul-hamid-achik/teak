@@ -31,31 +31,39 @@ type DirExpandedMsg struct {
 
 // Entry represents a file or directory in the tree.
 type Entry struct {
-	Name     string
-	Path     string
-	IsDir    bool
-	Children []Entry
-	Expanded bool
-	Loading  bool // true while async directory read is in progress
-	Depth    int
+	Name         string
+	Path         string
+	IsDir        bool
+	Children     []Entry
+	Expanded     bool
+	Loading      bool // true while async directory read is in progress
+	Depth        int
 	IsGitIgnored bool // true if entry matches .gitignore
 }
 
 // Model is a file tree sidebar sub-model.
 type Model struct {
-	Root    string
-	Entries []Entry
-	Cursor  int
-	ScrollY int
-	Width       int
-	Height      int
-	theme          ui.Theme
-	cachedFlat     []Entry
-	diagnostics    map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
-	gitStatus      map[string]string // relative path → status ("M", "A", "D", "U")
-	gitignorePatterns []string       // patterns from .gitignore
-	lastClickPath  string
-	lastClickTime  time.Time
+	Root              string
+	Entries           []Entry
+	Cursor            int
+	ScrollY           int
+	Width             int
+	Height            int
+	theme             ui.Theme
+	cachedFlat        []Entry
+	diagnostics       map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	gitStatus         map[string]string // relative path → status ("M", "A", "D", "U")
+	gitignorePatterns []string          // patterns from .gitignore
+	lastClickPath     string
+	lastClickTime     time.Time
+
+	// CACHED STYLES - pre-allocated to avoid per-frame allocations in View()
+	cachedStyles struct {
+		base            lipgloss.Style // base style for applying dynamic colors
+		cursorBg        color.Color    // cached cursor background
+		entryBg         color.Color    // cached entry background
+		gitIgnoredColor color.Color    // cached git ignored color (Nord3)
+	}
 }
 
 // SetDiagnostics sets the diagnostics map (file paths + directory paths → worst severity).
@@ -72,11 +80,18 @@ func (m *Model) SetGitStatus(status map[string]string) {
 // Only reads the first level synchronously for fast startup.
 func New(root string, theme ui.Theme) Model {
 	m := Model{
-		Root:  root,
-		theme: theme,
+		Root:              root,
+		theme:             theme,
 		gitignorePatterns: loadGitignore(root),
 	}
 	m.Entries = readDirEntries(root, 0, m.gitignorePatterns)
+
+	// Initialize cached styles to avoid per-frame allocations
+	m.cachedStyles.base = lipgloss.NewStyle()
+	m.cachedStyles.cursorBg = theme.TreeCursor.GetBackground()
+	m.cachedStyles.entryBg = theme.TreeEntry.GetBackground()
+	m.cachedStyles.gitIgnoredColor = ui.Nord3
+
 	return m
 }
 
@@ -310,16 +325,16 @@ func readDirEntries(path string, depth int, gitignorePatterns []string) []Entry 
 	for _, de := range dirEntries {
 		name := de.Name()
 		fullPath := filepath.Join(path, name)
-		
+
 		// Get relative path from root for gitignore matching
 		relPath := fullPath
 		isGitIgnored := matchesGitignore(relPath, gitignorePatterns, de.IsDir())
-		
+
 		entry := Entry{
-			Name:  name,
-			Path:  fullPath,
-			IsDir: de.IsDir(),
-			Depth: depth,
+			Name:         name,
+			Path:         fullPath,
+			IsDir:        de.IsDir(),
+			Depth:        depth,
 			IsGitIgnored: isGitIgnored,
 		}
 		if de.IsDir() {
@@ -404,16 +419,19 @@ func (m Model) View() string {
 			isCursor := idx == m.Cursor
 			icon, iconColor := iconForEntry(entry)
 
-			// Determine background based on cursor state
+			// Determine background based on cursor state using cached colors
 			var bg color.Color
 			var baseStyle lipgloss.Style
 			if isCursor {
-				bg = m.theme.TreeCursor.GetBackground()
+				bg = m.cachedStyles.cursorBg
 				baseStyle = m.theme.TreeCursor
 			} else {
-				bg = m.theme.TreeEntry.GetBackground()
+				bg = m.cachedStyles.entryBg
 				baseStyle = m.theme.TreeEntry
 			}
+
+			// Set background on cached base style (minimal allocation vs NewStyle)
+			cachedBase := m.cachedStyles.base.Background(bg)
 
 			// Build plain text parts to calculate widths accurately
 			indent := " " + strings.Repeat("  ", entry.Depth)
@@ -483,31 +501,31 @@ func (m Model) View() string {
 				usedWidth = m.Width
 			}
 
-			// Render parts with consistent background
-			styledIcon := lipgloss.NewStyle().Foreground(iconColor).Background(bg).Render(icon)
+			// Render parts with consistent background using cached style
+			styledIcon := cachedBase.Foreground(iconColor).Render(icon)
 			nameFg := baseStyle.GetForeground()
 			if gitNameColor != nil {
 				nameFg = gitNameColor
 			}
 			// Dim gitignored entries
 			if entry.IsGitIgnored {
-				nameFg = ui.Nord3 // dim gray
-				iconColor = ui.Nord3
+				nameFg = m.cachedStyles.gitIgnoredColor // dim gray
+				iconColor = m.cachedStyles.gitIgnoredColor
 			}
-			styledName := lipgloss.NewStyle().Foreground(nameFg).Background(bg).Render(nameStr)
+			styledName := cachedBase.Foreground(nameFg).Render(nameStr)
 			if entry.IsGitIgnored {
-				styledIcon = lipgloss.NewStyle().Foreground(ui.Nord3).Background(bg).Render(icon)
+				styledIcon = cachedBase.Foreground(m.cachedStyles.gitIgnoredColor).Render(icon)
 			}
 
 			// Git status indicator part
 			var gitIndPart string
 			if hasGitInd {
-				gitIndPart = lipgloss.NewStyle().Foreground(gitNameColor).Background(bg).Render(" " + gitIndicator)
+				gitIndPart = cachedBase.Foreground(gitNameColor).Render(" " + gitIndicator)
 			}
 
 			var diagPart string
 			if hasDiag {
-				diagPart = lipgloss.NewStyle().Foreground(diagColor).Background(bg).Render(" ●")
+				diagPart = cachedBase.Foreground(diagColor).Render(" ●")
 			}
 
 			// Calculate padding needed
@@ -525,16 +543,16 @@ func (m Model) View() string {
 			padding := strings.Repeat(" ", padWidth)
 
 			// Assemble: indent + icon + space + name + diag + padding
-			// Render indent and padding with background too
-			indentStyled := lipgloss.NewStyle().Background(bg).Render(indent)
-			spaceStyled := lipgloss.NewStyle().Background(bg).Render(" ")
-			padStyled := lipgloss.NewStyle().Background(bg).Render(padding)
+			// Render indent and padding with background too using cached style
+			indentStyled := cachedBase.Render(indent)
+			spaceStyled := cachedBase.Render(" ")
+			padStyled := cachedBase.Render(padding)
 
 			line := indentStyled + styledIcon + spaceStyled + styledName + gitIndPart + diagPart + padStyled
 			sb.WriteString(line)
 		} else {
-			emptyLine := lipgloss.NewStyle().
-				Background(m.theme.TreeEntry.GetBackground()).
+			// Use entry background for empty lines
+			emptyLine := m.cachedStyles.base.Background(m.cachedStyles.entryBg).
 				Render(strings.Repeat(" ", m.Width))
 			sb.WriteString(emptyLine)
 		}
