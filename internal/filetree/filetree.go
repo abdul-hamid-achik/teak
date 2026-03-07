@@ -38,6 +38,7 @@ type Entry struct {
 	Expanded bool
 	Loading  bool // true while async directory read is in progress
 	Depth    int
+	IsGitIgnored bool // true if entry matches .gitignore
 }
 
 // Model is a file tree sidebar sub-model.
@@ -52,6 +53,7 @@ type Model struct {
 	cachedFlat     []Entry
 	diagnostics    map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
 	gitStatus      map[string]string // relative path → status ("M", "A", "D", "U")
+	gitignorePatterns []string       // patterns from .gitignore
 	lastClickPath  string
 	lastClickTime  time.Time
 }
@@ -72,8 +74,9 @@ func New(root string, theme ui.Theme) Model {
 	m := Model{
 		Root:  root,
 		theme: theme,
+		gitignorePatterns: loadGitignore(root),
 	}
-	m.Entries = readDirEntries(root, 0)
+	m.Entries = readDirEntries(root, 0, m.gitignorePatterns)
 	return m
 }
 
@@ -81,23 +84,23 @@ func New(root string, theme ui.Theme) Model {
 // If the directory is the root, it refreshes the top-level entries.
 func (m *Model) RefreshDir(dir string) {
 	if dir == m.Root {
-		m.Entries = readDirEntries(m.Root, 0)
+		m.Entries = readDirEntries(m.Root, 0, m.gitignorePatterns)
 		m.cachedFlat = nil
 		return
 	}
-	refreshInSlice(m.Entries, dir)
+	refreshInSlice(m.Entries, dir, m.gitignorePatterns)
 	m.cachedFlat = nil
 }
 
-func refreshInSlice(entries []Entry, dir string) bool {
+func refreshInSlice(entries []Entry, dir string, gitignorePatterns []string) bool {
 	for i := range entries {
 		if entries[i].Path == dir && entries[i].IsDir {
-			entries[i].Children = readDirEntries(dir, entries[i].Depth+1)
+			entries[i].Children = readDirEntries(dir, entries[i].Depth+1, gitignorePatterns)
 			entries[i].Loading = false
 			return true
 		}
 		if entries[i].Expanded && entries[i].Children != nil {
-			if refreshInSlice(entries[i].Children, dir) {
+			if refreshInSlice(entries[i].Children, dir, gitignorePatterns) {
 				return true
 			}
 		}
@@ -221,13 +224,13 @@ func (m *Model) ToggleEntry(path string) (Model, tea.Cmd) {
 // toggleDir toggles a directory's expanded state.
 // If expanding and children aren't loaded, starts an async read.
 func (m *Model) toggleDir(path string) (Model, tea.Cmd) {
-	cmd := toggleInSlice(m.Entries, path)
+	cmd := toggleInSlice(m.Entries, path, m.gitignorePatterns)
 	m.cachedFlat = nil
 	return *m, cmd
 }
 
 // toggleInSlice toggles expansion and returns a command if async loading is needed.
-func toggleInSlice(entries []Entry, path string) tea.Cmd {
+func toggleInSlice(entries []Entry, path string, gitignorePatterns []string) tea.Cmd {
 	for i := range entries {
 		if entries[i].Path == path && entries[i].IsDir {
 			entries[i].Expanded = !entries[i].Expanded
@@ -237,14 +240,14 @@ func toggleInSlice(entries []Entry, path string) tea.Cmd {
 				dirPath := entries[i].Path
 				depth := entries[i].Depth + 1
 				return func() tea.Msg {
-					children := readDirEntries(dirPath, depth)
+					children := readDirEntries(dirPath, depth, gitignorePatterns)
 					return DirExpandedMsg{Path: dirPath, Children: children}
 				}
 			}
 			return nil
 		}
 		if entries[i].Expanded && entries[i].Children != nil {
-			if cmd := toggleInSlice(entries[i].Children, path); cmd != nil {
+			if cmd := toggleInSlice(entries[i].Children, path, gitignorePatterns); cmd != nil {
 				return cmd
 			}
 		}
@@ -297,7 +300,7 @@ func flattenEntries(entries []Entry, flat *[]Entry) {
 	}
 }
 
-func readDirEntries(path string, depth int) []Entry {
+func readDirEntries(path string, depth int, gitignorePatterns []string) []Entry {
 	dirEntries, err := os.ReadDir(path)
 	if err != nil {
 		return nil
@@ -306,15 +309,18 @@ func readDirEntries(path string, depth int) []Entry {
 	var dirs, files []Entry
 	for _, de := range dirEntries {
 		name := de.Name()
-		// skip dotfiles
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
+		fullPath := filepath.Join(path, name)
+		
+		// Get relative path from root for gitignore matching
+		relPath := fullPath
+		isGitIgnored := matchesGitignore(relPath, gitignorePatterns, de.IsDir())
+		
 		entry := Entry{
 			Name:  name,
-			Path:  filepath.Join(path, name),
+			Path:  fullPath,
 			IsDir: de.IsDir(),
 			Depth: depth,
+			IsGitIgnored: isGitIgnored,
 		}
 		if de.IsDir() {
 			dirs = append(dirs, entry)
@@ -327,6 +333,60 @@ func readDirEntries(path string, depth int) []Entry {
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 
 	return append(dirs, files...)
+}
+
+// loadGitignore reads a top-level .gitignore and returns simple patterns.
+func loadGitignore(rootDir string) []string {
+	data, err := os.ReadFile(filepath.Join(rootDir, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
+}
+
+// matchesGitignore checks if a relative path matches any gitignore pattern.
+func matchesGitignore(rel string, patterns []string, isDir bool) bool {
+	for _, pat := range patterns {
+		dirOnly := strings.HasSuffix(pat, "/")
+		if dirOnly {
+			if !isDir {
+				continue
+			}
+			pat = strings.TrimSuffix(pat, "/")
+		}
+
+		// Match against basename
+		base := filepath.Base(rel)
+		if matched, _ := filepath.Match(pat, base); matched {
+			return true
+		}
+		// Match against full relative path
+		if matched, _ := filepath.Match(pat, rel); matched {
+			return true
+		}
+		// Handle patterns like "dir/**"
+		prefix := strings.TrimSuffix(pat, "/**")
+		if prefix != pat {
+			if strings.HasPrefix(rel, prefix+"/") || rel == prefix {
+				return true
+			}
+		}
+		// Handle directory prefix patterns like "bin"
+		if !strings.Contains(pat, "*") && !strings.Contains(pat, "?") {
+			if strings.HasPrefix(rel, pat+"/") || rel == pat {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // View renders the file tree.
@@ -429,7 +489,15 @@ func (m Model) View() string {
 			if gitNameColor != nil {
 				nameFg = gitNameColor
 			}
+			// Dim gitignored entries
+			if entry.IsGitIgnored {
+				nameFg = ui.Nord3 // dim gray
+				iconColor = ui.Nord3
+			}
 			styledName := lipgloss.NewStyle().Foreground(nameFg).Background(bg).Render(nameStr)
+			if entry.IsGitIgnored {
+				styledIcon = lipgloss.NewStyle().Foreground(ui.Nord3).Background(bg).Render(icon)
+			}
 
 			// Git status indicator part
 			var gitIndPart string

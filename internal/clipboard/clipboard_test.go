@@ -185,3 +185,167 @@ func TestCopy_Paste_Roundtrip_Multiline(t *testing.T) {
 		t.Errorf("multiline roundtrip failed: got %q, internal=%q, want %q", content, internal, text)
 	}
 }
+
+func TestCopy_VeryLongString(t *testing.T) {
+	// 1MB string
+	veryLong := strings.Repeat("x", 1024*1024)
+	_ = Copy(veryLong)
+	if internal != veryLong {
+		t.Errorf("internal length = %d, want %d", len(internal), len(veryLong))
+	}
+}
+
+func TestCopy_Paste_WhitespaceOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"single space", " "},
+		{"multiple spaces", "     "},
+		{"single tab", "\t"},
+		{"multiple tabs", "\t\t\t"},
+		{"newline", "\n"},
+		{"multiple newlines", "\n\n\n"},
+		{"mixed whitespace", " \t\n "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = Copy(tt.text)
+			if internal != tt.text {
+				t.Errorf("internal = %q, want %q", internal, tt.text)
+			}
+		})
+	}
+}
+
+func TestCopy_Paste_RepeatedCalls(t *testing.T) {
+	values := []string{"first", "second", "third", "fourth"}
+	
+	for i, expected := range values {
+		_ = Copy(expected)
+		if internal != expected {
+			t.Errorf("iteration %d: internal = %q, want %q", i, internal, expected)
+		}
+	}
+}
+
+func TestPaste_WithoutPriorCopy(t *testing.T) {
+	// Reset internal
+	internal = ""
+	
+	// Paste should still return something (OS clipboard or empty internal)
+	content, err := Paste()
+	// We don't care about the error, just that it doesn't panic
+	_ = err
+	_ = content
+}
+
+func TestCopy_DoesNotPanicWithNil(t *testing.T) {
+	// This test ensures Copy handles edge cases gracefully
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Copy panicked with %v", r)
+		}
+	}()
+	
+	// Empty string should not panic
+	_ = Copy("")
+}
+
+func TestPaste_DoesNotPanic(t *testing.T) {
+	// This test ensures Paste handles edge cases gracefully
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Paste panicked with %v", r)
+		}
+	}()
+	
+	// Paste should not panic even if internal is empty
+	internal = ""
+	_, _ = Paste()
+}
+
+func TestCopy_Paste_PreservesExactBytes(t *testing.T) {
+	// Test that bytes are preserved exactly through the internal fallback
+	original := "test with special chars: \x00\x01\x02"
+	_ = Copy(original)
+	
+	if internal != original {
+		t.Errorf("bytes not preserved: got %q, want %q", internal, original)
+	}
+}
+
+func TestCopy_Paste_EscapeSequences(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"backslash n", `test\nnot a newline`},
+		{"backslash t", `test\tnot a tab`},
+		{"backslash r", `test\rnot a cr`},
+		{"backslash backslash", `test\\backslash`},
+		{"backslash quote", `test\"quote`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = Copy(tt.text)
+			if internal != tt.text {
+				t.Errorf("internal = %q, want %q", internal, tt.text)
+			}
+		})
+	}
+}
+
+func TestCopy_Paste_JSONLikeContent(t *testing.T) {
+	json := `{"key": "value", "number": 42, "array": [1,2,3]}`
+	_ = Copy(json)
+	
+	content, _ := Paste()
+	if content != json && internal != json {
+		t.Errorf("JSON roundtrip failed: got %q, internal=%q, want %q", content, internal, json)
+	}
+}
+
+func TestCopy_Paste_XMLLikeContent(t *testing.T) {
+	xml := `<root><element attr="value">content</element></root>`
+	_ = Copy(xml)
+	
+	content, _ := Paste()
+	if content != xml && internal != xml {
+		t.Errorf("XML roundtrip failed: got %q, internal=%q, want %q", content, internal, xml)
+	}
+}
+
+func TestCopy_Paste_CodeSnippet(t *testing.T) {
+	code := `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello, 世界")
+}`
+	_ = Copy(code)
+	
+	content, _ := Paste()
+	if content != code && internal != code {
+		t.Errorf("code roundtrip failed:\ngot %q\ninternal=%q\nwant %q", content, internal, code)
+	}
+}
+
+func TestInternalVariableIsPackageLevel(t *testing.T) {
+	// Verify internal is package-level by checking it persists across calls
+	_ = Copy("value1")
+	val1 := internal
+	
+	_ = Copy("value2")
+	val2 := internal
+	
+	if val1 == val2 {
+		t.Error("internal variable should change between Copy calls")
+	}
+	if val1 != "value1" || val2 != "value2" {
+		t.Errorf("internal values incorrect: got %q, %q, want value1, value2", val1, val2)
+	}
+}

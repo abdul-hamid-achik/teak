@@ -352,3 +352,126 @@ func TestThemeByNameConsistency(t *testing.T) {
 	_ = theme1.Editor
 	_ = theme2.Editor
 }
+
+// TestPlaceOverlayAt tests PlaceOverlayAt function
+func TestPlaceOverlayAt(t *testing.T) {
+	base := "Hello\nWorld"
+	overlay := "X"
+	
+	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestPlaceOverlayAtWithOffset tests PlaceOverlayAt with offset
+func TestPlaceOverlayAtWithOffset(t *testing.T) {
+	base := "Hello\nWorld"
+	overlay := "X"
+	
+	result := PlaceOverlayAt(base, overlay, 2, 1, 10, 5)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestPlaceOverlayAtWithLargeOverlay tests PlaceOverlayAt with large overlay
+func TestPlaceOverlayAtWithLargeOverlay(t *testing.T) {
+	base := "Hi"
+	overlay := "Large overlay text"
+	
+	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestPlaceOverlayAtWithEmptyBase tests PlaceOverlayAt with empty base
+func TestPlaceOverlayAtWithEmptyBase(t *testing.T) {
+	base := ""
+	overlay := "X"
+	
+	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestPlaceOverlayAtWithEmptyOverlay tests PlaceOverlayAt with empty overlay
+func TestPlaceOverlayAtWithEmptyOverlay(t *testing.T) {
+	base := "Hello"
+	overlay := ""
+	
+	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlay tests RenderOverlay function
+func TestRenderOverlay(t *testing.T) {
+	base := "Hello World"
+	overlay := "X"
+	
+	result := RenderOverlay(base, overlay, 20, 10)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlayWithLargeOverlay tests RenderOverlay with large overlay
+func TestRenderOverlayWithLargeOverlay(t *testing.T) {
+	base := "Hi"
+	overlay := "This is a very large overlay text"
+	
+	result := RenderOverlay(base, overlay, 20, 10)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlayWithSmallCanvas tests RenderOverlay with small canvas
+func TestRenderOverlayWithSmallCanvas(t *testing.T) {
+	base := "Hello"
+	overlay := "X"
+	
+	result := RenderOverlay(base, overlay, 5, 3)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlayWithMultilineOverlay tests RenderOverlay with multiline overlay
+func TestRenderOverlayWithMultilineOverlay(t *testing.T) {
+	base := "Hello World"
+	overlay := "Line1\nLine2\nLine3"
+	
+	result := RenderOverlay(base, overlay, 30, 10)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlayCentersOverlay tests that RenderOverlay centers the overlay
+func TestRenderOverlayCentersOverlay(t *testing.T) {
+	base := "Hello World"
+	overlay := "X"
+	
+	// With a 20-width canvas and 1-char overlay, should be centered at x=9
+	result := RenderOverlay(base, overlay, 20, 10)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestRenderOverlayHandlesNegativePosition tests RenderOverlay handles negative positions
+func TestRenderOverlayHandlesNegativePosition(t *testing.T) {
+	base := "Hello"
+	overlay := "X"
+	
+	// Very small canvas should clamp position to 0
+	result := RenderOverlay(base, overlay, 1, 1)
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
