@@ -9,11 +9,6 @@ import (
 	"teak/internal/overlay"
 )
 
-// FileListMsg carries the cached file list from a background walk.
-type FileListMsg struct {
-	Files []string
-}
-
 // walkProjectFiles returns relative file paths under rootDir, skipping
 // hidden directories, common build/dependency folders, and respecting
 // a top-level .gitignore if present.

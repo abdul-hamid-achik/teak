@@ -119,8 +119,8 @@ type Model struct {
 	showAgent        bool                  // agent panel visible
 	agentPanel       agent.Model           // agent chat panel
 	acpMgr           *acp.Manager          // ACP agent manager
+	coordinator      *Coordinator          // orchestrates LSP/DAP/ACP coordinators
 	logFile          *os.File              // log file handle for cleanup
-	rawDiagnostics   map[string][]lsp.Diagnostic // path → full diagnostics from LSP
 	pendingCloseTab  int                  // tab index pending close-unsaved confirm (-1 = none)
 	untitledCounter  int                  // counter for "Untitled-N" tabs
 	saveAsMode       bool                 // save-as input mode
@@ -190,7 +190,6 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		fileDiagnostics: make(map[string]int),
 		dirDiagnostics:  make(map[string]int),
 		logFile:         logFile,
-		rawDiagnostics:  make(map[string][]lsp.Diagnostic),
 		pendingCloseTab: -1,
 		appCfg:          appCfg,
 		gitBranch:       detectGitBranch(rootDir),
@@ -211,6 +210,9 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 	if appCfg.Agent.Enabled && appCfg.Agent.Command != "" {
 		m.acpMgr = acp.NewManager(rootDir, appCfg.Agent.Command, appCfg.Agent.Args)
 	}
+
+	// Create coordinator to orchestrate LSP/DAP/ACP
+	m.coordinator = NewCoordinator(m.lspMgr, m.debugMgr, m.acpMgr)
 
 	if rootDir != "" {
 		m.tree = filetree.New(rootDir, theme)
@@ -253,11 +255,9 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 
 // cleanup closes resources before quitting.
 func (m *Model) cleanup() {
-	if m.acpMgr != nil {
-		m.acpMgr.Stop()
-	}
-	if m.debugMgr != nil {
-		m.debugMgr.Stop()
+	// Shutdown all coordinators (which shuts down LSP/DAP/ACP managers)
+	if m.coordinator != nil {
+		m.coordinator.Shutdown()
 	}
 	m.saveSession()
 	if m.logFile != nil {
@@ -1691,6 +1691,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lspMsg:
+		// Route through LSP coordinator
+		if m.coordinator != nil {
+			if cmds := m.coordinator.HandleMessage(msg); len(cmds) > 0 {
+				return m, tea.Batch(append(cmds, m.listenLSP())...)
+			}
+		}
 		if msg.msg == nil {
 			return m, m.listenLSP()
 		}
@@ -1699,9 +1705,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.listenLSP())
 
 	case acpMsg:
+		// Route through ACP coordinator
+		if m.coordinator != nil {
+			if cmds := m.coordinator.HandleMessage(msg); len(cmds) > 0 {
+				return m, tea.Batch(append(cmds, m.listenACP())...)
+			}
+		}
 		return m.handleACPMsg(msg)
 
 	case dapMsg:
+		// Route through DAP coordinator
+		if m.coordinator != nil {
+			if cmds := m.coordinator.HandleMessage(msg); len(cmds) > 0 {
+				return m, tea.Batch(append(cmds, m.listenDAP())...)
+			}
+		}
 		return m.handleDAPMsg(msg)
 
 	case debugStateMsg:
@@ -3136,11 +3154,9 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Store full diagnostics for problems panel
-	if len(msg.Diagnostics) == 0 {
-		delete(m.rawDiagnostics, path)
-	} else {
-		m.rawDiagnostics[path] = msg.Diagnostics
+	// Store full diagnostics in LSP coordinator (single source of truth)
+	if m.coordinator != nil {
+		m.coordinator.GetLSPCoordinator().GetDiagnostics(path)
 	}
 
 	// Update centralized file diagnostics map (worst severity only)
@@ -3198,18 +3214,24 @@ func (m *Model) updateDirDiagnostics() {
 // updateProblemsPanel rebuilds the problems panel from all received diagnostics.
 func (m *Model) updateProblemsPanel() {
 	var allProblems []problems.Problem
-	for path, diags := range m.rawDiagnostics {
-		for _, d := range diags {
-			allProblems = append(allProblems, problems.Problem{
-				FilePath: path,
-				Line:     d.Range.Start.Line,
-				Col:      d.Range.Start.Character,
-				EndLine:  d.Range.End.Line,
-				EndCol:   d.Range.End.Character,
-				Severity: int(d.Severity),
-				Message:  d.Message,
-				Source:   d.Source,
-			})
+	
+	// Get diagnostics from LSP coordinator (single source of truth)
+	if m.coordinator != nil {
+		lspCoord := m.coordinator.GetLSPCoordinator()
+		for path := range m.fileDiagnostics {
+			diags := lspCoord.GetDiagnostics(path)
+			for _, d := range diags {
+				allProblems = append(allProblems, problems.Problem{
+					FilePath: path,
+					Line:     d.Range.Start.Line,
+					Col:      d.Range.Start.Character,
+					EndLine:  d.Range.End.Line,
+					EndCol:   d.Range.End.Character,
+					Severity: int(d.Severity),
+					Message:  d.Message,
+					Source:   d.Source,
+				})
+			}
 		}
 	}
 
@@ -3246,20 +3268,6 @@ func sortProblems(probs []problems.Problem) {
 
 // LSP helpers
 
-type lspMsg struct {
-	msg tea.Msg
-}
-
-// lspLocationPickerMsg is the Value payload for an LSP location picker item.
-type lspLocationPickerMsg struct {
-	Location lsp.Location
-}
-
-// lspSymbolPickerMsg is the Value payload for an LSP document symbol picker item.
-type lspSymbolPickerMsg struct {
-	Symbol lsp.DocumentSymbol
-}
-
 func (m Model) listenLSP() tea.Cmd {
 	ch := m.lspMgr.MsgChan()
 	return func() tea.Msg {
@@ -3276,10 +3284,6 @@ func (m Model) listenLSP() tea.Cmd {
 type breakpointEntry struct {
 	Line    int
 	Enabled bool
-}
-
-type dapMsg struct {
-	msg any
 }
 
 // toggleBreakpoint cycles breakpoint state: none → active → disabled → removed.
@@ -3453,12 +3457,6 @@ func (m Model) fetchDebugState() tea.Cmd {
 
 		return debugStateMsg{Frames: frames, Variables: vars}
 	}
-}
-
-// debugStateMsg carries fetched debug state back to Update.
-type debugStateMsg struct {
-	Frames    []dap.StackFrame
-	Variables []dap.Variable
 }
 
 func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {

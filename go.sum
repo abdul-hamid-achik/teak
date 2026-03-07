@@ -18,6 +18,8 @@ github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiE
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/aymanbagabas/go-udiff v0.4.0 h1:TKnLPh7IbnizJIBKFWa9mKayRUBQ9Kh1BPCk6w2PnYM=
 github.com/aymanbagabas/go-udiff v0.4.0/go.mod h1:0L9PGwj20lrtmEMeyw4WKJ/TMyDtvAoK9bf2u/mNo3w=
+github.com/charmbracelet/bubbletea/v2 v2.0.0-beta.3.0.20250617194119-3f1d09f7d826 h1:pQxCWMojVjHePqGzWsANhplourZYsD6AuR6eR2Hi5yc=
+github.com/charmbracelet/bubbletea/v2 v2.0.0-beta.3.0.20250617194119-3f1d09f7d826/go.mod h1:bfzSaUDPMKrWDjD6wo/ato9lfDdEX83rZgwcXHYWJ98=
 github.com/charmbracelet/colorprofile v0.4.2 h1:BdSNuMjRbotnxHSfxy+PCSa4xAmz7szw70ktAtWRYrY=
 github.com/charmbracelet/colorprofile v0.4.2/go.mod h1:0rTi81QpwDElInthtrQ6Ni7cG0sDtwAd4C4le060fT8=
 github.com/charmbracelet/lipgloss v1.1.0 h1:vYXsiLHVkK7fp74RkV7b2kq9+zDLoEU4MZoFqR/noCY=
@@ -32,6 +34,10 @@ github.com/charmbracelet/x/cellbuf v0.0.15 h1:ur3pZy0o6z/R7EylET877CBxaiE1Sp1GMx
 github.com/charmbracelet/x/cellbuf v0.0.15/go.mod h1:J1YVbR7MUuEGIFPCaaZ96KDl5NoS0DAWkskup+mOY+Q=
 github.com/charmbracelet/x/exp/golden v0.0.0-20250806222409-83e3a29d542f h1:pk6gmGpCE7F3FcjaOEKYriCvpmIN4+6OS/RD0vm4uIA=
 github.com/charmbracelet/x/exp/golden v0.0.0-20250806222409-83e3a29d542f/go.mod h1:IfZAMTHB6XkZSeXUqriemErjAWCCzT0LwjKFYCZyw0I=
+github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260305213658-fe36e8c10185 h1:JgaLfHQ4IuluEWG2yq541AN1696JYiF9lPX3/29G75c=
+github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260305213658-fe36e8c10185/go.mod h1:zYyXKZx1gN3GWYa+S45Tc7Pp8IHiH07VmsoxXSbxqw4=
+github.com/charmbracelet/x/input v0.3.5-0.20250509021451-13796e822d86 h1:BxAEmOBIDajkgao3EsbBxKQCYvgYPGdT62WASLvtf4Y=
+github.com/charmbracelet/x/input v0.3.5-0.20250509021451-13796e822d86/go.mod h1:62Rp/6EtTxoeJDSdtpA3tJp3y3ZRpsiekBSje+K8htA=
 github.com/charmbracelet/x/term v0.2.2 h1:xVRT/S2ZcKdhhOuSP4t5cLi5o+JxklsoEObBSgfgZRk=
 github.com/charmbracelet/x/term v0.2.2/go.mod h1:kF8CY5RddLWrsgVwpw4kAa6TESp6EB5y3uxGLeCqzAI=
 github.com/charmbracelet/x/termios v0.1.1 h1:o3Q2bT8eqzGnGPOYheoYS8eEleT5ZVNYNy8JawjaNZY=

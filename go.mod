@@ -18,11 +18,16 @@ require (
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/aymanbagabas/go-udiff v0.4.0 // indirect
+	github.com/charmbracelet/bubbletea/v2 v2.0.0-beta.3.0.20250617194119-3f1d09f7d826 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/lipgloss v1.1.0 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260223171050-89c142e4aa73 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
+	github.com/charmbracelet/x/exp/golden v0.0.0-20250806222409-83e3a29d542f // indirect
+	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260305213658-fe36e8c10185 // indirect
+	github.com/charmbracelet/x/input v0.3.5-0.20250509021451-13796e822d86 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect

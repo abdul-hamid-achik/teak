@@ -21,7 +21,7 @@ type Client struct {
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
 	stdout       io.ReadCloser
-	mu           sync.Mutex
+	mu           sync.RWMutex // RWMutex for better concurrent reads
 	requestID    int
 	pending      map[int]chan callResult
 	rootURI      string
@@ -36,50 +36,50 @@ type Client struct {
 
 // IsReady returns whether the client has completed initialization.
 func (c *Client) IsReady() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.initialized
 }
 
 // SupportsHover returns whether the server supports hover requests.
 func (c *Client) SupportsHover() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.capabilities.HoverProvider
 }
 
 // SupportsCompletion returns whether the server supports completion requests.
 func (c *Client) SupportsCompletion() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.capabilities.CompletionProvider != nil
 }
 
 // SupportsDefinition returns whether the server supports go-to-definition.
 func (c *Client) SupportsDefinition() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.capabilities.DefinitionProvider
 }
 
 // SupportsReferences returns whether the server supports find-references.
 func (c *Client) SupportsReferences() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.capabilities.ReferencesProvider
 }
 
 // SupportsRename returns whether the server supports rename.
 func (c *Client) SupportsRename() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.capabilities.RenameProvider
 }
 
 // GetCompletionTriggerCharacters returns the trigger characters for completion.
 func (c *Client) GetCompletionTriggerCharacters() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.capabilities.CompletionProvider != nil {
 		return c.capabilities.CompletionProvider.TriggerCharacters
 	}
@@ -88,8 +88,8 @@ func (c *Client) GetCompletionTriggerCharacters() []string {
 
 // GetSyncKind returns the negotiated document sync mode.
 func (c *Client) GetSyncKind() SyncKind {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.syncKind
 }
 
@@ -871,9 +871,12 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		}
 		return res.Result, nil
 	case <-ctx.Done():
+		// Cancel the pending request on the server side
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
+		// Send cancellation notification to LSP server
+		c.notify("$/cancelRequest", map[string]any{"id": id})
 		return nil, ctx.Err()
 	}
 }

@@ -37,6 +37,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Warning: config: %v\n", err)
 	}
 
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
 	model, err := app.NewModel(filePath, rootDir, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

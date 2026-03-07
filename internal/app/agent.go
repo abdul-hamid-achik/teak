@@ -15,31 +15,6 @@ import (
 	"teak/internal/ui"
 )
 
-// acpMsg wraps an ACP message from the msgChan so it routes through the
-// main Update switch without colliding with other message types.
-type acpMsg struct {
-	msg tea.Msg
-}
-
-// toggleAgentMsg is sent by the command palette.
-type toggleAgentMsg struct{}
-
-// focusAgentMsg is sent by the command palette.
-type focusAgentMsg struct{}
-
-// agentCancelMsg is sent to cancel the current agent operation.
-type agentCancelMsg struct{}
-
-// agentModelPickerSelectMsg is sent when a model is selected from the overlay picker.
-type agentModelPickerSelectMsg struct {
-	ModelId string
-}
-
-// agentFilePickerSelectMsg is sent when a file is selected from the overlay picker.
-type agentFilePickerSelectMsg struct {
-	Path string
-}
-
 // listenACP returns a tea.Cmd that waits for the next ACP message.
 func (m Model) listenACP() tea.Cmd {
 	if m.acpMgr == nil {
@@ -449,12 +424,6 @@ func (m *Model) applyAgentWrite(path, content string) tea.Cmd {
 		}
 		return nil
 	}
-}
-
-// agentWriteErrorMsg represents a write error for the agent
-type agentWriteErrorMsg struct {
-	Path string
-	Err  error
 }
 
 // validatePathStrict performs stricter validation including symlink resolution

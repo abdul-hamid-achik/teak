@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -194,4 +195,48 @@ func merge(cfg *Config, user *userConfig) {
 			cfg.Agent.Args = user.Agent.Args
 		}
 	}
+}
+
+// Validate validates the configuration and returns an error if invalid.
+func (c Config) Validate() error {
+	// Validate editor config
+	if c.Editor.TabSize < 1 || c.Editor.TabSize > 8 {
+		return fmt.Errorf("tab_size must be between 1 and 8, got %d", c.Editor.TabSize)
+	}
+
+	// Validate theme - check against known valid themes
+	validThemes := map[string]bool{
+		"nord":         true,
+		"dracula":      true,
+		"catppuccin":   true,
+		"solarized-dark": true,
+		"one-dark":     true,
+	}
+	if c.UI.Theme != "" {
+		if !validThemes[c.UI.Theme] {
+			return fmt.Errorf("unknown theme: %q", c.UI.Theme)
+		}
+	}
+
+	// Validate agent config
+	if c.Agent.Enabled && c.Agent.Command == "" {
+		return fmt.Errorf("agent.enabled is true but agent.command is empty")
+	}
+
+	// Validate session config
+	if c.Session.Enabled && c.Session.AutoSaveInterval <= 0 {
+		return fmt.Errorf("session.auto_save_interval must be positive when session is enabled")
+	}
+
+	// Validate LSP configs
+	for i, lsp := range c.LSP {
+		if lsp.Command == "" {
+			return fmt.Errorf("lsp[%d].command is empty", i)
+		}
+		if len(lsp.Extensions) == 0 {
+			return fmt.Errorf("lsp[%d].extensions is empty", i)
+		}
+	}
+
+	return nil
 }
