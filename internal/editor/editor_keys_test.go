@@ -13,7 +13,7 @@ func newEditor(content string, line, col int) Editor {
 	buf := text.NewBufferFromBytes([]byte(content))
 	e := New(buf, ui.DefaultTheme(), DefaultConfig())
 	e.SetSize(80, 24)
-	e.Buffer.Cursor = text.Position{Line: line, Col: col}
+	e.Buffer.SetCursor(text.Position{Line: line, Col: col})
 	return e
 }
 
@@ -32,7 +32,7 @@ func TestEditorCopyDoesNotModifyBuffer(t *testing.T) {
 	if got := editorContent(e); got != "hello world" {
 		t.Errorf("ctrl+c should not modify buffer, got %q", got)
 	}
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Error("ctrl+c should preserve selection")
 	}
 }
@@ -225,7 +225,7 @@ func TestEditorShiftUpDown(t *testing.T) {
 	e := newEditor("line1\nline2\nline3", 1, 0)
 
 	e, _ = e.Update(tea.KeyPressMsg{Text: "shift+down"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("shift+down should create selection")
 	}
 
@@ -237,7 +237,7 @@ func TestEditorCtrlShiftLeftRight(t *testing.T) {
 	e := newEditor("hello world", 0, 5)
 
 	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+shift+left"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("ctrl+shift+left should create selection")
 	}
 
@@ -249,13 +249,13 @@ func TestEditorShiftHomeEnd(t *testing.T) {
 	e := newEditor("hello world", 0, 5)
 
 	e, _ = e.Update(tea.KeyPressMsg{Text: "shift+home"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("shift+home should create selection")
 	}
 
 	e = newEditor("hello world", 0, 5)
 	e, _ = e.Update(tea.KeyPressMsg{Text: "shift+end"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("shift+end should create selection")
 	}
 }
@@ -264,13 +264,13 @@ func TestEditorCtrlShiftHomeEnd(t *testing.T) {
 	e := newEditor("line1\nline2\nline3", 1, 3)
 
 	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+shift+home"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("ctrl+shift+home should create selection")
 	}
 
 	e = newEditor("line1\nline2\nline3", 1, 3)
 	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+shift+end"})
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Fatal("ctrl+shift+end should create selection")
 	}
 }
@@ -481,7 +481,7 @@ func TestEditorMouseDrag(t *testing.T) {
 		Y: 0,
 	})
 
-	if e.Buffer.Selection == nil {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Error("mouse motion while dragging should create selection")
 	}
 }
@@ -494,7 +494,7 @@ func TestEditorMouseMotionWithoutDrag(t *testing.T) {
 		Y: 0,
 	})
 
-	if e.Buffer.Selection != nil {
+	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty() {
 		t.Error("mouse motion without dragging should not create selection")
 	}
 }

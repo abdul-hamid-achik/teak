@@ -53,10 +53,11 @@ func BenchmarkViewportRenderWithSelection(b *testing.B) {
 	theme := ui.NordTheme()
 	buf := createTestBuffer(100)
 	// Set a selection
-	buf.Selection = &text.Selection{
+	buf.Selections = text.NewSelections(text.Position{Line: 5, Col: 10})
+	buf.Selections.Add(text.Selection{
 		Anchor: text.Position{Line: 5, Col: 10},
 		Head:   text.Position{Line: 10, Col: 20},
-	}
+	})
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
 

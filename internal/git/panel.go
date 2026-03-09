@@ -291,6 +291,11 @@ func (m Model) IsGitRepo() bool {
 	return m.isGitRepo
 }
 
+// SetIsGitRepo sets whether the root dir is inside a git repository.
+func (m *Model) SetIsGitRepo(isGitRepo bool) {
+	m.isGitRepo = isGitRepo
+}
+
 // RootDir returns the root directory of the git repo.
 func (m Model) RootDir() string {
 	return m.rootDir
@@ -990,8 +995,27 @@ func (m *Model) SetSize(w, h int) {
 
 // View renders the git panel.
 func (m Model) View() string {
-	if !m.isGitRepo || m.Width == 0 || m.Height == 0 {
+	if m.Width == 0 || m.Height == 0 {
 		return ""
+	}
+
+	// Fallback UI when not in a git repo
+	if !m.isGitRepo {
+		var sb strings.Builder
+		sb.WriteString("\n")
+		sb.WriteString(m.theme.GitSectionHeader.Render("  Not a Git Repository"))
+		sb.WriteString("\n\n")
+		sb.WriteString("  This directory is not a Git repository.\n")
+		sb.WriteString("\n")
+		initBtn := zone.Mark("git-init-btn",
+			m.theme.GitActionButton.Render("\uf417 Initialize Git Repository"))
+		sb.WriteString("  " + initBtn)
+		sb.WriteString("\n")
+		// Pad remaining height
+		for i := 5; i < m.Height; i++ {
+			sb.WriteByte('\n')
+		}
+		return sb.String()
 	}
 
 	var sb strings.Builder
@@ -1212,7 +1236,7 @@ func (m Model) View() string {
 	}
 	m.commitBody.SetStyles(taStyles)
 
-	// Render textarea view
+	// Render textarea view wrapped in zone for click detection
 	bodyView := m.commitBody.View()
 	bodyLines := strings.Split(bodyView, "\n")
 	for i := 0; i < bodyHeight; i++ {
@@ -1220,7 +1244,9 @@ func (m Model) View() string {
 		sb.WriteString(borderStyle.Render("│"))
 		linesUsed++
 		if i < len(bodyLines) {
-			sb.WriteString(bodyLines[i])
+			// Wrap each line in the git-commit-body zone
+			lineWithZone := zone.Mark("git-commit-body", bodyLines[i])
+			sb.WriteString(lineWithZone)
 		} else {
 			sb.WriteString(strings.Repeat(" ", innerWidth))
 		}

@@ -1405,6 +1405,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Update file tree git status indicators
 		if msg.Err == nil {
+			// Mark as git repo if we got entries (even if empty)
+			if !m.gitPanel.IsGitRepo() {
+				m.gitPanel.SetIsGitRepo(true)
+			}
 			gitStatusMap := make(map[string]string)
 			for _, e := range msg.Entries {
 				// Use the most visible status (unstaged > staged)
@@ -2313,6 +2317,12 @@ func (m Model) sidebarTabBar() string {
 // adjustedY is relative to the panel (0-based), originalMsg has absolute coords for zone checks.
 func (m Model) handleGitPanelClick(adjustedY int, originalMsg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	// Check zone-based buttons using original absolute-coordinate message
+	if zone.Get("git-init-btn").InBounds(originalMsg) {
+		// Initialize git repository
+		cmd := git.InitCmd(m.rootDir)
+		m.status = "Initializing Git repository..."
+		return m, cmd
+	}
 	if zone.Get("git-commit-btn").InBounds(originalMsg) {
 		result, cmd := m.gitPanel.DoCommit()
 		m.gitPanel = result

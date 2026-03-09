@@ -219,7 +219,7 @@ func TestEditorUpdateKeyPressSelection(t *testing.T) {
 	msg := tea.KeyPressMsg{Text: "shift+right"}
 	editor, _ = editor.Update(msg)
 
-	if editor.Buffer.Selection == nil {
+	if editor.Buffer.Selections == nil || editor.Buffer.Selections.Count() == 0 {
 		t.Fatal("expected selection to be set")
 	}
 }
@@ -232,7 +232,7 @@ func TestEditorUpdateKeyPressSelectAll(t *testing.T) {
 	msg := tea.KeyPressMsg{Text: "ctrl+a"}
 	editor, _ = editor.Update(msg)
 
-	if editor.Buffer.Selection == nil {
+	if editor.Buffer.Selections == nil || editor.Buffer.Selections.Count() == 0 {
 		t.Fatal("expected selection to be set")
 	}
 }
@@ -284,7 +284,7 @@ func TestEditorUpdateKeyPressEnter(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("hello"))
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 	editor.SetSize(80, 24)
-	editor.Buffer.Cursor = text.Position{Line: 0, Col: 5}
+	editor.Buffer.SetCursor(text.Position{Line: 0, Col: 5})
 
 	msg := tea.KeyPressMsg{Text: "enter"}
 	editor, _ = editor.Update(msg)
@@ -386,7 +386,7 @@ func TestEditorUpdateMouseClickRightWithSelection(t *testing.T) {
 	editor, _ = editor.Update(msg)
 
 	// Selection should be preserved
-	if editor.Buffer.Selection == nil || editor.Buffer.Selection.IsEmpty() {
+	if editor.Buffer.Selections == nil || editor.Buffer.Selections.Count() == 0 || editor.Buffer.Selections.Primary().IsEmpty() {
 		t.Error("expected selection to be preserved")
 	}
 }
@@ -413,7 +413,7 @@ func TestEditorUpdateMouseClickDoubleClick(t *testing.T) {
 	}
 	editor, _ = editor.Update(msg)
 
-	if editor.Buffer.Selection == nil || editor.Buffer.Selection.IsEmpty() {
+	if editor.Buffer.Selections == nil || editor.Buffer.Selections.Count() == 0 || editor.Buffer.Selections.Primary().IsEmpty() {
 		t.Error("expected word selection on double-click")
 	}
 }
@@ -844,7 +844,7 @@ func TestEditorDispatchContextMenuActionSelectAll(t *testing.T) {
 
 	editor, _ = editor.dispatchContextMenuAction("select_all")
 
-	if editor.Buffer.Selection == nil || editor.Buffer.Selection.IsEmpty() {
+	if editor.Buffer.Selections == nil || editor.Buffer.Selections.Count() == 0 || editor.Buffer.Selections.Primary().IsEmpty() {
 		t.Error("expected selection to be set")
 	}
 }

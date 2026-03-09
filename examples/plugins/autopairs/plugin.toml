@@ -1,0 +1,5 @@
+name = "autopairs"
+version = "1.0.0"
+description = "Auto-close brackets and quotes"
+author = "Teak Team"
+main = "init.lua"

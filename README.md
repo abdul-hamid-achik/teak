@@ -80,8 +80,27 @@ teak ~/projects/myapp
 | `Shift+Home/End` | Select to line edge |
 | `Ctrl+A` | Select all |
 | `Ctrl+D` | Select next occurrence |
+| `Ctrl+U` | Select all occurrences |
+| `Ctrl+Alt+Up` | Add cursor above |
+| `Ctrl+Alt+Down` | Add cursor below |
 | `Double-click` | Select word |
 | `Click+Drag` | Select with mouse |
+
+### Multi-Cursor Editing
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+D` | Select next occurrence of current selection |
+| `Ctrl+U` | Select all occurrences of current selection |
+| `Ctrl+Alt+Up` | Add cursor on line above |
+| `Ctrl+Alt+Down` | Add cursor on line below |
+| `Esc` | Clear additional cursors (keep primary) |
+
+**Multi-Cursor Features:**
+- Type at multiple positions simultaneously
+- Delete/edit multiple selections at once
+- All cursors move together with arrow keys
+- Primary selection (last added) determines viewport scrolling
 
 ### Editing
 

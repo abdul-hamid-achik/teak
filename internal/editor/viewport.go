@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -106,9 +107,9 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 			lineContent := string(lineBytes)
 			lineLen := len(lineBytes)
 
-			// Check for selection on this line
-			selStart, selEnd := selectionRange(buf.Selection, line, lineLen)
-			hasSelection := selStart >= 0 && selEnd > selStart
+			// Check for ALL selections on this line
+			selectionRanges := selectionRanges(buf, line, lineLen)
+			hasSelection := len(selectionRanges) > 0
 
 			// Check for syntax highlighting tokens
 			var tokens []highlight.StyledToken
@@ -117,9 +118,9 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 			}
 
 			if hasSelection {
-				sb.WriteString(v.renderLineWithSelection(lineContent, lineBytes, selStart, selEnd, line == buf.Cursor.Line, textWidth, theme))
+				sb.WriteString(v.renderLineWithMultipleSelections(lineContent, lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
 			} else if len(tokens) > 0 {
-				rendered := v.renderLineWithTokens(tokens, line == buf.Cursor.Line, textWidth, theme)
+				rendered := v.renderLineWithTokens(tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
 				if hasBracketMatch {
 					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
 				}
@@ -594,8 +595,9 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 	return sb.String()
 }
 
-// selectionRange returns the byte range of the selection overlapping a line.
+// selectionRange returns the byte range of a single selection overlapping a line.
 // Returns (-1, -1) if no overlap.
+// Deprecated: Use selectionRanges for multiple selections support.
 func selectionRange(sel *text.Selection, line, lineLen int) (int, int) {
 	if sel == nil || sel.IsEmpty() {
 		return -1, -1
@@ -621,6 +623,101 @@ func selectionRange(sel *text.Selection, line, lineLen int) (int, int) {
 		return -1, -1
 	}
 	return startCol, endCol
+}
+
+// selectionRanges returns byte ranges of all selections overlapping a line.
+// Returns nil if no selections overlap.
+func selectionRanges(buf *text.Buffer, line, lineLen int) []struct {
+	start, end int
+} {
+	if buf.Selections == nil {
+		return nil
+	}
+
+	var ranges []struct{ start, end int }
+
+	for _, sel := range buf.Selections.All() {
+		if sel.IsEmpty() {
+			continue
+		}
+
+		start, end := sel.Ordered()
+
+		// No overlap
+		if line < start.Line || line > end.Line {
+			continue
+		}
+
+		startCol := 0
+		if line == start.Line {
+			startCol = start.Col
+		}
+
+		endCol := lineLen
+		if line == end.Line {
+			endCol = end.Col
+		}
+
+		if startCol >= endCol {
+			continue
+		}
+
+		ranges = append(ranges, struct{ start, end int }{startCol, endCol})
+	}
+
+	// Sort ranges by start position
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].start < ranges[j].start
+	})
+
+	return ranges
+}
+
+func (v *Viewport) renderLineWithMultipleSelections(lineContent string, lineBytes []byte, ranges []struct{ start, end int }, isPrimaryLine bool, textWidth int, theme ui.Theme) string {
+	var sb strings.Builder
+	col := 0
+
+	for _, selRange := range ranges {
+		// Render text before selection
+		if col < selRange.start {
+			before := lineContent[col:selRange.start]
+			displayed := applyScrollX(before, v.ScrollX)
+			displayed = truncateToWidth(displayed, textWidth)
+			sb.WriteString(theme.Editor.Render(displayed))
+		}
+
+		// Render selected text
+		selected := lineContent[selRange.start:selRange.end]
+		displayed := applyScrollX(selected, v.ScrollX)
+		displayed = truncateToWidth(displayed, textWidth)
+
+		// Primary line gets primary selection style, others get secondary
+		if isPrimaryLine {
+			sb.WriteString(theme.Selection.Render(displayed))
+		} else {
+			sb.WriteString(theme.SecondarySelection.Render(displayed))
+		}
+
+		col = selRange.end
+	}
+
+	// Render remaining text
+	if col < len(lineContent) {
+		remaining := lineContent[col:]
+		displayed := applyScrollX(remaining, v.ScrollX)
+		displayed = truncateToWidth(displayed, textWidth)
+		padLen := max(0, textWidth-displayWidth(displayed))
+		if padLen > 0 {
+			displayed += getSpaces(padLen)
+		}
+		if isPrimaryLine {
+			sb.WriteString(theme.CursorLine.Render(displayed))
+		} else {
+			sb.WriteString(theme.Editor.Render(displayed))
+		}
+	}
+
+	return sb.String()
 }
 
 func (v *Viewport) renderLineWithSelection(lineContent string, lineBytes []byte, selStart, selEnd int, isCursorLine bool, textWidth int, theme ui.Theme) string {

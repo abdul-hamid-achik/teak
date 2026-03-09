@@ -28,19 +28,20 @@ var (
 
 // Theme holds lipgloss styles for the editor UI.
 type Theme struct {
-	Editor       lipgloss.Style
-	Gutter       lipgloss.Style
-	GutterActive lipgloss.Style
-	Selection    lipgloss.Style
-	CursorLine   lipgloss.Style
-	StatusBar    lipgloss.Style
-	StatusText   lipgloss.Style
-	HelpBorder   lipgloss.Style
-	HelpTitle    lipgloss.Style
-	HelpKey      lipgloss.Style
-	TreeEntry    lipgloss.Style
-	TreeCursor   lipgloss.Style
-	TreeBorder   lipgloss.Style
+	Editor             lipgloss.Style
+	Gutter             lipgloss.Style
+	GutterActive       lipgloss.Style
+	Selection          lipgloss.Style
+	SecondarySelection lipgloss.Style
+	CursorLine         lipgloss.Style
+	StatusBar          lipgloss.Style
+	StatusText         lipgloss.Style
+	HelpBorder         lipgloss.Style
+	HelpTitle          lipgloss.Style
+	HelpKey            lipgloss.Style
+	TreeEntry          lipgloss.Style
+	TreeCursor         lipgloss.Style
+	TreeBorder         lipgloss.Style
 
 	// Tab bar
 	TabActive        lipgloss.Style
@@ -185,6 +186,9 @@ func defaultNordTheme() Theme {
 			Bold(true),
 		Selection: lipgloss.NewStyle().
 			Background(Nord2).
+			Foreground(Nord6),
+		SecondarySelection: lipgloss.NewStyle().
+			Background(Nord10).
 			Foreground(Nord6),
 		CursorLine: lipgloss.NewStyle().
 			Background(Nord1),
@@ -449,6 +453,7 @@ func buildTheme(p palette) Theme {
 		Gutter:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).PaddingRight(1),
 		GutterActive:        lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
 		Selection:           lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
+		SecondarySelection:  lipgloss.NewStyle().Background(p.bg3).Foreground(p.fg1),
 		CursorLine:          lipgloss.NewStyle().Background(p.bg1),
 		StatusBar:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
 		StatusText:          lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),

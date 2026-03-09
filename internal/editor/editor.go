@@ -407,6 +407,19 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		edited = true
 	case "ctrl+d":
 		e.Buffer.SelectNextOccurrence()
+		edited = true
+	case "ctrl+u":
+		e.Buffer.SelectAllOccurrences()
+		edited = true
+	case "ctrl+alt+up":
+		e.Buffer.AddCursorAbove()
+		edited = true
+	case "ctrl+alt+down":
+		e.Buffer.AddCursorBelow()
+		edited = true
+	case "ctrl+shift+l":
+		e.Buffer.SplitSelectionIntoLines()
+		edited = true
 	case "ctrl+l":
 		e.Buffer.SelectLine()
 	case "ctrl+]":
@@ -508,7 +521,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 	if m.Button == tea.MouseRight {
 		pos := e.screenToBuffer(m.X, m.Y)
 		// Only move cursor if no selection (preserve selection for cut/copy)
-		if e.Buffer.Selection == nil || e.Buffer.Selection.IsEmpty() {
+		if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 || e.Buffer.Selections.Primary().IsEmpty() {
 			e.Buffer.Cursor = pos
 		}
 		e.contextMenu.Show(e.buildEditorMenuItems(), m.X, m.Y)
@@ -545,8 +558,8 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 		pos := e.screenToBuffer(m.X, m.Y)
 		if m.Mod == tea.ModShift {
 			anchor := e.Buffer.Cursor
-			if e.Buffer.Selection != nil {
-				anchor = e.Buffer.Selection.Anchor
+			if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 {
+				anchor = e.Buffer.Selections.Primary().Anchor
 			}
 			e.Buffer.SetSelection(anchor, pos)
 		} else {
@@ -575,8 +588,8 @@ func (e Editor) handleMouseMotion(msg tea.MouseMotionMsg) (Editor, tea.Cmd) {
 	m := msg.Mouse()
 	pos := e.screenToBuffer(m.X, m.Y)
 	anchor := e.Buffer.Cursor
-	if e.Buffer.Selection != nil {
-		anchor = e.Buffer.Selection.Anchor
+	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 {
+		anchor = e.Buffer.Selections.Primary().Anchor
 	}
 	e.Buffer.SetSelection(anchor, pos)
 	return e, nil
@@ -803,7 +816,7 @@ func (e Editor) ContextMenuItemCount() int {
 
 // buildEditorMenuItems returns context menu items based on current editor state.
 func (e Editor) buildEditorMenuItems() []ContextMenuItem {
-	hasSelection := e.Buffer.Selection != nil
+	hasSelection := e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty()
 
 	items := []ContextMenuItem{
 		{Label: "Cut", Shortcut: "Ctrl+X", Action: "cut", Disabled: !hasSelection},

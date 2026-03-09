@@ -1,0 +1,5 @@
+name = "statusline"
+version = "1.0.0"
+description = "Custom status line plugin"
+author = "Teak Team"
+main = "init.lua"

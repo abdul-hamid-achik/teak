@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -33,7 +34,7 @@ type EditChange struct {
 type Buffer struct {
 	rope       *Rope
 	Cursor     Position
-	Selection  *Selection
+	Selections *Selections
 	undo       *UndoStack
 	FilePath   string
 	dirty      bool
@@ -46,9 +47,10 @@ type Buffer struct {
 func NewBuffer() *Buffer {
 	r := NewFromString("")
 	return &Buffer{
-		rope:      r,
-		undo:      NewUndoStack(),
-		savedRope: r,
+		rope:       r,
+		Selections: NewSelections(Position{}),
+		undo:       NewUndoStack(),
+		savedRope:  r,
 	}
 }
 
@@ -56,9 +58,10 @@ func NewBuffer() *Buffer {
 func NewBufferFromBytes(data []byte) *Buffer {
 	r := New(data)
 	return &Buffer{
-		rope:      r,
-		undo:      NewUndoStack(),
-		savedRope: r,
+		rope:       r,
+		Selections: NewSelections(Position{}),
+		undo:       NewUndoStack(),
+		savedRope:  r,
 	}
 }
 
@@ -70,10 +73,11 @@ func NewBufferFromFile(path string) (*Buffer, error) {
 	}
 	r := New(data)
 	return &Buffer{
-		rope:      r,
-		undo:      NewUndoStack(),
-		FilePath:  path,
-		savedRope: r,
+		rope:       r,
+		Selections: NewSelections(Position{}),
+		undo:       NewUndoStack(),
+		FilePath:   path,
+		savedRope:  r,
 	}, nil
 }
 
@@ -90,8 +94,14 @@ func (b *Buffer) LoadContentWithTabSize(data []byte, tabSize int) {
 	r := New(expanded)
 	b.rope = r
 	b.savedRope = r
+	if b.Selections == nil {
+		b.Selections = NewSelections(Position{})
+	} else {
+		b.Selections.selections = []Selection{{Anchor: Position{}, Head: Position{}}}
+		b.Selections.primary = 0
+		b.Selections.dirty = false
+	}
 	b.Cursor = Position{}
-	b.Selection = nil
 	b.undo = NewUndoStack()
 	b.dirty = false
 	b.version++
@@ -144,35 +154,74 @@ func (b *Buffer) Line(line int) []byte {
 
 // InsertAtCursor inserts text at the current cursor position.
 func (b *Buffer) InsertAtCursor(text []byte) {
-	if b.Selection != nil {
-		// Selection replace: range = selection, text = inserted text
-		start, end := b.Selection.Ordered()
-		b.DeleteSelection()
-		b.undo.Save(b.rope, b.Cursor, false)
-		offset := b.rope.PositionToOffset(b.Cursor)
-		b.rope = b.rope.Insert(offset, text)
-		b.dirty = true
-		b.version++
-		b.Cursor = b.rope.OffsetToPosition(offset + len(text))
-		b.lastChange = &EditChange{
-			StartLine: start.Line, StartCol: start.Col,
-			EndLine: end.Line, EndCol: end.Col,
-			Text: string(text),
-		}
+	if len(text) == 0 {
 		return
 	}
-	isCharInsert := len(text) == 1
-	b.undo.Save(b.rope, b.Cursor, isCharInsert)
-	startPos := b.Cursor
-	offset := b.rope.PositionToOffset(b.Cursor)
-	b.rope = b.rope.Insert(offset, text)
+
+	// If single selection with content, use existing logic
+	if b.Selections.Count() == 1 {
+		sel := b.Selections.Primary()
+		if !sel.IsEmpty() {
+			// Selection replace
+			start, end := sel.Ordered()
+			b.DeleteSelection()
+			b.undo.Save(b.rope, b.Cursor, false)
+			offset := b.rope.PositionToOffset(b.Cursor)
+			b.rope = b.rope.Insert(offset, text)
+			b.dirty = true
+			b.version++
+			b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+			b.lastChange = &EditChange{
+				StartLine: start.Line, StartCol: start.Col,
+				EndLine: end.Line, EndCol: end.Col,
+				Text:    string(text),
+			}
+			return
+		}
+	}
+
+	// Multiple selections: insert at each cursor
+	b.undo.Save(b.rope, b.Cursor, false)
+
+	// Sort selections in reverse order (end to beginning)
+	selections := make([]Selection, len(b.Selections.selections))
+	copy(selections, b.Selections.selections)
+	sort.Slice(selections, func(i, j int) bool {
+		si := selections[i].Head
+		sj := selections[j].Head
+		if si.Line != sj.Line {
+			return si.Line > sj.Line // Reverse order
+		}
+		return si.Col > sj.Col
+	})
+
+	// Apply insertions from end to beginning
+	for _, sel := range selections {
+		offset := b.rope.PositionToOffset(sel.Head)
+		b.rope = b.rope.Insert(offset, text)
+	}
+
+	// Update all cursor positions
+	for i := range b.Selections.selections {
+		sel := &b.Selections.selections[i]
+		offset := b.rope.PositionToOffset(sel.Head) + len(text)
+		newHead := b.rope.OffsetToPosition(offset)
+		sel.Anchor = newHead
+		sel.Head = newHead
+	}
+
+	// Update b.Cursor to match primary selection
+	b.Cursor = b.Selections.PrimaryCursor()
+
 	b.dirty = true
 	b.version++
-	b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+
+	// For LSP sync, use primary selection
+	primary := b.Selections.Primary()
 	b.lastChange = &EditChange{
-		StartLine: startPos.Line, StartCol: startPos.Col,
-		EndLine: startPos.Line, EndCol: startPos.Col,
-		Text: string(text),
+		StartLine: primary.Head.Line, StartCol: primary.Head.Col,
+		EndLine: primary.Head.Line, EndCol: primary.Head.Col,
+		Text:    string(text),
 	}
 }
 
@@ -209,7 +258,7 @@ func (b *Buffer) DedentLine(tabSize int) {
 
 // Backspace deletes the character before the cursor.
 func (b *Buffer) Backspace() {
-	if b.Selection != nil {
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
@@ -245,7 +294,7 @@ func (b *Buffer) Backspace() {
 
 // Delete deletes the character at the cursor.
 func (b *Buffer) Delete() {
-	if b.Selection != nil {
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
@@ -275,29 +324,83 @@ func (b *Buffer) Delete() {
 	}
 }
 
-// DeleteSelection removes the selected text and clears the selection.
+// DeleteSelection removes all active selections.
 func (b *Buffer) DeleteSelection() {
-	if b.Selection == nil {
+	if b.Selections == nil || b.Selections.Count() == 0 {
 		return
 	}
-	start, end := b.Selection.Ordered()
-	startOff := b.rope.PositionToOffset(start)
-	endOff := b.rope.PositionToOffset(end)
-	n := endOff - startOff
-	if n <= 0 {
-		b.Selection = nil
+
+	// Single selection: use optimized path
+	if b.Selections.Count() == 1 {
+		sel := b.Selections.Primary()
+		if sel.IsEmpty() {
+			return
+		}
+		start, end := sel.Ordered()
+		startOff := b.rope.PositionToOffset(start)
+		endOff := b.rope.PositionToOffset(end)
+		n := endOff - startOff
+		if n <= 0 {
+			b.Selections.Clear()
+			return
+		}
+		b.undo.Save(b.rope, b.Cursor, false)
+		b.rope = b.rope.Delete(startOff, n)
+		b.dirty = true
+		b.version++
+		b.Cursor = start
+		b.Selections.Clear()
+		// Collapse the remaining selection to cursor
+		b.Selections.selections[0] = Selection{Anchor: b.Cursor, Head: b.Cursor}
+		b.lastChange = &EditChange{
+			StartLine: start.Line, StartCol: start.Col,
+			EndLine: end.Line, EndCol: end.Col,
+			Text:    "",
+		}
 		return
 	}
+
+	// Multiple selections: delete all
 	b.undo.Save(b.rope, b.Cursor, false)
-	b.rope = b.rope.Delete(startOff, n)
+
+	// Sort in reverse order
+	selections := make([]Selection, len(b.Selections.selections))
+	copy(selections, b.Selections.selections)
+	sort.Slice(selections, func(i, j int) bool {
+		si, _ := selections[i].Ordered()
+		sj, _ := selections[j].Ordered()
+		if si.Line != sj.Line {
+			return si.Line > sj.Line
+		}
+		return si.Col > sj.Col
+	})
+
+	// Delete from end to beginning
+	for _, sel := range selections {
+		if !sel.IsEmpty() {
+			start, end := sel.Ordered()
+			startOff := b.rope.PositionToOffset(start)
+			endOff := b.rope.PositionToOffset(end)
+			b.rope = b.rope.Delete(startOff, endOff-startOff)
+		}
+	}
+
+	// Collapse all selections to cursors
+	for i := range b.Selections.selections {
+		sel := &b.Selections.selections[i]
+		sel.Anchor = sel.Head
+	}
+
 	b.dirty = true
 	b.version++
-	b.Cursor = start
-	b.Selection = nil
-	b.lastChange = &EditChange{
-		StartLine: start.Line, StartCol: start.Col,
-		EndLine: end.Line, EndCol: end.Col,
-		Text: "",
+	b.Selections.Clear()
+}
+
+// SetCursor sets the cursor position and updates the primary selection.
+func (b *Buffer) SetCursor(pos Position) {
+	b.Cursor = pos
+	if b.Selections != nil {
+		b.Selections.selections[b.Selections.primary] = Selection{Anchor: pos, Head: pos}
 	}
 }
 
@@ -359,13 +462,20 @@ func (b *Buffer) MoveCursor(dir Direction) {
 
 // SetSelection sets the selection anchored at the anchor, with head as the cursor.
 func (b *Buffer) SetSelection(anchor, head Position) {
-	b.Selection = &Selection{Anchor: anchor, Head: head}
+	if b.Selections == nil {
+		b.Selections = NewSelections(anchor)
+	} else {
+		b.Selections.selections[b.Selections.primary] = Selection{Anchor: anchor, Head: head}
+		b.Selections.Clear() // Ensure only one selection
+	}
 	b.Cursor = head
 }
 
 // ClearSelection clears any active selection.
 func (b *Buffer) ClearSelection() {
-	b.Selection = nil
+	if b.Selections != nil {
+		b.Selections.Clear()
+	}
 }
 
 // CursorToLineStart moves the cursor to the beginning of the current line.
@@ -376,6 +486,98 @@ func (b *Buffer) CursorToLineStart() {
 // CursorToLineEnd moves the cursor to the end of the current line.
 func (b *Buffer) CursorToLineEnd() {
 	b.Cursor.Col = b.rope.LineLen(b.Cursor.Line)
+}
+
+// MoveCursors moves all cursors in the given direction.
+func (b *Buffer) MoveCursors(dir Direction) {
+	for i := range b.Selections.selections {
+		sel := &b.Selections.selections[i]
+		oldHead := sel.Head
+
+		switch dir {
+		case DirLeft:
+			if sel.Head.Col > 0 {
+				lineContent := b.rope.Line(sel.Head.Line)
+				_, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col])
+				sel.Head.Col -= size
+			} else if sel.Head.Line > 0 {
+				sel.Head.Line--
+				sel.Head.Col = b.rope.LineLen(sel.Head.Line)
+			}
+		case DirRight:
+			lineLen := b.rope.LineLen(sel.Head.Line)
+			if sel.Head.Col < lineLen {
+				lineContent := b.rope.Line(sel.Head.Line)
+				_, size := utf8.DecodeRune(lineContent[sel.Head.Col:])
+				sel.Head.Col += size
+			} else if sel.Head.Line < b.rope.LineCount()-1 {
+				sel.Head.Line++
+				sel.Head.Col = 0
+			}
+		case DirUp:
+			if sel.Head.Line > 0 {
+				sel.Head.Line--
+				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+			}
+		case DirDown:
+			if sel.Head.Line < b.rope.LineCount()-1 {
+				sel.Head.Line++
+				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+			}
+		}
+
+		// Update anchor if not extending selection
+		if sel.Anchor == oldHead {
+			sel.Anchor = sel.Head
+		}
+	}
+
+	b.Selections.Normalize()
+	// Update b.Cursor to match primary
+	b.Cursor = b.Selections.PrimaryCursor()
+}
+
+// ExtendCursors extends all selections in the given direction.
+func (b *Buffer) ExtendCursors(dir Direction) {
+	for i := range b.Selections.selections {
+		sel := &b.Selections.selections[i]
+
+		switch dir {
+		case DirLeft:
+			if sel.Head.Col > 0 {
+				lineContent := b.rope.Line(sel.Head.Line)
+				_, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col])
+				sel.Head.Col -= size
+			} else if sel.Head.Line > 0 {
+				sel.Head.Line--
+				sel.Head.Col = b.rope.LineLen(sel.Head.Line)
+			}
+		case DirRight:
+			lineLen := b.rope.LineLen(sel.Head.Line)
+			if sel.Head.Col < lineLen {
+				lineContent := b.rope.Line(sel.Head.Line)
+				_, size := utf8.DecodeRune(lineContent[sel.Head.Col:])
+				sel.Head.Col += size
+			} else if sel.Head.Line < b.rope.LineCount()-1 {
+				sel.Head.Line++
+				sel.Head.Col = 0
+			}
+		case DirUp:
+			if sel.Head.Line > 0 {
+				sel.Head.Line--
+				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+			}
+		case DirDown:
+			if sel.Head.Line < b.rope.LineCount()-1 {
+				sel.Head.Line++
+				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+			}
+		}
+		// Don't update anchor - we're extending
+	}
+
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 }
 
 // Save writes the buffer to its FilePath.
@@ -423,7 +625,9 @@ func (b *Buffer) Undo() {
 	}
 	b.rope = rope
 	b.Cursor = cursor
-	b.Selection = nil
+	if b.Selections != nil {
+		b.Selections.Clear()
+	}
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // undo: fall back to full sync
@@ -437,7 +641,9 @@ func (b *Buffer) Redo() {
 	}
 	b.rope = rope
 	b.Cursor = cursor
-	b.Selection = nil
+	if b.Selections != nil {
+		b.Selections.Clear()
+	}
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // redo: fall back to full sync
@@ -464,12 +670,12 @@ func (b *Buffer) Bytes() []byte {
 	return b.rope.Bytes()
 }
 
-// SelectedText returns the currently selected text, or empty if no selection.
+// SelectedText returns the currently selected text from the primary selection, or empty if no selection.
 func (b *Buffer) SelectedText() []byte {
-	if b.Selection == nil || b.Selection.IsEmpty() {
+	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
 		return nil
 	}
-	start, end := b.Selection.Ordered()
+	start, end := b.Selections.Primary().Ordered()
 	startOff := b.rope.PositionToOffset(start)
 	endOff := b.rope.PositionToOffset(end)
 	return b.rope.Slice(startOff, endOff).Bytes()
@@ -562,7 +768,7 @@ func (b *Buffer) MoveCursorWordRight() {
 
 // BackspaceWord deletes from the cursor to the start of the previous word.
 func (b *Buffer) BackspaceWord() {
-	if b.Selection != nil {
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
@@ -582,7 +788,7 @@ func (b *Buffer) BackspaceWord() {
 
 // DeleteWord deletes from the cursor to the start of the next word.
 func (b *Buffer) DeleteWord() {
-	if b.Selection != nil {
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
@@ -629,8 +835,8 @@ func (b *Buffer) CursorToDocEnd() {
 // If no selection exists, anchors at the current cursor position before moving.
 func (b *Buffer) ExtendSelection(move func()) {
 	anchor := b.Cursor
-	if b.Selection != nil {
-		anchor = b.Selection.Anchor
+	if b.Selections != nil && b.Selections.Count() > 0 {
+		anchor = b.Selections.Primary().Anchor
 	}
 	move()
 	if anchor == b.Cursor {
@@ -677,7 +883,7 @@ func (b *Buffer) SelectWordAtCursor() {
 
 // SelectNextOccurrence selects the next occurrence of the current selection, or selects word at cursor.
 func (b *Buffer) SelectNextOccurrence() {
-	if b.Selection == nil || b.Selection.IsEmpty() {
+	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
 		b.SelectWordAtCursor()
 		return
 	}
@@ -686,7 +892,7 @@ func (b *Buffer) SelectNextOccurrence() {
 		return
 	}
 	content := b.rope.Bytes()
-	_, end := b.Selection.Ordered()
+	_, end := b.Selections.Primary().Ordered()
 	endOff := b.rope.PositionToOffset(end)
 
 	// Search forward from end of selection
@@ -696,15 +902,150 @@ func (b *Buffer) SelectNextOccurrence() {
 	if idx >= 0 {
 		matchOff := endOff + idx
 		matchEnd := matchOff + len(needle)
-		b.SetSelection(b.rope.OffsetToPosition(matchOff), b.rope.OffsetToPosition(matchEnd))
+		newSel := Selection{
+			Anchor: b.rope.OffsetToPosition(matchOff),
+			Head:   b.rope.OffsetToPosition(matchEnd),
+		}
+		b.Selections.Add(newSel)
+		b.Selections.Normalize()
 		return
 	}
 	// Wrap around
 	idx = strings.Index(haystack[:endOff], needle)
 	if idx >= 0 {
 		matchEnd := idx + len(needle)
-		b.SetSelection(b.rope.OffsetToPosition(idx), b.rope.OffsetToPosition(matchEnd))
+		newSel := Selection{
+			Anchor: b.rope.OffsetToPosition(idx),
+			Head:   b.rope.OffsetToPosition(matchEnd),
+		}
+		b.Selections.Add(newSel)
+		b.Selections.Normalize()
 	}
+}
+
+// SelectAllOccurrences selects all occurrences of the current primary selection.
+func (b *Buffer) SelectAllOccurrences() {
+	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
+		b.SelectWordAtCursor()
+	}
+
+	primary := b.Selections.Primary()
+	start, end := primary.Ordered()
+	startOff := b.rope.PositionToOffset(start)
+	endOff := b.rope.PositionToOffset(end)
+	selectedText := b.rope.Slice(startOff, endOff).Bytes()
+
+	if len(selectedText) == 0 {
+		return
+	}
+
+	content := b.rope.Bytes()
+	needle := string(selectedText)
+	haystack := string(content)
+
+	// Clear existing selections except primary
+	b.Selections.Clear()
+
+	// Find all occurrences
+	idx := 0
+	for {
+		pos := strings.Index(haystack[idx:], needle)
+		if pos < 0 {
+			break
+		}
+		matchOff := idx + pos
+		matchEnd := matchOff + len(needle)
+		newSel := Selection{
+			Anchor: b.rope.OffsetToPosition(matchOff),
+			Head:   b.rope.OffsetToPosition(matchEnd),
+		}
+		b.Selections.Add(newSel)
+		idx = matchEnd
+	}
+
+	b.Selections.Normalize()
+}
+
+// AddCursorAbove adds a cursor on the line above each selection.
+func (b *Buffer) AddCursorAbove() {
+	if b.Selections == nil {
+		return
+	}
+	selections := b.Selections.All()
+	for _, sel := range selections {
+		if sel.Head.Line > 0 {
+			newPos := Position{
+				Line: sel.Head.Line - 1,
+				Col:  min(sel.Head.Col, b.rope.LineLen(sel.Head.Line-1)),
+			}
+			b.Selections.Add(Selection{Anchor: newPos, Head: newPos})
+		}
+	}
+	b.Selections.Normalize()
+}
+
+// AddCursorBelow adds a cursor on the line below each selection.
+func (b *Buffer) AddCursorBelow() {
+	if b.Selections == nil {
+		return
+	}
+	selections := b.Selections.All()
+	for i := len(selections) - 1; i >= 0; i-- {
+		sel := selections[i]
+		if sel.Head.Line < b.rope.LineCount()-1 {
+			newPos := Position{
+				Line: sel.Head.Line + 1,
+				Col:  min(sel.Head.Col, b.rope.LineLen(sel.Head.Line+1)),
+			}
+			b.Selections.Add(Selection{Anchor: newPos, Head: newPos})
+		}
+	}
+	b.Selections.Normalize()
+}
+
+// SplitSelectionIntoLines splits the current selection into multiple selections,
+// one per line covered by the selection.
+func (b *Buffer) SplitSelectionIntoLines() {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+
+	primary := b.Selections.Primary()
+	if primary.IsEmpty() {
+		return
+	}
+
+	start, end := primary.Ordered()
+	startLine := start.Line
+	endLine := end.Line
+
+	// Clear existing selections
+	b.Selections.Clear()
+
+	// Add one selection per line
+	for line := startLine; line <= endLine; line++ {
+		lineLen := b.rope.LineLen(line)
+		
+		// Determine column range for this line
+		colStart := 0
+		colEnd := lineLen
+		
+		if line == startLine {
+			colStart = start.Col
+		}
+		if line == endLine {
+			colEnd = end.Col
+		}
+		
+		if colStart < colEnd {
+			b.Selections.Add(Selection{
+				Anchor: Position{Line: line, Col: colStart},
+				Head:   Position{Line: line, Col: colEnd},
+			})
+		}
+	}
+
+	b.Selections.Normalize()
 }
 
 // SelectLine selects the current line.
@@ -724,8 +1065,8 @@ func (b *Buffer) ToggleLineComment(prefix string) {
 	}
 	startLine := b.Cursor.Line
 	endLine := b.Cursor.Line
-	if b.Selection != nil {
-		s, e := b.Selection.Ordered()
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
+		s, e := b.Selections.Primary().Ordered()
 		startLine = s.Line
 		endLine = e.Line
 		if e.Col == 0 && endLine > startLine {
@@ -907,8 +1248,8 @@ func (b *Buffer) DeleteLine() {
 func (b *Buffer) IndentLines(tabSize int) {
 	startLine := b.Cursor.Line
 	endLine := b.Cursor.Line
-	if b.Selection != nil {
-		s, e := b.Selection.Ordered()
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
+		s, e := b.Selections.Primary().Ordered()
 		startLine = s.Line
 		endLine = e.Line
 		if e.Col == 0 && endLine > startLine {
@@ -931,8 +1272,8 @@ func (b *Buffer) IndentLines(tabSize int) {
 func (b *Buffer) DedentLines(tabSize int) {
 	startLine := b.Cursor.Line
 	endLine := b.Cursor.Line
-	if b.Selection != nil {
-		s, e := b.Selection.Ordered()
+	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
+		s, e := b.Selections.Primary().Ordered()
 		startLine = s.Line
 		endLine = e.Line
 		if e.Col == 0 && endLine > startLine {

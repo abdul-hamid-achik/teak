@@ -97,6 +97,19 @@ func UnstageAllCmd(rootDir string) tea.Cmd {
 	}
 }
 
+// InitCmd initializes a git repository.
+func InitCmd(rootDir string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = rootDir
+		if err := cmd.Run(); err != nil {
+			return RefreshMsg{Err: fmt.Errorf("git init: %w", err)}
+		}
+		// Return a refresh message to update the git panel
+		return RefreshMsg{Branch: "", Entries: []StatusEntry{}}
+	}
+}
+
 // CommitCmd creates a git commit with the given message.
 func CommitCmd(rootDir, message string) tea.Cmd {
 	return func() tea.Msg {

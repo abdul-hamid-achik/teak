@@ -95,8 +95,8 @@ func TestBufferSelection(t *testing.T) {
 	if got := b.Rope().String(); got != " world" {
 		t.Errorf("after delete selection: got %q, want %q", got, " world")
 	}
-	if b.Selection != nil {
-		t.Error("selection should be nil after delete")
+	if b.Selections == nil || b.Selections.Count() == 0 || !b.Selections.Primary().IsEmpty() {
+		t.Error("selection should be empty after delete")
 	}
 }
 
