@@ -1,17 +1,33 @@
 package editor
 
 import (
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
-	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
 )
+
+// spacePool is a pre-allocated string of spaces for padding.
+// This avoids repeated allocations from strings.Repeat(" ", n).
+const maxSpacePool = 512
+
+var spacePool = strings.Repeat(" ", maxSpacePool)
+
+// getSpaces returns a string of n spaces from the pool.
+// Falls back to strings.Repeat for large values.
+func getSpaces(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n <= maxSpacePool {
+		return spacePool[:n]
+	}
+	return strings.Repeat(" ", n)
+}
 
 // Viewport manages the visible area of the editor.
 type Viewport struct {
@@ -112,16 +128,19 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 				// plain text rendering
 				displayed := applyScrollX(lineContent, v.ScrollX)
 				displayed = truncateToWidth(displayed, textWidth)
-				padded := displayed + strings.Repeat(" ", max(0, textWidth-displayWidth(displayed)))
+				padLen := max(0, textWidth-displayWidth(displayed))
+				if padLen > 0 {
+					displayed += getSpaces(padLen)
+				}
 				if line == buf.Cursor.Line {
-					sb.WriteString(theme.CursorLine.Render(padded))
+					sb.WriteString(theme.CursorLine.Render(displayed))
 				} else {
-					sb.WriteString(theme.Editor.Render(padded))
+					sb.WriteString(theme.Editor.Render(displayed))
 				}
 			}
 		} else {
 			// empty area below text
-			sb.WriteString(theme.Editor.Render(strings.Repeat(" ", textWidth)))
+			sb.WriteString(theme.Editor.Render(getSpaces(textWidth)))
 		}
 
 		// Scrollbar
@@ -197,7 +216,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			if wrapOffset == 0 {
 				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagMap, bufLine, baseWidth, markerWidth))
 			} else {
-				sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", gwTotal)))
+				sb.WriteString(theme.Gutter.Render(getSpaces(gwTotal)))
 			}
 			// Padding between gutter and text
 			sb.WriteByte(' ')
@@ -212,12 +231,12 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			if bufLine == buf.Cursor.Line {
 				sb.WriteString(rendered)
 				if padLen > 0 {
-					sb.WriteString(theme.CursorLine.Render(strings.Repeat(" ", padLen)))
+					sb.WriteString(theme.CursorLine.Render(getSpaces(padLen)))
 				}
 			} else {
 				sb.WriteString(rendered)
 				if padLen > 0 {
-					sb.WriteString(theme.Editor.Render(strings.Repeat(" ", padLen)))
+					sb.WriteString(theme.Editor.Render(getSpaces(padLen)))
 				}
 			}
 
@@ -227,9 +246,9 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 				wrapOffset = 0
 			}
 		} else {
-			sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", gwTotal)))
+			sb.WriteString(theme.Gutter.Render(getSpaces(gwTotal)))
 			sb.WriteByte(' ')
-			sb.WriteString(theme.Editor.Render(strings.Repeat(" ", textWidth)))
+			sb.WriteString(theme.Editor.Render(getSpaces(textWidth)))
 		}
 
 		// Scrollbar
@@ -251,27 +270,25 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 	var sb strings.Builder
 
 	// Breakpoint marker (1 leading space + 2-cell icon + 1 trailing space)
+	// Use pre-cached theme styles to avoid allocations
 	if gutterOpts != nil {
 		switch gutterOpts.Breakpoints[line] {
 		case BPActive:
-			bpStyle := lipgloss.NewStyle().Foreground(ui.Nord11)
 			sb.WriteByte(' ')
-			sb.WriteString(bpStyle.Render("\U000f0765"))
+			sb.WriteString(theme.BreakpointActive.Render("\U000f0765"))
 		case BPDisabled:
-			bpStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
 			sb.WriteByte(' ')
-			sb.WriteString(bpStyle.Render("\U000f0765"))
+			sb.WriteString(theme.BreakpointDisabled.Render("\U000f0765"))
 		default:
 			sb.WriteString("   ")
 		}
 	}
 
-	numStr := fmt.Sprintf("%*d", baseWidth, line+1)
+	numStr := formatLineNumber(line, baseWidth)
 
 	isExecLine := gutterOpts != nil && gutterOpts.ExecLine == line
 	if isExecLine {
-		execStyle := lipgloss.NewStyle().Background(ui.Nord3).Foreground(ui.Nord13)
-		sb.WriteString(execStyle.Render(numStr))
+		sb.WriteString(theme.ExecLineMarker.Render(numStr))
 	} else if sev, ok := diagMap[line]; ok {
 		switch sev {
 		case 1:
@@ -571,7 +588,7 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 		if isCursorLine {
 			baseStyle = theme.CursorLine
 		}
-		sb.WriteString(baseStyle.Render(strings.Repeat(" ", widthLeft)))
+		sb.WriteString(baseStyle.Render(getSpaces(widthLeft)))
 	}
 
 	return sb.String()
@@ -675,7 +692,7 @@ func (v *Viewport) renderLineWithSelection(lineContent string, lineBytes []byte,
 
 	// Pad remaining width
 	if widthLeft > 0 {
-		sb.WriteString(baseStyle.Render(strings.Repeat(" ", widthLeft)))
+		sb.WriteString(baseStyle.Render(getSpaces(widthLeft)))
 	}
 
 	return sb.String()

@@ -1,8 +1,10 @@
 package highlight
 
 import (
+	"fmt"
 	"testing"
 
+	"teak/internal/text"
 	"teak/internal/ui"
 )
 
@@ -112,5 +114,76 @@ func TestMultipleLanguages(t *testing.T) {
 				t.Errorf("expected tokens for %s", tt.filename)
 			}
 		})
+	}
+}
+
+func TestTokenizeViewport(t *testing.T) {
+	theme := ui.DefaultTheme()
+
+	// Create a buffer with 100 lines
+	var content string
+	for i := 0; i < 100; i++ {
+		content += fmt.Sprintf("func test%d() { return %d }\n", i, i)
+	}
+	buf := text.NewBufferFromBytes([]byte(content))
+
+	h := New("test.go", theme)
+
+	// Tokenize viewport lines 40-60
+	viewStart := 40
+	viewEnd := 60
+	tokens := h.TokenizeViewport(buf, viewStart, viewEnd)
+
+	// Result should have same length as buffer line count
+	if len(tokens) != buf.LineCount() {
+		t.Errorf("expected %d lines, got %d", buf.LineCount(), len(tokens))
+	}
+
+	// Viewport lines should be tokenized
+	for i := viewStart; i < viewEnd && i < len(tokens); i++ {
+		if len(tokens[i]) == 0 {
+			t.Errorf("viewport line %d should have tokens", i)
+		}
+	}
+
+	// Lines outside viewport (+/- margin) may be nil or empty
+	// But at least the basic structure should be there
+	if tokens[0] != nil {
+		t.Log("Line 0 has tokens (within margin)")
+	}
+}
+
+func TestTokenizeViewportSmallBuffer(t *testing.T) {
+	theme := ui.DefaultTheme()
+	buf := text.NewBufferFromBytes([]byte("package main\n\nfunc main() {}"))
+
+	h := New("test.go", theme)
+
+	// Viewport larger than buffer
+	tokens := h.TokenizeViewport(buf, 0, 100)
+
+	if len(tokens) != buf.LineCount() {
+		t.Errorf("expected %d lines, got %d", buf.LineCount(), len(tokens))
+	}
+
+	// Lines with content should be tokenized (empty lines may have nil tokens)
+	for i := 0; i < buf.LineCount(); i++ {
+		line := buf.Line(i)
+		if len(line) > 0 && len(tokens[i]) == 0 {
+			t.Errorf("line %d (non-empty) should have tokens", i)
+		}
+	}
+}
+
+func TestTokenizeViewportEmptyBuffer(t *testing.T) {
+	theme := ui.DefaultTheme()
+	buf := text.NewBufferFromBytes([]byte(""))
+
+	h := New("test.go", theme)
+	tokens := h.TokenizeViewport(buf, 0, 10)
+
+	// Empty buffer has 1 line
+	if len(tokens) != 1 {
+		t.Errorf("expected 1 line for empty buffer, got %d", len(tokens))
 	}
 }

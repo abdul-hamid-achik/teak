@@ -1,11 +1,26 @@
 package editor
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
 	"teak/internal/ui"
 )
+
+// formatLineNumber formats a line number with padding for the gutter.
+// Uses strconv.Itoa for performance (faster than fmt.Sprintf).
+func formatLineNumber(line, width int) string {
+	numStr := strconv.Itoa(line + 1)
+	if len(numStr) < width {
+		// Pre-allocate padded string
+		padding := make([]byte, width-len(numStr))
+		for i := range padding {
+			padding[i] = ' '
+		}
+		numStr = string(padding) + numStr
+	}
+	return numStr
+}
 
 // BreakpointState represents the state of a breakpoint on a line.
 type BreakpointState int
@@ -52,7 +67,7 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 	for i := range height {
 		line := scrollY + i
 		if line >= totalLines {
-			sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", width)))
+			sb.WriteString(theme.Gutter.Render(getSpaces(width)))
 		} else {
 			// Breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
 			if opts != nil {
@@ -68,7 +83,7 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 				}
 			}
 
-			numStr := fmt.Sprintf("%*d", baseWidth, line+1)
+			numStr := formatLineNumber(line, baseWidth)
 
 			// Check if this is the current execution line
 			isExecLine := opts != nil && opts.ExecLine == line
@@ -142,7 +157,7 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 		}
 
 		if !inRange || line >= totalLines {
-			sb.WriteString(theme.Gutter.Render(strings.Repeat(" ", width)))
+			sb.WriteString(theme.Gutter.Render(getSpaces(width)))
 		} else {
 			// Breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
 			if opts != nil {
@@ -159,7 +174,7 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 			}
 
 			// Line number
-			numStr := fmt.Sprintf("%*d", baseWidth, line+1)
+			numStr := formatLineNumber(line, baseWidth)
 			isExecLine := opts != nil && opts.ExecLine == line
 
 			if isExecLine {
