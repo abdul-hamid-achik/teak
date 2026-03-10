@@ -81,15 +81,16 @@ type ServerCapabilities struct {
 		ResolveProvider   bool     `json:"resolveProvider,omitempty"`
 		TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 	} `json:"completionProvider,omitempty"`
-	HoverProvider           bool `json:"hoverProvider,omitempty"`
-	DefinitionProvider      bool `json:"definitionProvider,omitempty"`
-	ReferencesProvider      bool `json:"referencesProvider,omitempty"`
-	RenameProvider          bool `json:"renameProvider,omitempty"`
-	DocumentSymbolProvider  bool `json:"documentSymbolProvider,omitempty"`
-	CodeActionProvider      any  `json:"codeActionProvider,omitempty"` // bool or CodeActionOptions
-	FormattingProvider      bool `json:"documentFormattingProvider,omitempty"`
-	RangeFormattingProvider bool `json:"documentRangeFormattingProvider,omitempty"`
-	FoldingRangeProvider    bool `json:"foldingRangeProvider,omitempty"`
+	PositionEncoding        string `json:"positionEncoding,omitempty"`                // utf-8 / utf-16 / utf-32
+	HoverProvider           any    `json:"hoverProvider,omitempty"`                   // bool or options object
+	DefinitionProvider      any    `json:"definitionProvider,omitempty"`              // bool or options object
+	ReferencesProvider      any    `json:"referencesProvider,omitempty"`              // bool or options object
+	RenameProvider          any    `json:"renameProvider,omitempty"`                  // bool or options object
+	DocumentSymbolProvider  any    `json:"documentSymbolProvider,omitempty"`          // bool or options object
+	CodeActionProvider      any    `json:"codeActionProvider,omitempty"`              // bool or CodeActionOptions
+	FormattingProvider      any    `json:"documentFormattingProvider,omitempty"`      // bool or options object
+	RangeFormattingProvider any    `json:"documentRangeFormattingProvider,omitempty"` // bool or options object
+	FoldingRangeProvider    any    `json:"foldingRangeProvider,omitempty"`            // bool or options object
 	SignatureHelpProvider   *struct {
 		TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 	} `json:"signatureHelpProvider,omitempty"`

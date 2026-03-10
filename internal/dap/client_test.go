@@ -5,6 +5,102 @@ import (
 	"testing"
 )
 
+func TestIsDelveDAP(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    bool
+	}{
+		{
+			name:    "dlv dap",
+			command: "dlv",
+			args:    []string{"dap"},
+			want:    true,
+		},
+		{
+			name:    "absolute dlv path",
+			command: "/usr/local/bin/dlv",
+			args:    []string{"dap", "--log"},
+			want:    true,
+		},
+		{
+			name:    "dlv non dap command",
+			command: "dlv",
+			args:    []string{"debug"},
+			want:    false,
+		},
+		{
+			name:    "non dlv adapter",
+			command: "debugpy-adapter",
+			args:    []string{},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDelveDAP(tt.command, tt.args); got != tt.want {
+				t.Fatalf("isDelveDAP() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindClientAddrArg(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+		ok   bool
+	}{
+		{
+			name: "equals form",
+			args: []string{"dap", "--client-addr=127.0.0.1:12345"},
+			want: "127.0.0.1:12345",
+			ok:   true,
+		},
+		{
+			name: "separate form",
+			args: []string{"dap", "--client-addr", "127.0.0.1:22345"},
+			want: "127.0.0.1:22345",
+			ok:   true,
+		},
+		{
+			name: "missing value after flag",
+			args: []string{"dap", "--client-addr"},
+			want: "",
+			ok:   false,
+		},
+		{
+			name: "not present",
+			args: []string{"dap"},
+			want: "",
+			ok:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := findClientAddrArg(tt.args)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("findClientAddrArg() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestAddClientAddrArg(t *testing.T) {
+	args := []string{"dap", "--log"}
+	got := addClientAddrArg(args, "127.0.0.1:0")
+	if len(got) != len(args)+1 {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(args)+1)
+	}
+	if got[len(got)-1] != "--client-addr=127.0.0.1:0" {
+		t.Fatalf("last arg = %q, want --client-addr=127.0.0.1:0", got[len(got)-1])
+	}
+}
+
 func TestSendRequest_SeqMatchesPending(t *testing.T) {
 	// Verify that the pending map key matches the Seq used in the request.
 	// This was a bug where requestID and seq were separate counters.
@@ -290,6 +386,50 @@ func TestHandleEvent_Breakpoint(t *testing.T) {
 	}
 	if bp.Breakpoint.Message != "Breakpoint verified" {
 		t.Errorf("message = %q, want 'Breakpoint verified'", bp.Breakpoint.Message)
+	}
+}
+
+func TestHandleEvent_BreakpointNestedBody(t *testing.T) {
+	msgChan := make(chan any, 10)
+	c := &Client{
+		pending: make(map[int]chan callResult),
+		msgChan: msgChan,
+	}
+
+	event := &Event{
+		Type:  "event",
+		Event: "breakpoint",
+		Body: map[string]any{
+			"reason": "changed",
+			"breakpoint": map[string]any{
+				"verified": true,
+				"message":  "verified by adapter",
+				"line":     float64(42),
+				"source": map[string]any{
+					"name": "main.go",
+					"path": "/tmp/main.go",
+				},
+			},
+		},
+	}
+	c.handleEvent(event)
+
+	msg := <-msgChan
+	bp, ok := msg.(BreakpointEventMsg)
+	if !ok {
+		t.Fatalf("expected BreakpointEventMsg, got %T", msg)
+	}
+	if bp.Reason != "changed" {
+		t.Fatalf("reason = %q, want %q", bp.Reason, "changed")
+	}
+	if !bp.Breakpoint.Verified {
+		t.Fatal("verified = false, want true")
+	}
+	if bp.Breakpoint.Line != 42 {
+		t.Fatalf("line = %d, want 42", bp.Breakpoint.Line)
+	}
+	if bp.Breakpoint.Source.Path != "/tmp/main.go" {
+		t.Fatalf("source.path = %q, want %q", bp.Breakpoint.Source.Path, "/tmp/main.go")
 	}
 }
 

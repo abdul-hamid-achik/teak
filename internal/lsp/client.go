@@ -45,7 +45,7 @@ func (c *Client) IsReady() bool {
 func (c *Client) SupportsHover() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.capabilities.HoverProvider
+	return capabilityEnabled(c.capabilities.HoverProvider)
 }
 
 // SupportsCompletion returns whether the server supports completion requests.
@@ -59,21 +59,21 @@ func (c *Client) SupportsCompletion() bool {
 func (c *Client) SupportsDefinition() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.capabilities.DefinitionProvider
+	return capabilityEnabled(c.capabilities.DefinitionProvider)
 }
 
 // SupportsReferences returns whether the server supports find-references.
 func (c *Client) SupportsReferences() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.capabilities.ReferencesProvider
+	return capabilityEnabled(c.capabilities.ReferencesProvider)
 }
 
 // SupportsRename returns whether the server supports rename.
 func (c *Client) SupportsRename() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.capabilities.RenameProvider
+	return capabilityEnabled(c.capabilities.RenameProvider)
 }
 
 // GetCompletionTriggerCharacters returns the trigger characters for completion.
@@ -96,6 +96,19 @@ func (c *Client) GetSyncKind() SyncKind {
 type callResult struct {
 	Result json.RawMessage
 	Error  *jsonrpcError
+}
+
+func capabilityEnabled(v any) bool {
+	switch vv := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return vv
+	case map[string]any:
+		return true
+	default:
+		return true
+	}
 }
 
 type jsonrpcRequest struct {
@@ -219,7 +232,8 @@ func (c *Client) Initialize() error {
 				},
 			},
 			"general": map[string]any{
-				"positionEncodings": []string{"utf-16", "utf-8", "utf-32"},
+				// Teak uses byte-based columns, so request UTF-8 positions.
+				"positionEncodings": []string{"utf-8"},
 			},
 		},
 	}
@@ -733,9 +747,9 @@ func (c *Client) Formatting(uri string) ([]TextEdit, error) {
 
 // FoldingRange requests folding ranges for a document.
 func (c *Client) FoldingRange(uri string) ([]FoldingRange, error) {
-	c.mu.Lock()
-	supported := c.capabilities.FoldingRangeProvider
-	c.mu.Unlock()
+	c.mu.RLock()
+	supported := capabilityEnabled(c.capabilities.FoldingRangeProvider)
+	c.mu.RUnlock()
 	if !supported {
 		return nil, nil
 	}

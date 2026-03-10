@@ -44,7 +44,7 @@ type CloseTabMsg struct {
 type FileLoadedMsg struct {
 	Path     string
 	Data     []byte
-	TabIndex int // which tab to populate
+	TabIndex int  // which tab to populate
 	ForceNew bool // skip replaceable tab logic
 }
 
@@ -67,7 +67,8 @@ func loadFileCmd(path string, tabIndex int, forceNew bool) tea.Cmd {
 
 // LspReadyMsg is sent when an LSP client finishes initializing.
 type LspReadyMsg struct {
-	FilePath string
+	FilePath    string
+	OpenVersion int
 }
 
 // DiffLoadedMsg is sent when a diff has been computed.

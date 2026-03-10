@@ -353,7 +353,12 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	case "backspace":
 		// Delete both brackets when backspacing between empty pair
 		if IsBetweenBrackets(e.Buffer, e.Buffer.Cursor) {
-			e.Buffer.Delete()
+			start := text.Position{Line: e.Buffer.Cursor.Line, Col: e.Buffer.Cursor.Col - 1}
+			end := text.Position{Line: e.Buffer.Cursor.Line, Col: e.Buffer.Cursor.Col + 1}
+			e.Buffer.ReplaceRange(start, end, nil)
+			e.Buffer.SetCursor(start)
+			edited = true
+			break
 		}
 		e.Buffer.Backspace()
 		edited = true

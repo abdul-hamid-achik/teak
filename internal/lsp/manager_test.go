@@ -130,3 +130,25 @@ func TestManagerEnsureClientWaitsForConcurrentStartup(t *testing.T) {
 		t.Fatalf("created %d clients, want 1", created)
 	}
 }
+
+func TestManagerConfigForFileUsesMergedUserConfig(t *testing.T) {
+	m := NewManager("/tmp", []ServerConfig{
+		{
+			Extensions: []string{".go"},
+			Command:    "custom-gopls",
+			Args:       []string{"--stdio"},
+			LanguageID: "go-custom",
+		},
+	})
+
+	cfg := m.ConfigForFile("/tmp/main.go")
+	if cfg == nil {
+		t.Fatal("ConfigForFile() returned nil for .go file")
+	}
+	if cfg.Command != "custom-gopls" {
+		t.Fatalf("Command = %q, want %q", cfg.Command, "custom-gopls")
+	}
+	if cfg.LanguageID != "go-custom" {
+		t.Fatalf("LanguageID = %q, want %q", cfg.LanguageID, "go-custom")
+	}
+}

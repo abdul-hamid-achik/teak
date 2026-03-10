@@ -105,6 +105,7 @@ func (b *Buffer) LoadContentWithTabSize(data []byte, tabSize int) {
 	b.undo = NewUndoStack()
 	b.dirty = false
 	b.version++
+	b.lastChange = nil
 }
 
 // expandTabs replaces tab characters with spaces aligned to tabSize stops.
@@ -836,6 +837,7 @@ func (b *Buffer) BackspaceWord() {
 	b.rope = b.rope.Delete(startOff, n)
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // word-wise delete may span mixed token classes; use full-sync fallback
 }
 
 // DeleteWord deletes from the cursor to the start of the next word.
@@ -1182,6 +1184,7 @@ func (b *Buffer) ToggleLineComment(prefix string) {
 	}
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // multi-line structural edit; use full-sync fallback
 }
 
 // MoveLineUp swaps the current line with the line above.
@@ -1216,6 +1219,7 @@ func (b *Buffer) MoveLineUp() {
 	b.Cursor.Line--
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // line swap is non-local for incremental sync
 }
 
 // MoveLineDown swaps the current line with the line below.
@@ -1245,6 +1249,7 @@ func (b *Buffer) MoveLineDown() {
 	b.Cursor.Line++
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // line swap is non-local for incremental sync
 }
 
 // DuplicateLineDown duplicates the current line below.
@@ -1258,6 +1263,7 @@ func (b *Buffer) DuplicateLineDown() {
 	b.Cursor.Line++
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // line duplicate is non-local for incremental sync
 }
 
 // DuplicateLineUp duplicates the current line above.
@@ -1271,6 +1277,7 @@ func (b *Buffer) DuplicateLineUp() {
 	// So don't change Cursor.Line
 	b.dirty = true
 	b.version++
+	b.lastChange = nil // line duplicate is non-local for incremental sync
 }
 
 // DeleteLine deletes the current line.

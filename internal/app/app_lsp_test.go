@@ -81,6 +81,52 @@ func TestAppLSPMultipleDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAppHandleDiagnosticsUpdatesProblemsPanel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+
+	root := t.TempDir()
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatalf("NewModel failed: %v", err)
+	}
+	defer model.cleanup()
+
+	filePath := filepath.Join(root, "main.go")
+	msg := lsp.DiagnosticsMsg{
+		URI: lsp.FileURI(filePath),
+		Diagnostics: []lsp.Diagnostic{
+			{
+				Range: lsp.DiagRange{
+					Start: lsp.DiagPosition{Line: 3, Character: 5},
+					End:   lsp.DiagPosition{Line: 3, Character: 10},
+				},
+				Severity: lsp.SeverityError,
+				Message:  "undefined: x",
+				Source:   "gopls",
+			},
+		},
+	}
+
+	updated, _ := model.handleDiagnostics(msg)
+	updatedModel := updated.(Model)
+
+	if updatedModel.problemsPanel.ProblemCount() != 1 {
+		t.Fatalf("ProblemCount() = %d, want 1", updatedModel.problemsPanel.ProblemCount())
+	}
+	prob := updatedModel.problemsPanel.SelectedProblem()
+	if prob == nil {
+		t.Fatal("SelectedProblem() = nil, want non-nil")
+	}
+	if prob.FilePath != filePath {
+		t.Fatalf("FilePath = %q, want %q", prob.FilePath, filePath)
+	}
+	if prob.Message != "undefined: x" {
+		t.Fatalf("Message = %q, want %q", prob.Message, "undefined: x")
+	}
+}
+
 // TestAppLSPCompletionMessage tests LSP completion message handling
 func TestAppLSPCompletionMessage(t *testing.T) {
 	cfg := config.DefaultConfig()

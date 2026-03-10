@@ -751,6 +751,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if err := m.debugMgr.Launch(); err != nil {
+					m.debugMgr.Stop()
 					m.status = fmt.Sprintf("Launch error: %v", err)
 					return m, nil
 				}
@@ -760,6 +761,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focus = FocusDebugger
 				m.status = "Debugging started"
 				m.relayout()
+				return m, m.syncAllBreakpointsToDAP()
 			}
 			return m, nil
 		case "shift+f5":
@@ -1726,6 +1728,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.editors[i].Buffer.FilePath == msg.FilePath {
 						m.editors[i].TriggerCharacters = chars
 					}
+				}
+			}
+			// If the document changed while the server was still starting, send
+			// one full-sync update to reconcile stale didOpen content.
+			for i := range m.editors {
+				if m.editors[i].Buffer.FilePath == msg.FilePath && m.editors[i].Buffer.Version() > msg.OpenVersion {
+					client.DidChange(
+						lsp.FileURI(msg.FilePath),
+						m.editors[i].Buffer.Version(),
+						m.editors[i].Buffer.Content(),
+					)
+					break
 				}
 			}
 		}
@@ -3295,7 +3309,7 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 
 	// Store full diagnostics in LSP coordinator (single source of truth)
 	if m.coordinator != nil {
-		m.coordinator.GetLSPCoordinator().GetDiagnostics(path)
+		_ = m.coordinator.HandleMessage(msg)
 	}
 
 	// Update centralized file diagnostics map (worst severity only)
@@ -3513,6 +3527,19 @@ func (m Model) sendBreakpointsToDAP(filePath string) tea.Cmd {
 	}
 }
 
+func (m Model) syncAllBreakpointsToDAP() tea.Cmd {
+	if len(m.breakpoints) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(m.breakpoints))
+	for filePath := range m.breakpoints {
+		if cmd := m.sendBreakpointsToDAP(filePath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m Model) listenDAP() tea.Cmd {
 	ch := m.debugMgr.MsgChan()
 	return func() tea.Msg {
@@ -3613,13 +3640,13 @@ func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
 		if err != nil || client == nil {
 			return nil
 		}
-		cfg := lsp.ConfigForFile(filePath)
+		cfg := mgr.ConfigForFile(filePath)
 		langID := ""
 		if cfg != nil {
 			langID = cfg.LanguageID
 		}
 		client.DidOpen(lsp.FileURI(filePath), langID, version, content)
-		return LspReadyMsg{FilePath: filePath}
+		return LspReadyMsg{FilePath: filePath, OpenVersion: version}
 	}
 }
 
@@ -4894,6 +4921,7 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if err := m.debugMgr.Launch(); err != nil {
+				m.debugMgr.Stop()
 				m.status = fmt.Sprintf("Launch error: %v", err)
 				return m, nil
 			}
@@ -4903,6 +4931,7 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = FocusDebugger
 			m.status = "Debugging started"
 			m.relayout()
+			return m, m.syncAllBreakpointsToDAP()
 		}
 		return m, nil
 	case debugStopMsg:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,6 +251,53 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
+func isDelveDAP(command string, args []string) bool {
+	base := filepath.Base(command)
+	if base != "dlv" && base != "dlv.exe" {
+		return false
+	}
+	for _, arg := range args {
+		if arg == "dap" {
+			return true
+		}
+	}
+	return false
+}
+
+func findClientAddrArg(args []string) (string, bool) {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--client-addr=") {
+			return strings.TrimPrefix(arg, "--client-addr="), true
+		}
+		if arg == "--client-addr" && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func addClientAddrArg(args []string, addr string) []string {
+	return append(args, "--client-addr="+addr)
+}
+
+func waitForDial(listener net.Listener, timeout time.Duration) (net.Conn, error) {
+	type acceptResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan acceptResult, 1)
+	go func() {
+		conn, err := listener.Accept()
+		resultCh <- acceptResult{conn: conn, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.conn, result.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout waiting for debug adapter to connect")
+	}
+}
+
 // NewClient creates a new DAP client and starts the debug adapter process.
 func NewClient(command string, args []string, msgChan chan<- any) (*Client, error) {
 	resolved := resolveCommand(command)
@@ -257,21 +305,74 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 		return nil, fmt.Errorf("debug adapter %q not found in PATH. Install with: go install github.com/go-delve/delve/cmd/dlv@latest", command)
 	}
 
-	cmd := exec.Command(resolved, args...)
-	cmd.Dir = "."
+	var (
+		cmd   *exec.Cmd
+		stdin io.WriteCloser
+		stdout io.ReadCloser
+	)
 
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
+	if isDelveDAP(resolved, args) {
+		addr, hasAddr := findClientAddrArg(args)
+		if !hasAddr {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return nil, fmt.Errorf("listen for delve client-addr: %w", err)
+			}
+			addr = listener.Addr().String()
+			args = addClientAddrArg(args, addr)
+			cmd = exec.Command(resolved, args...)
+			cmd.Dir = "."
+			if err := cmd.Start(); err != nil {
+				_ = listener.Close()
+				return nil, fmt.Errorf("start %s: %w", command, err)
+			}
+			conn, err := waitForDial(listener, 10*time.Second)
+			_ = listener.Close()
+			if err != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				return nil, fmt.Errorf("delve did not dial client-addr %q: %w", addr, err)
+			}
+			stdin = conn
+			stdout = conn
+		} else {
+			listener, err := net.Listen("tcp", addr)
+			if err != nil {
+				return nil, fmt.Errorf("listen on provided client-addr %q: %w", addr, err)
+			}
+			cmd = exec.Command(resolved, args...)
+			cmd.Dir = "."
+			if err := cmd.Start(); err != nil {
+				_ = listener.Close()
+				return nil, fmt.Errorf("start %s: %w", command, err)
+			}
+			conn, err := waitForDial(listener, 10*time.Second)
+			_ = listener.Close()
+			if err != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				return nil, fmt.Errorf("delve did not dial client-addr %q: %w", addr, err)
+			}
+			stdin = conn
+			stdout = conn
+		}
+	} else {
+		cmd = exec.Command(resolved, args...)
+		cmd.Dir = "."
+		var err error
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return nil, fmt.Errorf("stdin pipe: %w", err)
+		}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("stdout pipe: %w", err)
+		}
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", command, err)
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("start %s: %w", command, err)
+		}
 	}
 
 	c := &Client{
@@ -315,13 +416,7 @@ func (c *Client) Initialize() error {
 	c.mu.Lock()
 	c.initialized = true
 	c.mu.Unlock()
-
-	// Send initialized event
-	if err := c.sendEvent("initialized", map[string]any{}); err != nil {
-		return fmt.Errorf("initialized event: %w", err)
-	}
-	// DAP spec: configurationDone must follow initialized
-	return c.sendRequest("configurationDone", nil, nil)
+	return nil
 }
 
 // Launch starts debugging the specified program.
@@ -330,8 +425,11 @@ func (c *Client) Launch(program string) error {
 		Program: program,
 		Mode:    "debug",
 	}
-
-	return c.sendRequest("launch", args, nil)
+	if err := c.sendRequest("launch", args, nil); err != nil {
+		return err
+	}
+	// Most adapters (including Delve) expect configurationDone after launch/configuration.
+	return c.sendRequest("configurationDone", nil, nil)
 }
 
 // SetBreakpoints sets breakpoints in a source file.
@@ -694,13 +792,27 @@ func (c *Client) handleEvent(event *Event) {
 		}
 	case "breakpoint":
 		if body, ok := event.Body.(map[string]any); ok {
+			// DAP breakpoint payload can be either:
+			// {"reason":"changed","breakpoint":{...}}
+			// or a flattened body in some adapters.
+			breakpointBody := body
+			if nested, nok := body["breakpoint"].(map[string]any); nok {
+				breakpointBody = nested
+			}
+			bp := Breakpoint{
+				Verified: getBool(breakpointBody, "verified"),
+				Message:  getStr(breakpointBody, "message"),
+				Line:     getInt(breakpointBody, "line"),
+			}
+			if src, sok := breakpointBody["source"].(map[string]any); sok {
+				bp.Source = Source{
+					Name: getStr(src, "name"),
+					Path: getStr(src, "path"),
+				}
+			}
 			c.msgChan <- BreakpointEventMsg{
-				Reason: getStr(body, "reason"),
-				Breakpoint: Breakpoint{
-					Verified: getBool(body, "verified"),
-					Message:  getStr(body, "message"),
-					Line:     getInt(body, "line"),
-				},
+				Reason:     getStr(body, "reason"),
+				Breakpoint: bp,
 			}
 		}
 	}

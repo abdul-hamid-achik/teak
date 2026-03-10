@@ -132,6 +132,11 @@ func (m *Manager) ClientForFile(filePath string) *Client {
 	return client
 }
 
+// ConfigForFile returns the effective LSP config (defaults + user overrides) for a file.
+func (m *Manager) ConfigForFile(filePath string) *ServerConfig {
+	return configForFile(m.configs, filePath)
+}
+
 // ShutdownAll gracefully shuts down all language servers.
 func (m *Manager) ShutdownAll() {
 	m.mu.Lock()

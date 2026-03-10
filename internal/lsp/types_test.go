@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -16,10 +17,10 @@ func TestServerCapabilities(t *testing.T) {
 		},
 	}
 
-	if !caps.HoverProvider {
+	if !capabilityEnabled(caps.HoverProvider) {
 		t.Error("HoverProvider should be true")
 	}
-	if !caps.DefinitionProvider {
+	if !capabilityEnabled(caps.DefinitionProvider) {
 		t.Error("DefinitionProvider should be true")
 	}
 	if caps.CompletionProvider == nil {
@@ -27,6 +28,63 @@ func TestServerCapabilities(t *testing.T) {
 	}
 	if len(caps.CompletionProvider.TriggerCharacters) != 2 {
 		t.Errorf("expected 2 trigger characters, got %d", len(caps.CompletionProvider.TriggerCharacters))
+	}
+}
+
+func TestInitializeResultUnmarshalObjectProviders(t *testing.T) {
+	data := []byte(`{
+		"capabilities": {
+			"hoverProvider": {"workDoneProgress": true},
+			"definitionProvider": {"workDoneProgress": true},
+			"referencesProvider": {"workDoneProgress": true},
+			"renameProvider": {"prepareProvider": true},
+			"documentSymbolProvider": {"label": "symbols"},
+			"documentFormattingProvider": {"workDoneProgress": true},
+			"documentRangeFormattingProvider": {"workDoneProgress": true},
+			"foldingRangeProvider": {"lineFoldingOnly": true}
+		}
+	}`)
+
+	var result InitializeResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if !capabilityEnabled(result.Capabilities.HoverProvider) {
+		t.Fatal("hoverProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.DefinitionProvider) {
+		t.Fatal("definitionProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.ReferencesProvider) {
+		t.Fatal("referencesProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.RenameProvider) {
+		t.Fatal("renameProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.DocumentSymbolProvider) {
+		t.Fatal("documentSymbolProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.FormattingProvider) {
+		t.Fatal("documentFormattingProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.RangeFormattingProvider) {
+		t.Fatal("documentRangeFormattingProvider should be treated as supported")
+	}
+	if !capabilityEnabled(result.Capabilities.FoldingRangeProvider) {
+		t.Fatal("foldingRangeProvider should be treated as supported")
+	}
+}
+
+func TestCapabilityEnabledBoolAndNil(t *testing.T) {
+	if capabilityEnabled(nil) {
+		t.Fatal("nil capability should be disabled")
+	}
+	if capabilityEnabled(false) {
+		t.Fatal("false capability should be disabled")
+	}
+	if !capabilityEnabled(true) {
+		t.Fatal("true capability should be enabled")
 	}
 }
 
