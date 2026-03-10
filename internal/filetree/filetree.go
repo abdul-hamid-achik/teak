@@ -427,6 +427,11 @@ func loadGitignore(rootDir string) []string {
 	return patterns
 }
 
+// LoadGitignorePatterns reads the top-level .gitignore and returns simple patterns.
+func LoadGitignorePatterns(rootDir string) []string {
+	return loadGitignore(rootDir)
+}
+
 // matchesGitignore checks if a relative path matches any gitignore pattern.
 func matchesGitignore(rel string, patterns []string, isDir bool) bool {
 	for _, pat := range patterns {
@@ -462,6 +467,11 @@ func matchesGitignore(rel string, patterns []string, isDir bool) bool {
 		}
 	}
 	return false
+}
+
+// MatchesGitignore reports whether a relative path matches any gitignore pattern.
+func MatchesGitignore(rel string, patterns []string, isDir bool) bool {
+	return matchesGitignore(rel, patterns, isDir)
 }
 
 // View renders the file tree.

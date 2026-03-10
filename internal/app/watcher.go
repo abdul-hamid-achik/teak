@@ -1,18 +1,26 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/log"
 	"github.com/fsnotify/fsnotify"
+	"teak/internal/filetree"
 )
 
 const (
 	debounceWindow    = 100 * time.Millisecond
 	debounceRetention = 2 * time.Minute
+	watchFDReserve    = 128
+	minWatchLimit     = 32
+	defaultWatchLimit = 512
 )
 
 // FileChangedMsg is sent when an open file is modified externally.
@@ -28,53 +36,101 @@ type TreeChangedMsg struct {
 
 // fileWatcher watches open files and the project directory for external changes.
 type fileWatcher struct {
-	watcher  *fsnotify.Watcher
-	rootDir  string
-	msgChan  chan tea.Msg
-	debounce map[string]time.Time
+	watcher           *fsnotify.Watcher
+	rootDir           string
+	msgChan           chan tea.Msg
+	debounce          map[string]time.Time
+	gitignorePatterns []string
+	maxWatches        int
+
+	mu           sync.RWMutex
+	watched      map[string]struct{}
+	limitReached bool
 }
 
 func newFileWatcher(rootDir string) (*fileWatcher, error) {
+	return newFileWatcherWithMaxWatches(rootDir, defaultMaxWatches())
+}
+
+func newFileWatcherWithMaxWatches(rootDir string, maxWatches int) (*fileWatcher, error) {
+	if maxWatches <= 0 {
+		maxWatches = defaultMaxWatches()
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
-	fw := &fileWatcher{
-		watcher:  w,
-		rootDir:  rootDir,
-		msgChan:  make(chan tea.Msg, 32),
-		debounce: make(map[string]time.Time),
+	cleanRoot := filepath.Clean(rootDir)
+	if rootDir == "" {
+		cleanRoot = ""
 	}
+	fw := &fileWatcher{
+		watcher:           w,
+		rootDir:           cleanRoot,
+		msgChan:           make(chan tea.Msg, 32),
+		debounce:          make(map[string]time.Time),
+		gitignorePatterns: filetree.LoadGitignorePatterns(cleanRoot),
+		maxWatches:        maxWatches,
+		watched:           make(map[string]struct{}),
+	}
+
 	// Watch root directory for tree changes
-	if rootDir != "" {
-		fw.watchDirRecursive(rootDir)
+	if cleanRoot != "" {
+		fw.addWatch(cleanRoot)
 		// Watch .git directory for commit/push/branch changes
-		gitDir := filepath.Join(rootDir, ".git")
+		gitDir := filepath.Join(cleanRoot, ".git")
 		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
-			_ = fw.watcher.Add(gitDir)
+			fw.addWatch(gitDir)
 			refsDir := filepath.Join(gitDir, "refs")
 			if info, err := os.Stat(refsDir); err == nil && info.IsDir() {
-				_ = fw.watcher.Add(refsDir)
+				fw.addWatch(refsDir)
 				headsDir := filepath.Join(refsDir, "heads")
 				if info, err := os.Stat(headsDir); err == nil && info.IsDir() {
-					_ = fw.watcher.Add(headsDir)
+					fw.addWatch(headsDir)
 				}
 			}
 		}
+		fw.watchDirChildrenRecursive(cleanRoot)
 	}
 	go fw.listen()
 	return fw, nil
 }
 
+func defaultMaxWatches() int {
+	var rlimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
+		return defaultWatchLimit
+	}
+
+	cur := int(rlimit.Cur)
+	if cur <= 0 {
+		return defaultWatchLimit
+	}
+	maxWatches := cur - watchFDReserve
+	if maxWatches < minWatchLimit {
+		return minWatchLimit
+	}
+	return maxWatches
+}
+
 // watchDirRecursive adds a directory and all visible subdirectories to the watcher.
 func (fw *fileWatcher) watchDirRecursive(dir string) {
-	_ = fw.watcher.Add(dir)
+	if !fw.shouldWatchDir(dir) {
+		return
+	}
+	if !fw.addWatch(dir) {
+		return
+	}
+	fw.watchDirChildrenRecursive(dir)
+}
+
+func (fw *fileWatcher) watchDirChildrenRecursive(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() {
 			fw.watchDirRecursive(filepath.Join(dir, e.Name()))
 		}
 	}
@@ -82,17 +138,24 @@ func (fw *fileWatcher) watchDirRecursive(dir string) {
 
 // WatchFile adds a file path to the watcher.
 func (fw *fileWatcher) WatchFile(path string) {
-	_ = fw.watcher.Add(path)
+	if path == "" {
+		return
+	}
+	clean := filepath.Clean(path)
+	if fw.isWatched(filepath.Dir(clean)) {
+		return
+	}
+	fw.addWatch(clean)
 }
 
 // UnwatchFile removes a file path from the watcher.
 func (fw *fileWatcher) UnwatchFile(path string) {
-	_ = fw.watcher.Remove(path)
+	fw.removeWatch(path)
 }
 
 // WatchDir adds a directory to the watcher.
 func (fw *fileWatcher) WatchDir(dir string) {
-	_ = fw.watcher.Add(dir)
+	fw.watchDirRecursive(dir)
 }
 
 func (fw *fileWatcher) pruneDebounceEntries(now time.Time) {
@@ -141,6 +204,9 @@ func (fw *fileWatcher) listen() {
 						fw.watchDirRecursive(event.Name)
 					}
 				}
+				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					fw.removeWatch(event.Name)
+				}
 			}
 		case _, ok := <-fw.watcher.Errors:
 			if !ok {
@@ -171,4 +237,116 @@ func (fw *fileWatcher) Close() {
 func isGitInternalPath(path, rootDir string) bool {
 	gitDir := filepath.Join(rootDir, ".git")
 	return path == gitDir || strings.HasPrefix(path, gitDir+string(filepath.Separator))
+}
+
+func (fw *fileWatcher) shouldWatchDir(dir string) bool {
+	if dir == "" {
+		return true
+	}
+	clean := filepath.Clean(dir)
+	if clean == fw.rootDir {
+		return true
+	}
+	name := filepath.Base(clean)
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	if fw.rootDir == "" {
+		return true
+	}
+	rel, err := filepath.Rel(fw.rootDir, clean)
+	if err != nil || rel == "." {
+		return true
+	}
+	return !filetree.MatchesGitignore(rel, fw.gitignorePatterns, true)
+}
+
+func (fw *fileWatcher) addWatch(path string) bool {
+	if path == "" {
+		return false
+	}
+	clean := filepath.Clean(path)
+
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	if _, ok := fw.watched[clean]; ok {
+		return true
+	}
+	if fw.maxWatches > 0 && len(fw.watched) >= fw.maxWatches {
+		fw.markLimitReachedLocked()
+		return false
+	}
+	if err := fw.watcher.Add(clean); err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+			fw.markLimitReachedLocked()
+			return false
+		}
+		log.Error("file watcher add failed", "path", clean, "err", err)
+		return false
+	}
+
+	fw.watched[clean] = struct{}{}
+	return true
+}
+
+func (fw *fileWatcher) removeWatch(path string) {
+	if path == "" {
+		return
+	}
+	clean := filepath.Clean(path)
+
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	prefix := clean + string(filepath.Separator)
+	var toRemove []string
+	for watched := range fw.watched {
+		if watched == clean || strings.HasPrefix(watched, prefix) {
+			toRemove = append(toRemove, watched)
+		}
+	}
+	if len(toRemove) == 0 {
+		return
+	}
+	for _, watched := range toRemove {
+		if err := fw.watcher.Remove(watched); err != nil && !os.IsNotExist(err) {
+			log.Error("file watcher remove failed", "path", watched, "err", err)
+		}
+		delete(fw.watched, watched)
+	}
+}
+
+func (fw *fileWatcher) markLimitReachedLocked() {
+	if fw.limitReached {
+		return
+	}
+	fw.limitReached = true
+	log.Warn("file watcher limit reached", "root", fw.rootDir, "limit", fw.maxWatches)
+}
+
+func (fw *fileWatcher) isWatched(path string) bool {
+	if path == "" {
+		return false
+	}
+	clean := filepath.Clean(path)
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+	_, ok := fw.watched[clean]
+	return ok
+}
+
+func (fw *fileWatcher) watchedCount() int {
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+	return len(fw.watched)
+}
+
+func (fw *fileWatcher) watchLimitReached() bool {
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+	return fw.limitReached
 }

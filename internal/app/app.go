@@ -2721,6 +2721,10 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 	var tabIdx int
 	replaceIdx := m.findReplaceableTab()
 	if replaceIdx >= 0 {
+		replacedPath := m.tabBar.Tabs[replaceIdx].FilePath
+		if m.watcher != nil && replacedPath != "" && replacedPath != path {
+			m.watcher.UnwatchFile(replacedPath)
+		}
 		m.editors[replaceIdx] = ed
 		m.tabBar.Tabs[replaceIdx].Label = filepath.Base(path)
 		m.tabBar.Tabs[replaceIdx].FilePath = path
@@ -2879,6 +2883,9 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	buf := m.editors[idx].Buffer
 	closingPath := buf.FilePath
 	wasActive := idx == m.activeTab
+	if m.watcher != nil && closingPath != "" {
+		m.watcher.UnwatchFile(closingPath)
+	}
 	if buf.FilePath != "" {
 		if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
 			client.DidClose(lsp.FileURI(buf.FilePath))
@@ -3877,6 +3884,9 @@ func (m Model) handleSaveAsInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Update watcher
 		if m.watcher != nil {
+			if oldPath != "" && oldPath != newPath {
+				m.watcher.UnwatchFile(oldPath)
+			}
 			m.watcher.WatchFile(newPath)
 		}
 		// LSP: close old, open new

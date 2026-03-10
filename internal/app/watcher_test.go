@@ -289,3 +289,83 @@ func TestFileWatcher_PruneDebounceEntries(t *testing.T) {
 		t.Fatal("expected stale debounce entry to be pruned")
 	}
 }
+
+func TestFileWatcher_SkipsGitIgnoredDirsWhenRecursing(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gitignore) error = %v", err)
+	}
+
+	nodeModulesDir := filepath.Join(tmpDir, "node_modules")
+	nodeModulesChild := filepath.Join(nodeModulesDir, "left-pad")
+	visibleDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(nodeModulesChild, 0o755); err != nil {
+		t.Fatalf("MkdirAll(node_modules) error = %v", err)
+	}
+	if err := os.MkdirAll(visibleDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(src) error = %v", err)
+	}
+
+	fw, err := newFileWatcher(tmpDir)
+	if err != nil {
+		t.Fatalf("newFileWatcher: %v", err)
+	}
+	defer fw.Close()
+
+	if fw.isWatched(nodeModulesDir) {
+		t.Fatalf("expected %q to be skipped by watcher", nodeModulesDir)
+	}
+	if fw.isWatched(nodeModulesChild) {
+		t.Fatalf("expected %q to be skipped by watcher", nodeModulesChild)
+	}
+	if !fw.isWatched(visibleDir) {
+		t.Fatalf("expected %q to be watched", visibleDir)
+	}
+}
+
+func TestFileWatcher_RespectsMaxWatchLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, dir := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, dir), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	fw, err := newFileWatcherWithMaxWatches(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("newFileWatcherWithMaxWatches: %v", err)
+	}
+	defer fw.Close()
+
+	if !fw.isWatched(tmpDir) {
+		t.Fatalf("expected root %q to be watched", tmpDir)
+	}
+	if got := fw.watchedCount(); got != 2 {
+		t.Fatalf("watchedCount() = %d, want 2", got)
+	}
+	if !fw.watchLimitReached() {
+		t.Fatal("expected watch limit to be reported as reached")
+	}
+}
+
+func TestFileWatcher_WatchFileSkipsRedundantParentWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(filePath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+
+	fw, err := newFileWatcher(tmpDir)
+	if err != nil {
+		t.Fatalf("newFileWatcher: %v", err)
+	}
+	defer fw.Close()
+
+	before := fw.watchedCount()
+	fw.WatchFile(filePath)
+	after := fw.watchedCount()
+
+	if after != before {
+		t.Fatalf("WatchFile() added a redundant watch: before=%d after=%d", before, after)
+	}
+}
