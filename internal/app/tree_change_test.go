@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/config"
 	"teak/internal/git"
 )
@@ -122,5 +124,117 @@ func TestFileListMsgIgnoresStaleGeneration(t *testing.T) {
 	updated = updatedModel.(Model)
 	if len(updated.cachedFiles) != 1 || updated.cachedFiles[0] != "new.go" {
 		t.Fatalf("fresh file list should replace cache, got %v", updated.cachedFiles)
+	}
+}
+
+func TestGitSidebarMouseClickCollapsesDirectoryOnce(t *testing.T) {
+	zone.NewGlobal()
+	defer zone.Close()
+
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if model.logFile != nil {
+		defer model.logFile.Close()
+	}
+
+	model.sidebarTab = SidebarGit
+	model.showTree = true
+	model.width = 120
+	model.height = 40
+	model.relayout()
+
+	updatedModel, _ := model.Update(git.RefreshMsg{
+		Branch: "main",
+		Entries: []git.StatusEntry{
+			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+		},
+	})
+	updated := updatedModel.(Model)
+
+	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 2})
+	updatedModel, cmd := updated.Update(click)
+	if cmd != nil {
+		t.Fatal("expected directory click to be handled without a follow-up command")
+	}
+	updated = updatedModel.(Model)
+
+	if updated.focus != FocusGitPanel {
+		t.Fatalf("focus = %v, want %v", updated.focus, FocusGitPanel)
+	}
+	if updated.gitPanel.Cursor != 0 {
+		t.Fatalf("git cursor = %d, want 0", updated.gitPanel.Cursor)
+	}
+
+	node, staged := updated.gitPanel.NodeAtY(1)
+	if node == nil {
+		t.Fatal("expected staged directory node at y=1")
+	}
+	if !staged {
+		t.Fatal("expected clicked directory to remain in staged section")
+	}
+	if node.Name != "src" || node.Expanded {
+		t.Fatalf("expected src directory to be collapsed after one routed click, got name=%q expanded=%v", node.Name, node.Expanded)
+	}
+}
+
+func TestGitRefreshMsgPreservesCollapsedDirectoryAfterInteraction(t *testing.T) {
+	zone.NewGlobal()
+	defer zone.Close()
+
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if model.logFile != nil {
+		defer model.logFile.Close()
+	}
+
+	model.sidebarTab = SidebarGit
+	model.showTree = true
+	model.width = 120
+	model.height = 40
+	model.relayout()
+
+	updatedModel, _ := model.Update(git.RefreshMsg{
+		Branch: "main",
+		Entries: []git.StatusEntry{
+			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+			{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+		},
+	})
+	updated := updatedModel.(Model)
+
+	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 2})
+	updatedModel, _ = updated.Update(click)
+	updated = updatedModel.(Model)
+
+	updatedModel, _ = updated.Update(git.RefreshMsg{
+		Branch: "main",
+		Entries: []git.StatusEntry{
+			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+			{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+		},
+	})
+	updated = updatedModel.(Model)
+
+	node, staged := updated.gitPanel.NodeAtY(1)
+	if node == nil {
+		t.Fatal("expected staged directory node at y=1 after refresh")
+	}
+	if !staged {
+		t.Fatal("expected node to remain in staged section after refresh")
+	}
+	if node.Name != "src" || node.Expanded {
+		t.Fatalf("expected src directory to stay collapsed after refresh, got name=%q expanded=%v", node.Name, node.Expanded)
 	}
 }

@@ -2,11 +2,13 @@ package git
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
 
@@ -1070,6 +1072,256 @@ func TestRefreshMsgCursorClamp(t *testing.T) {
 	flat := m.activeFlatTree()
 	if m.Cursor >= len(flat) && len(flat) > 0 {
 		t.Errorf("Cursor = %d but flat length = %d", m.Cursor, len(flat))
+	}
+}
+
+func TestRefreshMsgPreservesCollapsedDirectoryState(t *testing.T) {
+	t.Run("preserves collapsed top-level directory", func(t *testing.T) {
+		m := testModel([]StatusEntry{
+			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+			{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+		})
+
+		if len(m.stagedTree) != 1 || !m.stagedTree[0].IsDir {
+			t.Fatalf("expected staged tree to contain one directory node, got %#v", m.stagedTree)
+		}
+		m.stagedTree[0].Expanded = false
+
+		m, _ = m.Update(RefreshMsg{
+			Branch: "main",
+			Entries: []StatusEntry{
+				{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+				{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+			},
+		})
+
+		if m.stagedTree[0].Expanded {
+			t.Fatal("expected src directory to stay collapsed after refresh")
+		}
+		if got := len(flattenTree(m.stagedTree)); got != 1 {
+			t.Fatalf("expected collapsed tree to flatten to 1 row, got %d", got)
+		}
+	})
+
+	t.Run("preserves nested collapsed directory", func(t *testing.T) {
+		m := testModel([]StatusEntry{
+			{Path: "src/pkg/a.go", IndexStatus: 'M', WorkStatus: ' '},
+			{Path: "src/other.go", IndexStatus: 'M', WorkStatus: ' '},
+		})
+
+		if len(m.stagedTree) != 1 || len(m.stagedTree[0].Children) < 1 {
+			t.Fatalf("expected nested directory tree, got %#v", m.stagedTree)
+		}
+		src := m.stagedTree[0]
+		pkg := src.Children[0]
+		if !pkg.IsDir {
+			t.Fatalf("expected first child to be a directory, got %#v", pkg)
+		}
+		pkg.Expanded = false
+
+		m, _ = m.Update(RefreshMsg{
+			Branch: "main",
+			Entries: []StatusEntry{
+				{Path: "src/pkg/a.go", IndexStatus: 'M', WorkStatus: ' '},
+				{Path: "src/other.go", IndexStatus: 'M', WorkStatus: ' '},
+			},
+		})
+
+		src = m.stagedTree[0]
+		pkg = src.Children[0]
+		if !src.Expanded {
+			t.Fatal("expected ancestor directory to remain expanded after refresh")
+		}
+		if pkg.Expanded {
+			t.Fatal("expected nested pkg directory to stay collapsed after refresh")
+		}
+	})
+
+	t.Run("preserves staged and unstaged expansion independently", func(t *testing.T) {
+		m := testModel([]StatusEntry{
+			{Path: "src/both.go", IndexStatus: 'M', WorkStatus: 'M'},
+		})
+
+		if len(m.stagedTree) != 1 || len(m.unstagedTree) != 1 {
+			t.Fatalf("expected src directory in both sections, got staged=%d unstaged=%d", len(m.stagedTree), len(m.unstagedTree))
+		}
+		m.stagedTree[0].Expanded = false
+		m.unstagedTree[0].Expanded = true
+
+		m, _ = m.Update(RefreshMsg{
+			Branch: "main",
+			Entries: []StatusEntry{
+				{Path: "src/both.go", IndexStatus: 'M', WorkStatus: 'M'},
+			},
+		})
+
+		if m.stagedTree[0].Expanded {
+			t.Fatal("expected staged src directory to stay collapsed after refresh")
+		}
+		if !m.unstagedTree[0].Expanded {
+			t.Fatal("expected unstaged src directory to stay expanded after refresh")
+		}
+	})
+}
+
+func TestMouseClickOnDirectorySetsSectionCursorAndTogglesOnce(t *testing.T) {
+	tests := []struct {
+		name          string
+		entries       []StatusEntry
+		clickY        int
+		wantSection   GitSection
+		wantFlatCount int
+	}{
+		{
+			name: "staged directory click",
+			entries: []StatusEntry{
+				{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+			},
+			clickY:        1,
+			wantSection:   SectionStaged,
+			wantFlatCount: 1,
+		},
+		{
+			name: "unstaged directory click",
+			entries: []StatusEntry{
+				{Path: "src/a.go", IndexStatus: ' ', WorkStatus: 'M'},
+			},
+			clickY:        2,
+			wantSection:   SectionUnstaged,
+			wantFlatCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := testModel(tt.entries)
+			m.activeSection = SectionCommitBody
+			m.Cursor = 99
+
+			updated, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: tt.clickY}))
+			if cmd != nil {
+				t.Fatal("expected directory click to avoid returning a command")
+			}
+
+			if updated.activeSection != tt.wantSection {
+				t.Fatalf("activeSection = %v, want %v", updated.activeSection, tt.wantSection)
+			}
+			if updated.Cursor != 0 {
+				t.Fatalf("Cursor = %d, want 0", updated.Cursor)
+			}
+
+			flat := updated.activeFlatTree()
+			if got := len(flat); got != tt.wantFlatCount {
+				t.Fatalf("flattened tree count = %d, want %d", got, tt.wantFlatCount)
+			}
+			if len(flat) == 0 {
+				t.Fatal("expected directory row to remain visible")
+			}
+			if flat[0].Name != "src" || flat[0].Expanded {
+				t.Fatalf("expected src to be collapsed after one click, got name=%q expanded=%v", flat[0].Name, flat[0].Expanded)
+			}
+		})
+	}
+}
+
+func TestEnsureCursorVisibleUsesScrollY(t *testing.T) {
+	m := testModel([]StatusEntry{
+		{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "b.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "c.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "d.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "e.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "f.go", IndexStatus: 'M', WorkStatus: ' '},
+	})
+	m.Width = 40
+	m.Height = 9 // full footer visible, tree viewport becomes 1 line
+	m.activeSection = SectionStaged
+	m.Cursor = 5
+
+	m.ensureCursorVisible()
+
+	if m.ScrollY <= 0 {
+		t.Fatalf("expected ScrollY to move down for active row, got %d", m.ScrollY)
+	}
+	node, staged := m.NodeAtY(0)
+	if node == nil {
+		t.Fatal("expected visible node at y=0 after scrolling")
+	}
+	if !staged {
+		t.Fatal("expected visible node to be in staged section")
+	}
+	if node.Name != "f.go" {
+		t.Fatalf("visible node = %q, want f.go", node.Name)
+	}
+}
+
+func TestNodeAtYWithScroll(t *testing.T) {
+	m := testModel([]StatusEntry{
+		{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "b.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "c.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "d.go", IndexStatus: 'M', WorkStatus: ' '},
+	})
+	m.Width = 40
+	m.Height = 12
+	m.ScrollY = 2
+
+	node, staged := m.NodeAtY(0)
+	if node == nil {
+		t.Fatal("expected visible node at y=0 with scroll applied")
+	}
+	if !staged {
+		t.Fatal("expected node at y=0 to be in staged section")
+	}
+	if node.Name != "b.go" {
+		t.Fatalf("node at y=0 = %q, want b.go", node.Name)
+	}
+}
+
+func TestMouseWheelScrollsTreeRows(t *testing.T) {
+	m := testModel([]StatusEntry{
+		{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "b.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "c.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "d.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "e.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "f.go", IndexStatus: 'M', WorkStatus: ' '},
+	})
+	m.Width = 40
+	m.Height = 10
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+
+	updated, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, Y: 0}))
+	if updated.ScrollY <= 0 {
+		t.Fatalf("expected mouse wheel to increase ScrollY, got %d", updated.ScrollY)
+	}
+	if updated.Cursor != 0 {
+		t.Fatalf("expected mouse wheel scrolling to keep cursor, got %d", updated.Cursor)
+	}
+}
+
+func TestViewWithOverflowKeepsFooterVisible(t *testing.T) {
+	zone.NewGlobal()
+	defer zone.Close()
+
+	m := testModel([]StatusEntry{
+		{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "b.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "c.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "d.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "e.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "f.go", IndexStatus: 'M', WorkStatus: ' '},
+	})
+	m.Width = 40
+	m.Height = 10
+
+	view := m.View()
+	if !strings.Contains(view, "Commit") {
+		t.Fatal("expected overflowing view to keep footer actions visible")
+	}
+	if got := m.commitFormStartY(); got < 0 {
+		t.Fatalf("expected commit form to remain visible when tree overflows, got %d", got)
 	}
 }
 

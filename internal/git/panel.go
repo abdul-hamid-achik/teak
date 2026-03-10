@@ -96,6 +96,36 @@ type GitTreeNode struct {
 	Expanded bool
 }
 
+type treeRowKind int
+
+const (
+	treeRowNone treeRowKind = iota
+	treeRowStagedHeader
+	treeRowNode
+	treeRowUnstagedHeader
+)
+
+type treeRowHit struct {
+	kind    treeRowKind
+	section GitSection
+	index   int
+	node    *GitTreeNode
+}
+
+type panelFooterMode int
+
+const (
+	panelFooterNone panelFooterMode = iota
+	panelFooterCompact
+	panelFooterFull
+)
+
+type panelLayout struct {
+	treeHeight int
+	footerMode panelFooterMode
+	bodyHeight int
+}
+
 // buildTree creates a tree structure from a flat list of status entries.
 func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 	root := &GitTreeNode{IsDir: true, Expanded: true}
@@ -112,7 +142,8 @@ func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 		if e.IsDir {
 			parts := strings.Split(path, "/")
 			node := root
-			for _, part := range parts {
+			for i, part := range parts {
+				dirPath := strings.Join(parts[:i+1], "/")
 				found := false
 				for _, c := range node.Children {
 					if c.IsDir && c.Name == part {
@@ -124,7 +155,7 @@ func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 				if !found {
 					dir := &GitTreeNode{
 						Name:     part,
-						Path:     path,
+						Path:     dirPath,
 						IsDir:    true,
 						Depth:    node.Depth + 1,
 						Expanded: true,
@@ -181,6 +212,40 @@ func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 	}
 
 	return root.Children
+}
+
+func rebuildTree(entries []StatusEntry, staged bool, previous []*GitTreeNode) []*GitTreeNode {
+	next := buildTree(entries, staged)
+	if len(previous) == 0 || len(next) == 0 {
+		return next
+	}
+
+	expanded := make(map[string]bool)
+	collectExpandedDirs(previous, expanded)
+	restoreExpandedDirs(next, expanded)
+	return next
+}
+
+func collectExpandedDirs(nodes []*GitTreeNode, expanded map[string]bool) {
+	for _, node := range nodes {
+		if !node.IsDir {
+			continue
+		}
+		expanded[node.Path] = node.Expanded
+		collectExpandedDirs(node.Children, expanded)
+	}
+}
+
+func restoreExpandedDirs(nodes []*GitTreeNode, expanded map[string]bool) {
+	for _, node := range nodes {
+		if !node.IsDir {
+			continue
+		}
+		if state, ok := expanded[node.Path]; ok {
+			node.Expanded = state
+		}
+		restoreExpandedDirs(node.Children, expanded)
+	}
 }
 
 // flattenTree flattens a tree into a list of nodes for rendering.
@@ -338,8 +403,8 @@ func (m *Model) deriveGroups() {
 			m.Unstaged = append(m.Unstaged, e)
 		}
 	}
-	m.stagedTree = buildTree(m.Staged, true)
-	m.unstagedTree = buildTree(m.Unstaged, false)
+	m.stagedTree = rebuildTree(m.Staged, true, m.stagedTree)
+	m.unstagedTree = rebuildTree(m.Unstaged, false, m.unstagedTree)
 }
 
 // activeFlatTree returns the flattened tree for the active section.
@@ -385,6 +450,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.Cursor >= len(flat) {
 				m.Cursor = max(0, len(flat)-1)
 			}
+			m.ensureCursorVisible()
 		}
 		return m, nil
 
@@ -420,18 +486,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Body scrolling is handled internally by textarea component
-		// No need for manual scroll handling here
-		flat := m.activeFlatTree()
-		if len(flat) > 0 && !m.Collapsed {
+		if m.bodyFocused || m.CommitFormHitTest(mouse.Y) == "body" {
+			var cmd tea.Cmd
+			m.commitBody, cmd = m.commitBody.Update(msg)
+			return m, cmd
+		}
+		if !m.Collapsed {
 			if mouse.Button == tea.MouseWheelUp {
-				if m.Cursor > 0 {
-					m.Cursor--
-				}
+				m.scrollTree(-3)
 			} else if mouse.Button == tea.MouseWheelDown {
-				if m.Cursor < len(flat)-1 {
-					m.Cursor++
-				}
+				m.scrollTree(3)
 			}
 		}
 		return m, nil
@@ -453,62 +517,35 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	// Zone-based clicks (buttons, stage-all, unstage-all) are handled by app.go
 	// which has access to the original absolute-coordinate message.
 	// This method only handles positional Y-based clicks.
-	line := 0
-
-	// Staged header
-	if y == line {
+	hit := m.rowHitAtY(y)
+	switch hit.kind {
+	case treeRowStagedHeader:
 		m.stagedCollapsed = !m.stagedCollapsed
+		m.ensureCursorVisible()
 		return m, nil
-	}
-	line++
-
-	// Staged entries (tree)
-	if !m.stagedCollapsed {
-		stagedFlat := flattenTree(m.stagedTree)
-		for i, node := range stagedFlat {
-			if y == line {
-				if node.IsDir {
-					// Toggle directory expansion
-					node.Expanded = !node.Expanded
-					return m, nil
-				}
-				m.activeSection = SectionStaged
-				m.Cursor = i
-				m.unfocusCommit()
-				e := node.Entry
-				return m, func() tea.Msg {
-					return OpenDiffMsg{Path: e.Path, Status: e.DisplayStatus(true)}
-				}
-			}
-			line++
-		}
-	}
-
-	// Unstaged header
-	if y == line {
+	case treeRowUnstagedHeader:
 		m.unstagedCollapsed = !m.unstagedCollapsed
+		m.ensureCursorVisible()
 		return m, nil
-	}
-	line++
-
-	// Unstaged entries (tree)
-	if !m.unstagedCollapsed {
-		unstagedFlat := flattenTree(m.unstagedTree)
-		for i, node := range unstagedFlat {
-			if y == line {
-				if node.IsDir {
-					node.Expanded = !node.Expanded
-					return m, nil
-				}
-				m.activeSection = SectionUnstaged
-				m.Cursor = i
-				m.unfocusCommit()
-				e := node.Entry
-				return m, func() tea.Msg {
-					return OpenDiffMsg{Path: e.Path, Status: e.DisplayStatus(false)}
-				}
-			}
-			line++
+	case treeRowNode:
+		m.activeSection = hit.section
+		m.Cursor = hit.index
+		m.unfocusCommit()
+		if hit.node == nil {
+			return m, nil
+		}
+		if hit.node.IsDir {
+			hit.node.Expanded = !hit.node.Expanded
+			m.ensureCursorVisible()
+			return m, nil
+		}
+		if hit.node.Entry == nil {
+			return m, nil
+		}
+		e := hit.node.Entry
+		staged := hit.section == SectionStaged
+		return m, func() tea.Msg {
+			return OpenDiffMsg{Path: e.Path, Status: e.DisplayStatus(staged)}
 		}
 	}
 
@@ -583,6 +620,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.Cursor = len(stagedFlat) - 1
 		}
 		_ = flat
+		m.ensureCursorVisible()
 		return m, nil
 	case "down":
 		flat := m.activeFlatTree()
@@ -592,6 +630,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.activeSection = SectionUnstaged
 			m.Cursor = 0
 		}
+		m.ensureCursorVisible()
 		return m, nil
 	case "enter":
 		flat := m.activeFlatTree()
@@ -599,6 +638,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			node := flat[m.Cursor]
 			if node.IsDir {
 				node.Expanded = !node.Expanded
+				m.ensureCursorVisible()
 				return m, nil
 			}
 			if node.Entry != nil {
@@ -751,36 +791,11 @@ func (m *Model) FocusBody() {
 // commitFormStartY returns the Y offset within the panel where the commit form
 // top border renders, or -1 if the form is not visible.
 func (m Model) commitFormStartY() int {
-	line := 0
-	// Staged header
-	line++
-	if !m.stagedCollapsed {
-		line += len(flattenTree(m.stagedTree))
-	}
-	// Unstaged header
-	line++
-	if !m.unstagedCollapsed {
-		line += len(flattenTree(m.unstagedTree))
-	}
-
-	remaining := m.Height - line
-	if remaining < 4 {
+	layout := m.layout()
+	if layout.footerMode != panelFooterFull {
 		return -1
 	}
-
-	bodyHeight := m.bodyViewHeight()
-	formMinHeight := 1 + 1 + bodyHeight + 1 + 1
-	if formMinHeight > remaining {
-		bodyHeight = remaining - 4
-		if bodyHeight < 1 {
-			bodyHeight = 1
-		}
-	}
-
-	// Padding before form
-	padLines := remaining - (1 + 1 + bodyHeight + 1 + 1)
-	line += padLines
-	return line
+	return layout.treeHeight + 1
 }
 
 // FocusBodyAt focuses the body at the clicked location.
@@ -836,119 +851,46 @@ func (m Model) CommitFormHitTest(panelY int) string {
 		return "title"
 	}
 	bodyStartY := formY + 2
-	bodyHeight := m.bodyViewHeight()
-	// Adjust body height the same way commitFormStartY does
-	line := 0
-	line++ // staged header
-	if !m.stagedCollapsed {
-		line += len(flattenTree(m.stagedTree))
-	}
-	line++ // unstaged header
-	if !m.unstagedCollapsed {
-		line += len(flattenTree(m.unstagedTree))
-	}
-	remaining := m.Height - line
-	formMinHeight := 1 + 1 + bodyHeight + 1 + 1
-	if formMinHeight > remaining {
-		bodyHeight = remaining - 4
-		if bodyHeight < 1 {
-			bodyHeight = 1
-		}
-	}
+	bodyHeight := m.layout().bodyHeight
 	if panelY >= bodyStartY && panelY < bodyStartY+bodyHeight {
 		return "body"
 	}
 	return ""
 }
 
+func (m Model) rowHitAtY(y int) treeRowHit {
+	layout := m.layout()
+	if y < 0 || y >= layout.treeHeight {
+		return treeRowHit{}
+	}
+
+	rows := m.treeRows()
+	scrollY := m.normalizedScroll(layout.treeHeight, len(rows))
+	idx := scrollY + y
+	if idx < 0 || idx >= len(rows) {
+		return treeRowHit{}
+	}
+	return rows[idx]
+}
+
 // EntryAtY returns the status entry at the given panel Y coordinate and whether it's staged.
 // Returns nil if Y doesn't correspond to a file entry.
 func (m Model) EntryAtY(y int) (*StatusEntry, bool) {
-	line := 0
-
-	// Staged header
-	if y == line {
+	hit := m.rowHitAtY(y)
+	if hit.kind != treeRowNode || hit.node == nil || hit.node.Entry == nil {
 		return nil, false
 	}
-	line++
-
-	// Staged entries (tree)
-	if !m.stagedCollapsed {
-		stagedFlat := flattenTree(m.stagedTree)
-		for _, node := range stagedFlat {
-			if y == line {
-				if node.Entry != nil {
-					return node.Entry, true
-				}
-				return nil, false
-			}
-			line++
-		}
-	}
-
-	// Unstaged header
-	if y == line {
-		return nil, false
-	}
-	line++
-
-	// Unstaged entries (tree)
-	if !m.unstagedCollapsed {
-		unstagedFlat := flattenTree(m.unstagedTree)
-		for _, node := range unstagedFlat {
-			if y == line {
-				if node.Entry != nil {
-					return node.Entry, false
-				}
-				return nil, false
-			}
-			line++
-		}
-	}
-
-	return nil, false
+	return hit.node.Entry, hit.section == SectionStaged
 }
 
 // NodeAtY returns the tree node at the given panel Y coordinate and whether it's in the staged section.
 // Returns nil if Y doesn't correspond to any node.
 func (m Model) NodeAtY(y int) (*GitTreeNode, bool) {
-	line := 0
-
-	// Staged header
-	if y == line {
+	hit := m.rowHitAtY(y)
+	if hit.kind != treeRowNode {
 		return nil, false
 	}
-	line++
-
-	// Staged entries (tree)
-	if !m.stagedCollapsed {
-		stagedFlat := flattenTree(m.stagedTree)
-		for _, node := range stagedFlat {
-			if y == line {
-				return node, true
-			}
-			line++
-		}
-	}
-
-	// Unstaged header
-	if y == line {
-		return nil, false
-	}
-	line++
-
-	// Unstaged entries (tree)
-	if !m.unstagedCollapsed {
-		unstagedFlat := flattenTree(m.unstagedTree)
-		for _, node := range unstagedFlat {
-			if y == line {
-				return node, false
-			}
-			line++
-		}
-	}
-
-	return nil, false
+	return hit.node, hit.section == SectionStaged
 }
 
 // FilesUnderDir returns all file paths under a directory path in the given entry list.
@@ -979,6 +921,7 @@ func (m *Model) SetSize(w, h int) {
 		innerWidth = 1
 	}
 	m.commitTitle.SetWidth(innerWidth)
+	m.ensureCursorVisible()
 }
 
 // View renders the git panel.
@@ -1006,177 +949,246 @@ func (m Model) View() string {
 		return sb.String()
 	}
 
-	var sb strings.Builder
-	linesUsed := 0
+	layout := m.layout()
+	rows := m.treeRows()
+	scrollY := m.normalizedScroll(layout.treeHeight, len(rows))
+	lines := make([]string, 0, m.Height)
 
-	// 1. Staged section header with unstage-all button
-	stagedArrow := "▾"
-	if m.stagedCollapsed {
-		stagedArrow = "▸"
+	end := min(scrollY+layout.treeHeight, len(rows))
+	for _, row := range rows[scrollY:end] {
+		lines = append(lines, m.renderTreeRow(row))
 	}
-	stagedLabel := fmt.Sprintf(" STAGED (%d) %s", len(m.Staged), stagedArrow)
-	stagedHeaderText := m.theme.GitSectionHeader.Render(stagedLabel)
-	if len(m.Staged) > 0 {
-		unstageAllBtn := zone.Mark("git-unstage-all",
-			m.theme.GitUntracked.Render(" −"))
-		stagedHeaderText += unstageAllBtn
-	}
-	sb.WriteString(stagedHeaderText)
-	linesUsed++
-
-	// Staged entries (tree view)
-	if !m.stagedCollapsed {
-		stagedFlat := flattenTree(m.stagedTree)
-		for i, node := range stagedFlat {
-			if linesUsed >= m.Height {
-				break
-			}
-			sb.WriteByte('\n')
-			sb.WriteString(m.renderTreeNode(node, i, true))
-			linesUsed++
-		}
+	for len(lines) < layout.treeHeight {
+		lines = append(lines, "")
 	}
 
-	if linesUsed >= m.Height {
-		return sb.String()
+	switch layout.footerMode {
+	case panelFooterCompact:
+		lines = append(lines, m.renderCompactFooterLine())
+	case panelFooterFull:
+		lines = append(lines, m.renderPushPullLine())
+		lines = append(lines, m.renderCommitFormLines(layout.bodyHeight)...)
 	}
 
-	// 2. Unstaged / Changes section header with stage-all button
-	unstagedArrow := "▾"
-	if m.unstagedCollapsed {
-		unstagedArrow = "▸"
+	for len(lines) < m.Height {
+		lines = append(lines, "")
 	}
-	unstagedLabel := fmt.Sprintf(" CHANGES (%d) %s", len(m.Unstaged), unstagedArrow)
-	unstagedHeaderText := m.theme.GitSectionHeader.Render(unstagedLabel)
-	if len(m.Unstaged) > 0 {
-		stageAllBtn := zone.Mark("git-stage-all",
-			m.theme.GitAdded.Render(" +"))
-		unstagedHeaderText += stageAllBtn
-	}
-	sb.WriteByte('\n')
-	sb.WriteString(unstagedHeaderText)
-	linesUsed++
-
-	// Unstaged entries (tree view)
-	if !m.unstagedCollapsed {
-		unstagedFlat := flattenTree(m.unstagedTree)
-		for i, node := range unstagedFlat {
-			if linesUsed >= m.Height {
-				break
-			}
-			sb.WriteByte('\n')
-			sb.WriteString(m.renderTreeNode(node, i, false))
-			linesUsed++
-		}
+	if len(lines) > m.Height {
+		lines = lines[:m.Height]
 	}
 
-	if linesUsed >= m.Height {
-		return sb.String()
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) layout() panelLayout {
+	if m.Height <= 0 {
+		return panelLayout{}
 	}
 
-	// 3. Commit form area — rendered as a bordered box at the bottom
-	// Calculate how much space we have left for the commit form
-	// We need: 1 (push/pull buttons) + 1 (top border) + 1 (title) + bodyHeight (body) + 1 (bottom border) + 1 (commit button)
 	bodyHeight := m.bodyViewHeight()
-	formMinHeight := 1 + 1 + 1 + bodyHeight + 1 + 1
-	remaining := m.Height - linesUsed
-	if remaining < 3 {
-		// Not enough space, show spinner only
-		sb.WriteByte('\n')
-		linesUsed++
-		if m.spinning {
-			sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
-		} else {
-			// Show compact single row of buttons with manual spacing
-			availWidth := m.Width - 2
-			if availWidth < 10 {
-				availWidth = 10
-			}
-			// Split available width into 3 parts: commit gets 1/2, push/pull get 1/4 each
-			commitW := availWidth / 2
-			halfW := availWidth / 4
-			commitContent := "\uf417 Commit"
-			pushContent := "\uf0ee Push"
-			pullContent := "\uf0ed Pull"
-			// Pad each to their section width
-			commitPadded := commitContent + strings.Repeat(" ", commitW-len(commitContent))
-			pushPadded := pushContent + strings.Repeat(" ", halfW-len(pushContent))
-			pullPadded := pullContent + strings.Repeat(" ", halfW-len(pullContent))
-			commitBtn := zone.Mark("git-commit-btn", m.theme.GitActionButton.Render(commitPadded))
-			pushBtn := zone.Mark("git-push-btn", m.theme.GitActionButton.Render(pushPadded))
-			pullBtn := zone.Mark("git-pull-btn", m.theme.GitActionButton.Render(pullPadded))
-			sb.WriteString(" " + commitBtn + pushBtn + pullBtn)
+	fullFooterHeight := bodyHeight + 5
+	switch {
+	case m.Height >= fullFooterHeight+1:
+		return panelLayout{
+			treeHeight: m.Height - fullFooterHeight,
+			footerMode: panelFooterFull,
+			bodyHeight: bodyHeight,
 		}
-		linesUsed++
-		for linesUsed < m.Height {
-			sb.WriteByte('\n')
-			linesUsed++
+	case m.Height >= 2:
+		return panelLayout{
+			treeHeight: m.Height - 1,
+			footerMode: panelFooterCompact,
 		}
-		return sb.String()
+	default:
+		return panelLayout{treeHeight: m.Height}
 	}
+}
 
-	// Adjust body height if not enough space
-	if formMinHeight > remaining {
-		bodyHeight = remaining - 4 // 1 (push/pull) + 1 top + 1 title + 1 bottom + 1 commit
-		if bodyHeight < 1 {
-			bodyHeight = 1
+func (m Model) treeRows() []treeRowHit {
+	rows := []treeRowHit{{kind: treeRowStagedHeader}}
+	if !m.stagedCollapsed {
+		for i, node := range flattenTree(m.stagedTree) {
+			rows = append(rows, treeRowHit{
+				kind:    treeRowNode,
+				section: SectionStaged,
+				index:   i,
+				node:    node,
+			})
 		}
 	}
+	rows = append(rows, treeRowHit{kind: treeRowUnstagedHeader})
+	if !m.unstagedCollapsed {
+		for i, node := range flattenTree(m.unstagedTree) {
+			rows = append(rows, treeRowHit{
+				kind:    treeRowNode,
+				section: SectionUnstaged,
+				index:   i,
+				node:    node,
+			})
+		}
+	}
+	return rows
+}
 
-	// Pad before the commit form — push it toward the bottom
-	padLines := remaining - (1 + 1 + bodyHeight + 1 + 1 + 1) // push/pull + top + title + body + bottom + commit
-	for range padLines {
-		sb.WriteByte('\n')
-		linesUsed++
+func (m Model) maxTreeScroll(treeHeight int, rowCount int) int {
+	if treeHeight <= 0 || rowCount <= treeHeight {
+		return 0
+	}
+	return rowCount - treeHeight
+}
+
+func (m Model) normalizedScroll(treeHeight int, rowCount int) int {
+	maxScroll := m.maxTreeScroll(treeHeight, rowCount)
+	scrollY := m.ScrollY
+	if scrollY < 0 {
+		scrollY = 0
+	}
+	if scrollY > maxScroll {
+		scrollY = maxScroll
+	}
+	return scrollY
+}
+
+func (m *Model) scrollTree(delta int) {
+	rows := m.treeRows()
+	layout := m.layout()
+	maxScroll := m.maxTreeScroll(layout.treeHeight, len(rows))
+	m.ScrollY += delta
+	if m.ScrollY < 0 {
+		m.ScrollY = 0
+	}
+	if m.ScrollY > maxScroll {
+		m.ScrollY = maxScroll
+	}
+}
+
+func (m Model) activeTreeRowIndex() (int, bool) {
+	for i, row := range m.treeRows() {
+		if row.kind == treeRowNode && row.section == m.activeSection && row.index == m.Cursor {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (m *Model) ensureCursorVisible() {
+	layout := m.layout()
+	rows := m.treeRows()
+	maxScroll := m.maxTreeScroll(layout.treeHeight, len(rows))
+
+	if layout.treeHeight <= 0 {
+		m.ScrollY = 0
+		return
 	}
 
-	// Push and Pull buttons — rendered above the commit form
-	if linesUsed < m.Height {
-		if m.spinning {
-			sb.WriteByte('\n')
-			linesUsed++
-			sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
-		} else {
-			sb.WriteByte('\n')
-			linesUsed++
-			availWidth := m.Width - 2
-			if availWidth < 10 {
-				availWidth = 10
-			}
-			gap := 1
-			btnWidth := (availWidth - gap) / 2
-			btnWidthR := availWidth - gap - btnWidth
-			pushContent := "\uf0ee Push"
-			pullContent := "\uf0ed Pull"
-			pushPadded := centerText(pushContent, btnWidth, ' ')
-			pullPadded := centerText(pullContent, btnWidthR, ' ')
-			pushBtn := zone.Mark("git-push-btn",
-				m.theme.GitPushPullButton.Render(pushPadded))
-			pullBtn := zone.Mark("git-pull-btn",
-				m.theme.GitPushPullButton.Render(pullPadded))
-			sb.WriteString(" " + pushBtn + " " + pullBtn)
+	activeRow, ok := m.activeTreeRowIndex()
+	if ok {
+		if activeRow < m.ScrollY {
+			m.ScrollY = activeRow
+		}
+		if activeRow >= m.ScrollY+layout.treeHeight {
+			m.ScrollY = activeRow - layout.treeHeight + 1
 		}
 	}
 
-	// Commit form with box border
-	innerWidth := m.Width - 2 // -2 for left+right border chars
+	if m.ScrollY < 0 {
+		m.ScrollY = 0
+	}
+	if m.ScrollY > maxScroll {
+		m.ScrollY = maxScroll
+	}
+}
+
+func (m Model) renderTreeRow(row treeRowHit) string {
+	switch row.kind {
+	case treeRowStagedHeader:
+		stagedArrow := "▾"
+		if m.stagedCollapsed {
+			stagedArrow = "▸"
+		}
+		stagedLabel := fmt.Sprintf(" STAGED (%d) %s", len(m.Staged), stagedArrow)
+		line := m.theme.GitSectionHeader.Render(stagedLabel)
+		if len(m.Staged) > 0 {
+			line += zone.Mark("git-unstage-all", m.theme.GitUntracked.Render(" −"))
+		}
+		return line
+	case treeRowUnstagedHeader:
+		unstagedArrow := "▾"
+		if m.unstagedCollapsed {
+			unstagedArrow = "▸"
+		}
+		unstagedLabel := fmt.Sprintf(" CHANGES (%d) %s", len(m.Unstaged), unstagedArrow)
+		line := m.theme.GitSectionHeader.Render(unstagedLabel)
+		if len(m.Unstaged) > 0 {
+			line += zone.Mark("git-stage-all", m.theme.GitAdded.Render(" +"))
+		}
+		return line
+	case treeRowNode:
+		if row.node == nil {
+			return ""
+		}
+		return m.renderTreeNode(row.node, row.index, row.section == SectionStaged)
+	default:
+		return ""
+	}
+}
+
+func (m Model) renderCompactFooterLine() string {
+	if m.spinning {
+		return " " + m.spinner.View() + " " + m.spinStatus
+	}
+
+	availWidth := m.Width - 2
+	if availWidth < 10 {
+		availWidth = 10
+	}
+	commitW := availWidth / 2
+	halfW := availWidth / 4
+	commitContent := "\uf417 Commit"
+	pushContent := "\uf0ee Push"
+	pullContent := "\uf0ed Pull"
+	commitPadded := commitContent + strings.Repeat(" ", max(0, commitW-len(commitContent)))
+	pushPadded := pushContent + strings.Repeat(" ", max(0, halfW-len(pushContent)))
+	pullPadded := pullContent + strings.Repeat(" ", max(0, halfW-len(pullContent)))
+	commitBtn := zone.Mark("git-commit-btn", m.theme.GitActionButton.Render(commitPadded))
+	pushBtn := zone.Mark("git-push-btn", m.theme.GitActionButton.Render(pushPadded))
+	pullBtn := zone.Mark("git-pull-btn", m.theme.GitActionButton.Render(pullPadded))
+	return " " + commitBtn + pushBtn + pullBtn
+}
+
+func (m Model) renderPushPullLine() string {
+	if m.spinning {
+		return " " + m.spinner.View() + " " + m.spinStatus
+	}
+
+	availWidth := m.Width - 2
+	if availWidth < 10 {
+		availWidth = 10
+	}
+	gap := 1
+	btnWidth := (availWidth - gap) / 2
+	btnWidthR := availWidth - gap - btnWidth
+	pushContent := "\uf0ee Push"
+	pullContent := "\uf0ed Pull"
+	pushPadded := centerText(pushContent, btnWidth, ' ')
+	pullPadded := centerText(pullContent, btnWidthR, ' ')
+	pushBtn := zone.Mark("git-push-btn", m.theme.GitPushPullButton.Render(pushPadded))
+	pullBtn := zone.Mark("git-pull-btn", m.theme.GitPushPullButton.Render(pullPadded))
+	return " " + pushBtn + " " + pullBtn
+}
+
+func (m Model) renderCommitFormLines(bodyHeight int) []string {
+	innerWidth := m.Width - 2
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
 
 	borderColor := ui.Nord3
 	if m.titleFocused || m.bodyFocused {
-		borderColor = ui.Nord8 // highlight border when focused
+		borderColor = ui.Nord8
 	}
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 
-	// Top border: ╭─────╮
-	topBorder := "╭" + strings.Repeat("─", innerWidth) + "╮"
-	sb.WriteByte('\n')
-	sb.WriteString(borderStyle.Render(topBorder))
-	linesUsed++
-
-	// Title line: │ Message ...         │
 	m.commitTitle.SetWidth(innerWidth)
 	tiStyles := m.commitTitle.Styles()
 	titleBg := ui.Nord1
@@ -1188,98 +1200,54 @@ func (m Model) View() string {
 	tiStyles.Blurred.Text = lipgloss.NewStyle().Background(ui.Nord1).Foreground(ui.Nord4)
 	tiStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(ui.Nord1).Foreground(ui.Nord4)
 	m.commitTitle.SetStyles(tiStyles)
-
 	titleView := m.commitTitle.View()
 	titleClamped := lipgloss.NewStyle().MaxWidth(innerWidth).Render(titleView)
-	sb.WriteByte('\n')
-	sb.WriteString(borderStyle.Render("│") + zone.Mark("git-commit-title", titleClamped) + borderStyle.Render("│"))
-	linesUsed++
 
-	// Body lines: │ Description ...     │
 	bodyBg := ui.Nord1
 	if m.bodyFocused {
 		bodyBg = ui.Nord2
 	}
-
-	// Body lines using textarea component
 	m.commitBody.SetWidth(innerWidth)
 	m.commitBody.SetHeight(bodyHeight)
-
-	// Apply border background to textarea styles
 	taStyles := m.commitBody.Styles()
 	if m.bodyFocused {
-		taStyles.Focused.Text = lipgloss.NewStyle().
-			Background(bodyBg).
-			Foreground(ui.Nord6)
-		taStyles.Focused.Placeholder = lipgloss.NewStyle().
-			Background(bodyBg).
-			Foreground(ui.Nord4)
+		taStyles.Focused.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
+		taStyles.Focused.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
 	} else {
-		taStyles.Blurred.Text = lipgloss.NewStyle().
-			Background(bodyBg).
-			Foreground(ui.Nord4)
-		taStyles.Blurred.Placeholder = lipgloss.NewStyle().
-			Background(bodyBg).
-			Foreground(ui.Nord4)
+		taStyles.Blurred.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+		taStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
 	}
 	m.commitBody.SetStyles(taStyles)
 
-	// Render textarea view wrapped in zone for click detection
-	bodyView := m.commitBody.View()
-	bodyLines := strings.Split(bodyView, "\n")
+	lines := []string{
+		borderStyle.Render("╭" + strings.Repeat("─", innerWidth) + "╮"),
+		borderStyle.Render("│") + zone.Mark("git-commit-title", titleClamped) + borderStyle.Render("│"),
+	}
+
+	bodyLines := strings.Split(m.commitBody.View(), "\n")
 	for i := 0; i < bodyHeight; i++ {
-		sb.WriteByte('\n')
-		sb.WriteString(borderStyle.Render("│"))
-		linesUsed++
+		line := strings.Repeat(" ", innerWidth)
 		if i < len(bodyLines) {
-			// Wrap each line in the git-commit-body zone
-			lineWithZone := zone.Mark("git-commit-body", bodyLines[i])
-			sb.WriteString(lineWithZone)
-		} else {
-			sb.WriteString(strings.Repeat(" ", innerWidth))
+			line = zone.Mark("git-commit-body", bodyLines[i])
 		}
-		sb.WriteString(borderStyle.Render("│"))
+		lines = append(lines, borderStyle.Render("│")+line+borderStyle.Render("│"))
 	}
 
-	// Bottom border: ╰─────╯
-	bottomBorder := "╰" + strings.Repeat("─", innerWidth) + "╯"
-	sb.WriteByte('\n')
-	sb.WriteString(borderStyle.Render(bottomBorder))
-	linesUsed++
-
-	if linesUsed >= m.Height {
-		return sb.String()
-	}
-
-	// Action buttons with icons (or spinner when busy)
+	lines = append(lines, borderStyle.Render("╰"+strings.Repeat("─", innerWidth)+"╯"))
 	if m.spinning {
-		sb.WriteByte('\n')
-		linesUsed++
-		sb.WriteString(" " + m.spinner.View() + " " + m.spinStatus)
-	} else {
-		// Calculate available width for buttons (1-space padding on each side)
-		availWidth := m.Width - 2
-		if availWidth < 10 {
-			availWidth = 10
-		}
-
-		// Row 1: Commit button full width
-		sb.WriteByte('\n')
-		linesUsed++
-		commitContent := "\uf417 Commit"
-		commitPadded := centerText(commitContent, availWidth, ' ')
-		commitBtn := zone.Mark("git-commit-btn",
-			m.theme.GitCommitButton.Render(commitPadded))
-		sb.WriteString(" " + commitBtn)
+		lines = append(lines, " "+m.spinner.View()+" "+m.spinStatus)
+		return lines
 	}
 
-	// Pad remaining height
-	for linesUsed < m.Height {
-		sb.WriteByte('\n')
-		linesUsed++
+	availWidth := m.Width - 2
+	if availWidth < 10 {
+		availWidth = 10
 	}
-
-	return sb.String()
+	commitContent := "\uf417 Commit"
+	commitPadded := centerText(commitContent, availWidth, ' ')
+	commitBtn := zone.Mark("git-commit-btn", m.theme.GitCommitButton.Render(commitPadded))
+	lines = append(lines, " "+commitBtn)
+	return lines
 }
 
 func (m Model) renderTreeNode(node *GitTreeNode, idx int, staged bool) string {
