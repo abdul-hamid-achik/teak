@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,8 @@ type callResult struct {
 	Result json.RawMessage
 	Error  *jsonrpcError
 }
+
+var errClientNotRunning = errors.New("client not running")
 
 func capabilityEnabled(v any) bool {
 	switch vv := v.(type) {
@@ -297,10 +300,10 @@ func (c *Client) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	if _, err := c.call(ctx, "shutdown", nil); err != nil {
+	if _, err := c.callInternal(ctx, "shutdown", nil, false); err != nil && !isExpectedShutdownError(err) {
 		log.Error("lsp: shutdown failed", "err", err)
 	}
-	if err := c.notify("exit", nil); err != nil {
+	if err := c.notify("exit", nil); err != nil && !isExpectedShutdownError(err) {
 		log.Error("lsp: exit notification failed", "err", err)
 	}
 	c.cancelRead()
@@ -844,10 +847,14 @@ func (c *Client) DocumentSymbol(uri string) ([]DocumentSymbol, error) {
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.callInternal(ctx, method, params, true)
+}
+
+func (c *Client) callInternal(ctx context.Context, method string, params any, requireRunning bool) (json.RawMessage, error) {
 	c.mu.Lock()
-	if !c.running {
+	if requireRunning && !c.running {
 		c.mu.Unlock()
-		return nil, errors.New("client not running")
+		return nil, errClientNotRunning
 	}
 	c.requestID++
 	id := c.requestID
@@ -886,6 +893,21 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		}
 		return nil, ctx.Err()
 	}
+}
+
+func isExpectedShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errClientNotRunning) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "closed pipe") ||
+		strings.Contains(msg, "file already closed") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "use of closed network connection")
 }
 
 func (c *Client) notify(method string, params any) error {
