@@ -1,12 +1,10 @@
 package app
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -94,23 +92,6 @@ func newFileWatcherWithMaxWatches(rootDir string, maxWatches int) (*fileWatcher,
 	}
 	go fw.listen()
 	return fw, nil
-}
-
-func defaultMaxWatches() int {
-	var rlimit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
-		return defaultWatchLimit
-	}
-
-	cur := int(rlimit.Cur)
-	if cur <= 0 {
-		return defaultWatchLimit
-	}
-	maxWatches := cur - watchFDReserve
-	if maxWatches < minWatchLimit {
-		return minWatchLimit
-	}
-	return maxWatches
 }
 
 // watchDirRecursive adds a directory and all visible subdirectories to the watcher.
@@ -281,7 +262,7 @@ func (fw *fileWatcher) addWatch(path string) bool {
 		if os.IsNotExist(err) {
 			return false
 		}
-		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+		if isWatchLimitError(err) {
 			fw.markLimitReachedLocked()
 			return false
 		}
