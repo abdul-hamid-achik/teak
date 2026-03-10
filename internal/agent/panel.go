@@ -306,21 +306,6 @@ func (m *Model) appendToStreamBlock(kind StreamBlockKind, text string) {
 	}
 }
 
-// recomputeScroll updates maxScroll based on last known content size and view height.
-func (m *Model) recomputeScroll() {
-	chatH := m.chatViewHeight()
-	m.maxScroll = m.lastChatLineCount - chatH
-	if m.maxScroll < 0 {
-		m.maxScroll = 0
-	}
-	if m.scrollY > m.maxScroll {
-		m.scrollY = m.maxScroll
-	}
-	if m.scrollY < 0 {
-		m.scrollY = 0
-	}
-}
-
 // Update handles messages for the agent panel.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {

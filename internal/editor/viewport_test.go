@@ -238,7 +238,7 @@ func TestViewportSelectionRange(t *testing.T) {
 	}
 
 	// Test no overlap
-	start, end = selectionRange(sel, 5, 10)
+	start, _ = selectionRange(sel, 5, 10)
 	if start != -1 {
 		t.Errorf("expected start -1, got %d", start)
 	}

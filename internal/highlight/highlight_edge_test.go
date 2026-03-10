@@ -260,7 +260,7 @@ func TestTokenizeViewportMemoryUsage(t *testing.T) {
 	// Most tokens should be nil (only viewport + margin has content)
 	nilCount := 0
 	for _, line := range tokens {
-		if line == nil || len(line) == 0 {
+		if len(line) == 0 {
 			nilCount++
 		}
 	}

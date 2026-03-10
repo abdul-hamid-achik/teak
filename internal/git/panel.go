@@ -342,18 +342,6 @@ func (m *Model) deriveGroups() {
 	m.unstagedTree = buildTree(m.Unstaged, false)
 }
 
-// activeList returns the currently focused file list.
-func (m Model) activeList() []StatusEntry {
-	switch m.activeSection {
-	case SectionStaged:
-		return m.Staged
-	case SectionUnstaged:
-		return m.Unstaged
-	default:
-		return nil
-	}
-}
-
 // activeFlatTree returns the flattened tree for the active section.
 func (m Model) activeFlatTree() []*GitTreeNode {
 	switch m.activeSection {

@@ -162,8 +162,8 @@ func TestTabBarPinTabOutOfBounds(t *testing.T) {
 	tabBar.PinTab(100)
 	tabBar.PinTab(-1)
 
-	if !tabBar.Tabs[0].Preview {
-		// Preview should remain unchanged (default is false, but we didn't set it)
+	if tabBar.Tabs[0].Preview {
+		t.Error("preview state should remain unchanged for invalid pin indexes")
 	}
 }
 

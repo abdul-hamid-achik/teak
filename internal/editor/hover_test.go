@@ -133,7 +133,7 @@ func TestHoverViewManyLinesContent(t *testing.T) {
 	}
 	// Should be limited to 10 lines
 	if strings.Contains(view, "line 9") && !strings.Contains(view, "...") {
-		// May or may not have ellipsis depending on exact count
+		t.Error("expected truncated hover output to include ellipsis")
 	}
 }
 

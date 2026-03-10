@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"teak/internal/config"
@@ -46,6 +48,50 @@ func TestHandleTreeChangeDebouncesGitRefresh(t *testing.T) {
 	msg := refreshCmd()
 	if _, ok := msg.(git.RefreshMsg); !ok {
 		t.Fatalf("refreshCmd() returned %T, want git.RefreshMsg", msg)
+	}
+}
+
+func TestHandleTreeChangePreservesExpandedTreeState(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirPath := filepath.Join(tmpDir, "testdir")
+	childPath := filepath.Join(dirPath, "child.go")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(childPath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if model.logFile != nil {
+		defer model.logFile.Close()
+	}
+
+	updatedTree, cmd := model.tree.ToggleEntry(dirPath)
+	model.tree = updatedTree
+	if cmd == nil {
+		t.Fatal("expected directory expansion command")
+	}
+	expandedTree, followup := model.tree.Update(cmd())
+	if followup != nil {
+		t.Fatal("expected nil follow-up command after handling directory expansion")
+	}
+	model.tree = expandedTree
+
+	updatedModel, _ := model.handleTreeChange(TreeChangedMsg{Dir: tmpDir})
+	updated := updatedModel.(Model)
+
+	if !updated.tree.Entries[0].Expanded {
+		t.Fatal("expected tree change refresh to preserve expanded state")
+	}
+	if len(updated.tree.Entries[0].Children) != 1 {
+		t.Fatalf("expected 1 child after tree refresh, got %d", len(updated.tree.Entries[0].Children))
 	}
 }
 

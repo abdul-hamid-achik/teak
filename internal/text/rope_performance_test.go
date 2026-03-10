@@ -23,7 +23,7 @@ func TestRopeConcurrentAccess(t *testing.T) {
 
 	// Spawn multiple goroutines that read from the same rope
 	done := make(chan bool, 100)
-	
+
 	for i := 0; i < 100; i++ {
 		go func() {
 			// All these operations are read-only and safe
@@ -42,7 +42,7 @@ func TestRopeConcurrentAccess(t *testing.T) {
 	}
 
 	runtime.ReadMemStats(&memStatsAfter)
-	
+
 	// Memory should not have grown significantly (rope is immutable)
 	allocDelta := memStatsAfter.Alloc - memStatsBefore.Alloc
 	if allocDelta > 10*1024*1024 { // More than 10MB is suspicious
@@ -91,11 +91,11 @@ func TestRopeLineOperationsPerformance(t *testing.T) {
 	r := New([]byte(doc))
 
 	// Test random line access (simulates scrolling)
-	rand.Seed(time.Now().UnixNano())
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	start := time.Now()
 
 	for i := 0; i < 1000; i++ {
-		lineNum := rand.Intn(10000)
+		lineNum := rng.Intn(10000)
 		_ = r.LineStart(lineNum)
 		_ = r.Line(lineNum)
 	}
@@ -160,7 +160,7 @@ func TestRopeMemorySharing(t *testing.T) {
 	// Measure memory usage
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	// This is a soft check - just verify we didn't leak memory
 	_ = memStats
 }
@@ -284,10 +284,10 @@ func TestRopeSliceBounds(t *testing.T) {
 	r := NewFromString("hello world")
 
 	tests := []struct {
-		name   string
-		start  int
-		end    int
-		want   string
+		name  string
+		start int
+		end   int
+		want  string
 	}{
 		{"full", 0, 11, "hello world"},
 		{"partial", 0, 5, "hello"},
@@ -324,7 +324,7 @@ func TestRopeRebalancing(t *testing.T) {
 	// Rope should be balanced (depth should be logarithmic)
 	// For 1000 bytes with 512-byte leaves, depth should be small
 	// This is a soft check - just verify operations still work
-	
+
 	// Verify content
 	if r.Len() != 1000 {
 		t.Errorf("len = %d, want 1000", r.Len())
@@ -388,16 +388,15 @@ func BenchmarkRopeInsertRealWorld(b *testing.B) {
 	// Load a realistic file
 	line := strings.Repeat("x", 79) + "\n"
 	doc := strings.Repeat(line, 10000) // ~800KB
-	r := New([]byte(doc))
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		// Reset rope every iteration to avoid growing indefinitely
-		r = New([]byte(doc))
+		r := New([]byte(doc))
 		b.StartTimer()
 
-		r = r.Insert(r.Len()/2, []byte("INSERT"))
+		_ = r.Insert(r.Len()/2, []byte("INSERT"))
 	}
 }
 
@@ -412,7 +411,7 @@ func BenchmarkRopeDeleteRealWorld(b *testing.B) {
 		r := New([]byte(doc))
 		b.StartTimer()
 
-		r = r.Delete(r.Len()/2, 10)
+		_ = r.Delete(r.Len()/2, 10)
 	}
 }
 
@@ -422,11 +421,11 @@ func BenchmarkRopeLineAccessRandom(b *testing.B) {
 	doc := strings.Repeat(line, 10000)
 	r := New([]byte(doc))
 
-	rand.Seed(time.Now().UnixNano())
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		lineNum := rand.Intn(10000)
+		lineNum := rng.Intn(10000)
 		_ = r.LineStart(lineNum)
 	}
 }
@@ -461,7 +460,7 @@ func BenchmarkRopePositionToOffset(b *testing.B) {
 // BenchmarkRopeTypingSimulation simulates typing characters one at a time
 func BenchmarkRopeTypingSimulation(b *testing.B) {
 	b.ReportAllocs()
-	
+
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		r := New(nil)

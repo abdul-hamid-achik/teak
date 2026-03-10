@@ -283,12 +283,16 @@ func (c *Client) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	c.call(ctx, "shutdown", nil)
-	c.notify("exit", nil)
+	if _, err := c.call(ctx, "shutdown", nil); err != nil {
+		log.Error("lsp: shutdown failed", "err", err)
+	}
+	if err := c.notify("exit", nil); err != nil {
+		log.Error("lsp: exit notification failed", "err", err)
+	}
 	c.cancelRead()
-	c.stdout.Close() // unblocks readLoop's Read() call
-	c.stdin.Close()
-	c.cmd.Wait()
+	_ = c.stdout.Close() // unblocks readLoop's Read() call
+	_ = c.stdin.Close()
+	_ = c.cmd.Wait()
 }
 
 // DidOpen notifies the server that a document was opened.
@@ -297,14 +301,16 @@ func (c *Client) DidOpen(uri, languageID string, version int, content string) {
 	c.openDocs[uri] = version
 	c.mu.Unlock()
 
-	c.notify("textDocument/didOpen", map[string]any{
+	if err := c.notify("textDocument/didOpen", map[string]any{
 		"textDocument": map[string]any{
 			"uri":        uri,
 			"languageId": languageID,
 			"version":    version,
 			"text":       content,
 		},
-	})
+	}); err != nil {
+		log.Error("lsp: didOpen notification failed", "uri", uri, "err", err)
+	}
 }
 
 // DidChange notifies the server of a document change (full sync).
@@ -313,7 +319,7 @@ func (c *Client) DidChange(uri string, version int, content string) {
 	c.openDocs[uri] = version
 	c.mu.Unlock()
 
-	c.notify("textDocument/didChange", map[string]any{
+	if err := c.notify("textDocument/didChange", map[string]any{
 		"textDocument": map[string]any{
 			"uri":     uri,
 			"version": version,
@@ -321,7 +327,9 @@ func (c *Client) DidChange(uri string, version int, content string) {
 		"contentChanges": []map[string]any{
 			{"text": content},
 		},
-	})
+	}); err != nil {
+		log.Error("lsp: didChange notification failed", "uri", uri, "err", err)
+	}
 }
 
 // DidChangeIncremental notifies the server of an incremental document change.
@@ -332,7 +340,7 @@ func (c *Client) DidChangeIncremental(uri string, version int, startLine, startC
 	c.openDocs[uri] = version
 	c.mu.Unlock()
 
-	c.notify("textDocument/didChange", map[string]any{
+	if err := c.notify("textDocument/didChange", map[string]any{
 		"textDocument": map[string]any{
 			"uri":     uri,
 			"version": version,
@@ -346,16 +354,20 @@ func (c *Client) DidChangeIncremental(uri string, version int, startLine, startC
 				"text": text,
 			},
 		},
-	})
+	}); err != nil {
+		log.Error("lsp: incremental didChange notification failed", "uri", uri, "err", err)
+	}
 }
 
 // DidSave notifies the server that a document was saved.
 func (c *Client) DidSave(uri string) {
-	c.notify("textDocument/didSave", map[string]any{
+	if err := c.notify("textDocument/didSave", map[string]any{
 		"textDocument": map[string]any{
 			"uri": uri,
 		},
-	})
+	}); err != nil {
+		log.Error("lsp: didSave notification failed", "uri", uri, "err", err)
+	}
 }
 
 // DidClose notifies the server that a document was closed.
@@ -364,11 +376,13 @@ func (c *Client) DidClose(uri string) {
 	delete(c.openDocs, uri)
 	c.mu.Unlock()
 
-	c.notify("textDocument/didClose", map[string]any{
+	if err := c.notify("textDocument/didClose", map[string]any{
 		"textDocument": map[string]any{
 			"uri": uri,
 		},
-	})
+	}); err != nil {
+		log.Error("lsp: didClose notification failed", "uri", uri, "err", err)
+	}
 }
 
 // Completion requests completions at the given position.
@@ -635,25 +649,6 @@ func (c *Client) Rename(uri string, line, character int, newName string) (Worksp
 }
 
 func parseWorkspaceEditResult(result []byte) (WorkspaceEdit, error) {
-	type rawTextEdit struct {
-		Range struct {
-			Start struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"start"`
-			End struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"end"`
-		} `json:"range"`
-		NewText string `json:"newText"`
-	}
-	type textDocumentEdit struct {
-		TextDocument struct {
-			URI string `json:"uri"`
-		} `json:"textDocument"`
-		Edits []rawTextEdit `json:"edits"`
-	}
 	var edit WorkspaceEdit
 	if err := json.Unmarshal(result, &edit); err != nil {
 		return WorkspaceEdit{}, err
@@ -872,7 +867,9 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		delete(c.pending, id)
 		c.mu.Unlock()
 		// Send cancellation notification to LSP server
-		c.notify("$/cancelRequest", map[string]any{"id": id})
+		if err := c.notify("$/cancelRequest", map[string]any{"id": id}); err != nil {
+			log.Error("lsp: cancel request notification failed", "id", id, "err", err)
+		}
 		return nil, ctx.Err()
 	}
 }
@@ -1100,7 +1097,9 @@ func (c *Client) sendResponse(id int, result any) {
 		ID:      id,
 		Result:  resultJSON,
 	}
-	c.send(resp)
+	if err := c.send(resp); err != nil {
+		log.Error("lsp: failed to send response", "err", err, "id", id)
+	}
 }
 
 func (c *Client) handleDiagnostics(params json.RawMessage) {

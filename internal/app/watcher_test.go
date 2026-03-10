@@ -40,11 +40,17 @@ func TestFileWatcher_GitDirWatched(t *testing.T) {
 	gitDir := filepath.Join(tmpDir, ".git")
 	refsDir := filepath.Join(gitDir, "refs")
 	headsDir := filepath.Join(refsDir, "heads")
-	os.MkdirAll(headsDir, 0o755)
+	if err := os.MkdirAll(headsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(heads) error = %v", err)
+	}
 
 	// Write initial HEAD
-	os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
-	os.WriteFile(filepath.Join(headsDir, "main"), []byte("abc123\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(HEAD) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(headsDir, "main"), []byte("abc123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main ref) error = %v", err)
+	}
 
 	fw, err := newFileWatcher(tmpDir)
 	if err != nil {
@@ -54,7 +60,9 @@ func TestFileWatcher_GitDirWatched(t *testing.T) {
 
 	// Modify a git ref (simulates commit/push)
 	time.Sleep(150 * time.Millisecond) // let watcher settle
-	os.WriteFile(filepath.Join(headsDir, "main"), []byte("def456\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(headsDir, "main"), []byte("def456\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(updated main ref) error = %v", err)
+	}
 
 	// Should receive a TreeChangedMsg
 	select {
@@ -80,7 +88,9 @@ func TestFileWatcher_NewFileCreation(t *testing.T) {
 
 	// Create a new file (triggers Create event → TreeChangedMsg)
 	newFile := filepath.Join(tmpDir, "new_file.go")
-	os.WriteFile(newFile, []byte("package main\n"), 0o644)
+	if err := os.WriteFile(newFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(new_file.go) error = %v", err)
+	}
 
 	// Should receive a TreeChangedMsg for the creation
 	select {
@@ -101,7 +111,9 @@ func TestFileWatcher_NewFileCreation(t *testing.T) {
 func TestFileWatcher_FileDeletion(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "delete_me.go")
-	os.WriteFile(testFile, []byte("package main\n"), 0o644)
+	if err := os.WriteFile(testFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(delete_me.go) error = %v", err)
+	}
 
 	fw, err := newFileWatcher(tmpDir)
 	if err != nil {
@@ -138,7 +150,9 @@ func TestFileWatcher_NewDirWatched(t *testing.T) {
 
 	// Create a new subdirectory
 	newDir := filepath.Join(tmpDir, "newpkg")
-	os.MkdirAll(newDir, 0o755)
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(newpkg) error = %v", err)
+	}
 
 	// Should receive a TreeChangedMsg for the new directory
 	select {
@@ -189,8 +203,12 @@ func TestIsGitInternalPath_EdgeCases(t *testing.T) {
 func TestFileWatcher_WatchDirRecursive_SkipsDotDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Create visible and hidden subdirectories
-	os.MkdirAll(filepath.Join(tmpDir, "visible"), 0o755)
-	os.MkdirAll(filepath.Join(tmpDir, ".hidden"), 0o755)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "visible"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(visible) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".hidden"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.hidden) error = %v", err)
+	}
 
 	fw, err := newFileWatcher(tmpDir)
 	if err != nil {
@@ -204,7 +222,9 @@ func TestFileWatcher_WatchDirRecursive_SkipsDotDirs(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	visFile := filepath.Join(tmpDir, "visible", "test.go")
-	os.WriteFile(visFile, []byte("package visible"), 0o644)
+	if err := os.WriteFile(visFile, []byte("package visible"), 0o644); err != nil {
+		t.Fatalf("WriteFile(visible/test.go) error = %v", err)
+	}
 
 	select {
 	case msg := <-fw.msgChan:

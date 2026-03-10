@@ -21,13 +21,13 @@ const (
 
 // Setting represents a single configuration setting.
 type Setting struct {
-	ID          string
-	Label       string
-	Description string
-	Type        SettingType
-	Value       interface{}
+	ID           string
+	Label        string
+	Description  string
+	Type         SettingType
+	Value        interface{}
 	DefaultValue interface{}
-	Category    string
+	Category     string
 }
 
 // Category represents a group of settings.
@@ -39,14 +39,13 @@ type Category struct {
 
 // Model represents the settings editor state.
 type Model struct {
-	categories     []Category
+	categories       []Category
 	selectedCategory int
 	selectedSetting  int
 	scrollY          int
 	width            int
 	height           int
 	theme            ui.Theme
-	showPreview      bool
 	configPath       string
 }
 
@@ -58,31 +57,31 @@ func GetCategories(cfg config.Config) []Category {
 			Name: "Editor",
 			Settings: []Setting{
 				{
-					ID:          "editor.tab_size",
-					Label:       "Tab Size",
-					Description: "Number of spaces per tab",
-					Type:        TypeInt,
-					Value:       cfg.Editor.TabSize,
+					ID:           "editor.tab_size",
+					Label:        "Tab Size",
+					Description:  "Number of spaces per tab",
+					Type:         TypeInt,
+					Value:        cfg.Editor.TabSize,
 					DefaultValue: 4,
-					Category:    "editor",
+					Category:     "editor",
 				},
 				{
-					ID:          "editor.insert_tabs",
-					Label:       "Insert Tabs",
-					Description: "Insert tab character instead of spaces",
-					Type:        TypeBool,
-					Value:       cfg.Editor.InsertTabs,
+					ID:           "editor.insert_tabs",
+					Label:        "Insert Tabs",
+					Description:  "Insert tab character instead of spaces",
+					Type:         TypeBool,
+					Value:        cfg.Editor.InsertTabs,
 					DefaultValue: false,
-					Category:    "editor",
+					Category:     "editor",
 				},
 				{
-					ID:          "editor.auto_indent",
-					Label:       "Auto Indent",
-					Description: "Automatically indent new lines",
-					Type:        TypeBool,
-					Value:       cfg.Editor.AutoIndent,
+					ID:           "editor.auto_indent",
+					Label:        "Auto Indent",
+					Description:  "Automatically indent new lines",
+					Type:         TypeBool,
+					Value:        cfg.Editor.AutoIndent,
 					DefaultValue: true,
-					Category:    "editor",
+					Category:     "editor",
 				},
 			},
 		},
@@ -91,22 +90,22 @@ func GetCategories(cfg config.Config) []Category {
 			Name: "User Interface",
 			Settings: []Setting{
 				{
-					ID:          "ui.theme",
-					Label:       "Theme",
-					Description: "Color theme (nord, dracula, catppuccin, solarized-dark, one-dark)",
-					Type:        TypeString,
-					Value:       cfg.UI.Theme,
+					ID:           "ui.theme",
+					Label:        "Theme",
+					Description:  "Color theme (nord, dracula, catppuccin, solarized-dark, one-dark)",
+					Type:         TypeString,
+					Value:        cfg.UI.Theme,
 					DefaultValue: "nord",
-					Category:    "ui",
+					Category:     "ui",
 				},
 				{
-					ID:          "ui.show_tree",
-					Label:       "Show File Tree",
-					Description: "Show file tree sidebar on startup",
-					Type:        TypeBool,
-					Value:       cfg.UI.ShowTree,
+					ID:           "ui.show_tree",
+					Label:        "Show File Tree",
+					Description:  "Show file tree sidebar on startup",
+					Type:         TypeBool,
+					Value:        cfg.UI.ShowTree,
 					DefaultValue: true,
-					Category:    "ui",
+					Category:     "ui",
 				},
 			},
 		},
@@ -115,13 +114,13 @@ func GetCategories(cfg config.Config) []Category {
 			Name: "Language Server",
 			Settings: []Setting{
 				{
-					ID:          "lsp.config",
-					Label:       "LSP Configuration",
-					Description: "LSP servers are configured in config.toml",
-					Type:        TypeString,
-					Value:       "Edit config file to customize",
+					ID:           "lsp.config",
+					Label:        "LSP Configuration",
+					Description:  "LSP servers are configured in config.toml",
+					Type:         TypeString,
+					Value:        "Edit config file to customize",
 					DefaultValue: "",
-					Category:    "lsp",
+					Category:     "lsp",
 				},
 			},
 		},

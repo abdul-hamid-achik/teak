@@ -180,11 +180,13 @@ func (m *Manager) UnloadPlugin(name string) error {
 
 	// Call teardown function if exists
 	if fn := plugin.State.GetGlobal("teardown"); fn != lua.LNil {
-		plugin.State.CallByParam(lua.P{
+		if err := plugin.State.CallByParam(lua.P{
 			Fn:      fn.(*lua.LFunction),
 			NRet:    0,
 			Protect: true,
-		})
+		}); err != nil {
+			return fmt.Errorf("teardown plugin %s: %w", name, err)
+		}
 	}
 
 	// Return Lua state to pool

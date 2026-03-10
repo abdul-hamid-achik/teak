@@ -105,7 +105,7 @@ func New(root string, theme ui.Theme) Model {
 // If the directory is the root, it refreshes the top-level entries.
 func (m *Model) RefreshDir(dir string) {
 	if dir == m.Root {
-		m.Entries = readDirEntries(m.Root, m.Root, 0, m.gitignorePatterns)
+		m.Entries = refreshEntriesPreservingExpansion(m.Root, m.Root, 0, m.gitignorePatterns, m.Entries)
 		m.invalidateFlatCache()
 		return
 	}
@@ -113,14 +113,53 @@ func (m *Model) RefreshDir(dir string) {
 	m.invalidateFlatCache()
 }
 
+func refreshEntriesPreservingExpansion(rootDir, dir string, depth int, gitignorePatterns []string, previous []Entry) []Entry {
+	refreshed := readDirEntries(rootDir, dir, depth, gitignorePatterns)
+	if len(previous) == 0 {
+		return refreshed
+	}
+
+	previousByPath := make(map[string]Entry, len(previous))
+	for _, entry := range previous {
+		previousByPath[entry.Path] = entry
+	}
+
+	for i := range refreshed {
+		prev, ok := previousByPath[refreshed[i].Path]
+		if !ok || !refreshed[i].IsDir {
+			continue
+		}
+
+		refreshed[i].Expanded = prev.Expanded
+		if prev.Expanded {
+			refreshed[i].Children = refreshEntriesPreservingExpansion(
+				rootDir,
+				refreshed[i].Path,
+				refreshed[i].Depth+1,
+				gitignorePatterns,
+				prev.Children,
+			)
+			refreshed[i].Loading = false
+		}
+	}
+
+	return refreshed
+}
+
 func refreshInSlice(entries []Entry, rootDir, dir string, gitignorePatterns []string) bool {
 	for i := range entries {
 		if entries[i].Path == dir && entries[i].IsDir {
-			entries[i].Children = readDirEntries(rootDir, dir, entries[i].Depth+1, gitignorePatterns)
+			entries[i].Children = refreshEntriesPreservingExpansion(
+				rootDir,
+				dir,
+				entries[i].Depth+1,
+				gitignorePatterns,
+				entries[i].Children,
+			)
 			entries[i].Loading = false
 			return true
 		}
-		if entries[i].Expanded && entries[i].Children != nil {
+		if entries[i].Children != nil {
 			if refreshInSlice(entries[i].Children, rootDir, dir, gitignorePatterns) {
 				return true
 			}
@@ -284,7 +323,7 @@ func setChildrenInSlice(entries []Entry, path string, children []Entry) bool {
 			entries[i].Loading = false
 			return true
 		}
-		if entries[i].Expanded && entries[i].Children != nil {
+		if entries[i].Children != nil {
 			if setChildrenInSlice(entries[i].Children, path, children) {
 				return true
 			}
@@ -302,9 +341,8 @@ func (m *Model) ensureCursorVisible() {
 	}
 }
 
-func (m Model) flatEntries() []Entry {
+func (m *Model) flatEntries() []Entry {
 	if m.sharedFlatCache != nil && m.sharedFlatCache.entries != nil {
-		m.cachedFlat = m.sharedFlatCache.entries
 		return m.sharedFlatCache.entries
 	}
 	if m.cachedFlat != nil {
@@ -460,9 +498,6 @@ func (m Model) View() string {
 			const iconWidth = 2 // Nerd Font icons are typically 2 cells
 			nameStr := entry.Name
 
-			// Calculate used width: indent + icon + space + name
-			usedWidth := len(indent) + iconWidth + 1 + len(nameStr)
-
 			// Git status indicator + color for the filename
 			var gitNameColor color.Color
 			var gitIndicator string // e.g. "M", "A", "D", "U"
@@ -493,7 +528,6 @@ func (m Model) View() string {
 			gitIndWidth := 0
 			if hasGitInd {
 				gitIndWidth = 2 // " M"
-				usedWidth += gitIndWidth
 			}
 
 			// Diagnostic dot
@@ -506,7 +540,6 @@ func (m Model) View() string {
 					if sev == 1 {
 						diagColor = ui.Nord11
 					}
-					usedWidth += 2 // " ●"
 				}
 			}
 
@@ -520,7 +553,6 @@ func (m Model) View() string {
 			}
 			if maxNameWidth > 0 && len(nameStr) > maxNameWidth {
 				nameStr = nameStr[:maxNameWidth]
-				usedWidth = m.Width
 			}
 
 			// Render parts with consistent background using cached style
@@ -532,7 +564,6 @@ func (m Model) View() string {
 			// Dim gitignored entries
 			if entry.IsGitIgnored {
 				nameFg = m.cachedStyles.gitIgnoredColor // dim gray
-				iconColor = m.cachedStyles.gitIgnoredColor
 			}
 			styledName := cachedBase.Foreground(nameFg).Render(nameStr)
 			if entry.IsGitIgnored {

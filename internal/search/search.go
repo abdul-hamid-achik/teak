@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
@@ -83,7 +83,7 @@ type Model struct {
 	lastQuery   string
 	searching   bool
 	indexing    bool
-	indexed    bool // true after first successful semantic search
+	indexed     bool // true after first successful semantic search
 	spinner     spinner.Model
 	errMsg      string
 	debounceGen int // generation counter for debounce
@@ -433,15 +433,9 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	// Mode toggle
-	textLabel := "Text"
-	semLabel := "Semantic"
-	if m.mode == ModeText {
-		textLabel = "[Text]"
-	} else {
-		semLabel = "[Semantic]"
-	}
 	modeStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
 	activeMode := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true)
+	var textLabel, semLabel string
 	if m.mode == ModeText {
 		textLabel = activeMode.Render("Text")
 		semLabel = modeStyle.Render("Semantic")

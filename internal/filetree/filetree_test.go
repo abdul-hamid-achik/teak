@@ -129,6 +129,53 @@ func TestRefreshDir(t *testing.T) {
 	}
 }
 
+func TestRefreshDirPreservesExpandedState(t *testing.T) {
+	theme := ui.DefaultTheme()
+	tmpDir := t.TempDir()
+	dirPath := filepath.Join(tmpDir, "testdir")
+	childPath := filepath.Join(dirPath, "child.go")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(childPath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	model := New(tmpDir, theme)
+	model.cachedFlat = nil
+
+	updated, cmd := model.ToggleEntry(dirPath)
+	model = updated
+	if cmd == nil {
+		t.Fatal("expected directory expansion command")
+	}
+
+	expanded, followup := model.Update(cmd())
+	if followup != nil {
+		t.Fatal("expected nil follow-up command after handling directory expansion")
+	}
+	model = expanded
+
+	if !model.Entries[0].Expanded {
+		t.Fatal("expected directory to be expanded before refresh")
+	}
+	if len(model.Entries[0].Children) != 1 {
+		t.Fatalf("expected 1 child before refresh, got %d", len(model.Entries[0].Children))
+	}
+
+	model.RefreshDir(tmpDir)
+
+	if !model.Entries[0].Expanded {
+		t.Fatal("expected root refresh to preserve expanded state")
+	}
+	if len(model.Entries[0].Children) != 1 {
+		t.Fatalf("expected 1 child after refresh, got %d", len(model.Entries[0].Children))
+	}
+	if model.Entries[0].Children[0].Path != childPath {
+		t.Fatalf("child path = %q, want %q", model.Entries[0].Children[0].Path, childPath)
+	}
+}
+
 // TestModelInitialState tests initial model state
 func TestModelInitialState(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -306,7 +353,9 @@ func TestRefreshDirWithNonRootDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	subDir := filepath.Join(tmpDir, "subdir")
-	os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	model.RefreshDir(subDir)
 }
 
@@ -738,7 +787,9 @@ func TestUpdateWithEnterKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	path := filepath.Join(tmpDir, "testdir")
-	os.MkdirAll(path, 0o755)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false}}
 	model.cachedFlat = nil
 
@@ -819,7 +870,7 @@ func TestUpdateWithUnknownMsg(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 
-	model, cmd := model.Update("unknown message")
+	_, cmd := model.Update("unknown message")
 	if cmd != nil {
 		t.Error("Expected nil command for unknown message")
 	}
@@ -853,7 +904,9 @@ func TestHandleMouseClickOnDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	path := filepath.Join(tmpDir, "testdir")
-	os.MkdirAll(path, 0o755)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false}}
 	model.Height = 10
 	model.cachedFlat = nil
@@ -995,7 +1048,9 @@ func TestViewWithGitIgnoredEntry(t *testing.T) {
 
 	// Create a .gitignore file
 	gitignorePath := filepath.Join(tmpDir, ".gitignore")
-	os.WriteFile(gitignorePath, []byte("*.log\n"), 0o644)
+	if err := os.WriteFile(gitignorePath, []byte("*.log\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gitignore) error = %v", err)
+	}
 
 	// Recreate model to load gitignore
 	model = New(tmpDir, theme)
@@ -1004,7 +1059,9 @@ func TestViewWithGitIgnoredEntry(t *testing.T) {
 
 	// Create a log file that should be gitignored
 	logFile := filepath.Join(tmpDir, "test.log")
-	os.WriteFile(logFile, []byte("test"), 0o644)
+	if err := os.WriteFile(logFile, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(test.log) error = %v", err)
+	}
 
 	// Refresh to pick up the new file
 	model.RefreshDir(tmpDir)
@@ -1024,7 +1081,9 @@ func TestViewWithNestedDirectory(t *testing.T) {
 	model.Height = 10
 
 	subDir := filepath.Join(tmpDir, "subdir")
-	os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	model.Entries = []Entry{
 		{Name: "subdir", Path: subDir, IsDir: true, Expanded: true, Depth: 0, Children: []Entry{
 			{Name: "nested.go", Path: filepath.Join(subDir, "nested.go"), Depth: 1},
@@ -1089,7 +1148,9 @@ func TestLoadGitignore(t *testing.T) {
 	// Create a .gitignore file
 	gitignorePath := filepath.Join(tmpDir, ".gitignore")
 	content := "*.log\nbuild/\n# comment\n\n*.tmp"
-	os.WriteFile(gitignorePath, []byte(content), 0o644)
+	if err := os.WriteFile(gitignorePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gitignore) error = %v", err)
+	}
 
 	patterns := loadGitignore(tmpDir)
 	if len(patterns) != 3 {
@@ -1165,8 +1226,12 @@ func TestReadDirEntriesWithGitignore(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create test files
-	os.WriteFile(filepath.Join(tmpDir, "file.go"), []byte("test"), 0o644)
-	os.WriteFile(filepath.Join(tmpDir, "file.log"), []byte("test"), 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "file.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(file.go) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "file.log"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(file.log) error = %v", err)
+	}
 
 	patterns := []string{"*.log"}
 	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
@@ -1194,8 +1259,12 @@ func TestReadDirEntriesWithSubDirectory(t *testing.T) {
 
 	// Create subdirectory
 	subDir := filepath.Join(tmpDir, "subdir")
-	os.MkdirAll(subDir, 0o755)
-	os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(subdir/file.go) error = %v", err)
+	}
 
 	patterns := []string{}
 	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
@@ -1233,9 +1302,15 @@ func TestReadDirEntriesWithSorting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create files in non-alphabetical order
-	os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("test"), 0o644)
-	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644)
-	os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("test"), 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(c.go) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.go) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(b.go) error = %v", err)
+	}
 
 	patterns := []string{}
 	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
@@ -1258,9 +1333,15 @@ func TestReadDirEntriesWithMixedTypes(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create mixed entries
-	os.WriteFile(filepath.Join(tmpDir, "z.go"), []byte("test"), 0o644)
-	os.MkdirAll(filepath.Join(tmpDir, "adir"), 0o755)
-	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "z.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(z.go) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "adir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(adir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.go) error = %v", err)
+	}
 
 	patterns := []string{}
 	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
@@ -1279,9 +1360,13 @@ func TestRefreshInSlice(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	subDir := filepath.Join(tmpDir, "subdir")
-	os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	// Create a file in subdir so it has children
-	os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644)
+	if err := os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile(subdir/file.go) error = %v", err)
+	}
 
 	entries := []Entry{
 		{Name: "subdir", Path: subDir, IsDir: true, Expanded: true, Depth: 0, Children: nil},
@@ -1294,7 +1379,7 @@ func TestRefreshInSlice(t *testing.T) {
 	}
 
 	// Check if children were loaded (should have at least 1 child)
-	if entries[0].Children == nil || len(entries[0].Children) == 0 {
+	if len(entries[0].Children) == 0 {
 		t.Error("Expected children to be loaded")
 	}
 	if entries[0].Loading {
@@ -1307,9 +1392,13 @@ func TestRefreshInSliceWithNestedDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	subDir := filepath.Join(tmpDir, "subdir")
-	os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(subdir) error = %v", err)
+	}
 	nestedDir := filepath.Join(subDir, "nested")
-	os.MkdirAll(nestedDir, 0o755)
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested) error = %v", err)
+	}
 
 	entries := []Entry{
 		{
@@ -1341,7 +1430,9 @@ func TestToggleInSliceWithAsyncLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	path := filepath.Join(tmpDir, "testdir")
-	os.MkdirAll(path, 0o755)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 
 	entries := []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false, Children: nil}}
 
@@ -1381,7 +1472,9 @@ func TestToggleInSliceWithNestedDir(t *testing.T) {
 
 	subDir := filepath.Join(tmpDir, "subdir")
 	nestedDir := filepath.Join(subDir, "nested")
-	os.MkdirAll(nestedDir, 0o755)
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested) error = %v", err)
+	}
 
 	entries := []Entry{
 		{

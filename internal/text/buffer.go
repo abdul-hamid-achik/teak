@@ -646,8 +646,15 @@ func (b *Buffer) SaveAs(path string) error {
 
 	// Ensure data is flushed to disk (fsync)
 	if f, err := os.Open(tmpPath); err == nil {
-		f.Sync()
-		f.Close()
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("sync temp file: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("close temp file: %w", err)
+		}
 	}
 
 	// Atomic rename - guarantees file is either old or new, never partial

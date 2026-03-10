@@ -73,7 +73,7 @@ func TestHelpModelUpdateEscape(t *testing.T) {
 	model := NewHelpModel(ui.DefaultTheme())
 
 	msg := teaKeyPress("escape")
-	model, _ = model.Update(msg)
+	_, _ = model.Update(msg)
 
 	// Should return to caller to close
 }
@@ -304,11 +304,9 @@ func TestHelpModelMaxScrollFewLines(t *testing.T) {
 	model := NewHelpModel(ui.DefaultTheme())
 	model.SetSize(80, 100) // Large height, few lines
 
-	ms := model.maxScroll()
-	if ms < 0 {
-		ms = 0
+	if ms := model.maxScroll(); ms != 0 {
+		t.Fatalf("maxScroll() = %d, want 0", ms)
 	}
-	// If lines fit, maxScroll should be 0 or negative (clamped)
 }
 
 func TestHelpModelView(t *testing.T) {

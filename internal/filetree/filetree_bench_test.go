@@ -15,19 +15,25 @@ func createTestTree(entryCount int, theme ui.Theme) Model {
 	root := filepath.Join(tmpDir, "teak_test_tree")
 
 	// Clean up and create fresh
-	os.RemoveAll(root)
-	os.MkdirAll(root, 0755)
+	_ = os.RemoveAll(root)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		panic(err)
+	}
 
 	// Create test entries
 	for i := 0; i < entryCount; i++ {
 		if i%5 == 0 {
 			// Create a directory
 			dirPath := filepath.Join(root, filepath.FromSlash(getTestDirName(i)))
-			os.MkdirAll(dirPath, 0755)
+			if err := os.MkdirAll(dirPath, 0o755); err != nil {
+				panic(err)
+			}
 		} else {
 			// Create a file
 			filePath := filepath.Join(root, getTestFileName(i))
-			os.WriteFile(filePath, []byte("test content"), 0644)
+			if err := os.WriteFile(filePath, []byte("test content"), 0o644); err != nil {
+				panic(err)
+			}
 		}
 	}
 

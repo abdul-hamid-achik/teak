@@ -199,13 +199,13 @@ func TestEditorUpdateKeyPressNavigation(t *testing.T) {
 	// Just test that navigation doesn't crash
 	msg := tea.KeyPressMsg{Text: "right"}
 	editor, _ = editor.Update(msg)
-	
+
 	msg = tea.KeyPressMsg{Text: "left"}
 	editor, _ = editor.Update(msg)
-	
+
 	msg = tea.KeyPressMsg{Text: "end"}
 	editor, _ = editor.Update(msg)
-	
+
 	msg = tea.KeyPressMsg{Text: "home"}
 	editor, _ = editor.Update(msg)
 }
@@ -832,9 +832,8 @@ func TestEditorDispatchContextMenuActionPaste(t *testing.T) {
 	editor, cmd := editor.dispatchContextMenuAction("paste")
 
 	content := string(editor.Buffer.Bytes())
-	// Clipboard might be empty
-	if cmd == nil && content == "hello" {
-		// This is acceptable if clipboard is empty
+	if cmd == nil && content != "hello" {
+		t.Logf("paste applied synchronously without a follow-up command: %q", content)
 	}
 }
 
@@ -903,7 +902,7 @@ func TestEditorDispatchContextMenuActionLSP(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("hello"))
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 
-	editor, cmd := editor.dispatchContextMenuAction("goto_definition")
+	_, cmd := editor.dispatchContextMenuAction("goto_definition")
 
 	if cmd == nil {
 		t.Error("expected cmd to be non-nil for LSP action")

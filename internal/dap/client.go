@@ -485,9 +485,9 @@ func (c *Client) Shutdown() {
 	c.running = false
 	c.mu.Unlock()
 
-	c.Disconnect()
-	c.stdin.Close()
-	c.cmd.Wait()
+	_ = c.Disconnect()
+	_ = c.stdin.Close()
+	_ = c.cmd.Wait()
 }
 
 // IsReady returns whether the client has completed initialization.

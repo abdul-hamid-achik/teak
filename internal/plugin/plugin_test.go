@@ -139,11 +139,17 @@ func TestPluginManagerUnloadPlugin(t *testing.T) {
 	configContent := `name = "test-plugin"
 version = "1.0.0"
 main = "init.lua"
-`
-	os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte(configContent), 0o644)
-	os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(`return {}`), 0o644)
+	`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(`return {}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
 
-	mgr.LoadPlugin(pluginDir)
+	if err := mgr.LoadPlugin(pluginDir); err != nil {
+		t.Fatalf("LoadPlugin() error = %v", err)
+	}
 
 	// Unload the plugin
 	err = mgr.UnloadPlugin("test-plugin")

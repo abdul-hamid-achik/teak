@@ -445,7 +445,7 @@ func TestDiffModelUpdateWithUnknownMessage(t *testing.T) {
 	theme := ui.DefaultTheme()
 	model := New("test.go", nil, theme)
 
-	model, cmd := model.Update("unknown")
+	_, cmd := model.Update("unknown")
 	if cmd != nil {
 		t.Error("Expected nil command for unknown message")
 	}
@@ -593,12 +593,12 @@ func TestDiffModelWithNilTheme(t *testing.T) {
 	lines := []DiffLine{
 		{Left: "test", Right: "test"},
 	}
-	
+
 	// Use default theme instead of nil to avoid panic
 	theme := ui.DefaultTheme()
 	model := New("test.go", lines, theme)
 	model.SetSize(80, 10)
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -614,9 +614,9 @@ func TestDiffModelLineMapIndices(t *testing.T) {
 		{Left: "", Right: "c", LeftKind: KindEmpty, RightKind: KindAdded},
 		{Left: "d", Right: "", LeftKind: KindRemoved, RightKind: KindEmpty},
 	}
-	
+
 	model := New("test.go", lines, theme)
-	
+
 	// Check left line map
 	// Line 0: unchanged, should map to 0
 	// Line 1: removed, should map to 1
@@ -628,7 +628,7 @@ func TestDiffModelLineMapIndices(t *testing.T) {
 			t.Errorf("leftLineMap[%d] = %d, want %d", i, model.leftLineMap[i], expected)
 		}
 	}
-	
+
 	// Check right line map
 	// Line 0: unchanged, should map to 0
 	// Line 1: added, should map to 1

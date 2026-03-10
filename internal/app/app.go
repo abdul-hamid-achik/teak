@@ -2821,10 +2821,6 @@ func (m Model) findReplaceableTab() int {
 	return -1
 }
 
-func (m Model) closeCurrentTab() (tea.Model, tea.Cmd) {
-	return m.closeTab(m.activeTab)
-}
-
 func (m Model) closeCurrentTabSafe() (tea.Model, tea.Cmd) {
 	return m.closeTabSafe(m.activeTab)
 }
@@ -3503,7 +3499,9 @@ func (m Model) sendBreakpointsToDAP(filePath string) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		mgr.SetBreakpoints(filePath, dapLines)
+		if _, err := mgr.SetBreakpoints(filePath, dapLines); err != nil {
+			log.Error("dap: failed to set breakpoints", "file", filePath, "err", err)
+		}
 		return nil
 	}
 }
@@ -3684,74 +3682,7 @@ func (m Model) requestHover() tea.Cmd {
 	}
 }
 
-func (m Model) requestHoverDelayed() tea.Cmd {
-	// Debounce hover requests to avoid flickering
-	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
-		return hoverTriggerMsg{}
-	})
-}
-
 type hoverTriggerMsg struct{}
-
-func (m Model) handleHoverTrigger() (tea.Model, tea.Cmd) {
-	// Only show hover if we're not in the middle of typing
-	ed := m.activeEditor()
-	if ed == nil || ed.Buffer.FilePath == "" {
-		return m, nil
-	}
-	return m, m.requestHover()
-}
-
-func (m Model) requestSignatureHelp() tea.Cmd {
-	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
-		return nil
-	}
-	mgr := m.lspMgr
-	filePath := ed.Buffer.FilePath
-	line := ed.Buffer.Cursor.Line
-	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
-		client := mgr.ClientForFile(filePath)
-		if client == nil {
-			return nil
-		}
-		help, err := client.SignatureHelp(lsp.FileURI(filePath), line, col)
-		if err != nil || help == nil {
-			return nil
-		}
-		// Convert to editor.SignatureData
-		sigData := &editor.SignatureData{
-			ActiveSignature: help.ActiveSignature,
-			ActiveParameter: help.ActiveParameter,
-		}
-		for _, sig := range help.Signatures {
-			var params []editor.ParameterInfo
-			for _, p := range sig.Parameters {
-				label := ""
-				switch v := p.Label.(type) {
-				case string:
-					label = v
-				case []any:
-					// Handle [start, end] format
-					if len(v) >= 2 {
-						label = sig.Label // Use full label for now
-					}
-				}
-				params = append(params, editor.ParameterInfo{
-					Label:         label,
-					Documentation: p.Documentation,
-				})
-			}
-			sigData.Signatures = append(sigData.Signatures, editor.SignatureInfo{
-				Label:         sig.Label,
-				Documentation: sig.Documentation,
-				Parameters:    params,
-			})
-		}
-		return lsp.SignatureHelpResultMsg{Help: help}
-	}
-}
 
 func (m Model) requestFormatting() tea.Cmd {
 	ed := m.activeEditor()
@@ -4880,7 +4811,7 @@ func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 
 // handleCommandPaletteAction dispatches an action from the command palette.
 func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg.(type) {
+	switch innerMsg := msg.(type) {
 	case saveRequestMsg:
 		if m.activeEditor() == nil {
 			return m, nil
@@ -4911,7 +4842,6 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	case openSearchMsg:
-		innerMsg := msg.(openSearchMsg)
 		return m.openSearch(innerMsg.mode)
 	case openSearchReplaceMsg:
 		return m.openSearchReplace()

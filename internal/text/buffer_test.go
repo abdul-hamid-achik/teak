@@ -129,7 +129,9 @@ func TestBufferFileSaveLoad(t *testing.T) {
 func TestBufferDirtyFlag(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
-	os.WriteFile(path, []byte("original"), 0644)
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
 
 	b, _ := NewBufferFromFile(path)
 	if b.Dirty() {
@@ -141,7 +143,9 @@ func TestBufferDirtyFlag(t *testing.T) {
 		t.Error("should be dirty after edit")
 	}
 
-	b.SaveAs(path)
+	if err := b.SaveAs(path); err != nil {
+		t.Fatalf("SaveAs() error = %v", err)
+	}
 	if b.Dirty() {
 		t.Error("should not be dirty after save")
 	}

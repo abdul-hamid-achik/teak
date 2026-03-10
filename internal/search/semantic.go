@@ -180,7 +180,9 @@ func parsePlainOutput(data []byte) []Result {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) >= 2 {
 			lineNum := 0
-			fmt.Sscanf(parts[1], "%d", &lineNum)
+			if _, err := fmt.Sscanf(parts[1], "%d", &lineNum); err != nil {
+				lineNum = 0
+			}
 			preview := ""
 			if len(parts) >= 3 {
 				preview = strings.TrimSpace(parts[2])

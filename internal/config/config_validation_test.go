@@ -230,7 +230,9 @@ func TestConfigLoadNonExistent(t *testing.T) {
 func TestConfigLoadInvalidTOML(t *testing.T) {
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "teak")
-	os.MkdirAll(configDir, 0o755)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
 	configFile := filepath.Join(configDir, "config.toml")
 
 	// Write invalid TOML
@@ -238,7 +240,9 @@ func TestConfigLoadInvalidTOML(t *testing.T) {
 	[editor
 	tab_size = 4  # Missing closing bracket
 	`
-	os.WriteFile(configFile, []byte(invalidTOML), 0o644)
+	if err := os.WriteFile(configFile, []byte(invalidTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
 
 	// This would test Load() but it uses global configPath
 	// For now, skip this test
@@ -468,8 +472,4 @@ func intPtr(i int) *int {
 
 func stringPtr(s string) *string {
 	return &s
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

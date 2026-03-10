@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -375,49 +374,6 @@ func (m Model) cycleAgentMode() (Model, tea.Cmd, bool) {
 		return m, m.acpMgr.SetMode(sdk.SessionModeId(nextMode)), true
 	}
 	return m, nil, true
-}
-
-// openFileContent reads file content. If the file is open in a buffer,
-// returns that content; otherwise reads from disk.
-func (m Model) openFileContent(path string) string {
-	for i := range m.editors {
-		buf := m.editors[i].Buffer
-		if buf.FilePath == path {
-			return buf.Content()
-		}
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-// applyAgentWrite applies a file write from the agent to the editor.
-func (m *Model) applyAgentWrite(path, content string) tea.Cmd {
-	// Validate path is within root directory (security)
-	validatedPath, err := validatePathStrict(m.rootDir, path)
-	if err != nil {
-		return func() tea.Msg {
-			return agentWriteErrorMsg{Path: path, Err: err}
-		}
-	}
-
-	// Check if file is already open in a tab
-	for i := range m.editors {
-		if m.editors[i].Buffer.FilePath == validatedPath {
-			// Replace buffer content via LoadContent
-			m.editors[i].Buffer.LoadContent([]byte(content))
-			return nil
-		}
-	}
-	// Write directly to disk if not open
-	return func() tea.Msg {
-		if err := os.WriteFile(validatedPath, []byte(content), 0644); err != nil {
-			return agentWriteErrorMsg{Path: validatedPath, Err: err}
-		}
-		return nil
-	}
 }
 
 // validatePathStrict performs stricter validation including symlink resolution

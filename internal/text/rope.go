@@ -16,7 +16,7 @@ type Rope struct {
 	len       int
 	newlines  int
 	depth     int
-	lineIndex []int   // lazy cache of byte offsets for each line start
+	lineIndex []int     // lazy cache of byte offsets for each line start
 	initOnce  sync.Once // ensures lineIndex is built only once
 }
 
@@ -276,29 +276,6 @@ func (r *Rope) LineStart(line int) ByteOffset {
 		return r.lineIndex[line]
 	}
 	return r.len
-}
-
-func (r *Rope) lineStartHelper(line int, base int) int {
-	if r == nil {
-		return base
-	}
-	if r.isLeaf() {
-		off := 0
-		remaining := line
-		for remaining > 0 {
-			idx := bytes.IndexByte(r.value[off:], '\n')
-			if idx < 0 {
-				return base + r.len
-			}
-			off += idx + 1
-			remaining--
-		}
-		return base + off
-	}
-	if line <= r.left.newlines {
-		return r.left.lineStartHelper(line, base)
-	}
-	return r.right.lineStartHelper(line-r.left.newlines, base+r.left.len)
 }
 
 // Line returns the content of the given line (0-based), without trailing newline.

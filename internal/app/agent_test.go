@@ -21,11 +21,11 @@ func TestAgentPanelWidth(t *testing.T) {
 		{"hidden panel returns 0", 200, false, false, 0},
 		{"wide terminal no tree", 200, true, false, 60}, // 199 avail, 35% = 69, capped to 60
 		{"wide terminal with tree", 200, true, true, 60},
-		{"medium terminal no tree", 140, true, false, 48}, // 139 avail, 35% = 48
+		{"medium terminal no tree", 140, true, false, 48},  // 139 avail, 35% = 48
 		{"narrow terminal auto-hides", 60, true, false, 0}, // too narrow for editor
 		{"very narrow auto-hides", 50, true, true, 0},
 		{"just enough for both", 100, true, false, 34}, // 99 avail, 35%=34, editor=65
-		{"minimum clamp 25", 80, true, false, 27},       // 79 avail, 35%=27, editor=52
+		{"minimum clamp 25", 80, true, false, 27},      // 79 avail, 35%=27, editor=52
 	}
 
 	for _, tt := range tests {
@@ -109,12 +109,18 @@ func TestValidatePathStrict(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Create a file inside
 	testFile := filepath.Join(tmpDir, "hello.go")
-	os.WriteFile(testFile, []byte("package main"), 0o644)
+	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
+		t.Fatalf("WriteFile(hello.go) error = %v", err)
+	}
 	// Create a subdir
 	subDir := filepath.Join(tmpDir, "sub")
-	os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sub) error = %v", err)
+	}
 	subFile := filepath.Join(subDir, "world.go")
-	os.WriteFile(subFile, []byte("package sub"), 0o644)
+	if err := os.WriteFile(subFile, []byte("package sub"), 0o644); err != nil {
+		t.Fatalf("WriteFile(world.go) error = %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -198,9 +204,5 @@ func simpleValidatePath(rootDir, path string) bool {
 	}
 
 	cleanPath = strings.ReplaceAll(cleanPath, "\\", "/")
-	if strings.Contains(cleanPath, "..") {
-		return false
-	}
-
-	return true
+	return !strings.Contains(cleanPath, "..")
 }

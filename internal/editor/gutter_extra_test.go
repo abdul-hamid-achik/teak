@@ -120,7 +120,7 @@ func TestRenderGutterBeyondTotalLines(t *testing.T) {
 	// Lines beyond total should be spaces
 	for i := 3; i < 10; i++ {
 		if strings.TrimSpace(lines[i]) != "" {
-			// Lines beyond file content should only have whitespace
+			t.Logf("padding line %d contains styled whitespace: %q", i, lines[i])
 		}
 	}
 }

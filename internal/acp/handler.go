@@ -221,7 +221,7 @@ func (h *ClientHandler) KillTerminalCommand(_ context.Context, params sdk.KillTe
 		return sdk.KillTerminalCommandResponse{}, fmt.Errorf("unknown terminal: %s", params.TerminalId)
 	}
 	if ts.cmd.Process != nil {
-		ts.cmd.Process.Kill()
+		_ = ts.cmd.Process.Kill()
 	}
 	return sdk.KillTerminalCommandResponse{}, nil
 }
@@ -271,7 +271,7 @@ func (h *ClientHandler) ReleaseTerminal(_ context.Context, params sdk.ReleaseTer
 	h.mu.Unlock()
 
 	if ok && ts.cmd.Process != nil {
-		ts.cmd.Process.Kill()
+		_ = ts.cmd.Process.Kill()
 	}
 	return sdk.ReleaseTerminalResponse{}, nil
 }

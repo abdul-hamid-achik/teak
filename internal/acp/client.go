@@ -122,8 +122,10 @@ func (m *Manager) Start() error {
 	})
 	if err != nil {
 		cancel()
-		cmd.Process.Kill()
-		cmd.Wait()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
 		return fmt.Errorf("initialize: %w", err)
 	}
 	_ = initResp
@@ -135,8 +137,10 @@ func (m *Manager) Start() error {
 	})
 	if err != nil {
 		cancel()
-		cmd.Process.Kill()
-		cmd.Wait()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
 		return fmt.Errorf("new session: %w", err)
 	}
 
@@ -298,9 +302,11 @@ func (m *Manager) Cancel() {
 		return
 	}
 
-	conn.Cancel(context.Background(), sdk.CancelNotification{
+	if err := conn.Cancel(context.Background(), sdk.CancelNotification{
 		SessionId: sessionID,
-	})
+	}); err != nil {
+		log.Error("acp: cancel failed", "err", err)
+	}
 }
 
 // Stop shuts down the agent subprocess gracefully.
@@ -315,7 +321,7 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 
 	if proc != nil && proc.Process != nil {
-		proc.Process.Kill()
+		_ = proc.Process.Kill()
 		// Wait for the existing Start() goroutine to reap the process
 		if done != nil {
 			select {

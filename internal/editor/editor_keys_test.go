@@ -278,14 +278,14 @@ func TestEditorCtrlShiftHomeEnd(t *testing.T) {
 func TestEditorCtrlDSelectNextOccurrence(t *testing.T) {
 	e := newEditor("foo bar foo", 0, 0)
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+d"})
+	_, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+d"})
 	// Should attempt to select next occurrence; just ensure no crash
 }
 
 func TestEditorCtrlLSelectLine(t *testing.T) {
 	e := newEditor("hello\nworld", 0, 2)
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+l"})
+	_, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+l"})
 	// Should select the current line; just ensure no crash
 }
 
@@ -516,7 +516,7 @@ func TestEditorShiftClick(t *testing.T) {
 	e := newEditor("hello world", 0, 0)
 
 	// Click normally first
-	e, _ = e.Update(tea.MouseClickMsg{
+	_, _ = e.Update(tea.MouseClickMsg{
 		Button: tea.MouseLeft,
 		X:      5,
 		Y:      0,
