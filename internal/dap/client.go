@@ -639,16 +639,6 @@ func (c *Client) sendRequest(command string, args any, result *json.RawMessage) 
 	return nil
 }
 
-func (c *Client) sendEvent(event string, body any) error {
-	e := Event{
-		Seq:   c.nextSeq(),
-		Type:  "event",
-		Event: event,
-		Body:  body,
-	}
-	return c.send(e)
-}
-
 func (c *Client) send(msg any) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
