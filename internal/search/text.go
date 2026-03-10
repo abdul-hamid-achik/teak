@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxSearchLineBytes = 1<<20 + 1
+
 // TextSearch performs a text/regex search across files in rootDir.
 func TextSearch(rootDir, query string) ([]Result, error) {
 	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
@@ -81,6 +83,7 @@ func searchFile(path, rootDir string, re *regexp.Regexp, limit int) ([]Result, e
 
 	var results []Result
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), maxSearchLineBytes)
 	lineNum := 0
 	for scanner.Scan() {
 		if len(results) >= limit {
@@ -101,6 +104,9 @@ func searchFile(path, rootDir string, re *regexp.Regexp, limit int) ([]Result, e
 			})
 		}
 		lineNum++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

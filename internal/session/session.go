@@ -2,17 +2,20 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
+var writeFile = os.WriteFile
+
 // TabState stores the state of a single editor tab.
 type TabState struct {
-	FilePath string `json:"file_path"`
-	CursorLine int  `json:"cursor_line"`
-	CursorCol  int  `json:"cursor_col"`
-	ScrollY    int  `json:"scroll_y"`
-	Pinned     bool `json:"pinned"`
+	FilePath   string `json:"file_path"`
+	CursorLine int    `json:"cursor_line"`
+	CursorCol  int    `json:"cursor_col"`
+	ScrollY    int    `json:"scroll_y"`
+	Pinned     bool   `json:"pinned"`
 }
 
 // State stores the full session state.
@@ -36,7 +39,15 @@ func Path() string {
 
 // Save writes the session state to disk.
 func Save(state State) error {
-	path := Path()
+	return saveToPath(state, Path())
+}
+
+// Load reads the session state from disk.
+func Load() (State, error) {
+	return loadFromPath(Path())
+}
+
+func saveToPath(state State, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -44,13 +55,34 @@ func Save(state State) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+
+	tempFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return err
+	}
+
+	if err := writeFile(tempPath, data, 0o644); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("rename session file: %w", err)
+	}
+	return nil
 }
 
-// Load reads the session state from disk.
-func Load() (State, error) {
+func loadFromPath(path string) (State, error) {
 	var state State
-	data, err := os.ReadFile(Path())
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return state, err
 	}

@@ -148,7 +148,7 @@ func TestLSPCoordinatorHandleRename(t *testing.T) {
 	coord := NewLSPCoordinator(nil)
 
 	msg := lsp.RenameResultMsg{
-		Edits: map[string][]lsp.TextEdit{},
+		Edit: lsp.WorkspaceEdit{},
 	}
 
 	cmds := coord.HandleMessage(msg)

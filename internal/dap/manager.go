@@ -7,12 +7,12 @@ import (
 
 // DebugConfig describes how to launch a debug adapter.
 type DebugConfig struct {
-	Type      string   // e.g., "go", "node", "python"
-	Command   string   // debug adapter command
-	Args      []string // command arguments
-	Program   string   // program to debug
-	Cwd       string   // working directory
-	Env       map[string]string
+	Type    string   // e.g., "go", "node", "python"
+	Command string   // debug adapter command
+	Args    []string // command arguments
+	Program string   // program to debug
+	Cwd     string   // working directory
+	Env     map[string]string
 }
 
 // Manager manages debug sessions.
@@ -272,14 +272,10 @@ func DefaultGoDebugConfig(program string) DebugConfig {
 	}
 }
 
-// DefaultNodeDebugConfig returns a default debug config for Node.js programs.
+// DefaultNodeDebugConfig returns an empty config until Node DAP support exists.
 func DefaultNodeDebugConfig(program string) DebugConfig {
-	return DebugConfig{
-		Type:    "node",
-		Command: "node",
-		Args:    []string{"-e", "console.log('Node debug adapter not implemented')"},
-		Program: program,
-	}
+	_ = program
+	return DebugConfig{}
 }
 
 // ConfigForProgram returns a debug config for the given program path.

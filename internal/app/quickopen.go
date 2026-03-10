@@ -121,10 +121,10 @@ func matchesGitignore(rel string, patterns []string, isDir bool) bool {
 }
 
 // quickOpenCmd walks the project directory in the background.
-func quickOpenCmd(rootDir string) tea.Cmd {
+func quickOpenCmd(rootDir string, generation int) tea.Cmd {
 	return func() tea.Msg {
 		files := walkProjectFiles(rootDir)
-		return FileListMsg{Files: files}
+		return FileListMsg{Files: files, Generation: generation}
 	}
 }
 

@@ -86,6 +86,18 @@ func TestManagerCreationWithEmptyRoot(t *testing.T) {
 	}
 }
 
+func TestConfigForProgram(t *testing.T) {
+	goConfig := ConfigForProgram("/tmp/main.go")
+	if goConfig.Command != "dlv" {
+		t.Fatalf("expected Go program to use dlv, got %q", goConfig.Command)
+	}
+
+	nodeConfig := ConfigForProgram("/tmp/app.ts")
+	if nodeConfig.Command != "" {
+		t.Fatalf("expected unsupported Node program to return empty config, got %q", nodeConfig.Command)
+	}
+}
+
 // TestManagerInitialState tests initial manager state
 func TestManagerInitialState(t *testing.T) {
 	manager := NewManager("/test")
@@ -916,7 +928,7 @@ func TestLaunchRequestArgsCopy(t *testing.T) {
 // TestSetBreakpointsRequestArgsCopy tests SetBreakpointsRequestArgs copy behavior
 func TestSetBreakpointsRequestArgsCopy(t *testing.T) {
 	original := SetBreakpointsRequestArgs{
-		Source: Source{Name: "main.go"},
+		Source:      Source{Name: "main.go"},
 		Breakpoints: []SourceBreakpoint{{Line: 10}},
 	}
 	copy := original
@@ -1283,7 +1295,6 @@ func TestManagerMsgChanNotNil(t *testing.T) {
 		t.Error("Expected non-nil message channel")
 	}
 }
-
 
 // TestDebugConfigEnvMapOperations tests DebugConfig Env map operations
 func TestDebugConfigEnvMapOperations(t *testing.T) {

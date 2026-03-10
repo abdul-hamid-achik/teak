@@ -614,7 +614,7 @@ func (c *Client) References(uri string, line, character int) ([]Location, error)
 }
 
 // Rename requests a rename at the given position.
-func (c *Client) Rename(uri string, line, character int, newName string) (map[string][]TextEdit, error) {
+func (c *Client) Rename(uri string, line, character int, newName string) (WorkspaceEdit, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -624,45 +624,41 @@ func (c *Client) Rename(uri string, line, character int, newName string) (map[st
 		"newName":      newName,
 	})
 	if err != nil {
-		return nil, err
+		return WorkspaceEdit{}, err
 	}
 
 	if string(result) == "null" {
-		return nil, nil
+		return WorkspaceEdit{}, nil
 	}
 
-	var wsEdit struct {
-		Changes map[string][]struct {
-			Range struct {
-				Start struct {
-					Line      int `json:"line"`
-					Character int `json:"character"`
-				} `json:"start"`
-				End struct {
-					Line      int `json:"line"`
-					Character int `json:"character"`
-				} `json:"end"`
-			} `json:"range"`
-			NewText string `json:"newText"`
-		} `json:"changes"`
-	}
-	if err := json.Unmarshal(result, &wsEdit); err != nil {
-		return nil, err
-	}
+	return parseWorkspaceEditResult(result)
+}
 
-	edits := make(map[string][]TextEdit)
-	for uri, changes := range wsEdit.Changes {
-		for _, ch := range changes {
-			edits[uri] = append(edits[uri], TextEdit{
-				StartLine: ch.Range.Start.Line,
-				StartCol:  ch.Range.Start.Character,
-				EndLine:   ch.Range.End.Line,
-				EndCol:    ch.Range.End.Character,
-				NewText:   ch.NewText,
-			})
-		}
+func parseWorkspaceEditResult(result []byte) (WorkspaceEdit, error) {
+	type rawTextEdit struct {
+		Range struct {
+			Start struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"start"`
+			End struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"end"`
+		} `json:"range"`
+		NewText string `json:"newText"`
 	}
-	return edits, nil
+	type textDocumentEdit struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+		Edits []rawTextEdit `json:"edits"`
+	}
+	var edit WorkspaceEdit
+	if err := json.Unmarshal(result, &edit); err != nil {
+		return WorkspaceEdit{}, err
+	}
+	return edit, nil
 }
 
 // SignatureHelp requests signature help at the given position.

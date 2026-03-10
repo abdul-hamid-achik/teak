@@ -79,7 +79,8 @@ type agentWriteErrorMsg struct {
 
 // FileListMsg is emitted when the file list for quick open is ready.
 type FileListMsg struct {
-	Files []string
+	Files      []string
+	Generation int
 }
 
 // ============================================================================
@@ -131,4 +132,3 @@ type JumpToFrameMsg struct {
 	FilePath string
 	Line     int // 0-based
 }
-

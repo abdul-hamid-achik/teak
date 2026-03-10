@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"teak/internal/config"
@@ -256,8 +258,10 @@ func TestAppLSPRenameMessage(t *testing.T) {
 
 	// Test rename message
 	msg := lsp.RenameResultMsg{
-		Edits: map[string][]lsp.TextEdit{
-			"/test.go": {{StartLine: 1, StartCol: 0, EndLine: 1, EndCol: 5, NewText: "test"}},
+		Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{
+				"/test.go": {{StartLine: 1, StartCol: 0, EndLine: 1, EndCol: 5, NewText: "test"}},
+			},
 		},
 	}
 
@@ -265,6 +269,90 @@ func TestAppLSPRenameMessage(t *testing.T) {
 	_ = cmds
 
 	// Should not crash
+}
+
+func TestApplyRenameEditsUpdatesUnopenedFilesOnDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel failed: %v", err)
+	}
+	defer model.cleanup()
+
+	path := filepath.Join(tmpDir, "rename.go")
+	if err := os.WriteFile(path, []byte("alpha beta\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	updatedModel, _ := model.applyWorkspaceEdit(lsp.WorkspaceEdit{
+		Changes: map[string][]lsp.TextEdit{
+			lsp.FileURI(path): {{
+				StartLine: 0,
+				StartCol:  6,
+				EndLine:   0,
+				EndCol:    10,
+				NewText:   "gamma",
+			}},
+		},
+	})
+	updated := updatedModel.(Model)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "alpha gamma\n" {
+		t.Fatalf("file content = %q, want %q", string(data), "alpha gamma\n")
+	}
+	if updated.status != "Renamed: 1 edit(s) applied" {
+		t.Fatalf("status = %q", updated.status)
+	}
+}
+
+func TestApplyWorkspaceEditRenamesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel failed: %v", err)
+	}
+	defer model.cleanup()
+
+	oldPath := filepath.Join(tmpDir, "old.go")
+	newPath := filepath.Join(tmpDir, "nested", "new.go")
+	if err := os.WriteFile(oldPath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	updatedModel, _ := model.applyWorkspaceEdit(lsp.WorkspaceEdit{
+		DocumentChanges: []lsp.WorkspaceDocumentChange{
+			{
+				FileOperation: &lsp.WorkspaceFileOperation{
+					Kind:   lsp.FileOpRename,
+					OldURI: lsp.FileURI(oldPath),
+					NewURI: lsp.FileURI(newPath),
+				},
+			},
+		},
+	})
+	updated := updatedModel.(Model)
+
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("expected renamed file to exist: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old file to be gone, stat err = %v", err)
+	}
+	if updated.status != "Renamed: 1 edit(s) applied" {
+		t.Fatalf("status = %q", updated.status)
+	}
 }
 
 // TestAppLSPDocumentSymbolMessage tests LSP document symbol message handling
@@ -752,7 +840,7 @@ func TestAppLSPRenameEmptyEdits(t *testing.T) {
 
 	// Test empty rename edits
 	msg := lsp.RenameResultMsg{
-		Edits: map[string][]lsp.TextEdit{},
+		Edit: lsp.WorkspaceEdit{},
 	}
 
 	cmds := lspCoord.HandleMessage(msg)

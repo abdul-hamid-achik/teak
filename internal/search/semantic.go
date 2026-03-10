@@ -11,6 +11,15 @@ import (
 // vecgrepReady caches per-rootDir whether vecgrep has been initialized+indexed.
 var vecgrepReady sync.Map
 
+// InvalidateSemanticIndex clears the cached ready state for a workspace so the
+// next semantic search rechecks and reindexes vecgrep as needed.
+func InvalidateSemanticIndex(rootDir string) {
+	if rootDir == "" {
+		return
+	}
+	vecgrepReady.Delete(rootDir)
+}
+
 // SemanticSearch performs a semantic code search using vecgrep.
 func SemanticSearch(rootDir, query string) ([]Result, error) {
 	_, err := exec.LookPath("vecgrep")

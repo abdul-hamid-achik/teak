@@ -14,13 +14,13 @@ const (
 
 // ACPCoordinator manages ACP agent lifecycle and message handling.
 type ACPCoordinator struct {
-	mu           sync.RWMutex
-	mgr          *acp.Manager
-	running      bool
-	sessionID    string
-	modelID      string
-	mode         string
-	chatHistory  []ChatMessage
+	mu          sync.RWMutex
+	mgr         *acp.Manager
+	running     bool
+	sessionID   string
+	modelID     string
+	mode        string
+	chatHistory []ChatMessage
 }
 
 // ChatMessage represents a message in the chat history.
@@ -41,6 +41,15 @@ func NewACPCoordinator(mgr *acp.Manager) *ACPCoordinator {
 // HandleMessage routes ACP messages to appropriate handlers.
 func (c *ACPCoordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 	switch m := msg.(type) {
+	case acpMsg:
+		inner, ok := m.msg.(tea.Msg)
+		if !ok || inner == nil {
+			return nil
+		}
+		// ACP traffic reaches the app wrapped in acpMsg. Update coordinator
+		// state from the inner message, but don't echo it back into Update.
+		c.HandleMessage(inner)
+		return nil
 	case acp.AgentTextMsg:
 		return c.handleAgentText(m)
 	case acp.AgentThoughtMsg:
@@ -121,7 +130,9 @@ func (c *ACPCoordinator) handleAgentPromptResponse(msg acp.AgentPromptResponseMs
 func (c *ACPCoordinator) handleAgentSessionInfo(msg acp.AgentSessionInfoMsg) []tea.Cmd {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sessionID = string(msg.CurrentModel)
+	c.sessionID = string(msg.SessionID)
+	c.modelID = string(msg.CurrentModel)
+	c.mode = string(msg.CurrentMode)
 	return []tea.Cmd{func() tea.Msg { return msg }}
 }
 
@@ -148,13 +159,20 @@ func (c *ACPCoordinator) handleAgentError(msg acp.AgentErrorMsg) []tea.Cmd {
 
 // handleAgentStarted handles agent started messages.
 func (c *ACPCoordinator) handleAgentStarted(msg acp.AgentStartedMsg) []tea.Cmd {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.running = true
 	return []tea.Cmd{func() tea.Msg { return msg }}
 }
 
 // handleAgentStopped handles agent stopped messages.
 func (c *ACPCoordinator) handleAgentStopped(msg acp.AgentStoppedMsg) []tea.Cmd {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.running = false
+	c.sessionID = ""
+	c.modelID = ""
+	c.mode = ""
 	return []tea.Cmd{func() tea.Msg { return msg }}
 }
 
@@ -171,7 +189,7 @@ func (c *ACPCoordinator) AddToHistory(role, content string) {
 		Role:    role,
 		Content: content,
 	})
-	
+
 	// Clean old entries if too many
 	if len(c.chatHistory) > maxACPChatHistory {
 		// Remove oldest entries (keep last maxACPChatHistory)

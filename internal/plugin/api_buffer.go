@@ -5,11 +5,6 @@ import (
 	"teak/internal/text"
 )
 
-// bufferContext stores the current buffer context for Lua scripts.
-type bufferContext struct {
-	buffer *text.Buffer
-}
-
 // registerBufferAPI registers the buffer.* API functions.
 func registerBufferAPI(L *lua.LState) {
 	mod := L.SetFuncs(L.NewTable(), bufferAPIFunctions)
@@ -32,50 +27,46 @@ var bufferAPIFunctions = map[string]lua.LGFunction{
 	"is_dirty":      bufferIsDirty,
 }
 
-// getBufferFromContext gets the current buffer from Lua context.
-func getBufferFromContext(L *lua.LState) *text.Buffer {
-	// For now, we'll need to get this from the app context
-	// This is a simplified version - in production, you'd store this properly
-	return nil
+func requireRuntime(L *lua.LState, apiName string) Runtime {
+	runtime := getRuntimeFromContext(L)
+	if runtime == nil {
+		L.RaiseError("%s is unavailable outside an active plugin dispatch context", apiName)
+		return nil
+	}
+	return runtime
 }
 
 // buffer.get_text() -> string
 func bufferGetText(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
+	runtime := requireRuntime(L, "buffer.get_text")
+	text, err := runtime.BufferText()
+	if err != nil {
 		L.Push(lua.LNil)
-		L.Push(lua.LString("no active buffer"))
+		L.Push(lua.LString(err.Error()))
 		return 2
 	}
-
-	L.Push(lua.LString(buf.Content()))
+	L.Push(lua.LString(text))
 	return 1
 }
 
 // buffer.set_text(text: string)
 func bufferSetText(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.RaiseError("no active buffer")
+	runtime := requireRuntime(L, "buffer.set_text")
+	if err := runtime.SetBufferText(L.CheckString(1)); err != nil {
+		L.RaiseError("buffer.set_text failed: %v", err)
 		return 0
 	}
-
-	text := L.CheckString(1)
-	buf.LoadContentWithTabSize([]byte(text), 4)
-
 	return 0
 }
 
 // buffer.get_cursor() -> line: number, col: number
 func bufferGetCursor(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LNumber(1))
-		L.Push(lua.LNumber(1))
-		return 2
+	runtime := requireRuntime(L, "buffer.get_cursor")
+	cursor, err := runtime.BufferCursor()
+	if err != nil {
+		L.RaiseError("buffer.get_cursor failed: %v", err)
+		return 0
 	}
-
-	cursor := buf.Cursor
 	L.Push(lua.LNumber(cursor.Line + 1)) // Lua uses 1-based indexing
 	L.Push(lua.LNumber(cursor.Col + 1))
 	return 2
@@ -83,30 +74,30 @@ func bufferGetCursor(L *lua.LState) int {
 
 // buffer.set_cursor(line: number, col: number)
 func bufferSetCursor(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.RaiseError("no active buffer")
-		return 0
-	}
-
+	runtime := requireRuntime(L, "buffer.set_cursor")
 	line := L.CheckInt(1) - 1 // Convert to 0-based
 	col := L.CheckInt(2) - 1
-
-	buf.SetCursor(text.Position{Line: line, Col: col})
-
+	if err := runtime.SetBufferCursor(text.Position{Line: line, Col: col}); err != nil {
+		L.RaiseError("buffer.set_cursor failed: %v", err)
+		return 0
+	}
 	return 0
 }
 
 // buffer.get_selection() -> start_line, start_col, end_line, end_col or nil
 func bufferGetSelection(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil || buf.Selections == nil || buf.Selections.Count() == 0 || buf.Selections.Primary().IsEmpty() {
+	runtime := requireRuntime(L, "buffer.get_selection")
+	selection, err := runtime.BufferSelection()
+	if err != nil {
+		L.RaiseError("buffer.get_selection failed: %v", err)
+		return 0
+	}
+	if selection == nil || selection.IsEmpty() {
 		L.Push(lua.LNil)
 		return 1
 	}
 
-	sel := buf.Selections.Primary()
-	start, end := sel.Ordered()
+	start, end := selection.Ordered()
 	L.Push(lua.LNumber(start.Line + 1))
 	L.Push(lua.LNumber(start.Col + 1))
 	L.Push(lua.LNumber(end.Line + 1))
@@ -116,67 +107,52 @@ func bufferGetSelection(L *lua.LState) int {
 
 // buffer.insert(text: string)
 func bufferInsert(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.RaiseError("no active buffer")
+	runtime := requireRuntime(L, "buffer.insert")
+	if err := runtime.InsertText(L.CheckString(1)); err != nil {
+		L.RaiseError("buffer.insert failed: %v", err)
 		return 0
 	}
-
-	text := L.CheckString(1)
-	buf.InsertAtCursor([]byte(text))
-
 	return 0
 }
 
 // buffer.delete()
 func bufferDelete(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.RaiseError("no active buffer")
+	runtime := requireRuntime(L, "buffer.delete")
+	if err := runtime.DeleteSelection(); err != nil {
+		L.RaiseError("buffer.delete failed: %v", err)
 		return 0
 	}
-
-	buf.DeleteSelection()
-
 	return 0
 }
 
 // buffer.get_line(line: number) -> string
 func bufferGetLine(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LNil)
-		return 1
+	runtime := requireRuntime(L, "buffer.get_line")
+	content, err := runtime.BufferLine(L.CheckInt(1) - 1)
+	if err != nil {
+		L.RaiseError("buffer.get_line failed: %v", err)
+		return 0
 	}
-
-	line := L.CheckInt(1) - 1
-	content := buf.Line(line)
 	L.Push(lua.LString(string(content)))
 	return 1
 }
 
 // buffer.line_count() -> number
 func bufferLineCount(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LNumber(0))
-		return 1
+	runtime := requireRuntime(L, "buffer.line_count")
+	count, err := runtime.BufferLineCount()
+	if err != nil {
+		L.RaiseError("buffer.line_count failed: %v", err)
+		return 0
 	}
-
-	L.Push(lua.LNumber(buf.LineCount()))
+	L.Push(lua.LNumber(count))
 	return 1
 }
 
 // buffer.save() -> boolean, error?
 func bufferSave(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LFalse)
-		L.Push(lua.LString("no active buffer"))
-		return 2
-	}
-
-	if err := buf.Save(); err != nil {
+	runtime := requireRuntime(L, "buffer.save")
+	if err := runtime.SaveBuffer(); err != nil {
 		L.Push(lua.LFalse)
 		L.Push(lua.LString(err.Error()))
 		return 2
@@ -188,28 +164,28 @@ func bufferSave(L *lua.LState) int {
 
 // buffer.get_filepath() -> string or nil
 func bufferGetFilepath(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LNil)
-		return 1
+	runtime := requireRuntime(L, "buffer.get_filepath")
+	path, err := runtime.BufferFilePath()
+	if err != nil {
+		L.RaiseError("buffer.get_filepath failed: %v", err)
+		return 0
 	}
-
-	if buf.FilePath == "" {
+	if path == "" {
 		L.Push(lua.LNil)
 	} else {
-		L.Push(lua.LString(buf.FilePath))
+		L.Push(lua.LString(path))
 	}
 	return 1
 }
 
 // buffer.is_dirty() -> boolean
 func bufferIsDirty(L *lua.LState) int {
-	buf := getBufferFromContext(L)
-	if buf == nil {
-		L.Push(lua.LFalse)
-		return 1
+	runtime := requireRuntime(L, "buffer.is_dirty")
+	dirty, err := runtime.BufferDirty()
+	if err != nil {
+		L.RaiseError("buffer.is_dirty failed: %v", err)
+		return 0
 	}
-
-	L.Push(lua.LBool(buf.Dirty()))
+	L.Push(lua.LBool(dirty))
 	return 1
 }

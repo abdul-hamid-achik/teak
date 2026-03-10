@@ -54,6 +54,11 @@ func (p *luaStatePool) Put(L *lua.LState) {
 		return
 	}
 
+	clearKeybindingsForState(L)
+	clearCommandsForState(L)
+	clearAutocommandsForState(L)
+	clearRuntimeForState(L)
+
 	// Clear globals to prevent cross-plugin contamination
 	for _, name := range []string{
 		"_G", "package", "buffer", "editor", "keymap", "autocmd", "ui",

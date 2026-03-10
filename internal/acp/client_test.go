@@ -127,6 +127,7 @@ func TestAgentPromptResponseMsg_Error(t *testing.T) {
 
 func TestAgentSessionInfoMsg(t *testing.T) {
 	msg := AgentSessionInfoMsg{
+		SessionID: sdk.SessionId("session-1"),
 		Models: []sdk.ModelInfo{
 			{ModelId: "m1", Name: "Model 1"},
 			{ModelId: "m2", Name: "Model 2"},
@@ -139,6 +140,9 @@ func TestAgentSessionInfoMsg(t *testing.T) {
 	}
 	if len(msg.Models) != 2 {
 		t.Errorf("len(Models) = %d, want 2", len(msg.Models))
+	}
+	if msg.SessionID != "session-1" {
+		t.Errorf("SessionID = %q, want 'session-1'", msg.SessionID)
 	}
 	if msg.CurrentModel != "m1" {
 		t.Errorf("CurrentModel = %q, want 'm1'", msg.CurrentModel)

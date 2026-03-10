@@ -118,12 +118,41 @@ func TestACPCoordinatorHandleAgentSessionInfo(t *testing.T) {
 	coord := NewACPCoordinator(nil)
 
 	msg := acp.AgentSessionInfoMsg{
+		SessionID:    "session-456",
 		CurrentModel: "model-1",
+		CurrentMode:  "mode-1",
 	}
 
 	cmds := coord.HandleMessage(msg)
 	if cmds == nil {
 		t.Error("expected commands to be returned")
+	}
+	if coord.sessionID != "session-456" {
+		t.Fatalf("expected sessionID to be updated, got %q", coord.sessionID)
+	}
+	if coord.modelID != "model-1" {
+		t.Fatalf("expected modelID to be updated, got %q", coord.modelID)
+	}
+	if coord.mode != "mode-1" {
+		t.Fatalf("expected mode to be updated, got %q", coord.mode)
+	}
+}
+
+func TestACPCoordinatorHandleWrappedAgentSessionInfo(t *testing.T) {
+	coord := NewACPCoordinator(nil)
+
+	cmds := coord.HandleMessage(acpMsg{msg: acp.AgentSessionInfoMsg{
+		SessionID:    "session-789",
+		CurrentModel: "model-2",
+		CurrentMode:  "mode-2",
+	}})
+	if cmds != nil {
+		t.Fatalf("expected wrapped ACP message to update state without forwarding commands, got %d", len(cmds))
+	}
+
+	sid, mid, mode := coord.GetSessionInfo()
+	if sid != "session-789" || mid != "model-2" || mode != "mode-2" {
+		t.Fatalf("unexpected wrapped session info: sid=%q mid=%q mode=%q", sid, mid, mode)
 	}
 }
 
@@ -184,12 +213,21 @@ func TestACPCoordinatorHandleAgentStarted(t *testing.T) {
 // TestACPCoordinatorHandleAgentStopped tests stopped message handling
 func TestACPCoordinatorHandleAgentStopped(t *testing.T) {
 	coord := NewACPCoordinator(nil)
+	coord.SetRunning(true)
+	coord.SetSessionInfo("session-123", "model-1", "mode-1")
 
 	msg := acp.AgentStoppedMsg{}
 
 	cmds := coord.HandleMessage(msg)
 	if cmds == nil {
 		t.Error("expected commands to be returned")
+	}
+	if coord.IsRunning() {
+		t.Fatal("expected running to be false after stop")
+	}
+	sid, mid, mode := coord.GetSessionInfo()
+	if sid != "" || mid != "" || mode != "" {
+		t.Fatalf("expected session info to be cleared after stop, got sid=%q mid=%q mode=%q", sid, mid, mode)
 	}
 }
 

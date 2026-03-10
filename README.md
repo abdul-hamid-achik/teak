@@ -13,7 +13,8 @@ Teak brings a familiar, VS Code-like editing experience to the terminal — synt
 - **LSP support** — autocomplete, hover, go-to-definition, diagnostics, rename
 - **File tree** sidebar with lazy-loaded directories, diagnostic indicators, and context menus
 - **Git panel** showing branch name and changed files with color-coded status
-- **Text & semantic search** with debounced input and clickable results
+- **Text search** built in, plus **semantic search** when `vecgrep` is installed
+- **Lua plugins** with commands, keymaps, autocmds, and live editor/runtime access
 - **Live file watching** — external changes are detected and reloaded automatically
 - **Undo/redo** backed by a persistent, immutable rope data structure
 - **Mouse support** — click, drag-select, scroll, double-click to select word, right-click context menus
@@ -37,6 +38,8 @@ go build -o bin/teak ./cmd/teak
 
 Requires **Go 1.24+**.
 
+Semantic search is optional and requires [`vecgrep`](https://github.com/veces/vecgrep) to be installed and available on your `PATH`. Without it, regular text search still works and semantic search will report that the dependency is missing.
+
 ## Usage
 
 ```sh
@@ -49,6 +52,93 @@ teak
 # Open a directory
 teak ~/projects/myapp
 ```
+
+## Plugins
+
+Teak loads Lua plugins from `~/.config/teak/plugins/<plugin-name>/`.
+Each plugin directory needs a `plugin.toml` file and a Lua entrypoint, typically `init.lua`.
+
+Minimal layout:
+
+```text
+~/.config/teak/plugins/
+  my-plugin/
+    plugin.toml
+    init.lua
+```
+
+Minimal plugin:
+
+```toml
+# plugin.toml
+name = "my-plugin"
+main = "init.lua"
+```
+
+```lua
+local function update_status()
+  local path = buffer.get_filepath() or "[No Name]"
+  local line, col = buffer.get_cursor()
+  editor.set_status(string.format("%s | %d:%d", path, line, col))
+end
+
+function setup()
+  editor.command("my_plugin.status", update_status)
+
+  keymap.set("n", "<leader>ms", function()
+    update_status()
+    ui.notify("Status updated", "info")
+  end, { desc = "Refresh plugin status" })
+
+  autocmd.register("CursorMoved", function()
+    update_status()
+  end)
+end
+```
+
+Plugin notes:
+
+- `setup()` is called once when the plugin loads.
+- `teardown()` is called when the plugin unloads, if it exists.
+- Buffer, editor, and `ui.*` runtime operations are only available while Teak is dispatching a keymap, command, or autocmd. Calling them directly in `setup()` will fail.
+- Supported keymap modes are `n`, `a`, `tree`, `git`, `problems`, `debugger`, and `agent`.
+- `editor.feed_keys(keys)` supports plain text, named keys like `<enter>` and `<left>`, and modifiers like `ctrl+s` or `<shift+tab>`.
+- `editor.feed_keys` bypasses plugin key dispatch for the injected keys, so it will not recursively trigger another plugin mapping.
+
+Supported plugin APIs:
+
+- `buffer.*`
+- `editor.command`
+- `editor.feed_keys`
+- `editor.get_*`, `editor.set_status`, `editor.open_file`, and tab management
+- `keymap.*`
+- `autocmd.*`
+- `ui.notify`
+- `ui.show_panel`, `ui.hide_panel`, `ui.toggle_panel`
+
+Unsupported plugin APIs:
+
+- `ui.input`
+- `ui.confirm`
+- `ui.new_buffer`
+- `ui.new_float`
+- `ui.close_float`
+- `ui.set_highlights`
+- `ui.clear_highlights`
+
+Current autocmd events:
+
+- `VimEnter`
+- `VimLeave`
+- `BufRead`
+- `BufEnter`
+- `BufLeave`
+- `BufWrite`
+- `BufNew`
+- `BufDelete`
+- `TextChanged`
+- `CursorMoved`
+- `FileType`
 
 ## Keyboard Shortcuts
 

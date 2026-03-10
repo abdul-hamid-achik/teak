@@ -450,6 +450,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.currentMode = msg.CurrentMode
 		return m, nil
 
+	case acp.AgentModelChangedMsg:
+		m.currentModel = msg.ModelId
+		return m, nil
+
+	case acp.AgentModeChangedMsg:
+		m.currentMode = msg.ModeId
+		return m, nil
+
 	case acp.AgentStartedMsg:
 		m.connected = true
 		m.state = AgentIdle

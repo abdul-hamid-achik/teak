@@ -1,6 +1,26 @@
 package plugin
 
-import lua "github.com/yuin/gopher-lua"
+import (
+	"fmt"
+	"strings"
+	"sync"
+
+	lua "github.com/yuin/gopher-lua"
+)
+
+type keymapBinding struct {
+	action      lua.LValue
+	description string
+}
+
+type keymapRegistry struct {
+	mu     sync.RWMutex
+	states map[*lua.LState]map[string]map[string]keymapBinding
+}
+
+var pluginKeymaps = keymapRegistry{
+	states: make(map[*lua.LState]map[string]map[string]keymapBinding),
+}
 
 // registerKeymapAPI registers the keymap.* API functions.
 func registerKeymapAPI(L *lua.LState) {
@@ -18,7 +38,9 @@ var keymapAPIFunctions = map[string]lua.LGFunction{
 }
 
 // keymap.set(mode, keys, action, opts?)
-// mode: "n" (normal), "i" (insert), "v" (visual), "a" (all)
+// Common modes are "n" (editor keys), "a" (all dispatch contexts), and
+// app focus modes such as "tree", "git", "problems", "debugger", and "agent".
+// Other mode strings are stored as-is and depend on the app dispatching them.
 func keymapSet(L *lua.LState) int {
 	mode := L.CheckString(1)
 	keys := L.CheckString(2)
@@ -28,11 +50,17 @@ func keymapSet(L *lua.LState) int {
 
 	var opts map[string]interface{}
 	if L.GetTop() >= 4 {
-		opts = luaTableToGoMap(L.Get(4).(*lua.LTable))
+		table, ok := L.Get(4).(*lua.LTable)
+		if !ok {
+			L.ArgError(4, "expected table")
+			return 0
+		}
+		opts = luaTableToGoMap(table)
 	}
 
-	// Register keybinding
-	registerKeybinding(mode, keys, action, opts)
+	if err := registerKeybinding(L, mode, keys, action, opts); err != nil {
+		L.RaiseError("keymap.set failed: %v", err)
+	}
 
 	return 0
 }
@@ -42,7 +70,7 @@ func keymapUnset(L *lua.LState) int {
 	mode := L.CheckString(1)
 	keys := L.CheckString(2)
 
-	unregisterKeybinding(mode, keys)
+	unregisterKeybinding(L, mode, keys)
 
 	return 0
 }
@@ -52,7 +80,7 @@ func keymapGet(L *lua.LState) int {
 	mode := L.CheckString(1)
 	keys := L.CheckString(2)
 
-	action := getKeybinding(mode, keys)
+	action := getKeybinding(L, mode, keys)
 	if action == nil {
 		L.Push(lua.LNil)
 	} else {
@@ -68,7 +96,7 @@ func keymapClear(L *lua.LState) int {
 		mode = L.CheckString(1)
 	}
 
-	clearKeybindings(mode)
+	clearKeybindings(L, mode)
 
 	return 0
 }
@@ -77,7 +105,7 @@ func keymapClear(L *lua.LState) int {
 func keymapWhichKey(L *lua.LState) int {
 	keys := L.CheckString(1)
 
-	desc := getKeybindingDescription(keys)
+	desc := getKeybindingDescription(L, keys)
 	if desc == "" {
 		L.Push(lua.LNil)
 	} else {
@@ -86,26 +114,107 @@ func keymapWhichKey(L *lua.LState) int {
 	return 1
 }
 
-// Helper functions (stubs - would need integration with app)
-func registerKeybinding(mode, keys string, action lua.LValue, opts map[string]interface{}) {
-}
+func registerKeybinding(L *lua.LState, mode, keys string, action lua.LValue, opts map[string]interface{}) error {
+	if mode == "" || keys == "" {
+		return fmt.Errorf("mode and keys are required")
+	}
+	description := ""
+	if opts != nil {
+		if desc, ok := opts["desc"].(lua.LString); ok {
+			description = string(desc)
+		}
+	}
 
-func unregisterKeybinding(mode, keys string) {
-}
+	pluginKeymaps.mu.Lock()
+	defer pluginKeymaps.mu.Unlock()
 
-func getKeybinding(mode, keys string) interface{} {
+	modeBindings := pluginKeymaps.ensureStateMode(L, mode)
+	modeBindings[keys] = keymapBinding{
+		action:      action,
+		description: description,
+	}
 	return nil
 }
 
-func clearKeybindings(mode string) {
+func unregisterKeybinding(L *lua.LState, mode, keys string) {
+	pluginKeymaps.mu.Lock()
+	defer pluginKeymaps.mu.Unlock()
+
+	stateBindings := pluginKeymaps.states[L]
+	if stateBindings == nil {
+		return
+	}
+	modeBindings := stateBindings[mode]
+	if modeBindings == nil {
+		return
+	}
+	delete(modeBindings, keys)
+	if len(modeBindings) == 0 {
+		delete(stateBindings, mode)
+	}
+	if len(stateBindings) == 0 {
+		delete(pluginKeymaps.states, L)
+	}
 }
 
-func getKeybindingDescription(keys string) string {
+func getKeybinding(L *lua.LState, mode, keys string) lua.LValue {
+	pluginKeymaps.mu.RLock()
+	defer pluginKeymaps.mu.RUnlock()
+
+	binding, exact, _ := matchKeybindingLocked(pluginKeymaps.states[L], mode, keys)
+	if exact {
+		return binding.action
+	}
+	return nil
+}
+
+func clearKeybindings(L *lua.LState, mode string) {
+	pluginKeymaps.mu.Lock()
+	defer pluginKeymaps.mu.Unlock()
+
+	if mode == "" {
+		delete(pluginKeymaps.states, L)
+		return
+	}
+
+	stateBindings := pluginKeymaps.states[L]
+	if stateBindings == nil {
+		return
+	}
+	delete(stateBindings, mode)
+	if len(stateBindings) == 0 {
+		delete(pluginKeymaps.states, L)
+	}
+}
+
+func clearKeybindingsForState(L *lua.LState) {
+	clearKeybindings(L, "")
+}
+
+func matchKeybinding(L *lua.LState, mode, keys string) (binding keymapBinding, exact bool, prefix bool) {
+	pluginKeymaps.mu.RLock()
+	defer pluginKeymaps.mu.RUnlock()
+	return matchKeybindingLocked(pluginKeymaps.states[L], mode, keys)
+}
+
+func getKeybindingDescription(L *lua.LState, keys string) string {
+	pluginKeymaps.mu.RLock()
+	defer pluginKeymaps.mu.RUnlock()
+
+	stateBindings := pluginKeymaps.states[L]
+	if stateBindings == nil {
+		return ""
+	}
+	for _, modeBindings := range stateBindings {
+		if binding, ok := modeBindings[keys]; ok && binding.description != "" {
+			return binding.description
+		}
+	}
 	return ""
 }
 
-func pushAction(L *lua.LState, action interface{}) {
-	L.Push(lua.LString("action"))
+func pushAction(L *lua.LState, action lua.LValue) {
+	L.Push(action)
 }
 
 func luaTableToGoMap(t *lua.LTable) map[string]interface{} {
@@ -116,4 +225,39 @@ func luaTableToGoMap(t *lua.LTable) map[string]interface{} {
 		}
 	})
 	return result
+}
+
+func (r *keymapRegistry) ensureStateMode(L *lua.LState, mode string) map[string]keymapBinding {
+	stateBindings := r.states[L]
+	if stateBindings == nil {
+		stateBindings = make(map[string]map[string]keymapBinding)
+		r.states[L] = stateBindings
+	}
+	modeBindings := stateBindings[mode]
+	if modeBindings == nil {
+		modeBindings = make(map[string]keymapBinding)
+		stateBindings[mode] = modeBindings
+	}
+	return modeBindings
+}
+
+func matchKeybindingLocked(stateBindings map[string]map[string]keymapBinding, mode, keys string) (binding keymapBinding, exact bool, prefix bool) {
+	if stateBindings == nil {
+		return keymapBinding{}, false, false
+	}
+	checkModes := []string{mode}
+	if mode != "a" {
+		checkModes = append(checkModes, "a")
+	}
+	for _, keyMode := range checkModes {
+		for boundKeys, boundBinding := range stateBindings[keyMode] {
+			switch {
+			case boundKeys == keys:
+				return boundBinding, true, false
+			case strings.HasPrefix(boundKeys, keys):
+				prefix = true
+			}
+		}
+	}
+	return keymapBinding{}, false, prefix
 }

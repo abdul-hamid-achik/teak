@@ -218,3 +218,54 @@ func TestFileWatcher_WatchDirRecursive_SkipsDotDirs(t *testing.T) {
 		t.Fatal("timed out waiting for event in visible subdir")
 	}
 }
+
+func TestFileWatcher_WatchesDeepDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	deepDir := filepath.Join(tmpDir, "level1", "level2", "level3", "level4", "level5")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	fw, err := newFileWatcher(tmpDir)
+	if err != nil {
+		t.Fatalf("newFileWatcher: %v", err)
+	}
+	defer fw.Close()
+
+	time.Sleep(150 * time.Millisecond)
+
+	deepFile := filepath.Join(deepDir, "deep.go")
+	if err := os.WriteFile(deepFile, []byte("package deep\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	select {
+	case msg := <-fw.msgChan:
+		switch msg.(type) {
+		case TreeChangedMsg, FileChangedMsg:
+		default:
+			t.Errorf("expected TreeChangedMsg or FileChangedMsg, got %T", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event in deep subdir")
+	}
+}
+
+func TestFileWatcher_PruneDebounceEntries(t *testing.T) {
+	now := time.Now()
+	fw := &fileWatcher{
+		debounce: map[string]time.Time{
+			"fresh.go": now.Add(-50 * time.Millisecond),
+			"stale.go": now.Add(-5 * time.Minute),
+		},
+	}
+
+	fw.pruneDebounceEntries(now)
+
+	if _, ok := fw.debounce["fresh.go"]; !ok {
+		t.Fatal("expected fresh debounce entry to be retained")
+	}
+	if _, ok := fw.debounce["stale.go"]; ok {
+		t.Fatal("expected stale debounce entry to be pruned")
+	}
+}

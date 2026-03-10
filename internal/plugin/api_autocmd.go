@@ -1,8 +1,12 @@
 package plugin
 
 import (
-	lua "github.com/yuin/gopher-lua"
+	"path"
+	"path/filepath"
+	"slices"
 	"sync"
+
+	lua "github.com/yuin/gopher-lua"
 )
 
 // Event types
@@ -26,15 +30,26 @@ const (
 type Autocommand struct {
 	Event    string
 	Callback *lua.LFunction
-	Pattern  string // File pattern (e.g., "*.go")
+	Pattern  string // File pattern (for example, "*.go")
 	Group    string // Augroup name
 	Once     bool   // Run only once
 }
 
-var (
-	autocommandsMu sync.RWMutex
-	autocommands   = make(map[string][]Autocommand)
-)
+// EventContext describes the app state for an autocmd callback.
+type EventContext struct {
+	Event        string
+	FilePath     string
+	RelativePath string
+}
+
+type autocmdRegistry struct {
+	mu     sync.RWMutex
+	states map[*lua.LState]map[string][]Autocommand
+}
+
+var pluginAutocommands = autocmdRegistry{
+	states: make(map[*lua.LState]map[string][]Autocommand),
+}
 
 // registerAutocmdAPI registers the autocmd.* API functions.
 func registerAutocmdAPI(L *lua.LState) {
@@ -55,50 +70,75 @@ func autocmdRegister(L *lua.LState) int {
 	event := L.CheckString(1)
 	callback := L.CheckFunction(2)
 
-	var opts map[string]interface{}
-	if L.GetTop() >= 3 {
-		opts = luaTableToGoMap(L.Get(3).(*lua.LTable))
-	}
-
-	ac := Autocommand{
+	cmd := Autocommand{
 		Event:    event,
 		Callback: callback,
 	}
 
-	if pattern, ok := opts["pattern"].(string); ok {
-		ac.Pattern = pattern
-	}
-	if group, ok := opts["group"].(string); ok {
-		ac.Group = group
-	}
-	if once, ok := opts["once"].(bool); ok {
-		ac.Once = once
+	if L.GetTop() >= 3 {
+		opts := L.CheckTable(3)
+		opts.ForEach(func(key, value lua.LValue) {
+			k, ok := key.(lua.LString)
+			if !ok {
+				return
+			}
+			switch string(k) {
+			case "pattern":
+				if pattern, ok := value.(lua.LString); ok {
+					cmd.Pattern = string(pattern)
+				}
+			case "group":
+				if group, ok := value.(lua.LString); ok {
+					cmd.Group = string(group)
+				}
+			case "once":
+				cmd.Once = lua.LVAsBool(value)
+			}
+		})
 	}
 
-	autocommandsMu.Lock()
-	autocommands[event] = append(autocommands[event], ac)
-	autocommandsMu.Unlock()
+	pluginAutocommands.mu.Lock()
+	defer pluginAutocommands.mu.Unlock()
 
+	stateEvents := pluginAutocommands.ensureStateLocked(L)
+	stateEvents[event] = append(stateEvents[event], cmd)
 	return 0
 }
 
 // autocmd.unregister(event, callback?)
 func autocmdUnregister(L *lua.LState) int {
 	event := L.CheckString(1)
-
-	autocommandsMu.Lock()
-	defer autocommandsMu.Unlock()
-
-	if _, ok := autocommands[event]; ok {
-		// Remove all callbacks for this event if no callback specified
-		if L.GetTop() < 2 {
-			delete(autocommands, event)
-		} else {
-			// Remove specific callback (simplified - would need better matching in production)
-			delete(autocommands, event)
-		}
+	var callback *lua.LFunction
+	if L.GetTop() >= 2 {
+		callback = L.CheckFunction(2)
 	}
 
+	pluginAutocommands.mu.Lock()
+	defer pluginAutocommands.mu.Unlock()
+
+	stateEvents := pluginAutocommands.states[L]
+	if stateEvents == nil {
+		return 0
+	}
+	if callback == nil {
+		delete(stateEvents, event)
+	} else {
+		cmds := stateEvents[event]
+		filtered := cmds[:0]
+		for _, cmd := range cmds {
+			if cmd.Callback != callback {
+				filtered = append(filtered, cmd)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(stateEvents, event)
+		} else {
+			stateEvents[event] = filtered
+		}
+	}
+	if len(stateEvents) == 0 {
+		delete(pluginAutocommands.states, L)
+	}
 	return 0
 }
 
@@ -109,15 +149,22 @@ func autocmdClear(L *lua.LState) int {
 		event = L.CheckString(1)
 	}
 
-	autocommandsMu.Lock()
-	defer autocommandsMu.Unlock()
+	pluginAutocommands.mu.Lock()
+	defer pluginAutocommands.mu.Unlock()
 
 	if event == "" {
-		autocommands = make(map[string][]Autocommand)
-	} else {
-		delete(autocommands, event)
+		delete(pluginAutocommands.states, L)
+		return 0
 	}
 
+	stateEvents := pluginAutocommands.states[L]
+	if stateEvents == nil {
+		return 0
+	}
+	delete(stateEvents, event)
+	if len(stateEvents) == 0 {
+		delete(pluginAutocommands.states, L)
+	}
 	return 0
 }
 
@@ -128,34 +175,186 @@ func autocmdList(L *lua.LState) int {
 		event = L.CheckString(1)
 	}
 
-	autocommandsMu.RLock()
-	defer autocommandsMu.RUnlock()
+	pluginAutocommands.mu.RLock()
+	defer pluginAutocommands.mu.RUnlock()
 
 	result := L.NewTable()
-	if event == "" {
-		for ev, cmds := range autocommands {
-			cmdList := L.NewTable()
-			for i, cmd := range cmds {
-				cmdList.RawSetInt(i+1, lua.LString(cmd.Event))
-			}
-			result.RawSetString(ev, cmdList)
-		}
-	} else {
-		if cmds, ok := autocommands[event]; ok {
-			for i, cmd := range cmds {
-				result.RawSetInt(i+1, lua.LString(cmd.Event))
-			}
-		}
+	stateEvents := pluginAutocommands.states[L]
+	if stateEvents == nil {
+		L.Push(result)
+		return 1
 	}
 
+	appendCmd := func(cmd Autocommand) {
+		entry := L.NewTable()
+		L.SetField(entry, "event", lua.LString(cmd.Event))
+		L.SetField(entry, "pattern", lua.LString(cmd.Pattern))
+		L.SetField(entry, "group", lua.LString(cmd.Group))
+		L.SetField(entry, "once", lua.LBool(cmd.Once))
+		result.Append(entry)
+	}
+
+	if event != "" {
+		for _, cmd := range stateEvents[event] {
+			appendCmd(cmd)
+		}
+		L.Push(result)
+		return 1
+	}
+
+	events := make([]string, 0, len(stateEvents))
+	for name := range stateEvents {
+		events = append(events, name)
+	}
+	// Stable ordering makes tests and plugin behavior deterministic.
+	slices.Sort(events)
+	for _, name := range events {
+		for _, cmd := range stateEvents[name] {
+			appendCmd(cmd)
+		}
+	}
 	L.Push(result)
 	return 1
 }
 
-// TriggerEvent triggers all autocommands for an event.
-// Note: This requires proper integration with the app to get the Lua state.
-// For now, this is a placeholder.
-func TriggerEvent(event string) {
-	// Placeholder - would need proper Lua state management
-	_ = event
+func (r *autocmdRegistry) ensureStateLocked(L *lua.LState) map[string][]Autocommand {
+	stateEvents := r.states[L]
+	if stateEvents == nil {
+		stateEvents = make(map[string][]Autocommand)
+		r.states[L] = stateEvents
+	}
+	return stateEvents
+}
+
+func clearAutocommandsForState(L *lua.LState) {
+	pluginAutocommands.mu.Lock()
+	defer pluginAutocommands.mu.Unlock()
+	delete(pluginAutocommands.states, L)
+}
+
+func triggerAutocommandsForState(L *lua.LState, ctx EventContext) error {
+	pluginAutocommands.mu.RLock()
+	stateEvents := pluginAutocommands.states[L]
+	if stateEvents == nil {
+		pluginAutocommands.mu.RUnlock()
+		return nil
+	}
+	candidates := append([]Autocommand(nil), stateEvents[ctx.Event]...)
+	pluginAutocommands.mu.RUnlock()
+
+	var firstErr error
+	var onceCallbacks []*lua.LFunction
+	for _, cmd := range candidates {
+		if !matchesAutocmdPattern(cmd.Pattern, ctx) {
+			continue
+		}
+		if err := callAutocommand(L, cmd, ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if cmd.Once {
+			onceCallbacks = append(onceCallbacks, cmd.Callback)
+		}
+	}
+
+	if len(onceCallbacks) > 0 {
+		removeOnceAutocommands(L, ctx.Event, onceCallbacks)
+	}
+
+	return firstErr
+}
+
+func callAutocommand(L *lua.LState, cmd Autocommand, ctx EventContext) error {
+	eventTable := L.NewTable()
+	L.SetField(eventTable, "event", lua.LString(ctx.Event))
+	if ctx.FilePath != "" {
+		L.SetField(eventTable, "file", lua.LString(ctx.FilePath))
+	}
+	if ctx.RelativePath != "" {
+		L.SetField(eventTable, "relative_path", lua.LString(ctx.RelativePath))
+	}
+	return L.CallByParam(lua.P{
+		Fn:      cmd.Callback,
+		NRet:    0,
+		Protect: true,
+	}, eventTable)
+}
+
+func removeOnceAutocommands(L *lua.LState, event string, callbacks []*lua.LFunction) {
+	pluginAutocommands.mu.Lock()
+	defer pluginAutocommands.mu.Unlock()
+
+	stateEvents := pluginAutocommands.states[L]
+	if stateEvents == nil {
+		return
+	}
+	cmds := stateEvents[event]
+	if len(cmds) == 0 {
+		return
+	}
+	filtered := cmds[:0]
+	for _, cmd := range cmds {
+		if containsAutocmdCallback(callbacks, cmd.Callback) {
+			continue
+		}
+		filtered = append(filtered, cmd)
+	}
+	if len(filtered) == 0 {
+		delete(stateEvents, event)
+	} else {
+		stateEvents[event] = filtered
+	}
+	if len(stateEvents) == 0 {
+		delete(pluginAutocommands.states, L)
+	}
+}
+
+func containsAutocmdCallback(callbacks []*lua.LFunction, callback *lua.LFunction) bool {
+	for _, fn := range callbacks {
+		if fn == callback {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAutocmdPattern(pattern string, ctx EventContext) bool {
+	if pattern == "" {
+		return true
+	}
+	pattern = filepath.ToSlash(pattern)
+	for _, candidate := range autocmdMatchCandidates(ctx) {
+		ok, err := path.Match(pattern, candidate)
+		if err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+func autocmdMatchCandidates(ctx EventContext) []string {
+	candidates := make([]string, 0, 4)
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+		value = filepath.ToSlash(value)
+		for _, existing := range candidates {
+			if existing == value {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+		base := path.Base(value)
+		if base != value {
+			for _, existing := range candidates {
+				if existing == base {
+					return
+				}
+			}
+			candidates = append(candidates, base)
+		}
+	}
+	add(ctx.RelativePath)
+	add(ctx.FilePath)
+	return candidates
 }

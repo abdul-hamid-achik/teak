@@ -9,14 +9,16 @@ import (
 
 // Manager manages multiple LSP clients, one per language server.
 type Manager struct {
-	clients  map[string]*Client // keyed by server command
-	configs  []ServerConfig
-	rootDir  string
-	msgChan  chan any
-	mu       sync.Mutex
-	retries  map[string]int
-	starting map[string]bool // guards against concurrent starts
-	closed   bool
+	clients    map[string]*Client // keyed by server command
+	configs    []ServerConfig
+	rootDir    string
+	msgChan    chan any
+	mu         sync.Mutex
+	retries    map[string]int
+	starting   map[string]chan struct{} // guards against concurrent starts
+	closed     bool
+	newClient  func(ServerConfig, string, chan<- any) (*Client, error)
+	initClient func(*Client) error
 }
 
 const maxRetries = 3
@@ -26,12 +28,16 @@ const maxRetries = 3
 func NewManager(rootDir string, userConfigs []ServerConfig) *Manager {
 	configs := MergeConfigs(DefaultConfigs(), userConfigs)
 	return &Manager{
-		clients:  make(map[string]*Client),
-		configs:  configs,
-		rootDir:  rootDir,
-		msgChan:  make(chan any, 100),
-		retries:  make(map[string]int),
-		starting: make(map[string]bool),
+		clients:   make(map[string]*Client),
+		configs:   configs,
+		rootDir:   rootDir,
+		msgChan:   make(chan any, 100),
+		retries:   make(map[string]int),
+		starting:  make(map[string]chan struct{}),
+		newClient: NewClient,
+		initClient: func(client *Client) error {
+			return client.Initialize()
+		},
 	}
 }
 
@@ -49,64 +55,65 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 		return nil, nil // No server for this file type
 	}
 
-	m.mu.Lock()
+	for {
+		m.mu.Lock()
 
-	// Check if already running and ready
-	if client, ok := m.clients[cfg.Command]; ok && client.IsReady() {
+		// Check if already running and ready
+		if client, ok := m.clients[cfg.Command]; ok && client.IsReady() {
+			m.mu.Unlock()
+			return client, nil
+		}
+
+		// Check if disabled due to too many retries
+		if m.retries[cfg.Command] >= maxRetries {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("language server %s disabled after %d failures", cfg.Command, maxRetries)
+		}
+
+		if waitCh, ok := m.starting[cfg.Command]; ok {
+			m.mu.Unlock()
+			<-waitCh
+			continue
+		}
+
+		waitCh := make(chan struct{})
+		m.starting[cfg.Command] = waitCh
 		m.mu.Unlock()
+
+		// Create client outside lock
+		client, err := m.newClient(*cfg, m.rootDir, m.msgChan)
+		if err != nil {
+			m.mu.Lock()
+			m.retries[cfg.Command]++
+			close(waitCh)
+			delete(m.starting, cfg.Command)
+			m.mu.Unlock()
+			log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
+			return nil, err
+		}
+
+		// Initialize SYNCHRONOUSLY to ensure client is fully ready before registration
+		// This prevents race conditions where ClientForFile gets an uninitialized client
+		if err := m.initClient(client); err != nil {
+			m.mu.Lock()
+			m.retries[cfg.Command]++
+			close(waitCh)
+			delete(m.starting, cfg.Command)
+			m.mu.Unlock()
+			log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
+			client.Shutdown()
+			return nil, err
+		}
+
+		// Only register AFTER successful initialization
+		m.mu.Lock()
+		m.clients[cfg.Command] = client
+		close(waitCh)
+		delete(m.starting, cfg.Command)
+		m.mu.Unlock()
+
 		return client, nil
 	}
-
-	// Check if disabled due to too many retries
-	if m.retries[cfg.Command] >= maxRetries {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("language server %s disabled after %d failures", cfg.Command, maxRetries)
-	}
-
-	// Remove any failed/initializing client to retry
-	if _, ok := m.clients[cfg.Command]; ok {
-		delete(m.clients, cfg.Command)
-	}
-
-	// Guard against concurrent starts for the same server
-	if m.starting[cfg.Command] {
-		m.mu.Unlock()
-		return nil, nil
-	}
-	m.starting[cfg.Command] = true
-
-	m.mu.Unlock()
-
-	// Create client outside lock
-	client, err := NewClient(*cfg, m.rootDir, m.msgChan)
-	if err != nil {
-		m.mu.Lock()
-		m.retries[cfg.Command]++
-		delete(m.starting, cfg.Command)
-		m.mu.Unlock()
-		log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
-		return nil, err
-	}
-
-	// Initialize SYNCHRONOUSLY to ensure client is fully ready before registration
-	// This prevents race conditions where ClientForFile gets an uninitialized client
-	if err := client.Initialize(); err != nil {
-		m.mu.Lock()
-		m.retries[cfg.Command]++
-		delete(m.starting, cfg.Command)
-		m.mu.Unlock()
-		log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
-		client.Shutdown()
-		return nil, err
-	}
-
-	// Only register AFTER successful initialization
-	m.mu.Lock()
-	m.clients[cfg.Command] = client
-	delete(m.starting, cfg.Command)
-	m.mu.Unlock()
-
-	return client, nil
 }
 
 // ClientForFile returns the active and ready LSP client for a given file, or nil.

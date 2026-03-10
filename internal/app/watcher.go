@@ -10,6 +10,11 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+const (
+	debounceWindow    = 100 * time.Millisecond
+	debounceRetention = 2 * time.Minute
+)
+
 // FileChangedMsg is sent when an open file is modified externally.
 type FileChangedMsg struct {
 	Path string
@@ -23,10 +28,10 @@ type TreeChangedMsg struct {
 
 // fileWatcher watches open files and the project directory for external changes.
 type fileWatcher struct {
-	watcher   *fsnotify.Watcher
-	rootDir   string
-	msgChan   chan tea.Msg
-	debounce  map[string]time.Time
+	watcher  *fsnotify.Watcher
+	rootDir  string
+	msgChan  chan tea.Msg
+	debounce map[string]time.Time
 }
 
 func newFileWatcher(rootDir string) (*fileWatcher, error) {
@@ -42,7 +47,7 @@ func newFileWatcher(rootDir string) (*fileWatcher, error) {
 	}
 	// Watch root directory for tree changes
 	if rootDir != "" {
-		fw.watchDirRecursive(rootDir, 0)
+		fw.watchDirRecursive(rootDir)
 		// Watch .git directory for commit/push/branch changes
 		gitDir := filepath.Join(rootDir, ".git")
 		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
@@ -61,12 +66,8 @@ func newFileWatcher(rootDir string) (*fileWatcher, error) {
 	return fw, nil
 }
 
-// watchDirRecursive adds a directory and its immediate subdirectories to the watcher.
-// maxDepth limits recursion to avoid watching too deep.
-func (fw *fileWatcher) watchDirRecursive(dir string, depth int) {
-	if depth > 3 {
-		return
-	}
+// watchDirRecursive adds a directory and all visible subdirectories to the watcher.
+func (fw *fileWatcher) watchDirRecursive(dir string) {
 	_ = fw.watcher.Add(dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -74,7 +75,7 @@ func (fw *fileWatcher) watchDirRecursive(dir string, depth int) {
 	}
 	for _, e := range entries {
 		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			fw.watchDirRecursive(filepath.Join(dir, e.Name()), depth+1)
+			fw.watchDirRecursive(filepath.Join(dir, e.Name()))
 		}
 	}
 }
@@ -94,6 +95,14 @@ func (fw *fileWatcher) WatchDir(dir string) {
 	_ = fw.watcher.Add(dir)
 }
 
+func (fw *fileWatcher) pruneDebounceEntries(now time.Time) {
+	for path, last := range fw.debounce {
+		if now.Sub(last) > debounceRetention {
+			delete(fw.debounce, path)
+		}
+	}
+}
+
 func (fw *fileWatcher) listen() {
 	for {
 		select {
@@ -103,9 +112,10 @@ func (fw *fileWatcher) listen() {
 			}
 			// Debounce: skip if we saw this path in the last 100ms
 			now := time.Now()
-			if last, ok := fw.debounce[event.Name]; ok && now.Sub(last) < 100*time.Millisecond {
+			if last, ok := fw.debounce[event.Name]; ok && now.Sub(last) < debounceWindow {
 				continue
 			}
+			fw.pruneDebounceEntries(now)
 			fw.debounce[event.Name] = now
 
 			// Detect .git directory changes (commit, push, branch switch)
@@ -128,7 +138,7 @@ func (fw *fileWatcher) listen() {
 				// If a new directory was created, watch it too
 				if event.Has(fsnotify.Create) {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						fw.WatchDir(event.Name)
+						fw.watchDirRecursive(event.Name)
 					}
 				}
 			}

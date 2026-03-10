@@ -61,15 +61,9 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 	case acp.AgentSessionInfoMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentModelChangedMsg:
-		m.agentPanel, _ = m.agentPanel.Update(acp.AgentSessionInfoMsg{
-			Models:       m.agentPanel.AvailableModels(),
-			CurrentModel: inner.ModelId,
-		})
+		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentModeChangedMsg:
-		m.agentPanel, _ = m.agentPanel.Update(acp.AgentSessionInfoMsg{
-			Modes:       m.agentPanel.AvailableModes(),
-			CurrentMode: inner.ModeId,
-		})
+		m.agentPanel, _ = m.agentPanel.Update(inner)
 		m.agentPanel.AddSystemMessage("Mode changed to " + string(inner.ModeId))
 	case acp.AgentErrorMsg:
 		m.agentPanel.AddSystemMessage("Error: " + inner.Err.Error())
@@ -338,7 +332,7 @@ func (m Model) openAgentFilePicker() tea.Cmd {
 	// For now, show empty picker — it will populate when files arrive
 	picker := overlay.NewPicker("Attach File (loading...)", nil, m.theme, "agent-file-picker")
 	m.overlayStack.Push(picker)
-	return quickOpenCmd(m.rootDir)
+	return quickOpenCmd(m.rootDir, m.fileListGeneration)
 }
 
 // filesToAgentPickerItems converts file paths to picker items with agent-specific Value.

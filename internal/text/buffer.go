@@ -174,38 +174,65 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 			b.lastChange = &EditChange{
 				StartLine: start.Line, StartCol: start.Col,
 				EndLine: end.Line, EndCol: end.Col,
-				Text:    string(text),
+				Text: string(text),
 			}
 			return
 		}
+
+		b.undo.Save(b.rope, b.Cursor, false)
+		offset := b.rope.PositionToOffset(b.Cursor)
+		b.rope = b.rope.Insert(offset, text)
+		b.dirty = true
+		b.version++
+		b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+		b.Selections.selections[0] = Selection{Anchor: b.Cursor, Head: b.Cursor}
+		b.lastChange = &EditChange{
+			StartLine: sel.Head.Line, StartCol: sel.Head.Col,
+			EndLine: sel.Head.Line, EndCol: sel.Head.Col,
+			Text: string(text),
+		}
+		return
 	}
 
 	// Multiple selections: insert at each cursor
 	b.undo.Save(b.rope, b.Cursor, false)
 
-	// Sort selections in reverse order (end to beginning)
-	selections := make([]Selection, len(b.Selections.selections))
-	copy(selections, b.Selections.selections)
-	sort.Slice(selections, func(i, j int) bool {
-		si := selections[i].Head
-		sj := selections[j].Head
-		if si.Line != sj.Line {
-			return si.Line > sj.Line // Reverse order
+	originalSelections := make([]Selection, len(b.Selections.selections))
+	copy(originalSelections, b.Selections.selections)
+	originalOffsets := make([]int, len(originalSelections))
+	for i, sel := range originalSelections {
+		originalOffsets[i] = b.rope.PositionToOffset(sel.Head)
+	}
+
+	// Sort cursor indexes in reverse order so earlier inserts don't disturb later offsets.
+	indexes := make([]int, len(originalSelections))
+	for i := range indexes {
+		indexes[i] = i
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		oi := originalOffsets[indexes[i]]
+		oj := originalOffsets[indexes[j]]
+		if oi != oj {
+			return oi > oj
 		}
-		return si.Col > sj.Col
+		return indexes[i] > indexes[j]
 	})
 
 	// Apply insertions from end to beginning
-	for _, sel := range selections {
-		offset := b.rope.PositionToOffset(sel.Head)
-		b.rope = b.rope.Insert(offset, text)
+	for _, idx := range indexes {
+		b.rope = b.rope.Insert(originalOffsets[idx], text)
 	}
 
-	// Update all cursor positions
+	// Rebase each cursor against the original document positions.
 	for i := range b.Selections.selections {
+		newOffset := originalOffsets[i]
+		for _, otherOffset := range originalOffsets {
+			if otherOffset <= originalOffsets[i] {
+				newOffset += len(text)
+			}
+		}
+		newHead := b.rope.OffsetToPosition(newOffset)
 		sel := &b.Selections.selections[i]
-		offset := b.rope.PositionToOffset(sel.Head) + len(text)
-		newHead := b.rope.OffsetToPosition(offset)
 		sel.Anchor = newHead
 		sel.Head = newHead
 	}
@@ -216,13 +243,8 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 	b.dirty = true
 	b.version++
 
-	// For LSP sync, use primary selection
-	primary := b.Selections.Primary()
-	b.lastChange = &EditChange{
-		StartLine: primary.Head.Line, StartCol: primary.Head.Col,
-		EndLine: primary.Head.Line, EndCol: primary.Head.Col,
-		Text:    string(text),
-	}
+	// Multi-cursor edits require a full-sync fallback for LSP.
+	b.lastChange = nil
 }
 
 // InsertNewline inserts a newline at the cursor.
@@ -355,45 +377,68 @@ func (b *Buffer) DeleteSelection() {
 		b.lastChange = &EditChange{
 			StartLine: start.Line, StartCol: start.Col,
 			EndLine: end.Line, EndCol: end.Col,
-			Text:    "",
+			Text: "",
 		}
 		return
 	}
 
 	// Multiple selections: delete all
+	originalSelections := make([]Selection, len(b.Selections.selections))
+	copy(originalSelections, b.Selections.selections)
+	primarySelection := originalSelections[b.Selections.primary]
+	primaryStart, _ := primarySelection.Ordered()
+	primaryStartOff := b.rope.PositionToOffset(primaryStart)
+
 	b.undo.Save(b.rope, b.Cursor, false)
 
-	// Sort in reverse order
-	selections := make([]Selection, len(b.Selections.selections))
-	copy(selections, b.Selections.selections)
-	sort.Slice(selections, func(i, j int) bool {
-		si, _ := selections[i].Ordered()
-		sj, _ := selections[j].Ordered()
-		if si.Line != sj.Line {
-			return si.Line > sj.Line
+	type selectionRange struct {
+		start int
+		end   int
+	}
+	ranges := make([]selectionRange, 0, len(originalSelections))
+	for _, sel := range originalSelections {
+		if sel.IsEmpty() {
+			continue
 		}
-		return si.Col > sj.Col
+		start, end := sel.Ordered()
+		startOff := b.rope.PositionToOffset(start)
+		endOff := b.rope.PositionToOffset(end)
+		if endOff > startOff {
+			ranges = append(ranges, selectionRange{start: startOff, end: endOff})
+		}
+	}
+	if len(ranges) == 0 {
+		b.Selections = NewSelections(primaryStart)
+		b.Cursor = primaryStart
+		return
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start != ranges[j].start {
+			return ranges[i].start > ranges[j].start
+		}
+		return ranges[i].end > ranges[j].end
 	})
 
 	// Delete from end to beginning
-	for _, sel := range selections {
-		if !sel.IsEmpty() {
-			start, end := sel.Ordered()
-			startOff := b.rope.PositionToOffset(start)
-			endOff := b.rope.PositionToOffset(end)
-			b.rope = b.rope.Delete(startOff, endOff-startOff)
+	deletedBeforePrimary := 0
+	for _, r := range ranges {
+		if r.end <= primaryStartOff {
+			deletedBeforePrimary += r.end - r.start
 		}
-	}
-
-	// Collapse all selections to cursors
-	for i := range b.Selections.selections {
-		sel := &b.Selections.selections[i]
-		sel.Anchor = sel.Head
+		b.rope = b.rope.Delete(r.start, r.end-r.start)
 	}
 
 	b.dirty = true
 	b.version++
-	b.Selections.Clear()
+
+	newPrimaryOff := primaryStartOff - deletedBeforePrimary
+	if newPrimaryOff < 0 {
+		newPrimaryOff = 0
+	}
+	newPrimary := b.rope.OffsetToPosition(newPrimaryOff)
+	b.Cursor = newPrimary
+	b.Selections = NewSelections(newPrimary)
+	b.lastChange = nil
 }
 
 // SetCursor sets the cursor position and updates the primary selection.
@@ -1025,18 +1070,18 @@ func (b *Buffer) SplitSelectionIntoLines() {
 	// Add one selection per line
 	for line := startLine; line <= endLine; line++ {
 		lineLen := b.rope.LineLen(line)
-		
+
 		// Determine column range for this line
 		colStart := 0
 		colEnd := lineLen
-		
+
 		if line == startLine {
 			colStart = start.Col
 		}
 		if line == endLine {
 			colEnd = end.Col
 		}
-		
+
 		if colStart < colEnd {
 			b.Selections.Add(Selection{
 				Anchor: Position{Line: line, Col: colStart},

@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -275,32 +276,10 @@ func TestStateJSONFormat(t *testing.T) {
 	}
 }
 
-// Helper functions for testing with custom paths
-func saveToPath(state State, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-func loadFromPath(path string) (State, error) {
-	var state State
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return state, err
-	}
-	err = json.Unmarshal(data, &state)
-	return state, err
-}
-
 // TestPathWithUserHomeDir tests Path when home dir is available
 func TestPathWithUserHomeDir(t *testing.T) {
 	path := Path()
-	
+
 	// Should be in home dir or temp dir
 	home, err := os.UserHomeDir()
 	if err == nil {
@@ -322,7 +301,7 @@ func TestSaveAndLoadRealFunctions(t *testing.T) {
 	// Temporarily override the path for testing
 	originalPath := Path()
 	testPath := filepath.Join(t.TempDir(), "test-session.json")
-	
+
 	// We can't easily override Path(), so we test with helper functions
 	// This test documents that Save/Load use Path() internally
 	state := State{
@@ -331,12 +310,61 @@ func TestSaveAndLoadRealFunctions(t *testing.T) {
 		ActiveTab: 0,
 		Tabs:      []TabState{{FilePath: "/test.go"}},
 	}
-	
+
 	// Test that Save would work with proper path setup
 	// (In real usage, Path() returns the actual session path)
 	_ = state
 	_ = originalPath
 	_ = testPath
+}
+
+func TestSaveToPath_PreservesExistingFileOnTempWriteFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	testPath := filepath.Join(tmpDir, "session.json")
+
+	original := State{
+		Version:   1,
+		RootDir:   "/original",
+		ActiveTab: 0,
+		Tabs:      []TabState{{FilePath: "/original.go"}},
+	}
+	if err := saveToPath(original, testPath); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	oldWriteFile := writeFile
+	writeFile = func(string, []byte, os.FileMode) error {
+		return errors.New("write failed")
+	}
+	defer func() {
+		writeFile = oldWriteFile
+	}()
+
+	updated := State{
+		Version:   2,
+		RootDir:   "/updated",
+		ActiveTab: 0,
+		Tabs:      []TabState{{FilePath: "/updated.go"}},
+	}
+	if err := saveToPath(updated, testPath); err == nil {
+		t.Fatal("expected saveToPath to fail when temporary write fails")
+	}
+
+	loaded, err := loadFromPath(testPath)
+	if err != nil {
+		t.Fatalf("loadFromPath after failed save: %v", err)
+	}
+	if loaded.RootDir != original.RootDir {
+		t.Fatalf("expected existing session file to be preserved, got %q", loaded.RootDir)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(tmpDir, "session.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected temporary files to be cleaned up, found %v", matches)
+	}
 }
 
 // TestTabStateAllFields tests TabState with all fields set
@@ -348,7 +376,7 @@ func TestTabStateAllFields(t *testing.T) {
 		ScrollY:    500,
 		Pinned:     true,
 	}
-	
+
 	if tab.FilePath != "/path/to/file.go" {
 		t.Errorf("FilePath mismatch")
 	}
@@ -372,7 +400,7 @@ func TestTabStateUnpinned(t *testing.T) {
 		FilePath: "/file.go",
 		Pinned:   false,
 	}
-	
+
 	if tab.Pinned {
 		t.Error("Pinned should be false")
 	}
@@ -381,7 +409,7 @@ func TestTabStateUnpinned(t *testing.T) {
 // TestTabStateZeroValues tests TabState with zero values
 func TestTabStateZeroValues(t *testing.T) {
 	var tab TabState
-	
+
 	if tab.FilePath != "" {
 		t.Errorf("Expected empty FilePath, got %q", tab.FilePath)
 	}
@@ -402,7 +430,7 @@ func TestTabStateZeroValues(t *testing.T) {
 // TestStateWithZeroValues tests State with zero values
 func TestStateWithZeroValues(t *testing.T) {
 	var state State
-	
+
 	if state.Version != 0 {
 		t.Errorf("Expected Version 0, got %d", state.Version)
 	}
@@ -423,9 +451,9 @@ func TestStateWithLargeValues(t *testing.T) {
 		Version:   999,
 		RootDir:   "/very/long/path/to/project",
 		ActiveTab: 100,
-		Tabs: make([]TabState, 1000),
+		Tabs:      make([]TabState, 1000),
 	}
-	
+
 	for i := range state.Tabs {
 		state.Tabs[i] = TabState{
 			FilePath:   "/file.go",
@@ -435,20 +463,20 @@ func TestStateWithLargeValues(t *testing.T) {
 			Pinned:     i%2 == 0,
 		}
 	}
-	
+
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	err := saveToPath(state, testPath)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	
+
 	loaded, err := loadFromPath(testPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	
+
 	if len(loaded.Tabs) != 1000 {
 		t.Errorf("Expected 1000 tabs, got %d", len(loaded.Tabs))
 	}
@@ -465,10 +493,10 @@ func TestSaveInvalidJSON(t *testing.T) {
 		ActiveTab: 0,
 		Tabs:      []TabState{},
 	}
-	
+
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	err := saveToPath(state, testPath)
 	if err != nil {
 		t.Fatalf("Save should succeed, got: %v", err)
@@ -479,13 +507,13 @@ func TestSaveInvalidJSON(t *testing.T) {
 func TestLoadCorruptedJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	// Write corrupted JSON
 	err := os.WriteFile(testPath, []byte("{ invalid json }"), 0o644)
 	if err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
-	
+
 	_, err = loadFromPath(testPath)
 	if err == nil {
 		t.Error("Expected error when loading corrupted JSON")
@@ -496,13 +524,13 @@ func TestLoadCorruptedJSON(t *testing.T) {
 func TestLoadEmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	// Write empty file
 	err := os.WriteFile(testPath, []byte(""), 0o644)
 	if err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
-	
+
 	_, err = loadFromPath(testPath)
 	if err == nil {
 		t.Error("Expected error when loading empty file")
@@ -513,7 +541,7 @@ func TestLoadEmptyFile(t *testing.T) {
 func TestSaveWithUnicodePaths(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	state := State{
 		Version:   1,
 		RootDir:   "/项目",
@@ -523,17 +551,17 @@ func TestSaveWithUnicodePaths(t *testing.T) {
 			{FilePath: "/🚀.go"},
 		},
 	}
-	
+
 	err := saveToPath(state, testPath)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	
+
 	loaded, err := loadFromPath(testPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	
+
 	if loaded.RootDir != state.RootDir {
 		t.Errorf("RootDir mismatch: %q != %q", loaded.RootDir, state.RootDir)
 	}
@@ -546,7 +574,7 @@ func TestSaveWithUnicodePaths(t *testing.T) {
 func TestSaveWithWindowsPaths(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	state := State{
 		Version:   1,
 		RootDir:   `C:\Users\test\project`,
@@ -555,17 +583,17 @@ func TestSaveWithWindowsPaths(t *testing.T) {
 			{FilePath: `C:\Users\test\file.go`},
 		},
 	}
-	
+
 	err := saveToPath(state, testPath)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	
+
 	loaded, err := loadFromPath(testPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	
+
 	if loaded.RootDir != state.RootDir {
 		t.Errorf("RootDir mismatch: %q != %q", loaded.RootDir, state.RootDir)
 	}
@@ -575,27 +603,27 @@ func TestSaveWithWindowsPaths(t *testing.T) {
 func TestSaveOverwrite(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	// Save initial state
 	state1 := State{Version: 1, RootDir: "/first", Tabs: []TabState{}}
 	err := saveToPath(state1, testPath)
 	if err != nil {
 		t.Fatalf("First save failed: %v", err)
 	}
-	
+
 	// Overwrite with new state
 	state2 := State{Version: 2, RootDir: "/second", Tabs: []TabState{{FilePath: "/new.go"}}}
 	err = saveToPath(state2, testPath)
 	if err != nil {
 		t.Fatalf("Second save failed: %v", err)
 	}
-	
+
 	// Load and verify
 	loaded, err := loadFromPath(testPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	
+
 	if loaded.Version != 2 {
 		t.Errorf("Expected Version 2, got %d", loaded.Version)
 	}
@@ -612,11 +640,11 @@ func TestStateCopy(t *testing.T) {
 		ActiveTab: 0,
 		Tabs:      []TabState{{FilePath: "/file.go"}},
 	}
-	
+
 	copy := original
 	copy.Version = 2
 	copy.RootDir = "/modified"
-	
+
 	if original.Version != 1 {
 		t.Error("Expected original to be unchanged")
 	}
@@ -634,18 +662,18 @@ func TestTabStateJSONMarshal(t *testing.T) {
 		ScrollY:    100,
 		Pinned:     true,
 	}
-	
+
 	data, err := json.Marshal(tab)
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)
 	}
-	
+
 	var unmarshaled TabState
 	err = json.Unmarshal(data, &unmarshaled)
 	if err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
-	
+
 	if unmarshaled.FilePath != tab.FilePath {
 		t.Errorf("FilePath mismatch")
 	}
@@ -674,18 +702,18 @@ func TestStateJSONMarshal(t *testing.T) {
 			{FilePath: "/file2.go", Pinned: false},
 		},
 	}
-	
+
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)
 	}
-	
+
 	var unmarshaled State
 	err = json.Unmarshal(data, &unmarshaled)
 	if err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
-	
+
 	if unmarshaled.Version != state.Version {
 		t.Errorf("Version mismatch")
 	}
@@ -703,7 +731,7 @@ func TestStateJSONMarshal(t *testing.T) {
 // TestPathEndsWithSessionJSON tests that Path always ends with session.json
 func TestPathEndsWithSessionJSON(t *testing.T) {
 	path := Path()
-	
+
 	if filepath.Base(path) != "session.json" {
 		t.Errorf("Expected path to end with 'session.json', got %q", path)
 	}
@@ -713,7 +741,7 @@ func TestPathEndsWithSessionJSON(t *testing.T) {
 func TestPathDirectoryExists(t *testing.T) {
 	path := Path()
 	dir := filepath.Dir(path)
-	
+
 	// The directory should be creatable
 	err := os.MkdirAll(dir, 0o755)
 	if err != nil {
@@ -725,18 +753,18 @@ func TestPathDirectoryExists(t *testing.T) {
 func TestSavePermission(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	state := State{Version: 1, Tabs: []TabState{}}
 	err := saveToPath(state, testPath)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	
+
 	info, err := os.Stat(testPath)
 	if err != nil {
 		t.Fatalf("Stat failed: %v", err)
 	}
-	
+
 	// Check file permissions (should be 0o644)
 	expectedPerm := os.FileMode(0o644)
 	if info.Mode().Perm()&expectedPerm != expectedPerm {
@@ -748,7 +776,7 @@ func TestSavePermission(t *testing.T) {
 func TestConcurrentAccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "session.json")
-	
+
 	// Multiple saves
 	for i := 0; i < 10; i++ {
 		state := State{
@@ -757,19 +785,19 @@ func TestConcurrentAccess(t *testing.T) {
 			ActiveTab: 0,
 			Tabs:      []TabState{{FilePath: "/file.go"}},
 		}
-		
+
 		err := saveToPath(state, testPath)
 		if err != nil {
 			t.Fatalf("Save %d failed: %v", i, err)
 		}
 	}
-	
+
 	// Final load
 	loaded, err := loadFromPath(testPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	
+
 	if loaded.Version != 9 {
 		t.Errorf("Expected Version 9, got %d", loaded.Version)
 	}

@@ -163,6 +163,7 @@ func (m *Manager) Start() error {
 
 	// Send session info to panel
 	m.msgChan <- AgentSessionInfoMsg{
+		SessionID:    m.sessionID,
 		Models:       m.models,
 		CurrentModel: m.currentModel,
 		Modes:        m.modes,

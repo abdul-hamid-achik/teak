@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 )
@@ -111,7 +112,7 @@ func TestParseMessageMultiple(t *testing.T) {
 
 	// The rest should be the second message
 	t.Logf("rest1 = %q", string(rest1))
-	
+
 	// Parse second message from rest
 	content2, rest2, ok2 := parseMessage(rest1)
 	if !ok2 {
@@ -124,5 +125,70 @@ func TestParseMessageMultiple(t *testing.T) {
 
 	if len(rest2) != 0 {
 		t.Errorf("expected no remaining data, got %q", string(rest2))
+	}
+}
+
+func TestParseWorkspaceEditResultSupportsDocumentChanges(t *testing.T) {
+	result := []byte(`{
+		"documentChanges": [
+			{
+				"textDocument": {"uri": "file:///tmp/test.go", "version": 1},
+				"edits": [
+					{
+						"range": {
+							"start": {"line": 1, "character": 2},
+							"end": {"line": 1, "character": 5}
+						},
+						"newText": "name"
+					}
+				]
+			}
+		]
+	}`)
+
+	edits, err := parseWorkspaceEditResult(result)
+	if err != nil {
+		t.Fatalf("parseWorkspaceEditResult() error = %v", err)
+	}
+	if len(edits.Changes) != 1 {
+		t.Fatalf("expected 1 file edit set, got %d", len(edits.Changes))
+	}
+	fileEdits := edits.Changes["file:///tmp/test.go"]
+	if len(fileEdits) != 1 {
+		t.Fatalf("expected 1 text edit, got %d", len(fileEdits))
+	}
+	if fileEdits[0].NewText != "name" {
+		t.Fatalf("NewText = %q, want %q", fileEdits[0].NewText, "name")
+	}
+	if len(edits.DocumentChanges) != 1 {
+		t.Fatalf("expected ordered document changes to be preserved, got %d", len(edits.DocumentChanges))
+	}
+}
+
+func TestWorkspaceEditUnmarshalFileOperation(t *testing.T) {
+	var edit WorkspaceEdit
+	if err := json.Unmarshal([]byte(`{
+		"documentChanges": [
+			{
+				"kind": "rename",
+				"oldUri": "file:///tmp/old.go",
+				"newUri": "file:///tmp/new.go"
+			}
+		]
+	}`), &edit); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(edit.DocumentChanges) != 1 {
+		t.Fatalf("expected 1 document change, got %d", len(edit.DocumentChanges))
+	}
+	op := edit.DocumentChanges[0].FileOperation
+	if op == nil {
+		t.Fatal("expected file operation to be parsed")
+	}
+	if op.Kind != FileOpRename {
+		t.Fatalf("Kind = %q, want %q", op.Kind, FileOpRename)
+	}
+	if op.NewURI != "file:///tmp/new.go" {
+		t.Fatalf("NewURI = %q", op.NewURI)
 	}
 }

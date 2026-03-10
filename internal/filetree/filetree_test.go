@@ -58,9 +58,9 @@ func TestEntryStruct(t *testing.T) {
 // TestEntryWithChildren tests Entry with children
 func TestEntryWithChildren(t *testing.T) {
 	entry := Entry{
-		Name:  "test",
-		Path:  "/test",
-		IsDir: true,
+		Name:     "test",
+		Path:     "/test",
+		IsDir:    true,
 		Children: []Entry{{Name: "file1.go", IsDir: false}},
 		Expanded: true,
 	}
@@ -496,6 +496,34 @@ func TestModelCachedFlat(t *testing.T) {
 	}
 }
 
+func TestFlatEntriesCachePersistsAcrossCopies(t *testing.T) {
+	theme := ui.DefaultTheme()
+	tmpDir := t.TempDir()
+	model := New(tmpDir, theme)
+	model.Entries = []Entry{
+		{Name: "dir", IsDir: true, Expanded: true, Children: []Entry{{Name: "child.go"}}},
+		{Name: "file.go"},
+	}
+
+	firstCopy := model
+	flat1 := firstCopy.flatEntries()
+	if len(flat1) == 0 {
+		t.Fatal("expected flattened entries from first copy")
+	}
+	if model.sharedFlatCache == nil || len(model.sharedFlatCache.entries) == 0 {
+		t.Fatal("expected shared flat cache to be populated")
+	}
+
+	secondCopy := model
+	flat2 := secondCopy.flatEntries()
+	if len(flat2) != len(flat1) {
+		t.Fatalf("len(flat2) = %d, want %d", len(flat2), len(flat1))
+	}
+	if &flat1[0] != &flat2[0] {
+		t.Error("expected second copy to reuse shared flat cache")
+	}
+}
+
 // TestModelDiagnosticsMap tests diagnostics map operations
 func TestModelDiagnosticsMap(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -690,13 +718,13 @@ func TestUpdateWithKeyPress(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
 	model.Height = 10
-	
+
 	// Test down key
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if model.Cursor != 1 {
 		t.Errorf("Expected Cursor 1, got %d", model.Cursor)
 	}
-	
+
 	// Test up key
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	if model.Cursor != 0 {
@@ -713,7 +741,7 @@ func TestUpdateWithEnterKey(t *testing.T) {
 	os.MkdirAll(path, 0o755)
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false}}
 	model.cachedFlat = nil
-	
+
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !model.Entries[0].Expanded {
 		t.Error("Expected directory to be expanded")
@@ -726,7 +754,7 @@ func TestUpdateWithEnterKeyOnFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file.go", Path: filepath.Join(tmpDir, "file.go"), IsDir: false}}
-	
+
 	model, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Error("Expected PinFileMsg command")
@@ -745,7 +773,7 @@ func TestUpdateWithMouseClick(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
 	model.Height = 10
-	
+
 	// Create a mock mouse click
 	mouseMsg := tea.MouseClickMsg{}
 	model, _ = model.Update(mouseMsg)
@@ -759,7 +787,7 @@ func TestUpdateWithMouseWheel(t *testing.T) {
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}, {Name: "file3.go"}}
 	model.Height = 2
 	model.ScrollY = 1
-	
+
 	// Test wheel down
 	wheelMsg := tea.MouseWheelMsg{}
 	model, _ = model.Update(wheelMsg)
@@ -772,10 +800,10 @@ func TestUpdateWithDirExpanded(t *testing.T) {
 	model := New(tmpDir, theme)
 	path := filepath.Join(tmpDir, "testdir")
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: true, Loading: true}}
-	
+
 	children := []Entry{{Name: "child.go", Path: filepath.Join(path, "child.go")}}
 	expandedMsg := DirExpandedMsg{Path: path, Children: children}
-	
+
 	model, _ = model.Update(expandedMsg)
 	if model.Entries[0].Loading {
 		t.Error("Expected Loading to be false")
@@ -790,7 +818,7 @@ func TestUpdateWithUnknownMsg(t *testing.T) {
 	theme := ui.DefaultTheme()
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
-	
+
 	model, cmd := model.Update("unknown message")
 	if cmd != nil {
 		t.Error("Expected nil command for unknown message")
@@ -805,13 +833,13 @@ func TestHandleKeyPressBounds(t *testing.T) {
 	model.Entries = []Entry{{Name: "file1.go"}}
 	model.Cursor = 0
 	model.Height = 10
-	
+
 	// Try to go up from top
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	if model.Cursor != 0 {
 		t.Errorf("Expected Cursor to stay at 0, got %d", model.Cursor)
 	}
-	
+
 	// Try to go down beyond bounds
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if model.Cursor > len(model.flatEntries())-1 {
@@ -829,7 +857,7 @@ func TestHandleMouseClickOnDirectory(t *testing.T) {
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false}}
 	model.Height = 10
 	model.cachedFlat = nil
-	
+
 	// Simulate click at Y position 0
 	mouseMsg := tea.MouseClickMsg{}
 	model, _ = model.Update(mouseMsg)
@@ -842,11 +870,11 @@ func TestHandleMouseClickDoubleClick(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file.go", Path: filepath.Join(tmpDir, "file.go"), IsDir: false}}
 	model.Height = 10
-	
+
 	// First click
 	mouseMsg := tea.MouseClickMsg{}
 	model, _ = model.Update(mouseMsg)
-	
+
 	// Second click (should be detected as double-click)
 	model, cmd := model.Update(mouseMsg)
 	if cmd == nil {
@@ -862,7 +890,7 @@ func TestHandleMouseWheelBounds(t *testing.T) {
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
 	model.Height = 10
 	model.ScrollY = 0
-	
+
 	// Try to scroll up beyond top
 	wheelMsg := tea.MouseWheelMsg{}
 	model, _ = model.Update(wheelMsg)
@@ -879,7 +907,7 @@ func TestViewRenders(t *testing.T) {
 	model.Width = 50
 	model.Height = 10
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -895,7 +923,7 @@ func TestViewWithCursor(t *testing.T) {
 	model.Height = 10
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
 	model.Cursor = 1
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -914,7 +942,7 @@ func TestViewWithScroll(t *testing.T) {
 		{Name: "file3.go"}, {Name: "file4.go"},
 	}
 	model.ScrollY = 2
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -928,11 +956,11 @@ func TestViewWithDiagnostics(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Width = 50
 	model.Height = 10
-	
+
 	filePath := filepath.Join(tmpDir, "file.go")
 	model.Entries = []Entry{{Name: "file.go", Path: filePath}}
 	model.diagnostics = map[string]int{filePath: 1} // error
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -946,11 +974,11 @@ func TestViewWithGitStatus(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Width = 50
 	model.Height = 10
-	
+
 	filePath := filepath.Join(tmpDir, "file.go")
 	model.Entries = []Entry{{Name: "file.go", Path: filePath, IsDir: false}}
 	model.gitStatus = map[string]string{"file.go": "M"}
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -964,23 +992,23 @@ func TestViewWithGitIgnoredEntry(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Width = 50
 	model.Height = 10
-	
+
 	// Create a .gitignore file
 	gitignorePath := filepath.Join(tmpDir, ".gitignore")
 	os.WriteFile(gitignorePath, []byte("*.log\n"), 0o644)
-	
+
 	// Recreate model to load gitignore
 	model = New(tmpDir, theme)
 	model.Width = 50
 	model.Height = 10
-	
+
 	// Create a log file that should be gitignored
 	logFile := filepath.Join(tmpDir, "test.log")
 	os.WriteFile(logFile, []byte("test"), 0o644)
-	
+
 	// Refresh to pick up the new file
 	model.RefreshDir(tmpDir)
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -994,7 +1022,7 @@ func TestViewWithNestedDirectory(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Width = 50
 	model.Height = 10
-	
+
 	subDir := filepath.Join(tmpDir, "subdir")
 	os.MkdirAll(subDir, 0o755)
 	model.Entries = []Entry{
@@ -1002,7 +1030,7 @@ func TestViewWithNestedDirectory(t *testing.T) {
 			{Name: "nested.go", Path: filepath.Join(subDir, "nested.go"), Depth: 1},
 		}},
 	}
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -1017,7 +1045,7 @@ func TestViewWithEmptyTree(t *testing.T) {
 	model.Width = 50
 	model.Height = 5
 	model.Entries = []Entry{}
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view (should have empty lines)")
@@ -1032,7 +1060,7 @@ func TestViewWithLongNames(t *testing.T) {
 	model.Width = 30
 	model.Height = 5
 	model.Entries = []Entry{{Name: "very_long_file_name_that_should_be_truncated.go"}}
-	
+
 	view := model.View()
 	if view == "" {
 		t.Error("Expected non-empty view")
@@ -1044,7 +1072,7 @@ func TestSetSize(t *testing.T) {
 	theme := ui.DefaultTheme()
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
-	
+
 	model.SetSize(100, 30)
 	if model.Width != 100 {
 		t.Errorf("Expected Width 100, got %d", model.Width)
@@ -1057,12 +1085,12 @@ func TestSetSize(t *testing.T) {
 // TestLoadGitignore tests loadGitignore function
 func TestLoadGitignore(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create a .gitignore file
 	gitignorePath := filepath.Join(tmpDir, ".gitignore")
 	content := "*.log\nbuild/\n# comment\n\n*.tmp"
 	os.WriteFile(gitignorePath, []byte(content), 0o644)
-	
+
 	patterns := loadGitignore(tmpDir)
 	if len(patterns) != 3 {
 		t.Errorf("Expected 3 patterns, got %d: %v", len(patterns), patterns)
@@ -1072,7 +1100,7 @@ func TestLoadGitignore(t *testing.T) {
 // TestLoadGitignoreWithNonExistentFile tests loadGitignore with non-existent file
 func TestLoadGitignoreWithNonExistentFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	patterns := loadGitignore(tmpDir)
 	if patterns != nil {
 		t.Errorf("Expected nil patterns, got %v", patterns)
@@ -1082,7 +1110,7 @@ func TestLoadGitignoreWithNonExistentFile(t *testing.T) {
 // TestMatchesGitignore tests matchesGitignore function
 func TestMatchesGitignore(t *testing.T) {
 	patterns := []string{"*.log", "build/", "temp/**"}
-	
+
 	tests := []struct {
 		path     string
 		isDir    bool
@@ -1094,7 +1122,7 @@ func TestMatchesGitignore(t *testing.T) {
 		{"src/main.go", false, false},
 		{"README.md", false, false},
 	}
-	
+
 	for _, test := range tests {
 		result := matchesGitignore(test.path, patterns, test.isDir)
 		if result != test.expected {
@@ -1107,7 +1135,7 @@ func TestMatchesGitignore(t *testing.T) {
 // TestMatchesGitignoreWithBaseName tests matchesGitignore with basename matching
 func TestMatchesGitignoreWithBaseName(t *testing.T) {
 	patterns := []string{"*.go"}
-	
+
 	// Should match basename
 	result := matchesGitignore("/path/to/file.go", patterns, false)
 	if !result {
@@ -1118,13 +1146,13 @@ func TestMatchesGitignoreWithBaseName(t *testing.T) {
 // TestMatchesGitignoreWithDirectoryPattern tests matchesGitignore with directory pattern
 func TestMatchesGitignoreWithDirectoryPattern(t *testing.T) {
 	patterns := []string{"node_modules/"}
-	
+
 	// Should match directory
 	result := matchesGitignore("node_modules", patterns, true)
 	if !result {
 		t.Error("Expected to match node_modules/ pattern")
 	}
-	
+
 	// Should not match file
 	result = matchesGitignore("node_modules", patterns, false)
 	if result {
@@ -1135,18 +1163,18 @@ func TestMatchesGitignoreWithDirectoryPattern(t *testing.T) {
 // TestReadDirEntriesWithGitignore tests readDirEntries with gitignore
 func TestReadDirEntriesWithGitignore(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create test files
 	os.WriteFile(filepath.Join(tmpDir, "file.go"), []byte("test"), 0o644)
 	os.WriteFile(filepath.Join(tmpDir, "file.log"), []byte("test"), 0o644)
-	
+
 	patterns := []string{"*.log"}
-	entries := readDirEntries(tmpDir, 0, patterns)
-	
+	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
+
 	if len(entries) != 2 {
 		t.Errorf("Expected 2 entries (including .gitignored), got %d", len(entries))
 	}
-	
+
 	// Check if .log file is marked as gitignored
 	var logFileMarked bool
 	for _, entry := range entries {
@@ -1163,15 +1191,15 @@ func TestReadDirEntriesWithGitignore(t *testing.T) {
 // TestReadDirEntriesWithSubDirectory tests readDirEntries with subdirectory
 func TestReadDirEntriesWithSubDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create subdirectory
 	subDir := filepath.Join(tmpDir, "subdir")
 	os.MkdirAll(subDir, 0o755)
 	os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644)
-	
+
 	patterns := []string{}
-	entries := readDirEntries(tmpDir, 0, patterns)
-	
+	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
+
 	if len(entries) != 1 {
 		t.Errorf("Expected 1 entry, got %d", len(entries))
 	}
@@ -1180,22 +1208,42 @@ func TestReadDirEntriesWithSubDirectory(t *testing.T) {
 	}
 }
 
+func TestReadDirEntriesWithNestedGitignorePattern(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	nestedDir := filepath.Join(tmpDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "ignored.txt"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile() failed: %v", err)
+	}
+
+	entries := readDirEntries(tmpDir, nestedDir, 1, []string{"nested/ignored.txt"})
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if !entries[0].IsGitIgnored {
+		t.Error("expected nested/ignored.txt to be marked as gitignored")
+	}
+}
+
 // TestReadDirEntriesWithSorting tests readDirEntries sorting
 func TestReadDirEntriesWithSorting(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create files in non-alphabetical order
 	os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("test"), 0o644)
 	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644)
 	os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("test"), 0o644)
-	
+
 	patterns := []string{}
-	entries := readDirEntries(tmpDir, 0, patterns)
-	
+	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
+
 	if len(entries) != 3 {
 		t.Errorf("Expected 3 entries, got %d", len(entries))
 	}
-	
+
 	// Check if sorted correctly
 	expectedOrder := []string{"a.go", "b.go", "c.go"}
 	for i, expected := range expectedOrder {
@@ -1208,15 +1256,15 @@ func TestReadDirEntriesWithSorting(t *testing.T) {
 // TestReadDirEntriesWithMixedTypes tests readDirEntries with mixed files and directories
 func TestReadDirEntriesWithMixedTypes(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create mixed entries
 	os.WriteFile(filepath.Join(tmpDir, "z.go"), []byte("test"), 0o644)
 	os.MkdirAll(filepath.Join(tmpDir, "adir"), 0o755)
 	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("test"), 0o644)
-	
+
 	patterns := []string{}
-	entries := readDirEntries(tmpDir, 0, patterns)
-	
+	entries := readDirEntries(tmpDir, tmpDir, 0, patterns)
+
 	// Directories should come before files
 	if !entries[0].IsDir {
 		t.Error("Expected first entry to be directory")
@@ -1229,22 +1277,22 @@ func TestReadDirEntriesWithMixedTypes(t *testing.T) {
 // TestRefreshInSlice tests refreshInSlice function
 func TestRefreshInSlice(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	subDir := filepath.Join(tmpDir, "subdir")
 	os.MkdirAll(subDir, 0o755)
 	// Create a file in subdir so it has children
 	os.WriteFile(filepath.Join(subDir, "file.go"), []byte("test"), 0o644)
-	
+
 	entries := []Entry{
 		{Name: "subdir", Path: subDir, IsDir: true, Expanded: true, Depth: 0, Children: nil},
 		{Name: "file.go", Path: filepath.Join(tmpDir, "file.go"), IsDir: false},
 	}
-	
-	result := refreshInSlice(entries, subDir, []string{})
+
+	result := refreshInSlice(entries, tmpDir, subDir, []string{})
 	if !result {
 		t.Error("Expected refreshInSlice to return true")
 	}
-	
+
 	// Check if children were loaded (should have at least 1 child)
 	if entries[0].Children == nil || len(entries[0].Children) == 0 {
 		t.Error("Expected children to be loaded")
@@ -1257,12 +1305,12 @@ func TestRefreshInSlice(t *testing.T) {
 // TestRefreshInSliceWithNestedDir tests refreshInSlice with nested directory
 func TestRefreshInSliceWithNestedDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	subDir := filepath.Join(tmpDir, "subdir")
 	os.MkdirAll(subDir, 0o755)
 	nestedDir := filepath.Join(subDir, "nested")
 	os.MkdirAll(nestedDir, 0o755)
-	
+
 	entries := []Entry{
 		{
 			Name: "subdir", Path: subDir, IsDir: true, Expanded: true, Depth: 0,
@@ -1271,8 +1319,8 @@ func TestRefreshInSliceWithNestedDir(t *testing.T) {
 			},
 		},
 	}
-	
-	result := refreshInSlice(entries, nestedDir, []string{})
+
+	result := refreshInSlice(entries, tmpDir, nestedDir, []string{})
 	if !result {
 		t.Error("Expected refreshInSlice to return true")
 	}
@@ -1281,8 +1329,8 @@ func TestRefreshInSliceWithNestedDir(t *testing.T) {
 // TestRefreshInSliceWithNonExistentDir tests refreshInSlice with non-existent directory
 func TestRefreshInSliceWithNonExistentDir(t *testing.T) {
 	entries := []Entry{{Name: "file.go", Path: "/file.go", IsDir: false}}
-	
-	result := refreshInSlice(entries, "/nonexistent", []string{})
+
+	result := refreshInSlice(entries, "/", "/nonexistent", []string{})
 	if result {
 		t.Error("Expected refreshInSlice to return false")
 	}
@@ -1291,13 +1339,13 @@ func TestRefreshInSliceWithNonExistentDir(t *testing.T) {
 // TestToggleInSliceWithAsyncLoad tests toggleInSlice with async load
 func TestToggleInSliceWithAsyncLoad(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	path := filepath.Join(tmpDir, "testdir")
 	os.MkdirAll(path, 0o755)
-	
+
 	entries := []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false, Children: nil}}
-	
-	cmd := toggleInSlice(entries, path, []string{})
+
+	cmd := toggleInSlice(entries, tmpDir, path, []string{})
 	if cmd == nil {
 		t.Error("Expected async load command")
 	}
@@ -1312,7 +1360,7 @@ func TestToggleInSliceWithAsyncLoad(t *testing.T) {
 // TestToggleInSliceWithAlreadyLoaded tests toggleInSlice with already loaded children
 func TestToggleInSliceWithAlreadyLoaded(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	path := filepath.Join(tmpDir, "testdir")
 	entries := []Entry{
 		{
@@ -1320,8 +1368,8 @@ func TestToggleInSliceWithAlreadyLoaded(t *testing.T) {
 			Children: []Entry{{Name: "file.go"}},
 		},
 	}
-	
-	cmd := toggleInSlice(entries, path, []string{})
+
+	cmd := toggleInSlice(entries, tmpDir, path, []string{})
 	if cmd != nil {
 		t.Error("Expected nil command for already loaded children")
 	}
@@ -1330,11 +1378,11 @@ func TestToggleInSliceWithAlreadyLoaded(t *testing.T) {
 // TestToggleInSliceWithNestedDir tests toggleInSlice with nested directory
 func TestToggleInSliceWithNestedDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	subDir := filepath.Join(tmpDir, "subdir")
 	nestedDir := filepath.Join(subDir, "nested")
 	os.MkdirAll(nestedDir, 0o755)
-	
+
 	entries := []Entry{
 		{
 			Name: "subdir", Path: subDir, IsDir: true, Expanded: true,
@@ -1343,8 +1391,8 @@ func TestToggleInSliceWithNestedDir(t *testing.T) {
 			},
 		},
 	}
-	
-	cmd := toggleInSlice(entries, nestedDir, []string{})
+
+	cmd := toggleInSlice(entries, tmpDir, nestedDir, []string{})
 	if cmd == nil {
 		t.Error("Expected async load command for nested directory")
 	}
@@ -1353,11 +1401,11 @@ func TestToggleInSliceWithNestedDir(t *testing.T) {
 // TestSetChildrenInSlice tests setChildrenInSlice function
 func TestSetChildrenInSlice(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	path := filepath.Join(tmpDir, "testdir")
 	entries := []Entry{{Name: "testdir", Path: path, IsDir: true, Loading: true}}
 	children := []Entry{{Name: "file.go"}}
-	
+
 	result := setChildrenInSlice(entries, path, children)
 	if !result {
 		t.Error("Expected setChildrenInSlice to return true")
@@ -1373,10 +1421,10 @@ func TestSetChildrenInSlice(t *testing.T) {
 // TestSetChildrenInSliceWithNestedDir tests setChildrenInSlice with nested directory
 func TestSetChildrenInSliceWithNestedDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	subDir := filepath.Join(tmpDir, "subdir")
 	nestedDir := filepath.Join(subDir, "nested")
-	
+
 	entries := []Entry{
 		{
 			Name: "subdir", Path: subDir, IsDir: true, Expanded: true,
@@ -1386,7 +1434,7 @@ func TestSetChildrenInSliceWithNestedDir(t *testing.T) {
 		},
 	}
 	children := []Entry{{Name: "file.go"}}
-	
+
 	result := setChildrenInSlice(entries, nestedDir, children)
 	if !result {
 		t.Error("Expected setChildrenInSlice to return true")
@@ -1403,7 +1451,7 @@ func TestSetChildrenInSliceWithNestedDir(t *testing.T) {
 func TestSetChildrenInSliceWithNonExistentDir(t *testing.T) {
 	entries := []Entry{{Name: "file.go", Path: "/file.go", IsDir: false}}
 	children := []Entry{}
-	
+
 	result := setChildrenInSlice(entries, "/nonexistent", children)
 	if result {
 		t.Error("Expected setChildrenInSlice to return false")

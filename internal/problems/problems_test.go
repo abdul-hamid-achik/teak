@@ -66,6 +66,9 @@ func TestModel_Groups(t *testing.T) {
 	if len(m.groups) != 2 {
 		t.Errorf("Expected 2 groups, got %d", len(m.groups))
 	}
+	if got := m.groups[0].FilePath; got != "/test/root/main.go" {
+		t.Errorf("Expected first group to be sorted by path, got %q", got)
+	}
 }
 
 func TestModel_Selection(t *testing.T) {

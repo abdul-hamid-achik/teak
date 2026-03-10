@@ -50,8 +50,8 @@ type AgentWriteFileMsg struct {
 // AgentPermissionRequestMsg is sent when the agent requests user permission.
 // The handler blocks on ResponseCh until the UI responds.
 type AgentPermissionRequestMsg struct {
-	ToolCall sdk.RequestPermissionToolCall
-	Options  []sdk.PermissionOption
+	ToolCall   sdk.RequestPermissionToolCall
+	Options    []sdk.PermissionOption
 	ResponseCh chan sdk.RequestPermissionResponse
 }
 
@@ -78,6 +78,7 @@ type AgentPromptResponseMsg struct {
 
 // AgentSessionInfoMsg carries session model/mode state from NewSession.
 type AgentSessionInfoMsg struct {
+	SessionID    sdk.SessionId
 	Models       []sdk.ModelInfo
 	CurrentModel sdk.ModelId
 	Modes        []sdk.SessionMode

@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
+	"github.com/BurntSushi/toml"
 	lua "github.com/yuin/gopher-lua"
-	"teak/internal/app"
 )
 
 // Manager handles Lua plugin lifecycle and state management.
@@ -17,7 +18,6 @@ type Manager struct {
 	pluginDir   string
 	luaPool     *luaStatePool
 	apiRegistry *APIRegistry
-	app         *app.Model
 	loaded      bool
 }
 
@@ -40,19 +40,30 @@ type PluginConfig struct {
 }
 
 // NewManager creates a new plugin manager.
-func NewManager(pluginDir string, app *app.Model) (*Manager, error) {
+func NewManager(pluginDir string) (*Manager, error) {
 	m := &Manager{
 		plugins:     make(map[string]*Plugin),
 		pluginDir:   pluginDir,
 		luaPool:     newLuaStatePool(),
 		apiRegistry: NewAPIRegistry(),
-		app:         app,
 	}
 
 	// Register built-in APIs
 	m.registerAPIs()
 
 	return m, nil
+}
+
+// DefaultDir returns the default plugin directory.
+func DefaultDir() string {
+	if dir, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(dir, "teak", "plugins")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "teak", "plugins")
+	}
+	return filepath.Join(home, ".config", "teak", "plugins")
 }
 
 // registerAPIs registers all built-in Lua APIs.
@@ -117,6 +128,8 @@ func (m *Manager) LoadPlugin(path string) error {
 				NRet:    0,
 				Protect: true,
 			}); err != nil {
+				delete(m.plugins, config.Name)
+				m.luaPool.Put(L)
 				return fmt.Errorf("plugin setup failed: %w", err)
 			}
 		}
@@ -236,11 +249,91 @@ func (m *Manager) ListPlugins() []*Plugin {
 
 // Shutdown unloads all plugins.
 func (m *Manager) Shutdown() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
+	names := make([]string, 0, len(m.plugins))
 	for name := range m.plugins {
-		m.UnloadPlugin(name)
+		names = append(names, name)
+	}
+	m.mu.RUnlock()
+
+	for _, name := range names {
+		_ = m.UnloadPlugin(name)
+	}
+}
+
+// HandleKey dispatches a key sequence to loaded plugins.
+// It returns handled=true when the key was consumed, pending=true when the
+// sequence matches a binding prefix and more input is required.
+func (m *Manager) HandleKey(mode, keys string) (handled bool, pending bool, err error) {
+	m.mu.RLock()
+	names := make([]string, 0, len(m.plugins))
+	for name := range m.plugins {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	plugins := make([]*Plugin, 0, len(names))
+	for _, name := range names {
+		plugins = append(plugins, m.plugins[name])
+	}
+	m.mu.RUnlock()
+
+	pending = false
+	for _, plugin := range plugins {
+		binding, exact, prefix := matchKeybinding(plugin.State, mode, keys)
+		if prefix {
+			pending = true
+		}
+		if !exact {
+			continue
+		}
+		if err := executePluginAction(plugin.State, binding.action); err != nil {
+			return true, false, fmt.Errorf("plugin %s key %q: %w", plugin.Name, keys, err)
+		}
+		return true, false, nil
+	}
+	return pending, pending, nil
+}
+
+// TriggerEvent dispatches an autocmd event to all loaded plugins.
+func (m *Manager) TriggerEvent(event string, ctx EventContext) error {
+	if event == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	names := make([]string, 0, len(m.plugins))
+	for name := range m.plugins {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	plugins := make([]*Plugin, 0, len(names))
+	for _, name := range names {
+		plugins = append(plugins, m.plugins[name])
+	}
+	m.mu.RUnlock()
+
+	ctx.Event = event
+	var firstErr error
+	for _, plugin := range plugins {
+		if err := triggerAutocommandsForState(plugin.State, ctx); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("plugin %s event %s: %w", plugin.Name, event, err)
+		}
+	}
+	return firstErr
+}
+
+func executePluginAction(L *lua.LState, action lua.LValue) error {
+	switch value := action.(type) {
+	case *lua.LFunction:
+		return L.CallByParam(lua.P{
+			Fn:      value,
+			NRet:    0,
+			Protect: true,
+		})
+	case lua.LString:
+		return executeEditorCommand(L, string(value))
+	default:
+		return fmt.Errorf("unsupported action type %T", action)
 	}
 }
 
@@ -254,86 +347,12 @@ func loadPluginConfig(path string) (PluginConfig, error) {
 	if err != nil {
 		return config, err
 	}
-
-	// Simple TOML parsing for plugin config
-	// In production, use github.com/BurntSushi/toml
-	lines := string(data)
-	for _, line := range splitLines(lines) {
-		line = trimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-
-		parts := splitByEquals(line)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := trimSpace(parts[0])
-		value := trimQuotes(trimSpace(parts[1]))
-
-		switch key {
-		case "name":
-			config.Name = value
-		case "version":
-			config.Version = value
-		case "description":
-			config.Description = value
-		case "author":
-			config.Author = value
-		case "main":
-			config.Main = value
-		}
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return config, err
+	}
+	if config.Main == "" {
+		config.Main = "init.lua"
 	}
 
 	return config, nil
-}
-
-// Helper functions for simple TOML parsing
-func splitLines(s string) []string {
-	result := []string{}
-	current := ""
-	for _, c := range s {
-		if c == '\n' {
-			result = append(result, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	if current != "" {
-		result = append(result, current)
-	}
-	return result
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
-}
-
-func splitByEquals(s string) []string {
-	for i, c := range s {
-		if c == '=' {
-			return []string{s[:i], s[i+1:]}
-		}
-	}
-	return []string{s}
-}
-
-func trimQuotes(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') ||
-			(s[0] == '\'' && s[len(s)-1] == '\'') {
-			return s[1 : len(s)-1]
-		}
-	}
-	return s
 }

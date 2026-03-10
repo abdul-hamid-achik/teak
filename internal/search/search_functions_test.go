@@ -413,6 +413,42 @@ func TestSearchFileWithBinaryContent(t *testing.T) {
 	}
 }
 
+func TestSearchFileWithLongLine(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	longLine := strings.Repeat("a", 70_000) + "needle"
+	path := filepath.Join(tmpDir, "long.txt")
+	if err := os.WriteFile(path, []byte(longLine+"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to create long-line file: %v", err)
+	}
+
+	re := regexp.MustCompile("needle")
+	results, err := searchFile(path, tmpDir, re, 10)
+	if err != nil {
+		t.Fatalf("searchFile failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if results[0].Col != 70_000 {
+		t.Errorf("Expected match column 70000, got %d", results[0].Col)
+	}
+}
+
+func TestInvalidateSemanticIndex(t *testing.T) {
+	rootDir := t.TempDir()
+	vecgrepReady.Store(rootDir, true)
+	t.Cleanup(func() {
+		vecgrepReady.Delete(rootDir)
+	})
+
+	InvalidateSemanticIndex(rootDir)
+
+	if _, ok := vecgrepReady.Load(rootDir); ok {
+		t.Fatal("expected semantic index cache entry to be cleared")
+	}
+}
+
 // TestTextSearchResultStructure tests that results have proper structure
 func TestTextSearchResultStructure(t *testing.T) {
 	tmpDir := t.TempDir()

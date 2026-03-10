@@ -51,6 +51,7 @@ type Model struct {
 	Height            int
 	theme             ui.Theme
 	cachedFlat        []Entry
+	sharedFlatCache   *flatEntryCache
 	diagnostics       map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
 	gitStatus         map[string]string // relative path → status ("M", "A", "D", "U")
 	gitignorePatterns []string          // patterns from .gitignore
@@ -64,6 +65,10 @@ type Model struct {
 		entryBg         color.Color    // cached entry background
 		gitIgnoredColor color.Color    // cached git ignored color (Nord3)
 	}
+}
+
+type flatEntryCache struct {
+	entries []Entry
 }
 
 // SetDiagnostics sets the diagnostics map (file paths + directory paths → worst severity).
@@ -82,9 +87,10 @@ func New(root string, theme ui.Theme) Model {
 	m := Model{
 		Root:              root,
 		theme:             theme,
+		sharedFlatCache:   &flatEntryCache{},
 		gitignorePatterns: loadGitignore(root),
 	}
-	m.Entries = readDirEntries(root, 0, m.gitignorePatterns)
+	m.Entries = readDirEntries(root, root, 0, m.gitignorePatterns)
 
 	// Initialize cached styles to avoid per-frame allocations
 	m.cachedStyles.base = lipgloss.NewStyle()
@@ -99,23 +105,23 @@ func New(root string, theme ui.Theme) Model {
 // If the directory is the root, it refreshes the top-level entries.
 func (m *Model) RefreshDir(dir string) {
 	if dir == m.Root {
-		m.Entries = readDirEntries(m.Root, 0, m.gitignorePatterns)
-		m.cachedFlat = nil
+		m.Entries = readDirEntries(m.Root, m.Root, 0, m.gitignorePatterns)
+		m.invalidateFlatCache()
 		return
 	}
-	refreshInSlice(m.Entries, dir, m.gitignorePatterns)
-	m.cachedFlat = nil
+	refreshInSlice(m.Entries, m.Root, dir, m.gitignorePatterns)
+	m.invalidateFlatCache()
 }
 
-func refreshInSlice(entries []Entry, dir string, gitignorePatterns []string) bool {
+func refreshInSlice(entries []Entry, rootDir, dir string, gitignorePatterns []string) bool {
 	for i := range entries {
 		if entries[i].Path == dir && entries[i].IsDir {
-			entries[i].Children = readDirEntries(dir, entries[i].Depth+1, gitignorePatterns)
+			entries[i].Children = readDirEntries(rootDir, dir, entries[i].Depth+1, gitignorePatterns)
 			entries[i].Loading = false
 			return true
 		}
 		if entries[i].Expanded && entries[i].Children != nil {
-			if refreshInSlice(entries[i].Children, dir, gitignorePatterns) {
+			if refreshInSlice(entries[i].Children, rootDir, dir, gitignorePatterns) {
 				return true
 			}
 		}
@@ -217,7 +223,7 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 
 func (m Model) handleDirExpanded(msg DirExpandedMsg) (Model, tea.Cmd) {
 	setChildrenInSlice(m.Entries, msg.Path, msg.Children)
-	m.cachedFlat = nil
+	m.invalidateFlatCache()
 	return m, nil
 }
 
@@ -239,13 +245,13 @@ func (m *Model) ToggleEntry(path string) (Model, tea.Cmd) {
 // toggleDir toggles a directory's expanded state.
 // If expanding and children aren't loaded, starts an async read.
 func (m *Model) toggleDir(path string) (Model, tea.Cmd) {
-	cmd := toggleInSlice(m.Entries, path, m.gitignorePatterns)
-	m.cachedFlat = nil
+	cmd := toggleInSlice(m.Entries, m.Root, path, m.gitignorePatterns)
+	m.invalidateFlatCache()
 	return *m, cmd
 }
 
 // toggleInSlice toggles expansion and returns a command if async loading is needed.
-func toggleInSlice(entries []Entry, path string, gitignorePatterns []string) tea.Cmd {
+func toggleInSlice(entries []Entry, rootDir, path string, gitignorePatterns []string) tea.Cmd {
 	for i := range entries {
 		if entries[i].Path == path && entries[i].IsDir {
 			entries[i].Expanded = !entries[i].Expanded
@@ -255,14 +261,14 @@ func toggleInSlice(entries []Entry, path string, gitignorePatterns []string) tea
 				dirPath := entries[i].Path
 				depth := entries[i].Depth + 1
 				return func() tea.Msg {
-					children := readDirEntries(dirPath, depth, gitignorePatterns)
+					children := readDirEntries(rootDir, dirPath, depth, gitignorePatterns)
 					return DirExpandedMsg{Path: dirPath, Children: children}
 				}
 			}
 			return nil
 		}
 		if entries[i].Expanded && entries[i].Children != nil {
-			if cmd := toggleInSlice(entries[i].Children, path, gitignorePatterns); cmd != nil {
+			if cmd := toggleInSlice(entries[i].Children, rootDir, path, gitignorePatterns); cmd != nil {
 				return cmd
 			}
 		}
@@ -297,13 +303,27 @@ func (m *Model) ensureCursorVisible() {
 }
 
 func (m Model) flatEntries() []Entry {
+	if m.sharedFlatCache != nil && m.sharedFlatCache.entries != nil {
+		m.cachedFlat = m.sharedFlatCache.entries
+		return m.sharedFlatCache.entries
+	}
 	if m.cachedFlat != nil {
 		return m.cachedFlat
 	}
 	var flat []Entry
 	flattenEntries(m.Entries, &flat)
 	m.cachedFlat = flat
+	if m.sharedFlatCache != nil {
+		m.sharedFlatCache.entries = flat
+	}
 	return flat
+}
+
+func (m *Model) invalidateFlatCache() {
+	m.cachedFlat = nil
+	if m.sharedFlatCache != nil {
+		m.sharedFlatCache.entries = nil
+	}
 }
 
 func flattenEntries(entries []Entry, flat *[]Entry) {
@@ -315,7 +335,7 @@ func flattenEntries(entries []Entry, flat *[]Entry) {
 	}
 }
 
-func readDirEntries(path string, depth int, gitignorePatterns []string) []Entry {
+func readDirEntries(rootDir, path string, depth int, gitignorePatterns []string) []Entry {
 	dirEntries, err := os.ReadDir(path)
 	if err != nil {
 		return nil
@@ -326,8 +346,10 @@ func readDirEntries(path string, depth int, gitignorePatterns []string) []Entry 
 		name := de.Name()
 		fullPath := filepath.Join(path, name)
 
-		// Get relative path from root for gitignore matching
-		relPath := fullPath
+		relPath, err := filepath.Rel(rootDir, fullPath)
+		if err != nil {
+			relPath = fullPath
+		}
 		isGitIgnored := matchesGitignore(relPath, gitignorePatterns, de.IsDir())
 
 		entry := Entry{

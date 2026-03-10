@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/coder/acp-go-sdk"
+	"teak/internal/acp"
 	"teak/internal/ui"
 )
 
@@ -348,6 +350,68 @@ func TestAgentCurrentMode(t *testing.T) {
 	// Initially should be empty
 	if modeID != "" {
 		t.Errorf("Expected empty mode ID, got %q", modeID)
+	}
+}
+
+func TestAgentModelChangedPreservesModes(t *testing.T) {
+	theme := ui.DefaultTheme()
+	model := New(theme)
+
+	updated, _ := model.Update(acp.AgentSessionInfoMsg{
+		Models: []sdk.ModelInfo{
+			{ModelId: "m1", Name: "Model 1"},
+			{ModelId: "m2", Name: "Model 2"},
+		},
+		CurrentModel: "m1",
+		Modes: []sdk.SessionMode{
+			{Id: "auto", Name: "Auto"},
+		},
+		CurrentMode: "auto",
+	})
+	model = updated
+
+	updated, _ = model.Update(acp.AgentModelChangedMsg{ModelId: "m2"})
+	model = updated
+
+	if model.currentModel != "m2" {
+		t.Fatalf("expected current model to update, got %q", model.currentModel)
+	}
+	if model.currentMode != "auto" {
+		t.Fatalf("expected current mode to be preserved, got %q", model.currentMode)
+	}
+	if len(model.modes) != 1 || model.modes[0].Id != "auto" {
+		t.Fatalf("expected modes to be preserved, got %#v", model.modes)
+	}
+}
+
+func TestAgentModeChangedPreservesModels(t *testing.T) {
+	theme := ui.DefaultTheme()
+	model := New(theme)
+
+	updated, _ := model.Update(acp.AgentSessionInfoMsg{
+		Models: []sdk.ModelInfo{
+			{ModelId: "m1", Name: "Model 1"},
+		},
+		CurrentModel: "m1",
+		Modes: []sdk.SessionMode{
+			{Id: "auto", Name: "Auto"},
+			{Id: "review", Name: "Review"},
+		},
+		CurrentMode: "auto",
+	})
+	model = updated
+
+	updated, _ = model.Update(acp.AgentModeChangedMsg{ModeId: "review"})
+	model = updated
+
+	if model.currentMode != "review" {
+		t.Fatalf("expected current mode to update, got %q", model.currentMode)
+	}
+	if model.currentModel != "m1" {
+		t.Fatalf("expected current model to be preserved, got %q", model.currentModel)
+	}
+	if len(model.models) != 1 || model.models[0].ModelId != "m1" {
+		t.Fatalf("expected models to be preserved, got %#v", model.models)
 	}
 }
 

@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	lua "github.com/yuin/gopher-lua"
@@ -10,7 +11,7 @@ import (
 
 func TestPluginManagerNew(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestPluginManagerNew(t *testing.T) {
 
 func TestPluginManagerLoadNonExistent(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestPluginManagerLoadNonExistent(t *testing.T) {
 
 func TestPluginManagerLoadInvalidPlugin(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -70,9 +71,8 @@ func TestPluginManagerLoadInvalidPlugin(t *testing.T) {
 }
 
 func TestPluginManagerLoadValidPlugin(t *testing.T) {
-	t.Skip("Skipping - requires full app integration")
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -124,7 +124,7 @@ return {}
 
 func TestPluginManagerUnloadPlugin(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -159,7 +159,7 @@ main = "init.lua"
 
 func TestPluginManagerUnloadNonExistent(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, nil)
+	mgr, err := NewManager(dir)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -168,6 +168,151 @@ func TestPluginManagerUnloadNonExistent(t *testing.T) {
 	err = mgr.UnloadPlugin("non-existent")
 	if err == nil {
 		t.Error("UnloadPlugin should error for non-existent plugin")
+	}
+}
+
+func TestPluginManagerShutdownUnloadsPlugins(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	pluginDir := filepath.Join(dir, "test-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("Failed to create plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"test-plugin\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write plugin.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte("function setup() end\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write init.lua: %v", err)
+	}
+
+	if err := mgr.LoadAllPlugins(); err != nil {
+		t.Fatalf("LoadAllPlugins() error = %v", err)
+	}
+	if len(mgr.ListPlugins()) != 1 {
+		t.Fatalf("expected 1 loaded plugin, got %d", len(mgr.ListPlugins()))
+	}
+
+	mgr.Shutdown()
+
+	if len(mgr.ListPlugins()) != 0 {
+		t.Fatalf("expected plugins to be unloaded on shutdown, got %d", len(mgr.ListPlugins()))
+	}
+}
+
+func TestPluginManagerHandleKeyExecutesCommand(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer mgr.Shutdown()
+
+	pluginDir := filepath.Join(dir, "test-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("Failed to create plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"test-plugin\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write plugin.toml: %v", err)
+	}
+	initLua := `
+function setup()
+  editor.command("hello", function()
+    plugin_triggered = "yes"
+  end)
+  keymap.set("n", "ctrl+g", "hello")
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("Failed to write init.lua: %v", err)
+	}
+
+	if err := mgr.LoadAllPlugins(); err != nil {
+		t.Fatalf("LoadAllPlugins() error = %v", err)
+	}
+
+	handled, pending, err := mgr.HandleKey("n", "ctrl+g")
+	if err != nil {
+		t.Fatalf("HandleKey() error = %v", err)
+	}
+	if !handled || pending {
+		t.Fatalf("expected exact keybinding match, handled=%v pending=%v", handled, pending)
+	}
+
+	p, err := mgr.GetPlugin("test-plugin")
+	if err != nil {
+		t.Fatalf("GetPlugin() error = %v", err)
+	}
+	if got := p.State.GetGlobal("plugin_triggered").String(); got != "yes" {
+		t.Fatalf("plugin_triggered = %q, want %q", got, "yes")
+	}
+}
+
+func TestPluginManagerLoadsPluginsWithAutocmdAPI(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer mgr.Shutdown()
+
+	pluginDir := filepath.Join(dir, "test-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("Failed to create plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"test-plugin\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write plugin.toml: %v", err)
+	}
+	initLua := `
+	function setup()
+	  autocmd.register("BufWrite", function() end)
+	end
+	`
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("Failed to write init.lua: %v", err)
+	}
+
+	if err := mgr.LoadPlugin(pluginDir); err != nil {
+		t.Fatalf("expected autocmd setup to load successfully, got %v", err)
+	}
+	if len(mgr.ListPlugins()) != 1 {
+		t.Fatalf("expected 1 loaded plugin, got %d", len(mgr.ListPlugins()))
+	}
+}
+
+func TestPluginManagerRejectsUnsupportedUIAPI(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer mgr.Shutdown()
+
+	pluginDir := filepath.Join(dir, "test-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("Failed to create plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"test-plugin\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write plugin.toml: %v", err)
+	}
+	initLua := `
+function setup()
+  ui.notify("hello")
+end
+	`
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("Failed to write init.lua: %v", err)
+	}
+
+	err = mgr.LoadPlugin(pluginDir)
+	if err == nil {
+		t.Fatal("expected unsupported ui API setup to fail")
+	}
+	if !strings.Contains(err.Error(), "ui.notify is unavailable outside an active plugin dispatch context") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -316,39 +461,26 @@ func TestLoadPluginConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestHelperFunctions(t *testing.T) {
-	// Test splitLines
-	lines := splitLines("line1\nline2\nline3")
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines, got %d", len(lines))
+func TestLoadPluginConfigSupportsInlineComments(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "plugin.toml")
+
+	configContent := `name = "commented"
+main = "plugin.lua" # inline comment that broke the old parser
+description = "Works with TOML comments"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Test trimSpace
-	s := trimSpace("  hello  ")
-	if s != "hello" {
-		t.Errorf("Expected 'hello', got '%s'", s)
+	config, err := loadPluginConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadPluginConfig failed: %v", err)
 	}
-
-	// Test splitByEquals
-	parts := splitByEquals("key = value")
-	if len(parts) != 2 {
-		t.Errorf("Expected 2 parts, got %d", len(parts))
+	if config.Main != "plugin.lua" {
+		t.Fatalf("Expected main 'plugin.lua', got %q", config.Main)
 	}
-	if parts[0] != "key " {
-		t.Errorf("Expected 'key ', got '%s'", parts[0])
-	}
-	if parts[1] != " value" {
-		t.Errorf("Expected ' value', got '%s'", parts[1])
-	}
-
-	// Test trimQuotes
-	s = trimQuotes(`"hello"`)
-	if s != "hello" {
-		t.Errorf("Expected 'hello', got '%s'", s)
-	}
-
-	s = trimQuotes(`'hello'`)
-	if s != "hello" {
-		t.Errorf("Expected 'hello', got '%s'", s)
+	if config.Description != "Works with TOML comments" {
+		t.Fatalf("Expected description to decode correctly, got %q", config.Description)
 	}
 }

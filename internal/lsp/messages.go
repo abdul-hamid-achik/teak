@@ -1,18 +1,20 @@
 package lsp
 
+import "encoding/json"
+
 // LSP Error Codes (per JSON-RPC and LSP specifications)
 const (
 	// JSON-RPC 2.0 standard error codes
-	ParseError         = -32700
-	InvalidRequest     = -32600
-	MethodNotFound     = -32601
-	InvalidParams      = -32602
-	InternalError      = -32603
-	
+	ParseError     = -32700
+	InvalidRequest = -32600
+	MethodNotFound = -32601
+	InvalidParams  = -32602
+	InternalError  = -32603
+
 	// LSP reserved error codes
 	ServerNotInitialized = -32002
 	UnknownErrorCode     = -32001
-	
+
 	// LSP request cancellation codes
 	RequestCancelled = -32800
 	ContentModified  = -32801
@@ -74,21 +76,21 @@ type Location struct {
 
 // ServerCapabilities represents the capabilities of an LSP server.
 type ServerCapabilities struct {
-	TextDocumentSync       any    `json:"textDocumentSync,omitempty"` // int or TextDocumentSyncOptions
-	CompletionProvider     *struct {
+	TextDocumentSync   any `json:"textDocumentSync,omitempty"` // int or TextDocumentSyncOptions
+	CompletionProvider *struct {
 		ResolveProvider   bool     `json:"resolveProvider,omitempty"`
 		TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 	} `json:"completionProvider,omitempty"`
-	HoverProvider         bool `json:"hoverProvider,omitempty"`
-	DefinitionProvider    bool `json:"definitionProvider,omitempty"`
-	ReferencesProvider    bool `json:"referencesProvider,omitempty"`
-	RenameProvider        bool `json:"renameProvider,omitempty"`
-	DocumentSymbolProvider bool `json:"documentSymbolProvider,omitempty"`
-	CodeActionProvider    any  `json:"codeActionProvider,omitempty"` // bool or CodeActionOptions
+	HoverProvider           bool `json:"hoverProvider,omitempty"`
+	DefinitionProvider      bool `json:"definitionProvider,omitempty"`
+	ReferencesProvider      bool `json:"referencesProvider,omitempty"`
+	RenameProvider          bool `json:"renameProvider,omitempty"`
+	DocumentSymbolProvider  bool `json:"documentSymbolProvider,omitempty"`
+	CodeActionProvider      any  `json:"codeActionProvider,omitempty"` // bool or CodeActionOptions
 	FormattingProvider      bool `json:"documentFormattingProvider,omitempty"`
 	RangeFormattingProvider bool `json:"documentRangeFormattingProvider,omitempty"`
 	FoldingRangeProvider    bool `json:"foldingRangeProvider,omitempty"`
-	SignatureHelpProvider *struct {
+	SignatureHelpProvider   *struct {
 		TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 	} `json:"signatureHelpProvider,omitempty"`
 }
@@ -137,9 +139,30 @@ type TextEdit struct {
 	NewText   string
 }
 
+type WorkspaceFileOperationKind string
+
+const (
+	FileOpCreate WorkspaceFileOperationKind = "create"
+	FileOpRename WorkspaceFileOperationKind = "rename"
+	FileOpDelete WorkspaceFileOperationKind = "delete"
+)
+
+type WorkspaceFileOperation struct {
+	Kind   WorkspaceFileOperationKind
+	URI    string
+	OldURI string
+	NewURI string
+}
+
+type WorkspaceDocumentChange struct {
+	URI           string
+	Edits         []TextEdit
+	FileOperation *WorkspaceFileOperation
+}
+
 // RenameResultMsg is sent when a rename result arrives.
 type RenameResultMsg struct {
-	Edits map[string][]TextEdit // uri -> []TextEdit
+	Edit WorkspaceEdit
 }
 
 // LspErrorMsg is sent when an LSP request returns an error.
@@ -151,21 +174,21 @@ type LspErrorMsg struct {
 
 // SignatureHelp represents signature help information.
 type SignatureHelp struct {
-	Signatures []SignatureInformation `json:"signatures"`
-	ActiveSignature int `json:"activeSignature,omitempty"`
-	ActiveParameter int `json:"activeParameter,omitempty"`
+	Signatures      []SignatureInformation `json:"signatures"`
+	ActiveSignature int                    `json:"activeSignature,omitempty"`
+	ActiveParameter int                    `json:"activeParameter,omitempty"`
 }
 
 // SignatureInformation represents a function signature.
 type SignatureInformation struct {
-	Label         string         `json:"label"`
-	Documentation string         `json:"documentation,omitempty"`
+	Label         string                 `json:"label"`
+	Documentation string                 `json:"documentation,omitempty"`
 	Parameters    []ParameterInformation `json:"parameters,omitempty"`
 }
 
 // ParameterInformation represents a parameter in a signature.
 type ParameterInformation struct {
-	Label       any    `json:"label"` // string or [start, end]
+	Label         any    `json:"label"` // string or [start, end]
 	Documentation string `json:"documentation,omitempty"`
 }
 
@@ -201,9 +224,9 @@ type CodeActionResultMsg struct {
 
 // CodeAction represents a code action from the server.
 type CodeAction struct {
-	Title       string `json:"title"`
-	Kind        string `json:"kind,omitempty"`
-	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+	Title       string         `json:"title"`
+	Kind        string         `json:"kind,omitempty"`
+	Diagnostics []Diagnostic   `json:"diagnostics,omitempty"`
 	Edit        *WorkspaceEdit `json:"edit,omitempty"`
 	Command     *struct {
 		Title     string `json:"title"`
@@ -214,7 +237,98 @@ type CodeAction struct {
 
 // WorkspaceEdit represents a workspace edit.
 type WorkspaceEdit struct {
-	Changes map[string][]TextEdit `json:"changes,omitempty"`
+	Changes         map[string][]TextEdit     `json:"changes,omitempty"`
+	DocumentChanges []WorkspaceDocumentChange `json:"-"`
+}
+
+func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
+	type rawTextEdit struct {
+		Range struct {
+			Start struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"start"`
+			End struct {
+				Line      int `json:"line"`
+				Character int `json:"character"`
+			} `json:"end"`
+		} `json:"range"`
+		NewText string `json:"newText"`
+	}
+	type textDocumentEdit struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+		Edits []rawTextEdit `json:"edits"`
+	}
+	type fileOperation struct {
+		Kind   WorkspaceFileOperationKind `json:"kind"`
+		URI    string                     `json:"uri"`
+		OldURI string                     `json:"oldUri"`
+		NewURI string                     `json:"newUri"`
+	}
+	var raw struct {
+		Changes         map[string][]rawTextEdit `json:"changes"`
+		DocumentChanges []json.RawMessage        `json:"documentChanges"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	w.Changes = make(map[string][]TextEdit)
+	w.DocumentChanges = nil
+
+	appendEdits := func(uri string, edits []rawTextEdit, keepOrder bool) {
+		if uri == "" || len(edits) == 0 {
+			return
+		}
+		converted := make([]TextEdit, 0, len(edits))
+		for _, edit := range edits {
+			converted = append(converted, TextEdit{
+				StartLine: edit.Range.Start.Line,
+				StartCol:  edit.Range.Start.Character,
+				EndLine:   edit.Range.End.Line,
+				EndCol:    edit.Range.End.Character,
+				NewText:   edit.NewText,
+			})
+		}
+		w.Changes[uri] = append(w.Changes[uri], converted...)
+		if keepOrder {
+			w.DocumentChanges = append(w.DocumentChanges, WorkspaceDocumentChange{
+				URI:   uri,
+				Edits: converted,
+			})
+		}
+	}
+
+	for uri, edits := range raw.Changes {
+		appendEdits(uri, edits, false)
+	}
+	for _, rawChange := range raw.DocumentChanges {
+		var op fileOperation
+		if err := json.Unmarshal(rawChange, &op); err == nil && op.Kind != "" {
+			w.DocumentChanges = append(w.DocumentChanges, WorkspaceDocumentChange{
+				FileOperation: &WorkspaceFileOperation{
+					Kind:   op.Kind,
+					URI:    op.URI,
+					OldURI: op.OldURI,
+					NewURI: op.NewURI,
+				},
+			})
+			continue
+		}
+
+		var change textDocumentEdit
+		if err := json.Unmarshal(rawChange, &change); err != nil {
+			continue
+		}
+		appendEdits(change.TextDocument.URI, change.Edits, true)
+	}
+
+	if len(w.Changes) == 0 {
+		w.Changes = nil
+	}
+	return nil
 }
 
 // DocumentSymbolResultMsg is sent when document symbols arrive.
@@ -224,12 +338,12 @@ type DocumentSymbolResultMsg struct {
 
 // DocumentSymbol represents a symbol in a document.
 type DocumentSymbol struct {
-	Name           string             `json:"name"`
-	Detail         string             `json:"detail,omitempty"`
-	Kind           int                `json:"kind"`
-	Range          Range              `json:"range"`
-	SelectionRange Range              `json:"selectionRange"`
-	Children       []DocumentSymbol   `json:"children,omitempty"`
+	Name           string           `json:"name"`
+	Detail         string           `json:"detail,omitempty"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []DocumentSymbol `json:"children,omitempty"`
 }
 
 // Range represents a range in a document.
@@ -246,7 +360,7 @@ type Position struct {
 
 // LspShowMessageMsg is sent when the server wants to show a message.
 type LspShowMessageMsg struct {
-	Type    int    // 1=Error, 2=Warning, 3=Info, 4=Log
+	Type    int // 1=Error, 2=Warning, 3=Info, 4=Log
 	Message string
 }
 

@@ -3,6 +3,7 @@ package problems
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -17,7 +18,7 @@ type Problem struct {
 	Col      int
 	EndLine  int
 	EndCol   int
-	Severity int    // 1=error, 2=warning, 3=info, 4=hint
+	Severity int // 1=error, 2=warning, 3=info, 4=hint
 	Message  string
 	Source   string
 }
@@ -111,13 +112,9 @@ func (m *Model) buildGroups() []Group {
 
 // sortGroups sorts groups by file path.
 func sortGroups(groups []Group) {
-	for i := 0; i < len(groups)-1; i++ {
-		for j := i + 1; j < len(groups); j++ {
-			if groups[i].FilePath > groups[j].FilePath {
-				groups[i], groups[j] = groups[j], groups[i]
-			}
-		}
-	}
+	slices.SortFunc(groups, func(a, b Group) int {
+		return strings.Compare(a.FilePath, b.FilePath)
+	})
 }
 
 // ProblemCount returns the total number of problems.
