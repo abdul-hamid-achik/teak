@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"github.com/mattn/go-runewidth"
 	"teak/internal/ui"
 )
 
@@ -311,26 +312,7 @@ func New(rootDir string, theme ui.Theme) Model {
 
 	// Initialize textarea for commit body
 	ta := textarea.New()
-	ta.Placeholder = "Description (optional)"
-	ta.SetHeight(5)
-	ta.SetWidth(50)
-	ta.CharLimit = 10000
-
-	// Apply theme styling to textarea
-	taStyles := ta.Styles()
-	taStyles.Focused.Text = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord6)
-	taStyles.Focused.Placeholder = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
-	taStyles.Blurred.Text = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
-	taStyles.Blurred.Placeholder = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
-	ta.SetStyles(taStyles)
+	configureCommitBody(&ta)
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	sp.Style = lipgloss.NewStyle().Foreground(ui.Nord8)
@@ -349,6 +331,49 @@ func New(rootDir string, theme ui.Theme) Model {
 		m.isGitRepo = true
 	}
 	return m
+}
+
+func configureCommitBody(ta *textarea.Model) {
+	ta.Placeholder = "Description (optional)"
+	ta.Prompt = ""
+	ta.ShowLineNumbers = false
+	ta.EndOfBufferCharacter = ' '
+	ta.SetHeight(5)
+	ta.SetWidth(50)
+	ta.CharLimit = 10000
+
+	styles := ta.Styles()
+	styles.Focused.Text = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord6)
+	styles.Focused.Placeholder = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	styles.Focused.CursorLine = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord6)
+	styles.Focused.EndOfBuffer = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord1)
+	styles.Focused.Prompt = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord1)
+	styles.Blurred.Text = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	styles.Blurred.Placeholder = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	styles.Blurred.CursorLine = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord4)
+	styles.Blurred.EndOfBuffer = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord1)
+	styles.Blurred.Prompt = lipgloss.NewStyle().
+		Background(ui.Nord1).
+		Foreground(ui.Nord1)
+	ta.SetStyles(styles)
 }
 
 // IsGitRepo returns whether the root dir is inside a git repository.
@@ -556,6 +581,7 @@ func (m *Model) unfocusCommit() {
 	m.titleFocused = false
 	m.bodyFocused = false
 	m.commitTitle.Blur()
+	m.commitBody.Blur()
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -569,18 +595,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		case "tab":
 			// Move to body
-			m.titleFocused = false
-			m.commitTitle.Blur()
-			m.bodyFocused = true
-			m.activeSection = SectionCommitBody
-			return m, nil
+			return m, m.FocusBody()
 		case "enter":
 			// Move focus to body (like Tab) — commit only via button click
-			m.titleFocused = false
-			m.commitTitle.Blur()
-			m.bodyFocused = true
-			m.activeSection = SectionCommitBody
-			return m, nil
+			return m, m.FocusBody()
 		}
 		var cmd tea.Cmd
 		m.commitTitle, cmd = m.commitTitle.Update(msg)
@@ -685,14 +703,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				m.activeSection = SectionStaged
 				m.Cursor = 0
 			} else {
-				m.activeSection = SectionCommitTitle
-				m.titleFocused = true
-				return m, m.commitTitle.Focus()
+				return m, m.FocusTitle()
 			}
 		case SectionStaged:
-			m.activeSection = SectionCommitTitle
-			m.titleFocused = true
-			return m, m.commitTitle.Focus()
+			return m, m.FocusTitle()
 		case SectionCommitTitle, SectionCommitBody:
 			m.unfocusCommit()
 			m.bodyFocused = false
@@ -702,9 +716,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	case "c":
 		// Quick focus commit title
-		m.activeSection = SectionCommitTitle
-		m.titleFocused = true
-		return m, m.commitTitle.Focus()
+		return m, m.FocusTitle()
 	}
 	return m, nil
 }
@@ -777,15 +789,17 @@ func (m *Model) FocusTitle() tea.Cmd {
 	m.activeSection = SectionCommitTitle
 	m.titleFocused = true
 	m.bodyFocused = false
+	m.commitBody.Blur()
 	return m.commitTitle.Focus()
 }
 
 // FocusBody focuses the commit body area.
-func (m *Model) FocusBody() {
+func (m *Model) FocusBody() tea.Cmd {
 	m.activeSection = SectionCommitBody
 	m.bodyFocused = true
 	m.titleFocused = false
 	m.commitTitle.Blur()
+	return m.commitBody.Focus()
 }
 
 // commitFormStartY returns the Y offset within the panel where the commit form
@@ -799,13 +813,10 @@ func (m Model) commitFormStartY() int {
 }
 
 // FocusBodyAt focuses the body at the clicked location.
-// Note: With textarea component, precise cursor positioning on click is handled internally.
-func (m *Model) FocusBodyAt(panelY, panelX int) {
-	m.activeSection = SectionCommitBody
-	m.bodyFocused = true
-	m.titleFocused = false
-	m.commitTitle.Blur()
-	// Textarea handles cursor positioning internally when focused
+func (m *Model) FocusBodyAt(panelY, panelX int) tea.Cmd {
+	cmd := m.FocusBody()
+	m.moveCommitBodyCursor(panelY, panelX)
+	return cmd
 }
 
 // FocusTitleAt focuses the title and positions the cursor near the click X.
@@ -813,6 +824,7 @@ func (m *Model) FocusTitleAt(panelX int) tea.Cmd {
 	m.activeSection = SectionCommitTitle
 	m.titleFocused = true
 	m.bodyFocused = false
+	m.commitBody.Blur()
 
 	// The textinput may have an internal scroll offset that shifts the visible
 	// portion of the value.  Since the offset is not publicly accessible, we
@@ -831,6 +843,135 @@ func (m *Model) FocusTitleAt(panelX int) tea.Cmd {
 	}
 	m.commitTitle.SetCursor(pos)
 	return m.commitTitle.Focus()
+}
+
+type commitBodySegment struct {
+	line     int
+	startCol int
+	endCol   int
+	text     []rune
+}
+
+func (m Model) commitBodySegments(innerWidth int) []commitBodySegment {
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+
+	lines := strings.Split(m.commitBody.Value(), "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	segments := make([]commitBodySegment, 0, len(lines))
+	for lineIdx, line := range lines {
+		runes := []rune(line)
+		if len(runes) == 0 {
+			segments = append(segments, commitBodySegment{line: lineIdx})
+			continue
+		}
+
+		start := 0
+		width := 0
+		for i, r := range runes {
+			rw := runewidth.RuneWidth(r)
+			if rw < 1 {
+				rw = 1
+			}
+			if width > 0 && width+rw > innerWidth {
+				segments = append(segments, commitBodySegment{
+					line:     lineIdx,
+					startCol: start,
+					endCol:   i,
+					text:     append([]rune(nil), runes[start:i]...),
+				})
+				start = i
+				width = 0
+			}
+			width += rw
+		}
+
+		segments = append(segments, commitBodySegment{
+			line:     lineIdx,
+			startCol: start,
+			endCol:   len(runes),
+			text:     append([]rune(nil), runes[start:]...),
+		})
+	}
+
+	if len(segments) == 0 {
+		return []commitBodySegment{{line: 0}}
+	}
+	return segments
+}
+
+func (m Model) commitBodyDisplayIndex(segments []commitBodySegment) int {
+	currentLine := m.commitBody.Line()
+	currentRowOffset := m.commitBody.LineInfo().RowOffset
+	displayIndex := 0
+	for _, segment := range segments {
+		if segment.line >= currentLine {
+			break
+		}
+		displayIndex++
+	}
+	return displayIndex + currentRowOffset
+}
+
+func (m *Model) moveCommitBodyCursor(panelY, panelX int) {
+	innerWidth := max(1, m.Width-2)
+	segments := m.commitBodySegments(innerWidth)
+	if len(segments) == 0 {
+		return
+	}
+
+	bodyStartY := m.commitFormStartY() + 2
+	clickRow := panelY - bodyStartY
+	if clickRow < 0 {
+		clickRow = 0
+	}
+
+	targetDisplayIndex := m.commitBody.ScrollYOffset() + clickRow
+	if targetDisplayIndex < 0 {
+		targetDisplayIndex = 0
+	}
+	if targetDisplayIndex >= len(segments) {
+		targetDisplayIndex = len(segments) - 1
+	}
+
+	currentDisplayIndex := m.commitBodyDisplayIndex(segments)
+	for currentDisplayIndex < targetDisplayIndex {
+		m.commitBody.CursorDown()
+		currentDisplayIndex++
+	}
+	for currentDisplayIndex > targetDisplayIndex {
+		m.commitBody.CursorUp()
+		currentDisplayIndex--
+	}
+
+	segment := segments[targetDisplayIndex]
+	clickX := panelX - 1
+	if clickX < 0 {
+		clickX = 0
+	}
+
+	targetCol := segment.startCol
+	consumedWidth := 0
+	for _, r := range segment.text {
+		rw := runewidth.RuneWidth(r)
+		if rw < 1 {
+			rw = 1
+		}
+		if consumedWidth+rw > clickX {
+			break
+		}
+		consumedWidth += rw
+		targetCol++
+	}
+	if targetCol > segment.endCol {
+		targetCol = segment.endCol
+	}
+
+	m.commitBody.SetCursorColumn(targetCol)
 }
 
 // IsInCommitFormArea returns true if the given panel-relative Y is in the commit form region.
@@ -1210,13 +1351,16 @@ func (m Model) renderCommitFormLines(bodyHeight int) []string {
 	m.commitBody.SetWidth(innerWidth)
 	m.commitBody.SetHeight(bodyHeight)
 	taStyles := m.commitBody.Styles()
-	if m.bodyFocused {
-		taStyles.Focused.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
-		taStyles.Focused.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-	} else {
-		taStyles.Blurred.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-		taStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-	}
+	taStyles.Focused.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
+	taStyles.Focused.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+	taStyles.Focused.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
+	taStyles.Focused.EndOfBuffer = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
+	taStyles.Focused.Prompt = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
+	taStyles.Blurred.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+	taStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+	taStyles.Blurred.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+	taStyles.Blurred.EndOfBuffer = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
+	taStyles.Blurred.Prompt = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
 	m.commitBody.SetStyles(taStyles)
 
 	lines := []string{

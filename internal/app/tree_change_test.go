@@ -183,6 +183,62 @@ func TestGitSidebarMouseClickCollapsesDirectoryOnce(t *testing.T) {
 	}
 }
 
+func TestGitSidebarMouseClickFocusesCommitBody(t *testing.T) {
+	zone.NewGlobal()
+	defer zone.Close()
+
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+
+	model, err := NewModel("", tmpDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if model.logFile != nil {
+		defer model.logFile.Close()
+	}
+
+	model.sidebarTab = SidebarGit
+	model.showTree = true
+	model.width = 120
+	model.height = 40
+	model.relayout()
+
+	updatedModel, _ := model.Update(git.RefreshMsg{
+		Branch: "main",
+		Entries: []git.StatusEntry{
+			{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
+		},
+	})
+	updated := updatedModel.(Model)
+
+	bodyY := -1
+	for y := 0; y < updated.height; y++ {
+		if updated.gitPanel.CommitFormHitTest(y) == "body" {
+			bodyY = y
+			break
+		}
+	}
+	if bodyY < 0 {
+		t.Fatal("expected git panel commit body to be visible")
+	}
+
+	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: bodyY + 1})
+	updatedModel, cmd := updated.Update(click)
+	if cmd == nil {
+		t.Fatal("expected commit body click to return a focus command")
+	}
+	updated = updatedModel.(Model)
+
+	if updated.focus != FocusGitPanel {
+		t.Fatalf("focus = %v, want %v", updated.focus, FocusGitPanel)
+	}
+	if !updated.gitPanel.IsBodyFocused() {
+		t.Fatal("expected git commit body to be focused after click")
+	}
+}
+
 func TestGitRefreshMsgPreservesCollapsedDirectoryAfterInteraction(t *testing.T) {
 	zone.NewGlobal()
 	defer zone.Close()

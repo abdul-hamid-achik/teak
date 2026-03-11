@@ -2429,8 +2429,8 @@ func (m Model) handleGitPanelClick(adjustedY int, originalMsg tea.MouseClickMsg)
 	// Click on commit body → focus body and position cursor at click location
 	if zone.Get("git-commit-body").InBounds(originalMsg) {
 		mouse := originalMsg.Mouse()
-		m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
-		return m, nil
+		cmd := m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
+		return m, cmd
 	}
 
 	// Positional fallback for commit form clicks (zone may only track last-marked line)
@@ -2441,8 +2441,8 @@ func (m Model) handleGitPanelClick(adjustedY int, originalMsg tea.MouseClickMsg)
 		return m, cmd
 	case "body":
 		mouse := originalMsg.Mouse()
-		m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
-		return m, nil
+		cmd := m.gitPanel.FocusBodyAt(adjustedY, mouse.X)
+		return m, cmd
 	}
 
 	// Forward positional click with adjusted Y

@@ -18,8 +18,7 @@ func testModel(entries []StatusEntry) Model {
 	ti.Prompt = ""
 	ti.CharLimit = 72
 	ta := textarea.New()
-	ta.SetHeight(5)
-	ta.SetWidth(50)
+	configureCommitBody(&ta)
 	m := Model{
 		theme:       ui.DefaultTheme(),
 		rootDir:     "/tmp/fake",
@@ -1380,6 +1379,9 @@ func TestFocusBodyAt(t *testing.T) {
 		if !m.bodyFocused {
 			t.Error("expected bodyFocused=true")
 		}
+		if !m.commitBody.Focused() {
+			t.Error("expected commit body textarea to be focused")
+		}
 		// Cursor positioning is now handled internally by textarea
 	})
 
@@ -1399,7 +1401,66 @@ func TestFocusBodyAt(t *testing.T) {
 		if !m.bodyFocused {
 			t.Error("expected bodyFocused=true")
 		}
+		if !m.commitBody.Focused() {
+			t.Error("expected commit body textarea to be focused")
+		}
 	})
+}
+
+func TestFocusBodyAtPositionsCursor(t *testing.T) {
+	m := testModel(nil)
+	m.Width = 40
+	m.Height = 30
+	m.commitBody.SetValue("hello\nworld")
+
+	formY := m.commitFormStartY()
+	if formY < 0 {
+		t.Fatal("form not visible")
+	}
+
+	m.FocusBodyAt(formY+3, 3)
+
+	if got := m.commitBody.Line(); got != 1 {
+		t.Fatalf("line = %d, want 1", got)
+	}
+	if got := m.commitBody.Column(); got != 2 {
+		t.Fatalf("column = %d, want 2", got)
+	}
+}
+
+func TestFocusBodyAtPositionsCursorOnWrappedLine(t *testing.T) {
+	m := testModel(nil)
+	m.Width = 10
+	m.Height = 30
+	m.commitBody.SetValue("abcdefghij")
+
+	formY := m.commitFormStartY()
+	if formY < 0 {
+		t.Fatal("form not visible")
+	}
+
+	m.FocusBodyAt(formY+3, 1)
+
+	if got := m.commitBody.Line(); got != 0 {
+		t.Fatalf("line = %d, want 0", got)
+	}
+	if got := m.commitBody.Column(); got != 8 {
+		t.Fatalf("column = %d, want 8", got)
+	}
+}
+
+func TestNewConfiguresCommitBodyForDescription(t *testing.T) {
+	m := New(t.TempDir(), ui.DefaultTheme())
+
+	if m.commitBody.Prompt != "" {
+		t.Fatalf("prompt = %q, want empty", m.commitBody.Prompt)
+	}
+	if m.commitBody.ShowLineNumbers {
+		t.Fatal("expected commit body line numbers to be disabled")
+	}
+	if m.commitBody.EndOfBufferCharacter != ' ' {
+		t.Fatalf("end of buffer character = %q, want space", m.commitBody.EndOfBufferCharacter)
+	}
 }
 
 // ── TestIsInCommitFormArea ──────────────────────────────────────────────
@@ -1550,6 +1611,9 @@ func TestEnterInTitleMovesToBody(t *testing.T) {
 	}
 	if !m.bodyFocused {
 		t.Error("bodyFocused should be true after Enter")
+	}
+	if !m.commitBody.Focused() {
+		t.Error("commit body textarea should be focused after Enter")
 	}
 	if m.activeSection != SectionCommitBody {
 		t.Errorf("activeSection = %v, want SectionCommitBody", m.activeSection)
