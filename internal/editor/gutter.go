@@ -39,13 +39,9 @@ type GutterOpts struct {
 // RenderGutter renders line numbers for visible lines with optional diagnostic icons.
 // Returns the rendered gutter string and its width.
 func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, diagnostics []Diagnostic, opts *GutterOpts) (string, int) {
-	// Add 4 columns for breakpoint marker when opts provided (1 leading space + 2-cell icon + 1 trailing space)
-	baseWidth := gutterWidth(totalLines)
-	markerWidth := 0
-	if opts != nil {
-		markerWidth = 3
-	}
-	width := baseWidth + markerWidth
+	metrics := computeGutterMetrics(totalLines, opts, false)
+	baseWidth := metrics.lineNumberWidth
+	width := metrics.contentWidth()
 
 	// Build a map of line -> worst diagnostic severity
 	diagMap := make(map[int]int) // line -> severity (1=error, 2=warn, 3=info, 4=hint)
@@ -124,13 +120,9 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 		return RenderGutter(theme, totalLines, scrollY, height, activeLine, diagnostics, opts)
 	}
 
-	baseWidth := gutterWidth(totalLines)
-	markerWidth := 0
-	if opts != nil {
-		markerWidth = 3 // 1 leading space + 2-cell icon + 1 trailing space
-	}
-	foldWidth := 2 // Nerd Font chevron icon (2-cell glyph)
-	width := baseWidth + markerWidth + foldWidth
+	metrics := computeGutterMetrics(totalLines, opts, true)
+	baseWidth := metrics.lineNumberWidth
+	width := metrics.contentWidth()
 
 	diagMap := make(map[int]int)
 	for _, d := range diagnostics {

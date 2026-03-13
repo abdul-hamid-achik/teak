@@ -78,7 +78,7 @@ func (r *pluginRuntime) syncActiveEditorAfterEdit(prevVersion int, prevCursor te
 	if err != nil {
 		return err
 	}
-	ed.Viewport.EnsureCursorVisible(ed.Buffer.Cursor, ed.Buffer.LineCount())
+	ed.EnsureCursorVisible()
 	if ed.Buffer.Version() == prevVersion {
 		return nil
 	}
@@ -181,7 +181,8 @@ func (r *pluginRuntime) SetBufferCursor(pos text.Position) error {
 	prevCursor := ed.Buffer.Cursor
 	pos = r.clampPosition(ed.Buffer, pos)
 	ed.Buffer.SetCursor(pos)
-	ed.Viewport.EnsureCursorVisible(pos, ed.Buffer.LineCount())
+	ed.Buffer.Cursor = pos
+	ed.EnsureCursorVisible()
 	if cmd := r.model.triggerEditorAutocmds(ed.Buffer.FilePath, ed.Buffer.Version(), ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor); cmd != nil {
 		r.cmds = append(r.cmds, cmd)
 	}
@@ -253,7 +254,7 @@ func (r *pluginRuntime) SaveBuffer() error {
 	if ed.Buffer.FilePath == "" {
 		return fmt.Errorf("active buffer has no file path")
 	}
-	return r.dispatchImmediate(SaveFileCmd(ed.Buffer.Save, ed.Buffer.FilePath)())
+	return r.dispatchImmediate(SaveFileCmd(ed.Buffer.Save, ed.Buffer.FilePath, 0)())
 }
 
 func (r *pluginRuntime) BufferFilePath() (string, error) {

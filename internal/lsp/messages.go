@@ -140,6 +140,12 @@ type TextEdit struct {
 	NewText   string
 }
 
+// FormattingOptions configures document formatting requests.
+type FormattingOptions struct {
+	TabSize      int
+	InsertSpaces bool
+}
+
 type WorkspaceFileOperationKind string
 
 const (
@@ -213,9 +219,23 @@ type FoldingRangeResultMsg struct {
 	Ranges   []FoldingRange
 }
 
+// FormatStatus describes the outcome of a formatting request.
+type FormatStatus string
+
+const (
+	FormatApplied     FormatStatus = "applied"
+	FormatNoOp        FormatStatus = "noop"
+	FormatUnsupported FormatStatus = "unsupported"
+	FormatError       FormatStatus = "error"
+)
+
 // FormatResultMsg is sent when formatting result arrives.
 type FormatResultMsg struct {
-	Edits []TextEdit
+	RequestID int
+	FilePath  string
+	Status    FormatStatus
+	Edits     []TextEdit
+	Err       error
 }
 
 // CodeActionResultMsg is sent when code actions arrive.

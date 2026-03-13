@@ -12,21 +12,24 @@ import (
 
 // FileSavedMsg is sent when a file has been saved successfully.
 type FileSavedMsg struct {
-	Path string
+	Path      string
+	RequestID int
 }
 
 // FileErrorMsg is sent when a file operation fails.
 type FileErrorMsg struct {
-	Err error
+	Path      string
+	RequestID int
+	Err       error
 }
 
 // SaveFileCmd returns a command that saves the file.
-func SaveFileCmd(saveFn func() error, path string) tea.Cmd {
+func SaveFileCmd(saveFn func() error, path string, requestID int) tea.Cmd {
 	return func() tea.Msg {
 		if err := saveFn(); err != nil {
-			return FileErrorMsg{Err: err}
+			return FileErrorMsg{Path: path, RequestID: requestID, Err: err}
 		}
-		return FileSavedMsg{Path: path}
+		return FileSavedMsg{Path: path, RequestID: requestID}
 	}
 }
 

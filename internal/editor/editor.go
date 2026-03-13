@@ -130,12 +130,26 @@ func (e *Editor) SetSize(width, height int) {
 	e.Viewport.Width = width
 	e.Viewport.Height = height
 	if e.Config.WordWrap && e.Buffer != nil {
-		textWidth := width - gutterWidth(e.Buffer.LineCount()) - 1
-		if textWidth < 1 {
-			textWidth = 1
-		}
-		if e.Wrap == nil || e.Wrap.Width() != textWidth {
-			e.Wrap = NewWrapLayout(e.Buffer.Line, e.Buffer.LineCount(), textWidth)
+		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, false)
+		baseTextWidth := metrics.textWidth(width)
+		wrapWidth := baseTextWidth
+		for {
+			if e.Wrap == nil {
+				e.Wrap = NewWrapLayout(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
+			} else {
+				e.Wrap.Rebuild(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
+			}
+			nextWrapWidth := baseTextWidth
+			if e.Wrap.TotalRows() > height {
+				nextWrapWidth--
+				if nextWrapWidth < 1 {
+					nextWrapWidth = 1
+				}
+			}
+			if nextWrapWidth == wrapWidth {
+				break
+			}
+			wrapWidth = nextWrapWidth
 		}
 	}
 }
@@ -182,7 +196,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			case "enter", "tab":
 				if item := e.autocomplete.Selected(); item != nil {
 					e.Buffer.InsertAtCursor([]byte(item.InsertText))
-					e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+					e.EnsureCursorVisible()
 				}
 				e.autocomplete.Hide()
 				return e, e.scheduleRetokenize()
@@ -203,7 +217,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		return e.handleMouseWheel(msg)
 	case tea.PasteMsg:
 		e.Buffer.InsertAtCursor([]byte(msg.Content))
-		e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+		e.EnsureCursorVisible()
 		return e, e.scheduleRetokenize()
 	case RetokenizeMsg:
 		if e.Highlighter == nil {
@@ -456,7 +470,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			edited = true
 		}
 	}
-	e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+	e.EnsureCursorVisible()
 	if edited {
 		e.hover.Hide()
 		e.signatureHelp.Hide()
@@ -534,21 +548,12 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 	}
 
 	if m.Button == tea.MouseLeft {
-		// Compute gutter column boundaries
-		markerW := 0
-		if e.DebugGutter != nil {
-			markerW = 3 // 1 leading space + 2-cell icon + 1 trailing space
-		}
-		baseW := gutterWidth(e.Buffer.LineCount())
-		foldW := 0
-		if len(e.Folds.Regions) > 0 {
-			foldW = 2 // 2-cell Nerd Font chevron
-		}
-		foldCol := markerW + baseW   // start of fold column
-		gutterEnd := foldCol + foldW // end of gutter (before padding)
+		metrics := e.currentGutterMetrics()
+		foldCol := metrics.markerWidth + metrics.lineNumberWidth
+		gutterEnd := metrics.contentWidth()
 
 		// Click on fold indicator column → toggle fold
-		if foldW > 0 && m.X >= foldCol && m.X < gutterEnd {
+		if metrics.foldWidth > 0 && m.X >= foldCol && m.X < gutterEnd {
 			pos := e.screenToBuffer(m.X, m.Y)
 			e.Folds.Toggle(pos.Line)
 			return e, nil
@@ -663,19 +668,20 @@ func (e Editor) View() string {
 
 // effectiveGutterWidth computes the total gutter width matching what Render produces.
 func (e Editor) effectiveGutterWidth() int {
-	w := gutterWidth(e.Buffer.LineCount())
-	if e.DebugGutter != nil {
-		w += 3 // breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
-	}
-	if len(e.Folds.Regions) > 0 {
-		w += 2 // fold indicator column (2-cell Nerd Font chevron)
-	}
-	return w + 1 // +1 for gutter padding
+	return e.currentGutterMetrics().totalWidth()
+}
+
+func (e Editor) shouldRenderFoldGutter() bool {
+	return len(e.Folds.Regions) > 0 && !(e.Wrap != nil && e.Config.WordWrap)
+}
+
+func (e Editor) currentGutterMetrics() gutterMetrics {
+	return computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, e.shouldRenderFoldGutter())
 }
 
 // visibleLinesForClick returns the visible lines slice when folds are active, nil otherwise.
 func (e Editor) visibleLinesForClick() []int {
-	if len(e.Folds.Regions) == 0 {
+	if !e.shouldRenderFoldGutter() {
 		return nil
 	}
 	startLine := e.Viewport.foldedScrollStart(&e.Folds, e.Buffer.LineCount())
@@ -703,7 +709,7 @@ func (e Editor) CursorPosition() (int, int) {
 
 	// Word wrap mode: cursor position accounts for wrapped visual rows
 	if e.Wrap != nil && e.Config.WordWrap {
-		textWidth := e.Viewport.Width - gw
+		textWidth := e.Wrap.Width()
 		if textWidth < 1 {
 			textWidth = 1
 		}
@@ -729,6 +735,23 @@ func (e Editor) CursorPosition() (int, int) {
 	}
 	y := e.Buffer.Cursor.Line - e.Viewport.ScrollY
 	return x, y
+}
+
+// EnsureCursorVisible keeps the cursor in view using display-width-aware math.
+func (e *Editor) EnsureCursorVisible() {
+	if e.Buffer == nil {
+		return
+	}
+
+	textWidth := e.currentGutterMetrics().textWidth(e.Viewport.Width)
+	if e.Wrap != nil && e.Config.WordWrap {
+		if e.Wrap.Width() > 0 {
+			textWidth = e.Wrap.Width()
+		}
+		e.Viewport.ScrollX = 0
+	}
+
+	e.Viewport.ensureCursorVisible(e.Buffer, e.Buffer.Cursor, textWidth)
 }
 
 // ShowAutocomplete displays completion items.
@@ -858,7 +881,7 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
 			_ = clipboard.Copy(string(sel))
 			e.Buffer.DeleteSelection()
-			e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+			e.EnsureCursorVisible()
 			if e.Highlighter != nil {
 				e.Highlighter.Invalidate()
 			}
@@ -873,7 +896,7 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 	case "paste":
 		if content, _ := clipboard.Paste(); content != "" {
 			e.Buffer.InsertAtCursor([]byte(content))
-			e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+			e.EnsureCursorVisible()
 			if e.Highlighter != nil {
 				e.Highlighter.Invalidate()
 			}
@@ -885,21 +908,21 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 		return e, nil
 	case "undo":
 		e.Buffer.Undo()
-		e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
 		}
 		return e, e.scheduleRetokenize()
 	case "redo":
 		e.Buffer.Redo()
-		e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
 		}
 		return e, e.scheduleRetokenize()
 	case "toggle_comment":
 		e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
-		e.Viewport.EnsureCursorVisible(e.Buffer.Cursor, e.Buffer.LineCount())
+		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
 		}

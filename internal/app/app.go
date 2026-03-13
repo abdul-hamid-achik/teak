@@ -61,81 +61,82 @@ const (
 
 // Model is the root Bubbletea model.
 type Model struct {
-	editors                []editor.Editor
-	activeTab              int
-	tabBar                 editor.TabBar
-	tree                   filetree.Model
-	theme                  ui.Theme
-	status                 string
-	width                  int
-	height                 int
-	showHelp               bool
-	helpM                  editor.HelpModel
-	showTree               bool
-	showSearch             bool
-	searchMode             search.Mode
-	searchM                search.Model
-	focus                  FocusArea
-	rootDir                string
-	lspMgr                 *lsp.Manager
-	goToLineMode           bool
-	goToLineInput          string
-	welcome                *editor.Welcome
-	treeContextMenu        editor.ContextMenu
-	treeContextPath        string
-	renameMode             bool
-	renameInput            string
-	pendingCursor          *text.Position               // cursor to set after async file load
-	fileDiagnostics        map[string]int               // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
-	dirDiagnostics         map[string]int               // dir path → worst child severity
-	gitBranch              string                       // current git branch name
-	gitPanel               git.Model                    // git sidebar panel
-	watcher                *fileWatcher                 // watches files/dirs for external changes
-	newFileMode            bool                         // input mode for new file name
-	newFolderMode          bool                         // input mode for new folder name
-	newItemInput           string                       // input buffer for new file/folder name
-	newItemDir             string                       // directory to create new item in
-	deleteConfirm          bool                         // confirming deletion
-	deleteTarget           string                       // path to delete
-	diffViews              map[int]diff.Model           // tab index → diff view model
-	sidebarTab             SidebarTab                   // active sidebar tab
-	showBranchPicker       bool                         // branch picker overlay visible
-	branchPickerM          git.BranchPickerModel        // branch picker model
-	gitContextMenu         editor.ContextMenu           // context menu for git panel
-	gitContextEntry        *git.StatusEntry             // entry right-clicked in git panel
-	gitContextStaged       bool                         // whether the right-clicked entry is in staged section
-	gitContextPath         string                       // path of right-clicked entry (file or dir)
-	unsavedConfirm         *overlay.Confirm             // unsaved changes dialog shown on quit
-	overlayStack           overlay.Stack                // stack for picker overlays (quick open, command palette)
-	cachedFiles            []string                     // cached file list for quick open
-	cachedFilesReady       bool                         // true after file list has been loaded
-	fileListGeneration     int                          // invalidates stale async file scans
-	problemsPanel          problems.Model               // problems panel for diagnostics
-	showSettings           bool                         // settings overlay visible
-	settingsM              settings.Model               // settings editor model
-	closedTabs             []ClosedTab                  // history of closed tabs for reopening
-	debuggerPanel          debugger.Model               // debugger panel
-	debugMgr               *dap.Manager                 // debug session manager
-	breakpoints            map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
-	currentExecFile        string                       // file with current execution point
-	currentExecLine        int                          // current execution line (0-based), -1 when not paused
-	showAgent              bool                         // agent panel visible
-	agentPanel             agent.Model                  // agent chat panel
-	pluginMgr              *plugin.Manager              // Lua plugin manager
-	pluginKeySequence      string                       // pending plugin key sequence
-	pluginFeedDepth        int                          // nested synthetic key dispatch from plugins
-	acpMgr                 *acp.Manager                 // ACP agent manager
-	coordinator            *Coordinator                 // orchestrates LSP/DAP/ACP coordinators
-	logFile                *os.File                     // log file handle for cleanup
-	pendingCloseTab        int                          // tab index pending close-unsaved confirm (-1 = none)
-	untitledCounter        int                          // counter for "Untitled-N" tabs
-	saveAsMode             bool                         // save-as input mode
-	saveAsInput            string                       // save-as path input buffer
-	lastSearchResults      []search.Result              // saved results from last search
-	lastSearchIndex        int                          // current index in lastSearchResults
-	pendingSaveAfterFormat bool                         // save file after formatting completes
-	appCfg                 config.Config                // app config for feature flags
-	gitRefreshGeneration   int
+	editors              []editor.Editor
+	activeTab            int
+	tabBar               editor.TabBar
+	tree                 filetree.Model
+	theme                ui.Theme
+	status               string
+	width                int
+	height               int
+	showHelp             bool
+	helpM                editor.HelpModel
+	showTree             bool
+	showSearch           bool
+	searchMode           search.Mode
+	searchM              search.Model
+	focus                FocusArea
+	rootDir              string
+	lspMgr               *lsp.Manager
+	goToLineMode         bool
+	goToLineInput        string
+	welcome              *editor.Welcome
+	treeContextMenu      editor.ContextMenu
+	treeContextPath      string
+	renameMode           bool
+	renameInput          string
+	pendingCursor        *text.Position               // cursor to set after async file load
+	fileDiagnostics      map[string]int               // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	dirDiagnostics       map[string]int               // dir path → worst child severity
+	gitBranch            string                       // current git branch name
+	gitPanel             git.Model                    // git sidebar panel
+	watcher              *fileWatcher                 // watches files/dirs for external changes
+	newFileMode          bool                         // input mode for new file name
+	newFolderMode        bool                         // input mode for new folder name
+	newItemInput         string                       // input buffer for new file/folder name
+	newItemDir           string                       // directory to create new item in
+	deleteConfirm        bool                         // confirming deletion
+	deleteTarget         string                       // path to delete
+	diffViews            map[int]diff.Model           // tab index → diff view model
+	sidebarTab           SidebarTab                   // active sidebar tab
+	showBranchPicker     bool                         // branch picker overlay visible
+	branchPickerM        git.BranchPickerModel        // branch picker model
+	gitContextMenu       editor.ContextMenu           // context menu for git panel
+	gitContextEntry      *git.StatusEntry             // entry right-clicked in git panel
+	gitContextStaged     bool                         // whether the right-clicked entry is in staged section
+	gitContextPath       string                       // path of right-clicked entry (file or dir)
+	unsavedConfirm       *overlay.Confirm             // unsaved changes dialog shown on quit
+	overlayStack         overlay.Stack                // stack for picker overlays (quick open, command palette)
+	cachedFiles          []string                     // cached file list for quick open
+	cachedFilesReady     bool                         // true after file list has been loaded
+	fileListGeneration   int                          // invalidates stale async file scans
+	problemsPanel        problems.Model               // problems panel for diagnostics
+	showSettings         bool                         // settings overlay visible
+	settingsM            settings.Model               // settings editor model
+	closedTabs           []ClosedTab                  // history of closed tabs for reopening
+	debuggerPanel        debugger.Model               // debugger panel
+	debugMgr             *dap.Manager                 // debug session manager
+	breakpoints          map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
+	currentExecFile      string                       // file with current execution point
+	currentExecLine      int                          // current execution line (0-based), -1 when not paused
+	showAgent            bool                         // agent panel visible
+	agentPanel           agent.Model                  // agent chat panel
+	pluginMgr            *plugin.Manager              // Lua plugin manager
+	pluginKeySequence    string                       // pending plugin key sequence
+	pluginFeedDepth      int                          // nested synthetic key dispatch from plugins
+	acpMgr               *acp.Manager                 // ACP agent manager
+	coordinator          *Coordinator                 // orchestrates LSP/DAP/ACP coordinators
+	logFile              *os.File                     // log file handle for cleanup
+	pendingCloseTab      int                          // tab index pending close-unsaved confirm (-1 = none)
+	untitledCounter      int                          // counter for "Untitled-N" tabs
+	saveAsMode           bool                         // save-as input mode
+	saveAsInput          string                       // save-as path input buffer
+	lastSearchResults    []search.Result              // saved results from last search
+	lastSearchIndex      int                          // current index in lastSearchResults
+	pendingSaves         map[int]pendingSaveRequest   // request id -> save continuation state
+	nextSaveRequestID    int                          // monotonically increasing save request id
+	appCfg               config.Config                // app config for feature flags
+	gitRefreshGeneration int
 
 	// Managers (refactoring in progress)
 	tabMgr      *TabManager
@@ -200,28 +201,30 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 	}
 
 	m := Model{
-		theme:           theme,
-		rootDir:         rootDir,
-		tabBar:          editor.NewTabBar(theme),
-		lspMgr:          lsp.NewManager(rootDir, lspConfigs),
-		treeContextMenu: editor.NewContextMenu(theme),
-		fileDiagnostics: make(map[string]int),
-		dirDiagnostics:  make(map[string]int),
-		logFile:         logFile,
-		pendingCloseTab: -1,
-		appCfg:          appCfg,
-		gitBranch:       detectGitBranch(rootDir),
-		gitPanel:        git.New(rootDir, theme),
-		branchPickerM:   git.NewBranchPicker(theme),
-		gitContextMenu:  editor.NewContextMenu(theme),
-		helpM:           editor.NewHelpModel(theme),
-		problemsPanel:   problems.New(theme, rootDir),
-		settingsM:       settings.New(theme, appCfg, config.ConfigPath()),
-		debuggerPanel:   debugger.New(theme),
-		debugMgr:        dap.NewManager(rootDir),
-		breakpoints:     make(map[string][]breakpointEntry),
-		currentExecLine: -1,
-		agentPanel:      agent.New(theme),
+		theme:             theme,
+		rootDir:           rootDir,
+		tabBar:            editor.NewTabBar(theme),
+		lspMgr:            lsp.NewManager(rootDir, lspConfigs),
+		treeContextMenu:   editor.NewContextMenu(theme),
+		fileDiagnostics:   make(map[string]int),
+		dirDiagnostics:    make(map[string]int),
+		logFile:           logFile,
+		pendingCloseTab:   -1,
+		pendingSaves:      make(map[int]pendingSaveRequest),
+		nextSaveRequestID: 1,
+		appCfg:            appCfg,
+		gitBranch:         detectGitBranch(rootDir),
+		gitPanel:          git.New(rootDir, theme),
+		branchPickerM:     git.NewBranchPicker(theme),
+		gitContextMenu:    editor.NewContextMenu(theme),
+		helpM:             editor.NewHelpModel(theme),
+		problemsPanel:     problems.New(theme, rootDir),
+		settingsM:         settings.New(theme, appCfg, config.ConfigPath()),
+		debuggerPanel:     debugger.New(theme),
+		debugMgr:          dap.NewManager(rootDir),
+		breakpoints:       make(map[string][]breakpointEntry),
+		currentExecLine:   -1,
+		agentPanel:        agent.New(theme),
 	}
 
 	// Initialize ACP manager if agent is configured
@@ -640,13 +643,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
 				return m, nil
 			}
-			if m.appCfg.Editor.FormatOnSave {
-				if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
-					m.pendingSaveAfterFormat = true
-					return m, m.requestFormatting()
-				}
-			}
-			return m, SaveFileCmd(buf.Save, buf.FilePath)
+			return m, m.beginSaveForTab(m.activeTab, false, false)
 		case "ctrl+shift+s":
 			if m.activeEditor() == nil {
 				return m, nil
@@ -728,7 +725,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+alt+f":
 			// Format document
 			if m.focus == FocusEditor {
-				return m, m.requestFormatting()
+				ed := m.activeEditor()
+				if ed == nil || ed.Buffer.FilePath == "" {
+					return m, nil
+				}
+				return m, m.requestFormatting(ed.Buffer.FilePath, ed.Config, 0)
 			}
 			return m, nil
 		case "ctrl+shift+o":
@@ -1311,11 +1312,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SaveAndCloseTabMsg:
 		if msg.Index >= 0 && msg.Index < len(m.editors) {
 			buf := m.editors[msg.Index].Buffer
-			idx := msg.Index
-			return m, tea.Batch(
-				SaveFileCmd(buf.Save, buf.FilePath),
-				func() tea.Msg { return ForceCloseTabMsg{Index: idx} },
-			)
+			if buf.FilePath == "" {
+				m.status = "Save & Close requires a file path"
+				return m, nil
+			}
+			return m, m.beginSaveForTab(msg.Index, true, false)
 		}
 		return m, nil
 
@@ -1341,17 +1342,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.requestCompletion()
 
 	case FileSavedMsg:
-		m.status = fmt.Sprintf("Saved %s", msg.Path)
+		req, hadPendingSave := m.completeSaveRequest(msg.RequestID)
+		m.status = saveSuccessStatus(msg.Path, req.StatusNote)
 		search.InvalidateSemanticIndex(m.rootDir)
-		if m.activeTab < len(m.tabBar.Tabs) {
-			m.tabBar.Tabs[m.activeTab].Dirty = false
+		for i := range m.tabBar.Tabs {
+			if m.tabBar.Tabs[i].FilePath == msg.Path {
+				m.tabBar.Tabs[i].Dirty = false
+			}
 		}
 		var cmds []tea.Cmd
-		if m.activeEditor() != nil {
-			buf := m.activeEditor().Buffer
-			if buf.FilePath != "" {
-				if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
-					client.DidSave(lsp.FileURI(buf.FilePath))
+		if client := m.lspMgr.ClientForFile(msg.Path); client != nil {
+			client.DidSave(lsp.FileURI(msg.Path))
+		}
+		if hadPendingSave && req.CloseAfter {
+			closeIdx := -1
+			if req.TabIndex >= 0 && req.TabIndex < len(m.editors) && m.editors[req.TabIndex].Buffer.FilePath == msg.Path {
+				closeIdx = req.TabIndex
+			} else {
+				closeIdx = m.findEditorByPath(msg.Path)
+			}
+			if closeIdx >= 0 {
+				model, closeCmd := m.closeTab(closeIdx)
+				m = model.(Model)
+				if closeCmd != nil {
+					cmds = append(cmds, closeCmd)
 				}
 			}
 		}
@@ -1360,18 +1374,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, refreshCmd)
 		}
 		cmds = append(cmds, m.triggerPluginEvents(m.pluginEvent(plugin.EventBufWrite, msg.Path)))
+		if hadPendingSave && req.QuitAfter && !m.hasPendingQuitAfterSaves() {
+			cmds = append(cmds, func() tea.Msg { return QuitWithoutSavingMsg{} })
+		}
 		return m, tea.Batch(cmds...)
 
 	case SaveAllAndQuitMsg:
 		var saveCmds []tea.Cmd
+		unsaveable := 0
 		for i := range m.editors {
-			if m.editors[i].Buffer.Dirty() && m.editors[i].Buffer.FilePath != "" {
-				saveCmds = append(saveCmds, SaveFileCmd(m.editors[i].Buffer.Save, m.editors[i].Buffer.FilePath))
+			if !m.editors[i].Buffer.Dirty() {
+				continue
+			}
+			if m.editors[i].Buffer.FilePath == "" {
+				unsaveable++
+				continue
+			}
+			if cmd := m.beginSaveForTab(i, false, true); cmd != nil {
+				saveCmds = append(saveCmds, cmd)
 			}
 		}
-		m.lspMgr.ShutdownAll()
-		m.cleanup()
-		saveCmds = append(saveCmds, tea.Quit)
+		if unsaveable > 0 {
+			m.cancelQuitAfterSaves()
+			if len(saveCmds) > 0 {
+				m.status = "Saved file-backed tabs; use Save As for untitled tabs before quitting"
+				return m, tea.Batch(saveCmds...)
+			}
+			m.status = "Use Save As for untitled tabs before quitting"
+			return m, nil
+		}
+		if len(saveCmds) == 0 {
+			m.lspMgr.ShutdownAll()
+			m.cleanup()
+			return m, tea.Quit
+		}
 		return m, tea.Batch(saveCmds...)
 
 	case QuitWithoutSavingMsg:
@@ -1409,7 +1445,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if ed != nil {
 				ed.Buffer.Cursor.Line = sel.Symbol.SelectionRange.Start.Line
 				ed.Buffer.Cursor.Col = sel.Symbol.SelectionRange.Start.Character
-				ed.Viewport.EnsureCursorVisible(ed.Buffer.Cursor, ed.Buffer.LineCount())
+				ed.EnsureCursorVisible()
 				m.editors[m.activeTab] = *ed
 			}
 			return m, nil
@@ -1542,7 +1578,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDiffLoaded(msg)
 
 	case FileErrorMsg:
-		m.status = fmt.Sprintf("Error: %v", msg.Err)
+		req, hadPendingSave := m.completeSaveRequest(msg.RequestID)
+		if hadPendingSave && req.QuitAfter {
+			m.cancelQuitAfterSaves()
+		}
+		if msg.Path != "" {
+			m.status = fmt.Sprintf("Error saving %s: %v", msg.Path, msg.Err)
+		} else {
+			m.status = fmt.Sprintf("Error: %v", msg.Err)
+		}
 		return m, nil
 
 	case FileLoadedMsg:
@@ -1627,26 +1671,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lsp.FormatResultMsg:
-		if len(msg.Edits) > 0 && m.activeEditor() != nil {
-			buf := m.activeEditor().Buffer
-			// Apply edits in reverse order
-			for i := len(msg.Edits) - 1; i >= 0; i-- {
-				ed := msg.Edits[i]
-				start := text.Position{Line: ed.StartLine, Col: ed.StartCol}
-				end := text.Position{Line: ed.EndLine, Col: ed.EndCol}
-				buf.ReplaceRange(start, end, []byte(ed.NewText))
-			}
-			m.status = "Document formatted"
-			m.editors[m.activeTab] = *m.activeEditor()
-		}
-		if m.pendingSaveAfterFormat {
-			m.pendingSaveAfterFormat = false
-			if m.activeEditor() != nil {
-				buf := m.activeEditor().Buffer
-				return m, SaveFileCmd(buf.Save, buf.FilePath)
+		idx := m.findEditorByPath(msg.FilePath)
+		if msg.Status == lsp.FormatApplied && idx >= 0 {
+			applied := applyTextEditsToBuffer(m.editors[idx].Buffer, msg.Edits)
+			if applied > 0 {
+				if m.editors[idx].Highlighter != nil {
+					m.editors[idx].Highlighter.Invalidate()
+				}
+				m.status = "Document formatted"
 			}
 		}
-		return m, nil
+		if msg.RequestID == 0 {
+			switch msg.Status {
+			case lsp.FormatApplied:
+				if idx >= 0 && idx == m.activeTab {
+					m.editors[m.activeTab] = m.editors[idx]
+				}
+			case lsp.FormatNoOp:
+				m.status = "No formatting changes"
+			case lsp.FormatUnsupported:
+				m.status = "Formatting not supported"
+			case lsp.FormatError:
+				if msg.Err != nil {
+					m.status = fmt.Sprintf("Formatting failed: %v", msg.Err)
+				} else {
+					m.status = "Formatting failed"
+				}
+			}
+			return m, nil
+		}
+
+		m.setPendingSaveNote(msg.RequestID, formatResultNote(msg.Status, msg.Err))
+		return m, m.startSaveRequest(msg.RequestID)
 
 	case lsp.CodeActionResultMsg:
 		if len(msg.Actions) > 0 {
@@ -2706,7 +2762,7 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 		if m.pendingCursor != nil {
 			ed := m.activeEditor()
 			ed.Buffer.Cursor = *m.pendingCursor
-			ed.Viewport.EnsureCursorVisible(ed.Buffer.Cursor, ed.Buffer.LineCount())
+			ed.EnsureCursorVisible()
 			m.editors[m.activeTab] = *ed
 			m.pendingCursor = nil
 		}
@@ -2793,7 +2849,7 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 	// Apply pending cursor if set (e.g. from go-to-definition)
 	if m.pendingCursor != nil && tabIdx == m.activeTab {
 		m.editors[tabIdx].Buffer.Cursor = *m.pendingCursor
-		m.editors[tabIdx].Viewport.EnsureCursorVisible(m.editors[tabIdx].Buffer.Cursor, m.editors[tabIdx].Buffer.LineCount())
+		m.editors[tabIdx].EnsureCursorVisible()
 		m.pendingCursor = nil
 	}
 
@@ -3718,26 +3774,6 @@ func (m Model) requestHover() tea.Cmd {
 
 type hoverTriggerMsg struct{}
 
-func (m Model) requestFormatting() tea.Cmd {
-	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
-		return nil
-	}
-	mgr := m.lspMgr
-	filePath := ed.Buffer.FilePath
-	return func() tea.Msg {
-		client := mgr.ClientForFile(filePath)
-		if client == nil {
-			return nil
-		}
-		edits, err := client.Formatting(lsp.FileURI(filePath))
-		if err != nil || len(edits) == 0 {
-			return nil
-		}
-		return lsp.FormatResultMsg{Edits: edits}
-	}
-}
-
 func (m Model) requestFoldingRanges(filePath string) tea.Cmd {
 	if filePath == "" {
 		return nil
@@ -3842,7 +3878,7 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		ed.Buffer.ClearSelection()
 		ed.Buffer.Cursor.Line = lineNum
 		ed.Buffer.Cursor.Col = 0
-		ed.Viewport.EnsureCursorVisible(ed.Buffer.Cursor, ed.Buffer.LineCount())
+		ed.EnsureCursorVisible()
 		m.editors[m.activeTab] = *ed
 		return m, nil
 	case "backspace":
@@ -4854,7 +4890,12 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		buf := m.activeEditor().Buffer
-		return m, SaveFileCmd(buf.Save, buf.FilePath)
+		if buf.FilePath == "" {
+			m.saveAsMode = true
+			m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+			return m, nil
+		}
+		return m, m.beginSaveForTab(m.activeTab, false, false)
 	case toggleTreeMsg:
 		m.showTree = !m.showTree
 		if m.showTree {

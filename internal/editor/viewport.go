@@ -158,16 +158,11 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 
 // RenderWithWrap renders the viewport with word wrap enabled.
 func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, wrap *WrapLayout) string {
-	// Compute gutter width
-	baseWidth := gutterWidth(buf.LineCount())
-	markerWidth := 0
-	if gutterOpts != nil {
-		markerWidth = 3 // 1 leading space + 2-cell icon + 1 trailing space
-	}
-	gwTotal := baseWidth + markerWidth
-	v.GutterWidth = gwTotal + 1 // +1 for padding
-
-	textWidth := v.Width - v.GutterWidth
+	metrics := computeGutterMetrics(buf.LineCount(), gutterOpts, false)
+	v.GutterWidth = metrics.totalWidth()
+	baseWidth := metrics.lineNumberWidth
+	markerWidth := metrics.markerWidth
+	textWidth := wrap.Width()
 	if textWidth < 1 {
 		textWidth = 1
 	}
@@ -177,10 +172,6 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 	showScrollbar := totalRows > v.Height
 	var thumbStart, thumbEnd int
 	if showScrollbar {
-		textWidth--
-		if textWidth < 1 {
-			textWidth = 1
-		}
 		thumbSize := max(1, v.Height*v.Height/totalRows)
 		visualScrollY := wrap.VisualRow(v.ScrollY)
 		maxScroll := totalRows - v.Height
@@ -217,7 +208,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			if wrapOffset == 0 {
 				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagMap, bufLine, baseWidth, markerWidth))
 			} else {
-				sb.WriteString(theme.Gutter.Render(getSpaces(gwTotal)))
+				sb.WriteString(theme.Gutter.Render(getSpaces(metrics.contentWidth())))
 			}
 			// Padding between gutter and text
 			sb.WriteByte(' ')
@@ -247,7 +238,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 				wrapOffset = 0
 			}
 		} else {
-			sb.WriteString(theme.Gutter.Render(getSpaces(gwTotal)))
+			sb.WriteString(theme.Gutter.Render(getSpaces(metrics.contentWidth())))
 			sb.WriteByte(' ')
 			sb.WriteString(theme.Editor.Render(getSpaces(textWidth)))
 		}
@@ -872,7 +863,7 @@ func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Bu
 		screenCol = 0
 	}
 
-	textWidth := v.Width - gw
+	textWidth := wrap.Width()
 	if textWidth < 1 {
 		textWidth = 1
 	}
@@ -916,6 +907,35 @@ func (v *Viewport) EnsureCursorVisible(cursor text.Position, lineCount int) {
 	}
 	// ScrollX is in display columns, so compare with display width of cursor col
 	displayCol := cursor.Col // for ASCII this is fine, but we don't have line content here
+	if displayCol < v.ScrollX {
+		v.ScrollX = displayCol
+	}
+	if displayCol >= v.ScrollX+textWidth {
+		v.ScrollX = displayCol - textWidth + 1
+	}
+}
+
+func (v *Viewport) ensureCursorVisible(buf *text.Buffer, cursor text.Position, textWidth int) {
+	if cursor.Line < v.ScrollY {
+		v.ScrollY = cursor.Line
+	}
+	if cursor.Line >= v.ScrollY+v.Height {
+		v.ScrollY = cursor.Line - v.Height + 1
+	}
+
+	if cursor.Line < 0 || cursor.Line >= buf.LineCount() {
+		return
+	}
+	if textWidth < 1 {
+		textWidth = 1
+	}
+
+	lineContent := buf.Line(cursor.Line)
+	col := cursor.Col
+	if col > len(lineContent) {
+		col = len(lineContent)
+	}
+	displayCol := displayWidth(string(lineContent[:col]))
 	if displayCol < v.ScrollX {
 		v.ScrollX = displayCol
 	}

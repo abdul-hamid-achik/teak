@@ -77,6 +77,13 @@ func (c *Client) SupportsRename() bool {
 	return capabilityEnabled(c.capabilities.RenameProvider)
 }
 
+// SupportsFormatting returns whether the server supports document formatting.
+func (c *Client) SupportsFormatting() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return capabilityEnabled(c.capabilities.FormattingProvider)
+}
+
 // GetCompletionTriggerCharacters returns the trigger characters for completion.
 func (c *Client) GetCompletionTriggerCharacters() []string {
 	c.mu.RLock()
@@ -92,6 +99,14 @@ func (c *Client) GetSyncKind() SyncKind {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.syncKind
+}
+
+// DocumentVersion returns the tracked LSP version for an open document.
+func (c *Client) DocumentVersion(uri string) (int, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	version, ok := c.openDocs[uri]
+	return version, ok
 }
 
 type callResult struct {
@@ -134,11 +149,23 @@ type jsonrpcResponse struct {
 	Error   *jsonrpcError   `json:"error,omitempty"`
 }
 
+func formattingRequestParams(uri string, options FormattingOptions) map[string]any {
+	return map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"options": map[string]any{
+			"tabSize":      options.TabSize,
+			"insertSpaces": options.InsertSpaces,
+		},
+	}
+}
+
 type jsonrpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"` // Optional additional error information
 }
+
+const jsonrpcMethodNotFound = -32601
 
 // NewClient creates a new LSP client and starts the server process.
 func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, error) {
@@ -222,7 +249,7 @@ func (c *Client) Initialize() error {
 				},
 			},
 			"workspace": map[string]any{
-				"applyEdit":        true,
+				"applyEdit":        false,
 				"workspaceFolders": true,
 				"configuration":    true,
 			},
@@ -404,7 +431,7 @@ func (c *Client) DidClose(uri string) {
 
 // Completion requests completions at the given position.
 func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	result, err := c.call(ctx, "textDocument/completion", map[string]any{
@@ -470,7 +497,7 @@ func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, 
 
 // Hover requests hover info at the given position.
 func (c *Client) Hover(uri string, line, character int) (*HoverResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	result, err := c.call(ctx, "textDocument/hover", map[string]any{
@@ -699,17 +726,15 @@ func (c *Client) SignatureHelp(uri string, line, character int) (*SignatureHelp,
 }
 
 // Formatting requests formatting for a document.
-func (c *Client) Formatting(uri string) ([]TextEdit, error) {
+func (c *Client) Formatting(uri string, options FormattingOptions) ([]TextEdit, error) {
+	if !c.SupportsFormatting() {
+		return nil, nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := c.call(ctx, "textDocument/formatting", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"options": map[string]any{
-			"tabSize":      4,
-			"insertSpaces": true,
-		},
-	})
+	result, err := c.call(ctx, "textDocument/formatting", formattingRequestParams(uri, options))
 	if err != nil {
 		return nil, err
 	}
@@ -1059,6 +1084,20 @@ func (c *Client) handleMessage(data json.RawMessage) {
 		c.handleWorkspaceConfiguration(peek.ID, peek.Params)
 	case "workspace/workspaceFolders":
 		c.handleWorkspaceFolders(peek.ID)
+	case "window/workDoneProgress/create":
+		c.handleWorkDoneProgressCreate(peek.ID)
+	case "client/registerCapability":
+		c.handleClientRegisterCapability(peek.ID)
+	case "client/unregisterCapability":
+		c.handleClientUnregisterCapability(peek.ID)
+	case "window/showMessageRequest":
+		c.handleShowMessageRequest(peek.ID, peek.Params)
+	case "workspace/applyEdit":
+		c.handleApplyEdit(peek.ID)
+	default:
+		if peek.ID != nil {
+			c.sendErrorResponse(*peek.ID, jsonrpcMethodNotFound, fmt.Sprintf("method not found: %s", peek.Method), nil)
+		}
 	}
 }
 
@@ -1105,11 +1144,25 @@ func (c *Client) handleProgress(params json.RawMessage) {
 }
 
 func (c *Client) handleWorkspaceConfiguration(id *int, params json.RawMessage) {
-	// Respond with empty configuration for now
-	// Can be extended to read from settings
-	if id != nil && c.msgChan != nil {
-		c.sendResponse(*id, []any{})
+	// Respond with a nil entry per requested config item.
+	// Some servers expect the result array length to match the requested items.
+	if id == nil {
+		return
 	}
+
+	var req struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		c.sendResponse(*id, []any{})
+		return
+	}
+
+	resp := make([]any, len(req.Items))
+	for i := range resp {
+		resp[i] = nil
+	}
+	c.sendResponse(*id, resp)
 }
 
 func (c *Client) handleWorkspaceFolders(id *int) {
@@ -1120,6 +1173,42 @@ func (c *Client) handleWorkspaceFolders(id *int) {
 		}
 		c.sendResponse(*id, folders)
 	}
+}
+
+func (c *Client) handleWorkDoneProgressCreate(id *int) {
+	if id != nil {
+		c.sendResponse(*id, nil)
+	}
+}
+
+func (c *Client) handleClientRegisterCapability(id *int) {
+	if id != nil {
+		c.sendResponse(*id, nil)
+	}
+}
+
+func (c *Client) handleClientUnregisterCapability(id *int) {
+	if id != nil {
+		c.sendResponse(*id, nil)
+	}
+}
+
+func (c *Client) handleShowMessageRequest(id *int, params json.RawMessage) {
+	if id == nil {
+		return
+	}
+	c.handleShowMessage(params)
+	c.sendResponse(*id, nil)
+}
+
+func (c *Client) handleApplyEdit(id *int) {
+	if id == nil {
+		return
+	}
+	c.sendResponse(*id, map[string]any{
+		"applied":       false,
+		"failureReason": "workspace/applyEdit is not supported by this client",
+	})
 }
 
 func (c *Client) sendResponse(id int, result any) {
@@ -1135,6 +1224,21 @@ func (c *Client) sendResponse(id int, result any) {
 	}
 	if err := c.send(resp); err != nil {
 		log.Error("lsp: failed to send response", "err", err, "id", id)
+	}
+}
+
+func (c *Client) sendErrorResponse(id int, code int, message string, data any) {
+	resp := jsonrpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &jsonrpcError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+	}
+	if err := c.send(resp); err != nil {
+		log.Error("lsp: failed to send error response", "err", err, "id", id, "code", code)
 	}
 }
 
