@@ -56,6 +56,10 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 	var sb strings.Builder
 
 	// Use pre-cached theme styles instead of creating new styles each render
+	gutterStyle := theme.Gutter.UnsetPadding()
+	gutterActiveStyle := theme.GutterActive.UnsetPadding()
+	gutterErrorStyle := theme.GutterError.UnsetPadding()
+	gutterWarnStyle := theme.GutterWarn.UnsetPadding()
 	bpActiveStyle := theme.BreakpointActive
 	bpDisabledStyle := theme.BreakpointDisabled
 	execStyle := theme.ExecLineMarker
@@ -63,17 +67,19 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 	for i := range height {
 		line := scrollY + i
 		if line >= totalLines {
-			sb.WriteString(theme.Gutter.Render(getSpaces(width)))
+			sb.WriteString(gutterStyle.Render(getSpaces(width)))
 		} else {
-			// Breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
+			// Breakpoint marker column (1 leading space + icon + 1 trailing space)
 			if opts != nil {
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')
 					sb.WriteString(bpActiveStyle.Render("\U000f0765"))
+					sb.WriteByte(' ')
 				case BPDisabled:
 					sb.WriteByte(' ')
 					sb.WriteString(bpDisabledStyle.Render("\U000f0765"))
+					sb.WriteByte(' ')
 				default:
 					sb.WriteString("   ")
 				}
@@ -89,20 +95,20 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 			} else if sev, ok := diagMap[line]; ok {
 				switch sev {
 				case 1: // error
-					sb.WriteString(theme.GutterError.Render(numStr))
+					sb.WriteString(gutterErrorStyle.Render(numStr))
 				case 2: // warning
-					sb.WriteString(theme.GutterWarn.Render(numStr))
+					sb.WriteString(gutterWarnStyle.Render(numStr))
 				default:
 					if line == activeLine {
-						sb.WriteString(theme.GutterActive.Render(numStr))
+						sb.WriteString(gutterActiveStyle.Render(numStr))
 					} else {
-						sb.WriteString(theme.Gutter.Render(numStr))
+						sb.WriteString(gutterStyle.Render(numStr))
 					}
 				}
 			} else if line == activeLine {
-				sb.WriteString(theme.GutterActive.Render(numStr))
+				sb.WriteString(gutterActiveStyle.Render(numStr))
 			} else {
-				sb.WriteString(theme.Gutter.Render(numStr))
+				sb.WriteString(gutterStyle.Render(numStr))
 			}
 		}
 		if i < height-1 {
@@ -113,7 +119,8 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 }
 
 // RenderGutterWithFolds renders the gutter with fold indicators.
-// A dedicated 1-char column is added after line numbers for fold indicators (Nerd Font chevrons).
+// Fold rows reserve a 2-cell slot after line numbers so text starts at a
+// consistent column whether a fold icon is present or not.
 // If folds is nil or visibleLines is empty, falls back to standard rendering.
 func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLine int, diagnostics []Diagnostic, opts *GutterOpts, folds *FoldState, visibleLines []int) (string, int) {
 	if folds == nil || len(folds.Regions) == 0 || len(visibleLines) == 0 {
@@ -135,6 +142,10 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 
 	var sb strings.Builder
 	// Use pre-cached theme styles instead of creating new styles each render
+	gutterStyle := theme.Gutter.UnsetPadding()
+	gutterActiveStyle := theme.GutterActive.UnsetPadding()
+	gutterErrorStyle := theme.GutterError.UnsetPadding()
+	gutterWarnStyle := theme.GutterWarn.UnsetPadding()
 	bpActiveStyle := theme.BreakpointActive
 	bpDisabledStyle := theme.BreakpointDisabled
 	execStyle := theme.ExecLineMarker
@@ -149,17 +160,19 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 		}
 
 		if !inRange || line >= totalLines {
-			sb.WriteString(theme.Gutter.Render(getSpaces(width)))
+			sb.WriteString(gutterStyle.Render(getSpaces(width)))
 		} else {
-			// Breakpoint marker column (1 leading space + 2-cell icon + 1 trailing space)
+			// Breakpoint marker column (1 leading space + icon + 1 trailing space)
 			if opts != nil {
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')
 					sb.WriteString(bpActiveStyle.Render("\U000f0765"))
+					sb.WriteByte(' ')
 				case BPDisabled:
 					sb.WriteByte(' ')
 					sb.WriteString(bpDisabledStyle.Render("\U000f0765"))
+					sb.WriteByte(' ')
 				default:
 					sb.WriteString("   ")
 				}
@@ -174,29 +187,31 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 			} else if sev, ok := diagMap[line]; ok {
 				switch sev {
 				case 1:
-					sb.WriteString(theme.GutterError.Render(numStr))
+					sb.WriteString(gutterErrorStyle.Render(numStr))
 				case 2:
-					sb.WriteString(theme.GutterWarn.Render(numStr))
+					sb.WriteString(gutterWarnStyle.Render(numStr))
 				default:
 					if line == activeLine {
-						sb.WriteString(theme.GutterActive.Render(numStr))
+						sb.WriteString(gutterActiveStyle.Render(numStr))
 					} else {
-						sb.WriteString(theme.Gutter.Render(numStr))
+						sb.WriteString(gutterStyle.Render(numStr))
 					}
 				}
 			} else if line == activeLine {
-				sb.WriteString(theme.GutterActive.Render(numStr))
+				sb.WriteString(gutterActiveStyle.Render(numStr))
 			} else {
-				sb.WriteString(theme.Gutter.Render(numStr))
+				sb.WriteString(gutterStyle.Render(numStr))
 			}
 
-			// Fold indicator column (2-cell Nerd Font chevron)
+			// Fold indicator column (icon + trailing space)
 			indicator := folds.FoldIndicator(line)
 			switch indicator {
 			case ">":
 				sb.WriteString(foldCollapsedStyle.Render("\U000f0142"))
+				sb.WriteByte(' ')
 			case "v":
 				sb.WriteString(foldExpandedStyle.Render("\U000f0140"))
+				sb.WriteByte(' ')
 			default:
 				sb.WriteString("  ")
 			}

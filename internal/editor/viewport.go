@@ -162,6 +162,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 	v.GutterWidth = metrics.totalWidth()
 	baseWidth := metrics.lineNumberWidth
 	markerWidth := metrics.markerWidth
+	gutterStyle := theme.Gutter.UnsetPadding()
 	textWidth := wrap.Width()
 	if textWidth < 1 {
 		textWidth = 1
@@ -208,7 +209,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			if wrapOffset == 0 {
 				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagMap, bufLine, baseWidth, markerWidth))
 			} else {
-				sb.WriteString(theme.Gutter.Render(getSpaces(metrics.contentWidth())))
+				sb.WriteString(gutterStyle.Render(getSpaces(metrics.contentWidth())))
 			}
 			// Padding between gutter and text
 			sb.WriteByte(' ')
@@ -238,7 +239,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 				wrapOffset = 0
 			}
 		} else {
-			sb.WriteString(theme.Gutter.Render(getSpaces(metrics.contentWidth())))
+			sb.WriteString(gutterStyle.Render(getSpaces(metrics.contentWidth())))
 			sb.WriteByte(' ')
 			sb.WriteString(theme.Editor.Render(getSpaces(textWidth)))
 		}
@@ -260,17 +261,23 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 // renderWrapGutterLine renders a single gutter line for wrap mode.
 func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutterOpts *GutterOpts, diagMap map[int]int, line, baseWidth, markerWidth int) string {
 	var sb strings.Builder
+	gutterStyle := theme.Gutter.UnsetPadding()
+	gutterActiveStyle := theme.GutterActive.UnsetPadding()
+	gutterErrorStyle := theme.GutterError.UnsetPadding()
+	gutterWarnStyle := theme.GutterWarn.UnsetPadding()
 
-	// Breakpoint marker (1 leading space + 2-cell icon + 1 trailing space)
+	// Breakpoint marker (1 leading space + icon + 1 trailing space)
 	// Use pre-cached theme styles to avoid allocations
 	if gutterOpts != nil {
 		switch gutterOpts.Breakpoints[line] {
 		case BPActive:
 			sb.WriteByte(' ')
 			sb.WriteString(theme.BreakpointActive.Render("\U000f0765"))
+			sb.WriteByte(' ')
 		case BPDisabled:
 			sb.WriteByte(' ')
 			sb.WriteString(theme.BreakpointDisabled.Render("\U000f0765"))
+			sb.WriteByte(' ')
 		default:
 			sb.WriteString("   ")
 		}
@@ -284,20 +291,20 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 	} else if sev, ok := diagMap[line]; ok {
 		switch sev {
 		case 1:
-			sb.WriteString(theme.GutterError.Render(numStr))
+			sb.WriteString(gutterErrorStyle.Render(numStr))
 		case 2:
-			sb.WriteString(theme.GutterWarn.Render(numStr))
+			sb.WriteString(gutterWarnStyle.Render(numStr))
 		default:
 			if line == buf.Cursor.Line {
-				sb.WriteString(theme.GutterActive.Render(numStr))
+				sb.WriteString(gutterActiveStyle.Render(numStr))
 			} else {
-				sb.WriteString(theme.Gutter.Render(numStr))
+				sb.WriteString(gutterStyle.Render(numStr))
 			}
 		}
 	} else if line == buf.Cursor.Line {
-		sb.WriteString(theme.GutterActive.Render(numStr))
+		sb.WriteString(gutterActiveStyle.Render(numStr))
 	} else {
-		sb.WriteString(theme.Gutter.Render(numStr))
+		sb.WriteString(gutterStyle.Render(numStr))
 	}
 	return sb.String()
 }
