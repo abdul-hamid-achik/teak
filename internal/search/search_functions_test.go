@@ -224,6 +224,9 @@ func TestIsTextFile(t *testing.T) {
 		{"test.lua", true},
 		{"test.dart", true},
 		{"test.swift", true},
+		{"test.bp", true},
+		{"test.http", true},
+		{"test.hitspec", true},
 		{"test.tf", true},
 		{"Makefile", true}, // No extension
 		{"Dockerfile", true},

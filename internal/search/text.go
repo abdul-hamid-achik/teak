@@ -123,6 +123,7 @@ func isTextFile(name string) bool {
 		".sql": true, ".graphql": true, ".proto": true,
 		".lua": true, ".vim": true, ".el": true, ".clj": true, ".ex": true, ".exs": true,
 		".zig": true, ".nim": true, ".dart": true, ".swift": true,
+		".bp": true, ".http": true, ".hitspec": true,
 		".tf": true, ".hcl": true, ".nix": true,
 		".mod": true, ".sum": true, ".lock": true,
 		".env": false, // skip .env files

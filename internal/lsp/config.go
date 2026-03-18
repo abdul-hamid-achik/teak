@@ -118,6 +118,12 @@ func DefaultConfigs() []ServerConfig {
 			Args:       []string{"--stdio"},
 			LanguageID: "json",
 		},
+		{
+			Extensions: []string{".bp"},
+			Command:    "bp",
+			Args:       []string{"lsp"},
+			LanguageID: "blueprint",
+		},
 	}
 }
 

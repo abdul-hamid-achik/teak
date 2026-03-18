@@ -46,6 +46,9 @@ func TestCommentPrefixForFile(t *testing.T) {
 		{"config.yaml", "#"},
 		{"config.yml", "#"},
 		{"config.toml", "#"},
+		{"api.http", "#"},
+		{"contract.hitspec", "#"},
+		{"service.bp", "#"},
 		{"script.R", "#"},
 		{"script.pl", "#"},
 		{"script.pm", "#"},
@@ -144,6 +147,7 @@ func TestCommentPrefixesMap(t *testing.T) {
 		".html", ".xml", ".css", ".scss", ".lua", ".hs", ".sql",
 		".vim", ".el", ".lisp", ".clj", ".bat", ".tex", ".yaml",
 		".yml", ".toml", ".sh", ".bash", ".zsh",
+		".http", ".hitspec", ".bp",
 	}
 
 	for _, ext := range expectedExtensions {
@@ -177,7 +181,7 @@ func TestCommentPrefixesHash(t *testing.T) {
 	// Languages using # for comments
 	hash := []string{
 		".py", ".rb", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".toml",
-		".r", ".pl", ".pm", ".tcl", ".ps1",
+		".http", ".hitspec", ".bp", ".r", ".pl", ".pm", ".tcl", ".ps1",
 	}
 
 	for _, ext := range hash {

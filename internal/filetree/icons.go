@@ -15,6 +15,9 @@ var fileIcons = map[string]string{
 	".ts":      "\U000f06e6", // language-typescript
 	".tsx":     "\U000f0a4f", // react
 	".jsx":     "\U000f0a4f", // react
+	".bp":      "\U000f0626", // code-braces
+	".http":    "\U000f018d", // console
+	".hitspec": "\U000f018d", // console
 	".py":      "\U000f0320", // language-python
 	".rs":      "\U000f0d49", // language-rust
 	".html":    "\U000f031b", // language-html5
@@ -69,38 +72,41 @@ var filenameIcons = map[string]string{
 }
 
 var iconColors = map[string]color.Color{
-	".go":    lipgloss.Color("#00ADD8"),
-	".js":    lipgloss.Color("#F7DF1E"),
-	".ts":    lipgloss.Color("#3178C6"),
-	".tsx":   lipgloss.Color("#61DAFB"),
-	".jsx":   lipgloss.Color("#61DAFB"),
-	".py":    lipgloss.Color("#3776AB"),
-	".rs":    lipgloss.Color("#DEA584"),
-	".html":  lipgloss.Color("#E34F26"),
-	".css":   lipgloss.Color("#1572B6"),
-	".scss":  lipgloss.Color("#CD6799"),
-	".json":  lipgloss.Color("#F5C211"),
-	".md":    lipgloss.Color("#519aba"),
-	".yaml":  lipgloss.Color("#CB171E"),
-	".yml":   lipgloss.Color("#CB171E"),
-	".toml":  lipgloss.Color("#9C4121"),
-	".sh":    lipgloss.Color("#4EAA25"),
-	".bash":  lipgloss.Color("#4EAA25"),
-	".zsh":   lipgloss.Color("#4EAA25"),
-	".lua":   lipgloss.Color("#000080"),
-	".c":     lipgloss.Color("#A8B9CC"),
-	".h":     lipgloss.Color("#A8B9CC"),
-	".cpp":   lipgloss.Color("#F34B7D"),
-	".hpp":   lipgloss.Color("#F34B7D"),
-	".java":  lipgloss.Color("#ED8B00"),
-	".rb":    lipgloss.Color("#CC342D"),
-	".vue":   lipgloss.Color("#41B883"),
-	".swift": lipgloss.Color("#F05138"),
-	".kt":    lipgloss.Color("#7F52FF"),
-	".sql":   lipgloss.Color("#E38C00"),
-	".xml":   lipgloss.Color("#E37933"),
-	".php":   lipgloss.Color("#777BB4"),
-	".proto": lipgloss.Color("#4285F4"),
+	".go":      lipgloss.Color("#00ADD8"),
+	".js":      lipgloss.Color("#F7DF1E"),
+	".ts":      lipgloss.Color("#3178C6"),
+	".tsx":     lipgloss.Color("#61DAFB"),
+	".jsx":     lipgloss.Color("#61DAFB"),
+	".bp":      lipgloss.Color("#88C0D0"),
+	".http":    lipgloss.Color("#81A1C1"),
+	".hitspec": lipgloss.Color("#A3BE8C"),
+	".py":      lipgloss.Color("#3776AB"),
+	".rs":      lipgloss.Color("#DEA584"),
+	".html":    lipgloss.Color("#E34F26"),
+	".css":     lipgloss.Color("#1572B6"),
+	".scss":    lipgloss.Color("#CD6799"),
+	".json":    lipgloss.Color("#F5C211"),
+	".md":      lipgloss.Color("#519aba"),
+	".yaml":    lipgloss.Color("#CB171E"),
+	".yml":     lipgloss.Color("#CB171E"),
+	".toml":    lipgloss.Color("#9C4121"),
+	".sh":      lipgloss.Color("#4EAA25"),
+	".bash":    lipgloss.Color("#4EAA25"),
+	".zsh":     lipgloss.Color("#4EAA25"),
+	".lua":     lipgloss.Color("#000080"),
+	".c":       lipgloss.Color("#A8B9CC"),
+	".h":       lipgloss.Color("#A8B9CC"),
+	".cpp":     lipgloss.Color("#F34B7D"),
+	".hpp":     lipgloss.Color("#F34B7D"),
+	".java":    lipgloss.Color("#ED8B00"),
+	".rb":      lipgloss.Color("#CC342D"),
+	".vue":     lipgloss.Color("#41B883"),
+	".swift":   lipgloss.Color("#F05138"),
+	".kt":      lipgloss.Color("#7F52FF"),
+	".sql":     lipgloss.Color("#E38C00"),
+	".xml":     lipgloss.Color("#E37933"),
+	".php":     lipgloss.Color("#777BB4"),
+	".proto":   lipgloss.Color("#4285F4"),
 }
 
 // Modern folder/file icons (Nerd Font v3 material-style)
