@@ -11,7 +11,19 @@ This plan tracks the refactoring of the 9 largest source files in Teak, reducing
 
 ---
 
-## Progress: [2/6 Phases Complete] (Phases 1-2 mostly done, some infrastructure created)
+## Progress: [3/6 Phases Complete] (Phases 1-3 done, infrastructure created)
+
+### Completed Work:
+- ✅ Phase 1.1-1.2: modes/, keybindings/ packages
+- ✅ Phase 1.4: fileops/ package
+- ✅ Phase 2: lsp/capabilities/ package
+- ✅ Phase 3: git/treebuilder/ package
+
+### Remaining (requires invasive changes):
+- Phase 1.5: Splitting app.go (requires careful integration)
+- Phase 4: Splitting text/buffer.go (54+ methods, high risk)
+- Phase 5: Splitting editor files (already modular)
+- Phase 6: Agent/DAP refactoring
 
 ---
 
