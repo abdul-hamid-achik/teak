@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/editor/overlays"
 	"teak/internal/text"
 	"teak/internal/ui"
 )
@@ -530,7 +531,7 @@ func TestEditorShiftClick(t *testing.T) {
 
 func TestEditorAutocompleteTabSelect(t *testing.T) {
 	e := newEditor("hello", 0, 0)
-	e.autocomplete.Show([]AutocompleteItem{
+	e.autocomplete.Show([]overlays.AutocompleteItem{
 		{Label: "foobar", InsertText: "foobar"},
 	})
 

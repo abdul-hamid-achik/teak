@@ -15,6 +15,7 @@ import (
 	"time"
 
 	log "github.com/charmbracelet/log"
+	"teak/internal/lsp/capabilities"
 )
 
 // Client manages communication with a single LSP server process.
@@ -31,8 +32,9 @@ type Client struct {
 	initialized  bool
 	msgChan      chan<- any
 	cancelRead   context.CancelFunc
-	capabilities ServerCapabilities // server capabilities from initialize
-	syncKind     SyncKind           // document sync mode (negotiated)
+	capabilities ServerCapabilities    // server capabilities from initialize
+	syncKind     SyncKind              // document sync mode (negotiated)
+	capsChecker  *capabilities.Checker // delegated capability checker
 }
 
 // IsReady returns whether the client has completed initialization.
@@ -46,6 +48,9 @@ func (c *Client) IsReady() bool {
 func (c *Client) SupportsHover() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsHover()
+	}
 	return capabilityEnabled(c.capabilities.HoverProvider)
 }
 
@@ -53,6 +58,9 @@ func (c *Client) SupportsHover() bool {
 func (c *Client) SupportsCompletion() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsCompletion()
+	}
 	return c.capabilities.CompletionProvider != nil
 }
 
@@ -60,6 +68,9 @@ func (c *Client) SupportsCompletion() bool {
 func (c *Client) SupportsDefinition() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsDefinition()
+	}
 	return capabilityEnabled(c.capabilities.DefinitionProvider)
 }
 
@@ -67,6 +78,9 @@ func (c *Client) SupportsDefinition() bool {
 func (c *Client) SupportsReferences() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsReferences()
+	}
 	return capabilityEnabled(c.capabilities.ReferencesProvider)
 }
 
@@ -74,6 +88,9 @@ func (c *Client) SupportsReferences() bool {
 func (c *Client) SupportsRename() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsRename()
+	}
 	return capabilityEnabled(c.capabilities.RenameProvider)
 }
 
@@ -81,6 +98,9 @@ func (c *Client) SupportsRename() bool {
 func (c *Client) SupportsFormatting() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsFormatting()
+	}
 	return capabilityEnabled(c.capabilities.FormattingProvider)
 }
 
@@ -88,6 +108,9 @@ func (c *Client) SupportsFormatting() bool {
 func (c *Client) GetCompletionTriggerCharacters() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.GetCompletionTriggerCharacters()
+	}
 	if c.capabilities.CompletionProvider != nil {
 		return c.capabilities.CompletionProvider.TriggerCharacters
 	}
@@ -99,6 +122,38 @@ func (c *Client) GetSyncKind() SyncKind {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.syncKind
+}
+
+// newCapabilitiesChecker creates a capabilities.Checker from the server capabilities
+func (c *Client) newCapabilitiesChecker(caps ServerCapabilities, syncKind SyncKind) *capabilities.Checker {
+	// Convert lsp.ServerCapabilities to capabilities.ServerCapabilities
+	capsConv := capabilities.ServerCapabilities{
+		TextDocumentSync:        caps.TextDocumentSync,
+		CompletionProvider:      nil,
+		PositionEncoding:        caps.PositionEncoding,
+		HoverProvider:           caps.HoverProvider,
+		DefinitionProvider:      caps.DefinitionProvider,
+		ReferencesProvider:      caps.ReferencesProvider,
+		RenameProvider:          caps.RenameProvider,
+		DocumentSymbolProvider:  caps.DocumentSymbolProvider,
+		CodeActionProvider:      caps.CodeActionProvider,
+		FormattingProvider:      caps.FormattingProvider,
+		RangeFormattingProvider: caps.RangeFormattingProvider,
+		FoldingRangeProvider:    caps.FoldingRangeProvider,
+		SignatureHelpProvider:   nil,
+	}
+	if caps.CompletionProvider != nil {
+		capsConv.CompletionProvider = &capabilities.CompletionOptions{
+			ResolveProvider:   caps.CompletionProvider.ResolveProvider,
+			TriggerCharacters: caps.CompletionProvider.TriggerCharacters,
+		}
+	}
+	if caps.SignatureHelpProvider != nil {
+		capsConv.SignatureHelpProvider = &capabilities.SignatureHelpOptions{
+			TriggerCharacters: caps.SignatureHelpProvider.TriggerCharacters,
+		}
+	}
+	return capabilities.NewChecker(capsConv, capabilities.SyncKind(syncKind))
 }
 
 // DocumentVersion returns the tracked LSP version for an open document.
@@ -127,6 +182,37 @@ func capabilityEnabled(v any) bool {
 	default:
 		return true
 	}
+}
+
+func extractHoverContent(contents any) string {
+	switch v := contents.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if val, ok := v["value"]; ok {
+			return fmt.Sprintf("%v", val)
+		}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				return s
+			}
+			if m, ok := item.(map[string]any); ok {
+				if val, mok := m["value"]; mok {
+					return fmt.Sprintf("%v", val)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func parseWorkspaceEditResult(result []byte) (WorkspaceEdit, error) {
+	var edit WorkspaceEdit
+	if err := json.Unmarshal(result, &edit); err != nil {
+		return WorkspaceEdit{}, err
+	}
+	return edit, nil
 }
 
 type jsonrpcRequest struct {
@@ -302,6 +388,8 @@ func (c *Client) Initialize() error {
 			}
 		}
 	}
+	// Create the capabilities checker
+	c.capsChecker = c.newCapabilitiesChecker(initResult.Capabilities, c.syncKind)
 	c.mu.Unlock()
 
 	// Send initialized notification
@@ -427,448 +515,6 @@ func (c *Client) DidClose(uri string) {
 	}); err != nil {
 		log.Error("lsp: didClose notification failed", "uri", uri, "err", err)
 	}
-}
-
-// Completion requests completions at the given position.
-func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/completion", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse result — could be CompletionList or []CompletionItem
-	var items []CompletionItem
-
-	// Try CompletionList first
-	var list struct {
-		Items []struct {
-			Label      string `json:"label"`
-			Detail     string `json:"detail"`
-			InsertText string `json:"insertText"`
-			Kind       int    `json:"kind"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(result, &list); err == nil && len(list.Items) > 0 {
-		for _, item := range list.Items {
-			insertText := item.InsertText
-			if insertText == "" {
-				insertText = item.Label
-			}
-			items = append(items, CompletionItem{
-				Label:      item.Label,
-				Detail:     item.Detail,
-				InsertText: insertText,
-				Kind:       item.Kind,
-			})
-		}
-		return items, nil
-	}
-
-	// Try plain array
-	var plainItems []struct {
-		Label      string `json:"label"`
-		Detail     string `json:"detail"`
-		InsertText string `json:"insertText"`
-		Kind       int    `json:"kind"`
-	}
-	if err := json.Unmarshal(result, &plainItems); err == nil {
-		for _, item := range plainItems {
-			insertText := item.InsertText
-			if insertText == "" {
-				insertText = item.Label
-			}
-			items = append(items, CompletionItem{
-				Label:      item.Label,
-				Detail:     item.Detail,
-				InsertText: insertText,
-				Kind:       item.Kind,
-			})
-		}
-	}
-
-	return items, nil
-}
-
-// Hover requests hover info at the given position.
-func (c *Client) Hover(uri string, line, character int) (*HoverResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/hover", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var hover struct {
-		Contents any `json:"contents"`
-	}
-	if err := json.Unmarshal(result, &hover); err != nil {
-		return nil, err
-	}
-
-	content := extractHoverContent(hover.Contents)
-	if content == "" {
-		return nil, nil
-	}
-
-	return &HoverResult{Content: content}, nil
-}
-
-func extractHoverContent(contents any) string {
-	switch v := contents.(type) {
-	case string:
-		return v
-	case map[string]any:
-		if val, ok := v["value"]; ok {
-			return fmt.Sprintf("%v", val)
-		}
-	case []any:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				return s
-			}
-			if m, ok := item.(map[string]any); ok {
-				if val, mok := m["value"]; mok {
-					return fmt.Sprintf("%v", val)
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// Definition requests go-to-definition at the given position.
-func (c *Client) Definition(uri string, line, character int) ([]Location, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/definition", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var locations []Location
-
-	// Try array of locations
-	var locs []struct {
-		URI   string `json:"uri"`
-		Range struct {
-			Start struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"start"`
-			End struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"end"`
-		} `json:"range"`
-	}
-	if err := json.Unmarshal(result, &locs); err == nil {
-		for _, loc := range locs {
-			locations = append(locations, Location{
-				URI:       loc.URI,
-				StartLine: loc.Range.Start.Line,
-				StartCol:  loc.Range.Start.Character,
-				EndLine:   loc.Range.End.Line,
-				EndCol:    loc.Range.End.Character,
-			})
-		}
-		return locations, nil
-	}
-
-	// Try single location
-	var single struct {
-		URI   string `json:"uri"`
-		Range struct {
-			Start struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"start"`
-			End struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"end"`
-		} `json:"range"`
-	}
-	if err := json.Unmarshal(result, &single); err == nil && single.URI != "" {
-		locations = append(locations, Location{
-			URI:       single.URI,
-			StartLine: single.Range.Start.Line,
-			StartCol:  single.Range.Start.Character,
-			EndLine:   single.Range.End.Line,
-			EndCol:    single.Range.End.Character,
-		})
-	}
-
-	return locations, nil
-}
-
-// References requests find-references at the given position.
-func (c *Client) References(uri string, line, character int) ([]Location, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/references", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-		"context":      map[string]any{"includeDeclaration": true},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var locs []struct {
-		URI   string `json:"uri"`
-		Range struct {
-			Start struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"start"`
-			End struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"end"`
-		} `json:"range"`
-	}
-	if err := json.Unmarshal(result, &locs); err != nil {
-		return nil, err
-	}
-
-	var locations []Location
-	for _, loc := range locs {
-		locations = append(locations, Location{
-			URI:       loc.URI,
-			StartLine: loc.Range.Start.Line,
-			StartCol:  loc.Range.Start.Character,
-			EndLine:   loc.Range.End.Line,
-			EndCol:    loc.Range.End.Character,
-		})
-	}
-	return locations, nil
-}
-
-// Rename requests a rename at the given position.
-func (c *Client) Rename(uri string, line, character int, newName string) (WorkspaceEdit, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/rename", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-		"newName":      newName,
-	})
-	if err != nil {
-		return WorkspaceEdit{}, err
-	}
-
-	if string(result) == "null" {
-		return WorkspaceEdit{}, nil
-	}
-
-	return parseWorkspaceEditResult(result)
-}
-
-func parseWorkspaceEditResult(result []byte) (WorkspaceEdit, error) {
-	var edit WorkspaceEdit
-	if err := json.Unmarshal(result, &edit); err != nil {
-		return WorkspaceEdit{}, err
-	}
-	return edit, nil
-}
-
-// SignatureHelp requests signature help at the given position.
-func (c *Client) SignatureHelp(uri string, line, character int) (*SignatureHelp, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/signatureHelp", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var help SignatureHelp
-	if err := json.Unmarshal(result, &help); err != nil {
-		return nil, err
-	}
-
-	return &help, nil
-}
-
-// Formatting requests formatting for a document.
-func (c *Client) Formatting(uri string, options FormattingOptions) ([]TextEdit, error) {
-	if !c.SupportsFormatting() {
-		return nil, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/formatting", formattingRequestParams(uri, options))
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var edits []struct {
-		Range struct {
-			Start struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"start"`
-			End struct {
-				Line      int `json:"line"`
-				Character int `json:"character"`
-			} `json:"end"`
-		} `json:"range"`
-		NewText string `json:"newText"`
-	}
-	if err := json.Unmarshal(result, &edits); err != nil {
-		return nil, err
-	}
-
-	var textEdits []TextEdit
-	for _, ed := range edits {
-		textEdits = append(textEdits, TextEdit{
-			StartLine: ed.Range.Start.Line,
-			StartCol:  ed.Range.Start.Character,
-			EndLine:   ed.Range.End.Line,
-			EndCol:    ed.Range.End.Character,
-			NewText:   ed.NewText,
-		})
-	}
-	return textEdits, nil
-}
-
-// FoldingRange requests folding ranges for a document.
-func (c *Client) FoldingRange(uri string) ([]FoldingRange, error) {
-	c.mu.RLock()
-	supported := capabilityEnabled(c.capabilities.FoldingRangeProvider)
-	c.mu.RUnlock()
-	if !supported {
-		return nil, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/foldingRange", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var ranges []FoldingRange
-	if err := json.Unmarshal(result, &ranges); err != nil {
-		return nil, err
-	}
-	return ranges, nil
-}
-
-// CodeAction requests code actions for a range with diagnostics.
-func (c *Client) CodeAction(uri string, startLine, startCol, endLine, endCol int, diagnostics []Diagnostic) ([]CodeAction, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	// Convert diagnostics to LSP format
-	var lspDiags []map[string]any
-	for _, d := range diagnostics {
-		lspDiags = append(lspDiags, map[string]any{
-			"range": map[string]any{
-				"start": map[string]any{"line": d.Range.Start.Line, "character": d.Range.Start.Character},
-				"end":   map[string]any{"line": d.Range.End.Line, "character": d.Range.End.Character},
-			},
-			"severity": d.Severity,
-			"message":  d.Message,
-			"source":   d.Source,
-		})
-	}
-
-	result, err := c.call(ctx, "textDocument/codeAction", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-		"range": map[string]any{
-			"start": map[string]any{"line": startLine, "character": startCol},
-			"end":   map[string]any{"line": endLine, "character": endCol},
-		},
-		"context": map[string]any{
-			"diagnostics": lspDiags,
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var actions []CodeAction
-	if err := json.Unmarshal(result, &actions); err != nil {
-		return nil, err
-	}
-
-	return actions, nil
-}
-
-// DocumentSymbol requests document symbols.
-func (c *Client) DocumentSymbol(uri string) ([]DocumentSymbol, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	result, err := c.call(ctx, "textDocument/documentSymbol", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if string(result) == "null" {
-		return nil, nil
-	}
-
-	var symbols []DocumentSymbol
-	if err := json.Unmarshal(result, &symbols); err != nil {
-		return nil, err
-	}
-
-	return symbols, nil
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {

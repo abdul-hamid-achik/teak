@@ -2,6 +2,8 @@ package search
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,19 +71,27 @@ func TextSearch(rootDir, query string) ([]Result, error) {
 	return results, err
 }
 
-func searchFile(path, rootDir string, re *regexp.Regexp, limit int) ([]Result, error) {
+func searchFile(path, rootDir string, re *regexp.Regexp, limit int) (results []Result, retErr error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			closeErr := fmt.Errorf("close searched file %q: %w", path, err)
+			if retErr == nil {
+				retErr = closeErr
+				return
+			}
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 
 	relPath, err := filepath.Rel(rootDir, path)
 	if err != nil {
 		relPath = path
 	}
 
-	var results []Result
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), maxSearchLineBytes)
 	lineNum := 0

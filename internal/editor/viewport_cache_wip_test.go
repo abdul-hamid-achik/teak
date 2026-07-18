@@ -107,13 +107,13 @@ func TestViewportCacheGetSet(t *testing.T) {
 	}
 
 	// Get wrong row
-	content, ok = cache.Get(1)
+	_, ok = cache.Get(1)
 	if ok {
 		t.Error("Get for unset row should return false")
 	}
 
 	// Get out of bounds
-	content, ok = cache.Get(100)
+	_, ok = cache.Get(100)
 	if ok {
 		t.Error("Get out of bounds should return false")
 	}

@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"teak/internal/ui"
 )
 
@@ -133,12 +133,12 @@ var helpGroups = []bindingGroup{
 
 // HelpModel is the interactive help overlay with search and scroll.
 type HelpModel struct {
-	input   textinput.Model
-	scrollY int
-	height  int
-	width   int
-	theme   ui.Theme
-	lines   []helpLine // all rendered lines
+	input    textinput.Model
+	scrollY  int
+	height   int
+	width    int
+	theme    ui.Theme
+	lines    []helpLine // all rendered lines
 	filtered []helpLine // filtered by search
 }
 
@@ -211,12 +211,13 @@ func (m HelpModel) Update(msg tea.Msg) (HelpModel, tea.Cmd) {
 		}
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			m.scrollY -= 3
 			if m.scrollY < 0 {
 				m.scrollY = 0
 			}
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.scrollY += 3
 			if m.scrollY > m.maxScroll() {
 				m.scrollY = m.maxScroll()

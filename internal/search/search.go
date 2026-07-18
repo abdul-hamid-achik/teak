@@ -274,12 +274,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			m.scrollY -= 3
 			if m.scrollY < 0 {
 				m.scrollY = 0
 			}
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.scrollY += 3
 			if m.scrollY > maxScroll {
 				m.scrollY = maxScroll

@@ -1,0 +1,28 @@
+schema_version: 1
+recipe: go-agent-tool
+product:
+    name: teak
+    module: github.com/abdul-hamid-achik/teak
+    description: A mouse-friendly, extensible terminal code editor built with Bubble Tea
+    visibility: public
+    license: MIT
+runtime:
+    language: go
+    kind: cli
+surfaces:
+    cli: true
+    json: true
+    mcp: false
+    studio: false
+integrations:
+    code_structure: codemap
+    semantic_search: vecgrep
+    terminal_verification: glyphrun
+    browser_verification: none
+    secrets: none
+    artifacts: none
+distribution:
+    github_actions: true
+    goreleaser: true
+    homebrew: true
+    docs: markdown

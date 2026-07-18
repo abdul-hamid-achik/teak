@@ -4,12 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"teak/internal/editor/overlays"
 	"teak/internal/ui"
 )
 
 func TestNewAutocomplete(t *testing.T) {
 	theme := ui.DefaultTheme()
-	ac := NewAutocomplete(theme)
+	ac := overlays.NewAutocomplete(theme)
 
 	// Theme contains lipgloss.Style which cannot be compared directly
 	if ac.Visible {
@@ -24,8 +25,8 @@ func TestNewAutocomplete(t *testing.T) {
 }
 
 func TestAutocompleteShow(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	items := []AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	items := []overlays.AutocompleteItem{
 		{Label: "foo", Detail: "func", InsertText: "foo()"},
 		{Label: "bar", Detail: "var", InsertText: "bar"},
 	}
@@ -44,9 +45,9 @@ func TestAutocompleteShow(t *testing.T) {
 }
 
 func TestAutocompleteShowEmpty(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
 
-	ac.Show([]AutocompleteItem{})
+	ac.Show([]overlays.AutocompleteItem{})
 
 	if ac.Visible {
 		t.Error("expected Visible to be false for empty items")
@@ -54,8 +55,8 @@ func TestAutocompleteShowEmpty(t *testing.T) {
 }
 
 func TestAutocompleteHide(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 
 	ac.Hide()
 
@@ -71,8 +72,8 @@ func TestAutocompleteHide(t *testing.T) {
 }
 
 func TestAutocompleteMoveUp(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 		{Label: "bar", InsertText: "bar"},
 		{Label: "baz", InsertText: "baz"},
@@ -91,8 +92,8 @@ func TestAutocompleteMoveUp(t *testing.T) {
 }
 
 func TestAutocompleteMoveDown(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 		{Label: "bar", InsertText: "bar"},
 		{Label: "baz", InsertText: "baz"},
@@ -117,8 +118,8 @@ func TestAutocompleteMoveDown(t *testing.T) {
 }
 
 func TestAutocompleteSelected(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	items := []AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	items := []overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 		{Label: "bar", InsertText: "bar"},
 	}
@@ -140,8 +141,8 @@ func TestAutocompleteSelected(t *testing.T) {
 }
 
 func TestAutocompleteSelectedNotVisible(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 	ac.Hide()
 
 	item := ac.Selected()
@@ -151,8 +152,8 @@ func TestAutocompleteSelectedNotVisible(t *testing.T) {
 }
 
 func TestAutocompleteSelectedOutOfBounds(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 	ac.Cursor = 10
 
 	item := ac.Selected()
@@ -162,8 +163,8 @@ func TestAutocompleteSelectedOutOfBounds(t *testing.T) {
 }
 
 func TestAutocompleteView(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", Detail: "func", InsertText: "foo()"},
 		{Label: "bar", Detail: "var", InsertText: "bar"},
 	})
@@ -181,7 +182,7 @@ func TestAutocompleteView(t *testing.T) {
 }
 
 func TestAutocompleteViewNotVisible(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
 
 	view := ac.View()
 	if view != "" {
@@ -190,8 +191,8 @@ func TestAutocompleteViewNotVisible(t *testing.T) {
 }
 
 func TestAutocompleteViewEmpty(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{})
 
 	view := ac.View()
 	if view != "" {
@@ -200,8 +201,8 @@ func TestAutocompleteViewEmpty(t *testing.T) {
 }
 
 func TestAutocompleteViewCursor(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 		{Label: "bar", InsertText: "bar"},
 	})
@@ -215,10 +216,10 @@ func TestAutocompleteViewCursor(t *testing.T) {
 }
 
 func TestAutocompleteViewManyItems(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	items := make([]AutocompleteItem, 20)
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	items := make([]overlays.AutocompleteItem, 20)
 	for i := range items {
-		items[i] = AutocompleteItem{
+		items[i] = overlays.AutocompleteItem{
 			Label:      string(rune('a' + i)),
 			InsertText: string(rune('a' + i)),
 		}
@@ -233,8 +234,8 @@ func TestAutocompleteViewManyItems(t *testing.T) {
 }
 
 func TestAutocompleteViewLongLabels(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "very_long_label_that_exceeds_max_width", InsertText: "foo"},
 	})
 
@@ -245,8 +246,8 @@ func TestAutocompleteViewLongLabels(t *testing.T) {
 }
 
 func TestAutocompleteViewWithDetail(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", Detail: "func foo() string", InsertText: "foo"},
 	})
 
@@ -260,8 +261,8 @@ func TestAutocompleteViewWithDetail(t *testing.T) {
 }
 
 func TestAutocompleteViewWithLongDetail(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "foo", Detail: "very long detail text that should be truncated", InsertText: "foo"},
 	})
 
@@ -272,7 +273,7 @@ func TestAutocompleteViewWithLongDetail(t *testing.T) {
 }
 
 func TestAutocompleteItemStructure(t *testing.T) {
-	item := AutocompleteItem{
+	item := overlays.AutocompleteItem{
 		Label:      "test",
 		Detail:     "detail",
 		InsertText: "insert",
@@ -290,8 +291,8 @@ func TestAutocompleteItemStructure(t *testing.T) {
 }
 
 func TestAutocompleteMoveUpFromZero(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 
 	// Already at 0, should stay at 0
 	ac.MoveUp()
@@ -301,8 +302,8 @@ func TestAutocompleteMoveUpFromZero(t *testing.T) {
 }
 
 func TestAutocompleteMoveDownSingleItem(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
-	ac.Show([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
+	ac.Show([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 
 	ac.MoveDown()
 	if ac.Cursor != 0 {
@@ -311,9 +312,9 @@ func TestAutocompleteMoveDownSingleItem(t *testing.T) {
 }
 
 func TestAutocompleteViewWidthConstraints(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
 	// Very short label
-	ac.Show([]AutocompleteItem{{Label: "a", InsertText: "a"}})
+	ac.Show([]overlays.AutocompleteItem{{Label: "a", InsertText: "a"}})
 
 	view := ac.View()
 	if view == "" {
@@ -323,9 +324,9 @@ func TestAutocompleteViewWidthConstraints(t *testing.T) {
 }
 
 func TestAutocompleteViewMaxWidth(t *testing.T) {
-	ac := NewAutocomplete(ui.DefaultTheme())
+	ac := overlays.NewAutocomplete(ui.DefaultTheme())
 	// Very long label
-	ac.Show([]AutocompleteItem{
+	ac.Show([]overlays.AutocompleteItem{
 		{Label: "this_is_a_very_long_label_that_exceeds_sixty_characters", InsertText: "foo"},
 	})
 

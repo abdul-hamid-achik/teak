@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"context"
+
 	sdk "github.com/coder/acp-go-sdk"
 )
 
@@ -44,6 +46,12 @@ type AgentPlanMsg struct {
 type AgentWriteFileMsg struct {
 	Path       string
 	Content    string
+	ResponseCh chan error
+	Context    context.Context
+}
+
+// AgentWriteCancelledMsg removes a canceled write proposal from the UI queue.
+type AgentWriteCancelledMsg struct {
 	ResponseCh chan error
 }
 

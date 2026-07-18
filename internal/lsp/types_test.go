@@ -198,6 +198,90 @@ func TestHoverResult(t *testing.T) {
 	}
 }
 
+func TestOverlayResultMessagesPreserveRequestMetadata(t *testing.T) {
+	metadata := OverlayRequestMetadata{
+		FilePath:   "/workspace/main.go",
+		Version:    42,
+		Generation: 7,
+	}
+
+	tests := []struct {
+		name     string
+		copyFrom func() OverlayRequestMetadata
+	}{
+		{
+			name: "completion",
+			copyFrom: func() OverlayRequestMetadata {
+				msg := CompletionResultMsg{
+					OverlayRequestMetadata: metadata,
+					Items:                  []CompletionItem{{Label: "Println"}},
+				}
+				copied := msg
+				return copied.OverlayRequestMetadata
+			},
+		},
+		{
+			name: "hover",
+			copyFrom: func() OverlayRequestMetadata {
+				msg := HoverResultMsg{
+					OverlayRequestMetadata: metadata,
+					Content:                "Println formats output.",
+				}
+				copied := msg
+				return copied.OverlayRequestMetadata
+			},
+		},
+		{
+			name: "signature help",
+			copyFrom: func() OverlayRequestMetadata {
+				msg := SignatureHelpResultMsg{
+					OverlayRequestMetadata: metadata,
+					Help:                   &SignatureHelp{},
+				}
+				copied := msg
+				return copied.OverlayRequestMetadata
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copied := tt.copyFrom()
+			if copied != metadata {
+				t.Errorf("request metadata = %#v, want %#v", copied, metadata)
+			}
+		})
+	}
+}
+
+func TestOverlayResultMessagesAllowLegacyZeroValueMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata OverlayRequestMetadata
+	}{
+		{
+			name:     "completion",
+			metadata: CompletionResultMsg{Items: []CompletionItem{{Label: "Println"}}}.OverlayRequestMetadata,
+		},
+		{
+			name:     "hover",
+			metadata: HoverResultMsg{Content: "Println formats output."}.OverlayRequestMetadata,
+		},
+		{
+			name:     "signature help",
+			metadata: SignatureHelpResultMsg{Help: &SignatureHelp{}}.OverlayRequestMetadata,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.metadata != (OverlayRequestMetadata{}) {
+				t.Errorf("legacy metadata = %#v, want zero value", tt.metadata)
+			}
+		})
+	}
+}
+
 func TestSignatureHelpStruct(t *testing.T) {
 	help := SignatureHelp{
 		Signatures: []SignatureInformation{

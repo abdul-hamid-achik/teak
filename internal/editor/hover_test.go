@@ -4,12 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"teak/internal/editor/overlays"
 	"teak/internal/ui"
 )
 
 func TestNewHover(t *testing.T) {
 	theme := ui.DefaultTheme()
-	hover := NewHover(theme)
+	hover := overlays.NewHover(theme)
 
 	// Theme contains lipgloss.Style which cannot be compared directly
 	if hover.Visible {
@@ -21,7 +22,7 @@ func TestNewHover(t *testing.T) {
 }
 
 func TestHoverShow(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 
 	hover.Show("hover content")
 
@@ -34,7 +35,7 @@ func TestHoverShow(t *testing.T) {
 }
 
 func TestHoverShowEmpty(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 
 	hover.Show("")
 
@@ -44,7 +45,7 @@ func TestHoverShowEmpty(t *testing.T) {
 }
 
 func TestHoverHide(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("hover content")
 
 	hover.Hide()
@@ -58,7 +59,7 @@ func TestHoverHide(t *testing.T) {
 }
 
 func TestHoverView(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("hover content")
 
 	view := hover.View()
@@ -71,7 +72,7 @@ func TestHoverView(t *testing.T) {
 }
 
 func TestHoverViewNotVisible(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 
 	view := hover.View()
 	if view != "" {
@@ -80,7 +81,7 @@ func TestHoverViewNotVisible(t *testing.T) {
 }
 
 func TestHoverViewEmptyContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("")
 
 	view := hover.View()
@@ -90,7 +91,7 @@ func TestHoverViewEmptyContent(t *testing.T) {
 }
 
 func TestHoverViewLongContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	longContent := strings.Repeat("a", 100)
 	hover.Show(longContent)
 
@@ -105,7 +106,7 @@ func TestHoverViewLongContent(t *testing.T) {
 }
 
 func TestHoverViewMultiLineContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	content := "line1\nline2\nline3"
 	hover.Show(content)
 
@@ -119,7 +120,7 @@ func TestHoverViewMultiLineContent(t *testing.T) {
 }
 
 func TestHoverViewManyLinesContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	lines := make([]string, 20)
 	for i := range lines {
 		lines[i] = "line " + string(rune('0'+i))
@@ -138,7 +139,7 @@ func TestHoverViewManyLinesContent(t *testing.T) {
 }
 
 func TestHoverViewWidthLimit(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	// Content wider than max width (60)
 	content := strings.Repeat("a", 80)
 	hover.Show(content)
@@ -154,7 +155,7 @@ func TestHoverViewWidthLimit(t *testing.T) {
 }
 
 func TestHoverViewExactlyMaxWidth(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	// Exactly 60 characters
 	content := strings.Repeat("a", 60)
 	hover.Show(content)
@@ -166,7 +167,7 @@ func TestHoverViewExactlyMaxWidth(t *testing.T) {
 }
 
 func TestHoverViewOneOverMaxWidth(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	// 61 characters
 	content := strings.Repeat("a", 61)
 	hover.Show(content)
@@ -181,7 +182,7 @@ func TestHoverViewOneOverMaxWidth(t *testing.T) {
 }
 
 func TestHoverViewManyLinesExactlyTen(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	lines := make([]string, 10)
 	for i := range lines {
 		lines[i] = "line " + string(rune('0'+i))
@@ -196,7 +197,7 @@ func TestHoverViewManyLinesExactlyTen(t *testing.T) {
 }
 
 func TestHoverViewElevenLines(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	lines := make([]string, 11)
 	for i := range lines {
 		lines[i] = "line " + string(rune('0'+i))
@@ -215,7 +216,7 @@ func TestHoverViewElevenLines(t *testing.T) {
 }
 
 func TestHoverStructure(t *testing.T) {
-	hover := Hover{
+	hover := overlays.Hover{
 		Content: "test content",
 		Visible: true,
 	}
@@ -229,7 +230,7 @@ func TestHoverStructure(t *testing.T) {
 }
 
 func TestHoverShowReplacesContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("first content")
 	hover.Show("second content")
 
@@ -242,7 +243,7 @@ func TestHoverShowReplacesContent(t *testing.T) {
 }
 
 func TestHoverHideIdempotent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 
 	// Hide when already hidden
 	hover.Hide()
@@ -257,7 +258,7 @@ func TestHoverHideIdempotent(t *testing.T) {
 }
 
 func TestHoverViewUnicodeContent(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("你好世界🎉")
 
 	view := hover.View()
@@ -267,7 +268,7 @@ func TestHoverViewUnicodeContent(t *testing.T) {
 }
 
 func TestHoverViewSpecialCharacters(t *testing.T) {
-	hover := NewHover(ui.DefaultTheme())
+	hover := overlays.NewHover(ui.DefaultTheme())
 	hover.Show("func foo() error {\n\treturn nil\n}")
 
 	view := hover.View()

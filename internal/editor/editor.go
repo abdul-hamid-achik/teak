@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/clipboard"
+	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -70,9 +71,9 @@ type Editor struct {
 	dragging          bool
 	Highlighter       *highlight.Highlighter
 	Diagnostics       []Diagnostic
-	autocomplete      Autocomplete
-	hover             Hover
-	signatureHelp     SignatureHelp
+	autocomplete      overlays.Autocomplete
+	hover             overlays.Hover
+	signatureHelp     overlays.SignatureHelp
 	contextMenu       ContextMenu
 	HasLSP            bool
 	TriggerCharacters []string    // from LSP server capabilities
@@ -101,9 +102,9 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		Config:        cfg,
 		theme:         theme,
 		Highlighter:   hl,
-		autocomplete:  NewAutocomplete(theme),
-		hover:         NewHover(theme),
-		signatureHelp: NewSignatureHelp(theme),
+		autocomplete:  overlays.NewAutocomplete(theme),
+		hover:         overlays.NewHover(theme),
+		signatureHelp: overlays.NewSignatureHelp(theme),
 		contextMenu:   NewContextMenu(theme),
 		lastVersion:   -1,
 	}
@@ -672,7 +673,7 @@ func (e Editor) effectiveGutterWidth() int {
 }
 
 func (e Editor) shouldRenderFoldGutter() bool {
-	return len(e.Folds.Regions) > 0 && !(e.Wrap != nil && e.Config.WordWrap)
+	return len(e.Folds.Regions) > 0 && (e.Wrap == nil || !e.Config.WordWrap)
 }
 
 func (e Editor) currentGutterMetrics() gutterMetrics {
@@ -755,7 +756,7 @@ func (e *Editor) EnsureCursorVisible() {
 }
 
 // ShowAutocomplete displays completion items.
-func (e *Editor) ShowAutocomplete(items []AutocompleteItem) {
+func (e *Editor) ShowAutocomplete(items []overlays.AutocompleteItem) {
 	e.autocomplete.Show(items)
 }
 
@@ -775,7 +776,7 @@ func (e *Editor) HideHover() {
 }
 
 // ShowSignatureHelp displays signature help.
-func (e *Editor) ShowSignatureHelp(help *SignatureData) {
+func (e *Editor) ShowSignatureHelp(help *overlays.SignatureData) {
 	e.signatureHelp.Show(help)
 }
 

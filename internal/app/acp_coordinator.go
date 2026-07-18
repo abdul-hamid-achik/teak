@@ -62,6 +62,8 @@ func (c *ACPCoordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 		return c.handleAgentPlan(m)
 	case acp.AgentWriteFileMsg:
 		return c.handleAgentWriteFile(m)
+	case acp.AgentWriteCancelledMsg:
+		return c.handleAgentWriteCancelled(m)
 	case acp.AgentPermissionRequestMsg:
 		return c.handleAgentPermissionRequest(m)
 	case acp.AgentPromptResponseMsg:
@@ -113,6 +115,10 @@ func (c *ACPCoordinator) handleAgentPlan(msg acp.AgentPlanMsg) []tea.Cmd {
 
 // handleAgentWriteFile handles write file messages.
 func (c *ACPCoordinator) handleAgentWriteFile(msg acp.AgentWriteFileMsg) []tea.Cmd {
+	return []tea.Cmd{func() tea.Msg { return msg }}
+}
+
+func (c *ACPCoordinator) handleAgentWriteCancelled(msg acp.AgentWriteCancelledMsg) []tea.Cmd {
 	return []tea.Cmd{func() tea.Msg { return msg }}
 }
 

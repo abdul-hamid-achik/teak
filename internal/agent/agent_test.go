@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	sdk "github.com/coder/acp-go-sdk"
 	"teak/internal/acp"
 	"teak/internal/ui"
@@ -135,6 +138,190 @@ func TestAgentHasPendingWrite(t *testing.T) {
 
 	if model.HasPendingWrite() {
 		t.Error("Expected HasPendingWrite to be false")
+	}
+}
+
+func TestAgentPendingWriteKeyDecision(t *testing.T) {
+	tests := []struct {
+		name         string
+		key          tea.KeyPressMsg
+		wantAccepted bool
+		wantPending  bool
+		wantDecision bool
+	}{
+		{
+			name:         "enter accepts proposal",
+			key:          tea.KeyPressMsg{Code: tea.KeyEnter},
+			wantAccepted: true,
+			wantDecision: true,
+		},
+		{
+			name:         "escape rejects proposal",
+			key:          tea.KeyPressMsg{Code: tea.KeyEscape},
+			wantAccepted: false,
+			wantDecision: true,
+		},
+		{
+			name:        "other key keeps proposal and does not submit chat",
+			key:         tea.KeyPressMsg{Code: 'x', Text: "x"},
+			wantPending: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := New(ui.DefaultTheme())
+			proposal := acp.AgentWriteFileMsg{
+				Path:       "/workspace/example.go",
+				Content:    "package example",
+				ResponseCh: make(chan error, 1),
+			}
+			model, _ = model.Update(proposal)
+			model.input.SetValue("this must not be submitted")
+
+			model, cmd := model.Update(tt.key)
+
+			if got := model.HasPendingWrite(); got != tt.wantPending {
+				t.Errorf("HasPendingWrite() = %t, want %t", got, tt.wantPending)
+			}
+			if len(model.messages) != 0 {
+				t.Errorf("messages = %d, want 0", len(model.messages))
+			}
+			if model.loading {
+				t.Error("loading = true, want false")
+			}
+			if got := model.InputValue(); got != "this must not be submitted" {
+				t.Errorf("InputValue() = %q, want input preserved", got)
+			}
+
+			if !tt.wantDecision {
+				if cmd != nil {
+					t.Error("command = non-nil, want nil")
+				}
+				return
+			}
+			if cmd == nil {
+				t.Fatal("command = nil, want write decision command")
+			}
+			msg := cmd()
+			decision, ok := msg.(WriteDecisionMsg)
+			if !ok {
+				t.Fatalf("command message = %T, want WriteDecisionMsg", msg)
+			}
+			if decision.Accepted != tt.wantAccepted {
+				t.Errorf("decision.Accepted = %t, want %t", decision.Accepted, tt.wantAccepted)
+			}
+			if decision.Proposal.Path != proposal.Path || decision.Proposal.Content != proposal.Content {
+				t.Errorf("decision proposal = %#v, want path/content from %#v", decision.Proposal, proposal)
+			}
+			if decision.Proposal.ResponseCh != proposal.ResponseCh {
+				t.Error("decision proposal did not retain the original response channel")
+			}
+			select {
+			case response := <-proposal.ResponseCh:
+				t.Errorf("proposal response = %v, want no direct response", response)
+			default:
+			}
+		})
+	}
+}
+
+func TestAgentPendingWriteQueuesProposals(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	first := acp.AgentWriteFileMsg{
+		Path:       "/workspace/first.go",
+		Content:    "first",
+		ResponseCh: make(chan error, 1),
+	}
+	second := acp.AgentWriteFileMsg{
+		Path:       "/workspace/second.go",
+		Content:    "second",
+		ResponseCh: make(chan error, 1),
+	}
+
+	model, _ = model.Update(first)
+	model, _ = model.Update(second)
+	if got := model.PendingWrite(); got == nil || got.Path != first.Path {
+		t.Fatalf("first pending proposal = %#v, want %q", got, first.Path)
+	}
+
+	model, firstCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if firstCmd == nil {
+		t.Fatal("first decision command = nil")
+	}
+	firstMsg := firstCmd()
+	firstDecision, ok := firstMsg.(WriteDecisionMsg)
+	if !ok {
+		t.Fatalf("first decision = %T, want WriteDecisionMsg", firstMsg)
+	}
+	if !firstDecision.Accepted || firstDecision.Proposal.Path != first.Path || firstDecision.Proposal.ResponseCh != first.ResponseCh {
+		t.Errorf("first decision = %#v, want accepted first proposal", firstDecision)
+	}
+	if got := model.PendingWrite(); got == nil || got.Path != second.Path {
+		t.Fatalf("second pending proposal = %#v, want %q", got, second.Path)
+	}
+
+	model, secondCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if secondCmd == nil {
+		t.Fatal("second decision command = nil")
+	}
+	secondMsg := secondCmd()
+	secondDecision, ok := secondMsg.(WriteDecisionMsg)
+	if !ok {
+		t.Fatalf("second decision = %T, want WriteDecisionMsg", secondMsg)
+	}
+	if secondDecision.Accepted || secondDecision.Proposal.Path != second.Path || secondDecision.Proposal.ResponseCh != second.ResponseCh {
+		t.Errorf("second decision = %#v, want rejected second proposal", secondDecision)
+	}
+	if model.HasPendingWrite() {
+		t.Error("HasPendingWrite() = true, want false after both decisions")
+	}
+
+	firstResult := errors.New("first result")
+	secondResult := errors.New("second result")
+	firstDecision.Proposal.ResponseCh <- firstResult
+	secondDecision.Proposal.ResponseCh <- secondResult
+	if got := <-first.ResponseCh; !errors.Is(got, firstResult) {
+		t.Errorf("first response = %v, want %v", got, firstResult)
+	}
+	if got := <-second.ResponseCh; !errors.Is(got, secondResult) {
+		t.Errorf("second response = %v, want %v", got, secondResult)
+	}
+}
+
+func TestAgentPruneCancelledWritesRemovesCurrentAndQueuedProposals(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	first := acp.AgentWriteFileMsg{
+		Path:       "first.go",
+		ResponseCh: make(chan error, 1),
+		Context:    firstCtx,
+	}
+	second := acp.AgentWriteFileMsg{
+		Path:       "second.go",
+		ResponseCh: make(chan error, 1),
+		Context:    secondCtx,
+	}
+
+	model, _ = model.Update(first)
+	model, _ = model.Update(second)
+	cancelFirst()
+	model.PruneCancelledWrites()
+	if got := model.PendingWrite(); got == nil || got.Path != second.Path {
+		t.Fatalf("pending proposal after first cancellation = %#v, want second", got)
+	}
+	if err := <-first.ResponseCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first cancellation response = %v, want context.Canceled", err)
+	}
+
+	cancelSecond()
+	model.PruneCancelledWrites()
+	if model.HasPendingWrite() {
+		t.Fatal("pending write remains after both proposals were cancelled")
+	}
+	if err := <-second.ResponseCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second cancellation response = %v, want context.Canceled", err)
 	}
 }
 
@@ -1126,6 +1313,7 @@ func TestAgentFieldAccess(t *testing.T) {
 	_ = model.permission
 	_ = model.alwaysAllow
 	_ = model.pendingWrite
+	_ = model.pendingWrites
 	_ = model.spinner
 	_ = model.spinFrame
 	_ = model.lastEscTime
@@ -1267,6 +1455,9 @@ func TestAgentAllFieldsHaveZeroValues(t *testing.T) {
 	}
 	if model.pendingWrite != nil {
 		t.Error("Expected zero pendingWrite to be nil")
+	}
+	if model.pendingWrites != nil {
+		t.Error("Expected zero pendingWrites to be nil")
 	}
 	if model.spinFrame != 0 {
 		t.Errorf("Expected zero spinFrame 0, got %d", model.spinFrame)

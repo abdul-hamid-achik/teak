@@ -134,6 +134,7 @@ func (h *ClientHandler) WriteTextFile(ctx context.Context, params sdk.WriteTextF
 		Path:       params.Path,
 		Content:    params.Content,
 		ResponseCh: responseCh,
+		Context:    ctx,
 	}:
 	case <-ctx.Done():
 		return sdk.WriteTextFileResponse{}, ctx.Err()
@@ -146,6 +147,7 @@ func (h *ClientHandler) WriteTextFile(ctx context.Context, params sdk.WriteTextF
 		}
 		return sdk.WriteTextFileResponse{}, nil
 	case <-ctx.Done():
+		h.sendNonBlocking(AgentWriteCancelledMsg{ResponseCh: responseCh})
 		return sdk.WriteTextFileResponse{}, ctx.Err()
 	}
 }

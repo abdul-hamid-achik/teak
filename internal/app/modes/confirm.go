@@ -8,7 +8,6 @@ import (
 // DeleteConfirmMode handles delete confirmation
 type DeleteConfirmMode struct {
 	BaseMode
-	path string
 }
 
 func (m *DeleteConfirmMode) ID() ModeID { return ModeDeleteConfirm }
@@ -32,7 +31,6 @@ func (m *DeleteConfirmMode) ShouldIntercept(msg tea.Msg) bool {
 // CloseConfirmMode handles close tab confirmation
 type CloseConfirmMode struct {
 	BaseMode
-	tabIndex int
 }
 
 func (m *CloseConfirmMode) ID() ModeID { return ModeCloseConfirm }

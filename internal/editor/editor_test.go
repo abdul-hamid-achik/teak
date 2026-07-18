@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -519,7 +520,7 @@ func TestEditorUpdateAutocompleteNavigation(t *testing.T) {
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 	editor.SetSize(80, 24)
 
-	editor.autocomplete.Show([]AutocompleteItem{
+	editor.autocomplete.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 		{Label: "bar", InsertText: "bar"},
 	})
@@ -537,7 +538,7 @@ func TestEditorUpdateAutocompleteSelect(t *testing.T) {
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 	editor.SetSize(80, 24)
 
-	editor.autocomplete.Show([]AutocompleteItem{
+	editor.autocomplete.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 	})
 
@@ -559,7 +560,7 @@ func TestEditorUpdateAutocompleteEscape(t *testing.T) {
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 	editor.SetSize(80, 24)
 
-	editor.autocomplete.Show([]AutocompleteItem{
+	editor.autocomplete.Show([]overlays.AutocompleteItem{
 		{Label: "foo", InsertText: "foo"},
 	})
 
@@ -601,7 +602,7 @@ func TestEditorShowHideAutocomplete(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("hello"))
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
 
-	items := []AutocompleteItem{{Label: "foo", InsertText: "foo"}}
+	items := []overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}}
 	editor.ShowAutocomplete(items)
 
 	if !editor.IsAutocompleteVisible() {
@@ -640,7 +641,7 @@ func TestEditorAutocompleteView(t *testing.T) {
 		t.Error("expected empty autocomplete view when not visible")
 	}
 
-	editor.ShowAutocomplete([]AutocompleteItem{{Label: "foo", InsertText: "foo"}})
+	editor.ShowAutocomplete([]overlays.AutocompleteItem{{Label: "foo", InsertText: "foo"}})
 	view = editor.AutocompleteView()
 	if view == "" {
 		t.Error("expected non-empty autocomplete view")

@@ -3,19 +3,20 @@ package editor
 import (
 	"testing"
 
+	"teak/internal/editor/overlays"
 	"teak/internal/ui"
 )
 
 func TestSignatureHelpShow(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
-	help := &SignatureData{
-		Signatures: []SignatureInfo{
+	help := &overlays.SignatureData{
+		Signatures: []overlays.SignatureInfo{
 			{
 				Label:         "func Foo(a int, b string)",
 				Documentation: "Foo does something",
-				Parameters: []ParameterInfo{
+				Parameters: []overlays.ParameterInfo{
 					{Label: "a int", Documentation: "First param"},
 					{Label: "b string", Documentation: "Second param"},
 				},
@@ -40,10 +41,10 @@ func TestSignatureHelpShow(t *testing.T) {
 
 func TestSignatureHelpHide(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
-	sh.Show(&SignatureData{
-		Signatures: []SignatureInfo{{Label: "func Foo()"}},
+	sh.Show(&overlays.SignatureData{
+		Signatures: []overlays.SignatureInfo{{Label: "func Foo()"}},
 	})
 	sh.Hide()
 
@@ -57,7 +58,7 @@ func TestSignatureHelpHide(t *testing.T) {
 
 func TestSignatureHelpView(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
 	// View should be empty when not visible
 	if view := sh.View(); view != "" {
@@ -65,8 +66,8 @@ func TestSignatureHelpView(t *testing.T) {
 	}
 
 	// View should render when visible
-	sh.Show(&SignatureData{
-		Signatures: []SignatureInfo{
+	sh.Show(&overlays.SignatureData{
+		Signatures: []overlays.SignatureInfo{
 			{Label: "func Foo(a int)"},
 		},
 	})
@@ -79,12 +80,12 @@ func TestSignatureHelpView(t *testing.T) {
 
 func TestSignatureHelpViewLongLabel(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
 	// Create a very long signature
 	longLabel := "func VeryLongFunctionNameWithManyParameters(param1 int, param2 string, param3 bool, param4 float64)"
-	sh.Show(&SignatureData{
-		Signatures: []SignatureInfo{{Label: longLabel}},
+	sh.Show(&overlays.SignatureData{
+		Signatures: []overlays.SignatureInfo{{Label: longLabel}},
 	})
 
 	view := sh.View()
@@ -95,10 +96,10 @@ func TestSignatureHelpViewLongLabel(t *testing.T) {
 
 func TestSignatureHelpViewMultiLine(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
-	sh.Show(&SignatureData{
-		Signatures: []SignatureInfo{
+	sh.Show(&overlays.SignatureData{
+		Signatures: []overlays.SignatureInfo{
 			{
 				Label:         "func Foo()",
 				Documentation: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
@@ -114,10 +115,10 @@ func TestSignatureHelpViewMultiLine(t *testing.T) {
 
 func TestSignatureHelpUpdateActiveParameter(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
-	sh.Show(&SignatureData{
-		Signatures:      []SignatureInfo{{Label: "func Foo(a, b, c)"}},
+	sh.Show(&overlays.SignatureData{
+		Signatures:      []overlays.SignatureInfo{{Label: "func Foo(a, b, c)"}},
 		ActiveParameter: 0,
 	})
 
@@ -134,21 +135,21 @@ func TestSignatureHelpUpdateActiveParameter(t *testing.T) {
 
 func TestSignatureHelpHideIdempotent(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
 	// Hide when already hidden should not panic
 	sh.Hide()
 	sh.Hide()
 
 	// Show and hide multiple times
-	sh.Show(&SignatureData{Signatures: []SignatureInfo{{Label: "func Foo()"}}})
+	sh.Show(&overlays.SignatureData{Signatures: []overlays.SignatureInfo{{Label: "func Foo()"}}})
 	sh.Hide()
 	sh.Hide()
 }
 
 func TestSignatureHelpShowNil(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
 	// Show with nil should not panic
 	sh.Show(nil)
@@ -160,10 +161,10 @@ func TestSignatureHelpShowNil(t *testing.T) {
 
 func TestSignatureHelpShowEmptySignatures(t *testing.T) {
 	theme := ui.DefaultTheme()
-	sh := NewSignatureHelp(theme)
+	sh := overlays.NewSignatureHelp(theme)
 
 	// Show with empty signatures should not be visible
-	sh.Show(&SignatureData{Signatures: []SignatureInfo{}})
+	sh.Show(&overlays.SignatureData{Signatures: []overlays.SignatureInfo{}})
 
 	if sh.Visible {
 		t.Error("SignatureHelp should not be visible with empty signatures")

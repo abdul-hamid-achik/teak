@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
@@ -146,12 +146,13 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			p.scrollY -= 3
 			if p.scrollY < 0 {
 				p.scrollY = 0
 			}
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			maxScroll := len(p.filtered) - p.visibleCount()
 			if maxScroll < 0 {
 				maxScroll = 0

@@ -57,9 +57,9 @@ type ACPCoordinatorInterface interface {
 
 // Coordinator orchestrates all subsystem coordinators.
 type Coordinator struct {
-	lsp  LSPCoordinatorInterface
-	dap  DAPCoordinatorInterface
-	acp  ACPCoordinatorInterface
+	lsp LSPCoordinatorInterface
+	dap DAPCoordinatorInterface
+	acp ACPCoordinatorInterface
 }
 
 // NewCoordinator creates a new main coordinator.
@@ -79,7 +79,7 @@ func (c *Coordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 			// Could return error message to UI here
 		}
 	}()
-	
+
 	switch m := msg.(type) {
 	// LSP messages
 	case lspMsg, lsp.DiagnosticsMsg, lsp.CompletionResultMsg, lsp.HoverResultMsg,
@@ -97,7 +97,7 @@ func (c *Coordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 	// ACP messages
 	case acpMsg, acp.AgentTextMsg, acp.AgentThoughtMsg, acp.AgentToolCallMsg,
 		acp.AgentToolCallUpdateMsg, acp.AgentPlanMsg, acp.AgentWriteFileMsg,
-		acp.AgentPermissionRequestMsg, acp.AgentPromptResponseMsg,
+		acp.AgentWriteCancelledMsg, acp.AgentPermissionRequestMsg, acp.AgentPromptResponseMsg,
 		acp.AgentSessionInfoMsg, acp.AgentModelChangedMsg, acp.AgentModeChangedMsg,
 		acp.AgentErrorMsg, acp.AgentStartedMsg, acp.AgentStoppedMsg,
 		acp.FileReadRequestMsg:

@@ -211,7 +211,9 @@ func (fw *fileWatcher) listenCmd() tea.Cmd {
 
 // Close shuts down the watcher.
 func (fw *fileWatcher) Close() {
-	fw.watcher.Close()
+	if err := fw.watcher.Close(); err != nil {
+		log.Error("file watcher close failed", "root", fw.rootDir, "err", err)
+	}
 }
 
 // isGitInternalPath returns true if the path is inside the .git directory.

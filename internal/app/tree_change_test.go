@@ -21,7 +21,9 @@ func TestHandleTreeChangeDebouncesGitRefresh(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 	model.gitPanel.SetIsGitRepo(true)
 
@@ -72,7 +74,9 @@ func TestHandleTreeChangePreservesExpandedTreeState(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 
 	updatedTree, cmd := model.tree.ToggleEntry(dirPath)
@@ -107,7 +111,9 @@ func TestFileListMsgIgnoresStaleGeneration(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 
 	model.fileListGeneration = 2
@@ -140,7 +146,9 @@ func TestGitSidebarMouseClickCollapsesDirectoryOnce(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 
 	model.sidebarTab = SidebarGit
@@ -196,7 +204,9 @@ func TestGitSidebarMouseClickFocusesCommitBody(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 
 	model.sidebarTab = SidebarGit
@@ -252,7 +262,9 @@ func TestGitRefreshMsgPreservesCollapsedDirectoryAfterInteraction(t *testing.T) 
 		t.Fatalf("NewModel() error = %v", err)
 	}
 	if model.logFile != nil {
-		defer model.logFile.Close()
+		defer func() {
+			_ = model.logFile.Close()
+		}()
 	}
 
 	model.sidebarTab = SidebarGit

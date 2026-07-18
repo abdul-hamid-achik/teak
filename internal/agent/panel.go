@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,80 +15,6 @@ import (
 	"teak/internal/acp"
 	"teak/internal/ui"
 )
-
-// ChatRole indicates who sent a message.
-type ChatRole int
-
-const (
-	RoleUser ChatRole = iota
-	RoleAgent
-	RoleSystem
-)
-
-// StreamBlockKind distinguishes content blocks during streaming.
-type StreamBlockKind int
-
-const (
-	BlockText StreamBlockKind = iota
-	BlockThought
-	BlockToolCall
-)
-
-const maxToolOutputLines = 100
-
-// StreamBlock is a single chunk of streaming content, preserving chronological order.
-type StreamBlock struct {
-	Kind     StreamBlockKind
-	Content  string
-	ToolCall *ToolCallState
-}
-
-// ChatMessage represents a completed message in the chat history.
-type ChatMessage struct {
-	Role      ChatRole
-	Content   string
-	ToolCalls []*ToolCallState
-}
-
-// ToolCallState tracks a tool call's lifecycle.
-type ToolCallState struct {
-	ID        sdk.ToolCallId
-	Title     string
-	Kind      sdk.ToolKind
-	Status    sdk.ToolCallStatus
-	Locations []sdk.ToolCallLocation
-	Content   []sdk.ToolCallContent
-	Expanded  bool
-	StartTime time.Time
-	EndTime   time.Time
-}
-
-// PermissionPrompt holds state for an inline permission UI.
-type PermissionPrompt struct {
-	ToolCall   sdk.RequestPermissionToolCall
-	Options    []sdk.PermissionOption
-	Selected   int
-	ResponseCh chan sdk.RequestPermissionResponse
-}
-
-// TaggedFile represents a file tagged for inclusion in the next prompt.
-type TaggedFile struct {
-	Path string
-	Name string
-}
-
-// AgentState tracks the agent's current state for the header indicator.
-type AgentState int
-
-const (
-	AgentDisconnected AgentState = iota
-	AgentIdle
-	AgentThinking
-	AgentPermission
-)
-
-// CancelRequestedMsg signals the app to cancel the current agent operation.
-type CancelRequestedMsg struct{}
 
 // Model is the Bubbletea model for the agent chat panel.
 type Model struct {
@@ -109,7 +36,8 @@ type Model struct {
 	permission  *PermissionPrompt
 	alwaysAllow map[string]bool
 
-	pendingWrite *acp.AgentWriteFileMsg
+	pendingWrite  *acp.AgentWriteFileMsg
+	pendingWrites []acp.AgentWriteFileMsg
 
 	spinner   spinner.Model
 	spinFrame int
@@ -197,19 +125,101 @@ func (m Model) PendingWrite() *acp.AgentWriteFileMsg {
 	return m.pendingWrite
 }
 
-// AcceptWrite accepts the pending write proposal.
-func (m *Model) AcceptWrite() {
-	if m.pendingWrite != nil {
-		m.pendingWrite.ResponseCh <- nil
+// PruneCancelledWrites removes canceled proposals even if their explicit
+// cancellation message was dropped under ACP channel backpressure.
+func (m *Model) PruneCancelledWrites() {
+	if m.pendingWrite != nil && writeProposalCancelled(*m.pendingWrite) {
+		cancelled := *m.pendingWrite
 		m.pendingWrite = nil
+		respondToCancelledWrite(cancelled)
+		m.promotePendingWrite()
+	}
+
+	kept := m.pendingWrites[:0]
+	for _, proposal := range m.pendingWrites {
+		if writeProposalCancelled(proposal) {
+			respondToCancelledWrite(proposal)
+			continue
+		}
+		kept = append(kept, proposal)
+	}
+	clear(m.pendingWrites[len(kept):])
+	m.pendingWrites = kept
+}
+
+// AcceptWrite accepts the pending write proposal and emits its decision.
+// The app is responsible for responding to the agent and writing to disk.
+func (m *Model) AcceptWrite() tea.Cmd {
+	return m.resolvePendingWrite(true)
+}
+
+// RejectWrite rejects the pending write proposal and emits its decision.
+// The app is responsible for responding to the agent.
+func (m *Model) RejectWrite() tea.Cmd {
+	return m.resolvePendingWrite(false)
+}
+
+func (m *Model) resolvePendingWrite(accepted bool) tea.Cmd {
+	if m.pendingWrite == nil {
+		return nil
+	}
+
+	proposal := *m.pendingWrite
+	m.pendingWrite = nil
+	m.promotePendingWrite()
+	return func() tea.Msg {
+		return WriteDecisionMsg{Proposal: proposal, Accepted: accepted}
 	}
 }
 
-// RejectWrite rejects the pending write proposal.
-func (m *Model) RejectWrite() {
-	if m.pendingWrite != nil {
-		m.pendingWrite.ResponseCh <- fmt.Errorf("user rejected edit")
+func (m *Model) promotePendingWrite() {
+	for len(m.pendingWrites) > 0 {
+		next := m.pendingWrites[0]
+		m.pendingWrites[0] = acp.AgentWriteFileMsg{}
+		m.pendingWrites = m.pendingWrites[1:]
+		if writeProposalCancelled(next) {
+			respondToCancelledWrite(next)
+			continue
+		}
+		m.pendingWrite = &next
+		return
+	}
+	m.pendingWrite = nil
+}
+
+func (m *Model) cancelPendingWrite(responseCh chan error) {
+	if m.pendingWrite != nil && m.pendingWrite.ResponseCh == responseCh {
+		cancelled := *m.pendingWrite
 		m.pendingWrite = nil
+		respondToCancelledWrite(cancelled)
+		m.promotePendingWrite()
+		return
+	}
+
+	kept := m.pendingWrites[:0]
+	for _, proposal := range m.pendingWrites {
+		if proposal.ResponseCh == responseCh {
+			respondToCancelledWrite(proposal)
+			continue
+		}
+		kept = append(kept, proposal)
+	}
+	clear(m.pendingWrites[len(kept):])
+	m.pendingWrites = kept
+}
+
+func writeProposalCancelled(proposal acp.AgentWriteFileMsg) bool {
+	return proposal.Context != nil && proposal.Context.Err() != nil
+}
+
+func respondToCancelledWrite(proposal acp.AgentWriteFileMsg) {
+	err := context.Canceled
+	if proposal.Context != nil && proposal.Context.Err() != nil {
+		err = proposal.Context.Err()
+	}
+	select {
+	case proposal.ResponseCh <- err:
+	default:
 	}
 }
 
@@ -366,10 +376,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case acp.AgentWriteFileMsg:
-		m.pendingWrite = &msg
+		if writeProposalCancelled(msg) {
+			respondToCancelledWrite(msg)
+			return m, nil
+		}
+		if m.pendingWrite == nil {
+			m.pendingWrite = &msg
+		} else {
+			m.pendingWrites = append(m.pendingWrites, msg)
+		}
 		if m.autoScroll {
 			m.scrollY = m.maxScroll + 10
 		}
+		return m, nil
+
+	case acp.AgentWriteCancelledMsg:
+		m.cancelPendingWrite(msg.ResponseCh)
 		return m, nil
 
 	case acp.AgentPermissionRequestMsg:
@@ -464,13 +486,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			m.scrollY -= 3
 			if m.scrollY < 0 {
 				m.scrollY = 0
 			}
 			m.autoScroll = false
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.scrollY += 3
 			if m.scrollY > m.maxScroll {
 				m.scrollY = m.maxScroll
@@ -495,6 +518,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	if m.permission != nil {
 		return m.handlePermissionKey(key)
+	}
+	if m.pendingWrite != nil {
+		switch key {
+		case "enter":
+			return m, m.AcceptWrite()
+		case "esc", "escape":
+			return m, m.RejectWrite()
+		default:
+			return m, nil
+		}
 	}
 
 	switch key {

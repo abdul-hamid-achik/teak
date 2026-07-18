@@ -23,6 +23,7 @@ import (
 	"teak/internal/debugger"
 	"teak/internal/diff"
 	"teak/internal/editor"
+	"teak/internal/editor/overlays"
 	"teak/internal/filetree"
 	"teak/internal/git"
 	"teak/internal/highlight"
@@ -121,6 +122,8 @@ type Model struct {
 	currentExecLine      int                          // current execution line (0-based), -1 when not paused
 	showAgent            bool                         // agent panel visible
 	agentPanel           agent.Model                  // agent chat panel
+	agentWrites          agentWriteState              // serializes accepted/rejected ACP write decisions
+	agentWriteRoot       *os.Root                     // pinned workspace root for confined ACP writes
 	pluginMgr            *plugin.Manager              // Lua plugin manager
 	pluginKeySequence    string                       // pending plugin key sequence
 	pluginFeedDepth      int                          // nested synthetic key dispatch from plugins
@@ -137,13 +140,7 @@ type Model struct {
 	nextSaveRequestID    int                          // monotonically increasing save request id
 	appCfg               config.Config                // app config for feature flags
 	gitRefreshGeneration int
-
-	// Managers (refactoring in progress)
-	tabMgr      *TabManager
-	sidebarMgr  *SidebarManager
-	overlayMgr  *OverlayManager
-	layoutMgr   *LayoutManager
-	protocolMgr *ProtocolManager
+	overlayRequests      overlayRequestTracker
 }
 
 // ClosedTab stores information about a closed tab for reopening.
@@ -226,6 +223,15 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		currentExecLine:   -1,
 		agentPanel:        agent.New(theme),
 	}
+	if rootDir != "" {
+		m.agentWriteRoot, err = os.OpenRoot(rootDir)
+		if err != nil {
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+			return Model{}, fmt.Errorf("open workspace root: %w", err)
+		}
+	}
 
 	// Initialize ACP manager if agent is configured
 	if appCfg.Agent.Enabled && appCfg.Agent.Command != "" {
@@ -242,14 +248,6 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 
 	// Create coordinator to orchestrate LSP/DAP/ACP
 	m.coordinator = NewCoordinator(m.lspMgr, m.debugMgr, m.acpMgr)
-
-	// Initialize managers (refactoring in progress)
-	m.tabMgr = NewTabManager(theme)
-	m.sidebarMgr = NewSidebarManager(rootDir, theme)
-	m.overlayMgr = NewOverlayManager(theme, rootDir)
-	m.layoutMgr = NewLayoutManager(theme)
-	m.protocolMgr = NewProtocolManager(rootDir, appCfg, theme)
-	m.protocolMgr.SetCoordinator(m.coordinator)
 
 	if rootDir != "" {
 		m.tree = filetree.New(rootDir, theme)
@@ -299,10 +297,14 @@ func (m *Model) cleanup() {
 	}
 	m.saveSession()
 	if m.logFile != nil {
-		m.logFile.Close()
+		_ = m.logFile.Close()
 	}
 	if m.watcher != nil {
 		m.watcher.Close()
+	}
+	if m.agentWriteRoot != nil {
+		_ = m.agentWriteRoot.Close()
+		m.agentWriteRoot = nil
 	}
 	if m.pluginMgr != nil {
 		m.pluginMgr.Shutdown()
@@ -343,7 +345,7 @@ type sessionAutoSaveMsg struct{}
 // restoreSession rebuilds tabs from a saved session state.
 // Called from NewModel, sets up editors that Init() will load asynchronously.
 func (m *Model) restoreSession(state session.State) {
-	// Clear the initial empty editor
+	// Clear the initial empty editor.
 	m.editors = nil
 	m.tabBar.Tabs = nil
 
@@ -438,6 +440,8 @@ func (m Model) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.agentPanel.PruneCancelledWrites()
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -677,11 +681,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+shift+f":
 			return m.openSearch(search.ModeSemantic)
 		case "ctrl+space":
-			return m, m.requestCompletion()
+			return m.requestCompletion()
 		case "alt+k":
 			// Show hover tooltip (Alt+K for Knowledge/Documentation)
 			if m.focus == FocusEditor {
-				return m, m.requestHover()
+				return m.requestHover()
 			}
 			return m, nil
 		case "ctrl+k":
@@ -696,21 +700,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fold at cursor line
 			if ed := m.activeEditor(); ed != nil {
 				ed.Folds.Fold(ed.Buffer.Cursor.Line)
-				m.editors[m.activeTab] = *ed
+				m.setEditor(m.activeTab, *ed)
 			}
 			return m, nil
 		case "ctrl+shift+]":
 			// Unfold at cursor line
 			if ed := m.activeEditor(); ed != nil {
 				ed.Folds.Unfold(ed.Buffer.Cursor.Line)
-				m.editors[m.activeTab] = *ed
+				m.setEditor(m.activeTab, *ed)
 			}
 			return m, nil
 		case "ctrl+shift+[0]":
 			// Fold all
 			if ed := m.activeEditor(); ed != nil {
 				ed.Folds.FoldAll()
-				m.editors[m.activeTab] = *ed
+				m.setEditor(m.activeTab, *ed)
 				m.status = "All regions folded"
 			}
 			return m, nil
@@ -718,7 +722,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Unfold all
 			if ed := m.activeEditor(); ed != nil {
 				ed.Folds.UnfoldAll()
-				m.editors[m.activeTab] = *ed
+				m.setEditor(m.activeTab, *ed)
 				m.status = "All regions unfolded"
 			}
 			return m, nil
@@ -970,7 +974,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			relY := mouse0.Y - cmY - 1
 			ed := m.editors[m.activeTab]
 			result, cmd, action := ed.ClickContextMenuItem(relY)
-			m.editors[m.activeTab] = result
+			m.setEditor(m.activeTab, result)
 			if action == "goto_definition" || action == "find_references" || action == "rename_symbol" {
 				return m.handleContextMenuAction(action)
 			}
@@ -1326,7 +1330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		ed := m.activeEditor()
 		updated, cmd := ed.Update(msg)
-		m.editors[m.activeTab] = updated
+		m.setEditor(m.activeTab, updated)
 		return m, cmd
 
 	case editor.TokenizeCompleteMsg:
@@ -1335,11 +1339,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		ed := m.activeEditor()
 		updated, cmd := ed.Update(msg)
-		m.editors[m.activeTab] = updated
+		m.setEditor(m.activeTab, updated)
 		return m, cmd
 
 	case editor.RequestCompletionCmd:
-		return m, m.requestCompletion()
+		return m.requestCompletion()
 
 	case FileSavedMsg:
 		req, hadPendingSave := m.completeSaveRequest(msg.RequestID)
@@ -1355,7 +1359,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			client.DidSave(lsp.FileURI(msg.Path))
 		}
 		if hadPendingSave && req.CloseAfter {
-			closeIdx := -1
+			var closeIdx int
 			if req.TabIndex >= 0 && req.TabIndex < len(m.editors) && m.editors[req.TabIndex].Buffer.FilePath == msg.Path {
 				closeIdx = req.TabIndex
 			} else {
@@ -1446,7 +1450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ed.Buffer.Cursor.Line = sel.Symbol.SelectionRange.Start.Line
 				ed.Buffer.Cursor.Col = sel.Symbol.SelectionRange.Start.Character
 				ed.EnsureCursorVisible()
-				m.editors[m.activeTab] = *ed
+				m.setEditor(m.activeTab, *ed)
 			}
 			return m, nil
 		}
@@ -1614,9 +1618,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDiagnostics(msg)
 
 	case lsp.CompletionResultMsg:
-		items := make([]editor.AutocompleteItem, len(msg.Items))
+		if !m.acceptsOverlayResult(overlayRequestCompletion, msg.OverlayRequestMetadata) {
+			return m, nil
+		}
+		items := make([]overlays.AutocompleteItem, len(msg.Items))
 		for i, item := range msg.Items {
-			items[i] = editor.AutocompleteItem{
+			items[i] = overlays.AutocompleteItem{
 				Label:      item.Label,
 				Detail:     item.Detail,
 				InsertText: item.InsertText,
@@ -1624,26 +1631,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.activeEditor() != nil {
 			m.activeEditor().ShowAutocomplete(items)
-			m.editors[m.activeTab] = *m.activeEditor()
+			m.setEditor(m.activeTab, *m.activeEditor())
 		}
 		return m, nil
 
 	case lsp.HoverResultMsg:
+		if !m.acceptsOverlayResult(overlayRequestHover, msg.OverlayRequestMetadata) {
+			return m, nil
+		}
 		if msg.Content != "" && m.activeEditor() != nil {
 			m.activeEditor().ShowHover(msg.Content)
-			m.editors[m.activeTab] = *m.activeEditor()
+			m.setEditor(m.activeTab, *m.activeEditor())
 		}
 		return m, nil
 
 	case lsp.SignatureHelpResultMsg:
+		if !m.acceptsOverlayResult(overlayRequestSignature, msg.OverlayRequestMetadata) {
+			return m, nil
+		}
 		if msg.Help != nil && m.activeEditor() != nil {
-			// Convert to editor.SignatureData
-			sigData := &editor.SignatureData{
+			// Convert to overlays.SignatureData
+			sigData := &overlays.SignatureData{
 				ActiveSignature: msg.Help.ActiveSignature,
 				ActiveParameter: msg.Help.ActiveParameter,
 			}
 			for _, sig := range msg.Help.Signatures {
-				var params []editor.ParameterInfo
+				var params []overlays.ParameterInfo
 				for _, p := range sig.Parameters {
 					label := ""
 					switch v := p.Label.(type) {
@@ -1654,19 +1667,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							label = sig.Label
 						}
 					}
-					params = append(params, editor.ParameterInfo{
+					params = append(params, overlays.ParameterInfo{
 						Label:         label,
 						Documentation: p.Documentation,
 					})
 				}
-				sigData.Signatures = append(sigData.Signatures, editor.SignatureInfo{
+				sigData.Signatures = append(sigData.Signatures, overlays.SignatureInfo{
 					Label:         sig.Label,
 					Documentation: sig.Documentation,
 					Parameters:    params,
 				})
 			}
 			m.activeEditor().ShowSignatureHelp(sigData)
-			m.editors[m.activeTab] = *m.activeEditor()
+			m.setEditor(m.activeTab, *m.activeEditor())
 		}
 		return m, nil
 
@@ -1685,7 +1698,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.Status {
 			case lsp.FormatApplied:
 				if idx >= 0 && idx == m.activeTab {
-					m.editors[m.activeTab] = m.editors[idx]
+					m.setEditor(m.activeTab, m.editors[idx])
 				}
 			case lsp.FormatNoOp:
 				m.status = "No formatting changes"
@@ -1909,6 +1922,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case agent.WriteDecisionMsg:
+		return m.handleAgentWriteDecision(msg)
+
+	case agentWriteResultMsg:
+		return m.handleAgentWriteResult(msg)
+
 	case toggleAgentMsg:
 		cmd := m.toggleAgentPanel()
 		return m, cmd
@@ -1935,6 +1954,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Route input to agent panel when focused
 	if m.showAgent && m.focus == FocusAgent {
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
+			if m.agentPanel.HasPendingWrite() {
+				var cmd tea.Cmd
+				m.agentPanel, cmd = m.agentPanel.Update(kp)
+				if cmd == nil {
+					return m, nil
+				}
+				result := cmd()
+				if decision, ok := result.(agent.WriteDecisionMsg); ok {
+					return m.handleAgentWriteDecision(decision)
+				}
+				return m, func() tea.Msg { return result }
+			}
 			key := kp.String()
 			switch key {
 			case "esc", "escape":
@@ -1977,16 +2008,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.showTree && m.focus == FocusTree {
 		// Tab switches between sidebar tabs
 		if kp, ok := msg.(tea.KeyPressMsg); ok && kp.String() == "tab" {
-			if m.sidebarTab == SidebarFiles {
+			switch m.sidebarTab {
+			case SidebarFiles:
 				m.sidebarTab = SidebarGit
 				m.focus = FocusGitPanel
-			} else if m.sidebarTab == SidebarGit {
+			case SidebarGit:
 				m.sidebarTab = SidebarProblems
 				m.focus = FocusProblems
-			} else if m.sidebarTab == SidebarProblems {
+			case SidebarProblems:
 				m.sidebarTab = SidebarDebugger
 				m.focus = FocusDebugger
-			} else {
+			default:
 				m.sidebarTab = SidebarFiles
 				m.focus = FocusTree
 			}
@@ -2032,7 +2064,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prevVersion := ed.Buffer.Version()
 	prevCursor := ed.Buffer.Cursor
 	ed, cmd = ed.Update(msg)
-	m.editors[m.activeTab] = ed
+	m.setEditor(m.activeTab, ed)
 
 	// Update tab dirty state; edits pin preview tabs
 	if m.activeTab < len(m.tabBar.Tabs) {
@@ -2069,209 +2101,6 @@ func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) {
 	client.DidChange(uri, version, ed.Buffer.Content())
 }
 
-// View implements tea.Model.
-func (m Model) View() tea.View {
-	if m.width == 0 || m.height == 0 {
-		return tea.NewView("")
-	}
-
-	// Set debug gutter state on active editor
-	if ed := m.activeEditor(); ed != nil {
-		filePath := ed.Buffer.FilePath
-		bpEntries := m.breakpoints[filePath]
-		if len(bpEntries) > 0 || m.currentExecLine >= 0 {
-			bpMap := make(map[int]editor.BreakpointState, len(bpEntries))
-			for _, bp := range bpEntries {
-				if bp.Enabled {
-					bpMap[bp.Line] = editor.BPActive
-				} else {
-					bpMap[bp.Line] = editor.BPDisabled
-				}
-			}
-			execLine := -1
-			if m.currentExecFile == filePath {
-				execLine = m.currentExecLine
-			}
-			ed.DebugGutter = &editor.GutterOpts{
-				Breakpoints: bpMap,
-				ExecLine:    execLine,
-			}
-		} else {
-			ed.DebugGutter = nil
-		}
-	}
-
-	var content string
-	statusBar := m.renderStatusBar()
-
-	welcomeActive := m.welcome != nil && m.welcome.Active
-
-	if m.showTree {
-		content = m.viewWithTree() + "\n" + statusBar
-	} else {
-		tabBarView := m.tabBar.View()
-		var editorView string
-		if welcomeActive {
-			editorView = m.welcome.View()
-		} else if m.isActiveDiffTab() {
-			editorView = m.activeDiffView()
-		} else if m.activeEditor() != nil {
-			editorView = m.activeEditor().View()
-		}
-		editorCol := tabBarView + "\n" + editorView
-		// Agent panel on the right (no-tree mode)
-		if m.showAgent && m.agentPanelWidth() > 0 {
-			sidebarHeight := m.height - 2
-			rightBorder := m.agentBorderColumn(sidebarHeight)
-			agentView := m.agentPanel.View()
-			editorCol = lipgloss.JoinHorizontal(lipgloss.Top, editorCol, rightBorder, agentView)
-		}
-		content = editorCol + "\n" + statusBar
-	}
-
-	// Overlay context menus (rendered before help/search so they show in normal view)
-	if !m.isActiveDiffTab() && m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
-		cmView := m.activeEditor().ContextMenuView()
-		cmX, cmY := m.activeEditor().ContextMenuPosition()
-		if m.showTree {
-			cmX += m.treeWidth() + 1
-		}
-		cmY += 1 // +1 for tab bar
-		content = ui.PlaceOverlayAt(content, cmView, cmX, cmY, m.width, m.height)
-	} else if m.gitContextMenu.Visible {
-		cmView := m.gitContextMenu.View()
-		content = ui.PlaceOverlayAt(content, cmView, m.gitContextMenu.X, m.gitContextMenu.Y, m.width, m.height)
-	} else if m.treeContextMenu.Visible {
-		cmView := m.treeContextMenu.View()
-		content = ui.PlaceOverlayAt(content, cmView, m.treeContextMenu.X, m.treeContextMenu.Y, m.width, m.height)
-	}
-
-	// Branch picker overlay
-	if m.showBranchPicker {
-		pickerView := m.branchPickerM.View()
-		content = ui.RenderOverlay(content, pickerView, m.width, m.height)
-	}
-
-	// Overlay help, search, or go-to-line
-	if m.showHelp {
-		helpContent := m.helpM.View()
-		content = ui.RenderOverlay(content, helpContent, m.width, m.height)
-	} else if m.showSettings {
-		// Settings overlay with fixed size and centered position
-		settingsView := m.settingsM.View()
-		// Add hint at the bottom
-		hint := m.theme.Gutter.Render("\n\nPress 'r' to reset, '+'/'-' to change, ESC to close")
-		settingsView += hint
-
-		// Fixed modal dimensions
-		modalWidth := 72
-		modalHeight := 22
-
-		// Center the modal
-		centerX := (m.width - modalWidth) / 2
-		centerY := (m.height - modalHeight) / 2
-		if centerX < 0 {
-			centerX = 0
-		}
-		if centerY < 0 {
-			centerY = 0
-		}
-
-		// Wrap in a box with border
-		settingsBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(1, 2).
-			Width(modalWidth).
-			Render(settingsView)
-
-		content = ui.PlaceOverlayAt(content, settingsBox, centerX, centerY, m.width, m.height)
-	} else if m.showSearch {
-		searchView := m.searchM.View()
-		content = ui.RenderOverlay(content, searchView, m.width, m.height)
-	} else if m.goToLineMode {
-		goToBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("Go to Line: %s_", m.goToLineInput))
-		content = ui.RenderOverlay(content, goToBox, m.width, m.height)
-	} else if m.renameMode {
-		renameBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("Rename Symbol: %s_", m.renameInput))
-		content = ui.RenderOverlay(content, renameBox, m.width, m.height)
-	} else if m.newFileMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("New File: %s_", m.newItemInput))
-		content = ui.RenderOverlay(content, box, m.width, m.height)
-	} else if m.newFolderMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("New Folder: %s_", m.newItemInput))
-		content = ui.RenderOverlay(content, box, m.width, m.height)
-	} else if m.deleteConfirm {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord11).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("Delete %s? (y/N)", filepath.Base(m.deleteTarget)))
-		content = ui.RenderOverlay(content, box, m.width, m.height)
-	} else if m.saveAsMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
-			Padding(0, 1).
-			Render(fmt.Sprintf("Save As: %s_", m.saveAsInput))
-		content = ui.RenderOverlay(content, box, m.width, m.height)
-	}
-
-	// Overlay stack (quick open, command palette)
-	if !m.overlayStack.IsEmpty() {
-		content = ui.RenderOverlay(content, m.overlayStack.View(), m.width, m.height)
-	}
-
-	// Unsaved changes confirm dialog (highest priority overlay)
-	if m.unsavedConfirm != nil {
-		content = ui.RenderOverlay(content, m.unsavedConfirm.View(), m.width, m.height)
-	}
-
-	scanned := zone.Scan(content)
-	v := tea.NewView(scanned)
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
-
-	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && !m.isActiveDiffTab() && m.overlayStack.IsEmpty() && m.unsavedConfirm == nil && m.focus == FocusEditor && m.activeEditor() != nil {
-		cx, cy := m.activeEditor().CursorPosition()
-		if m.showTree {
-			cx += m.treeWidth() + 1
-		}
-		cy += 1 // +1 for tab bar
-		if cy >= 0 && cy < m.height-1 && cx >= 0 && cx < m.width {
-			cursor := tea.NewCursor(cx, cy)
-			cursor.Shape = tea.CursorBar
-			cursor.Blink = true
-			v.Cursor = cursor
-		}
-	}
-
-	return v
-}
-
 func (m Model) isActiveDiffTab() bool {
 	if m.activeTab < len(m.tabBar.Tabs) {
 		return m.tabBar.Tabs[m.activeTab].Kind == editor.TabDiff
@@ -2279,22 +2108,7 @@ func (m Model) isActiveDiffTab() bool {
 	return false
 }
 
-func (m Model) activeDiffView() string {
-	if dv, ok := m.diffViews[m.activeTab]; ok {
-		return dv.View()
-	}
-	return ""
-}
-
 func (m *Model) activeEditor() *editor.Editor {
-	// Try using TabManager first (new way)
-	if m.tabMgr != nil {
-		if ed := m.tabMgr.GetActiveEditor(); ed != nil {
-			return ed
-		}
-	}
-
-	// Fallback to legacy fields during transition
 	if len(m.editors) == 0 {
 		return nil
 	}
@@ -2302,6 +2116,11 @@ func (m *Model) activeEditor() *editor.Editor {
 		return &m.editors[m.activeTab]
 	}
 	return &m.editors[0]
+}
+
+// setEditor updates the editor slice, the single source of truth for tab state.
+func (m *Model) setEditor(idx int, ed editor.Editor) {
+	m.editors[idx] = ed
 }
 
 // forwardToEditor sends an adjusted mouse message to the active editor and handles LSP updates.
@@ -2316,135 +2135,36 @@ func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if m.activeEditor() == nil {
+	ed := m.activeEditor()
+	if ed == nil {
 		return m, nil
 	}
-	ed := *m.activeEditor()
 	if ed.Buffer.FilePath != "" {
 		ed.HasLSP = m.lspMgr.ClientForFile(ed.Buffer.FilePath) != nil
 	}
 	prevVersion := ed.Buffer.Version()
 	prevCursor := ed.Buffer.Cursor
 	var cmd tea.Cmd
-	ed, cmd = ed.Update(msg)
-	m.editors[m.activeTab] = ed
+	updated, cmd := ed.Update(msg)
+	m.setEditor(m.activeTab, updated)
 
 	if m.activeTab < len(m.tabBar.Tabs) {
-		m.tabBar.Tabs[m.activeTab].Dirty = ed.Buffer.Dirty()
+		m.tabBar.Tabs[m.activeTab].Dirty = updated.Buffer.Dirty()
 	}
-	if ed.Buffer.Version() != prevVersion && ed.Buffer.FilePath != "" {
-		if client := m.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
-			m.notifyLSPChange(client, &ed)
+	if updated.Buffer.Version() != prevVersion && updated.Buffer.FilePath != "" {
+		if client := m.lspMgr.ClientForFile(updated.Buffer.FilePath); client != nil {
+			m.notifyLSPChange(client, &updated)
 		}
 	}
-	return m, tea.Batch(cmd, m.triggerEditorAutocmds(ed.Buffer.FilePath, prevVersion, ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor))
-}
-
-// viewWithTree: sidebar tab bar + active panel on left, tab bar + editor on right.
-func (m Model) viewWithTree() string {
-	tabBarView := m.tabBar.View()
-	var editorView string
-	if m.welcome != nil && m.welcome.Active {
-		editorView = m.welcome.View()
-	} else if m.isActiveDiffTab() {
-		editorView = m.activeDiffView()
-	} else if m.activeEditor() != nil {
-		editorView = m.activeEditor().View()
+	var signatureHelpCmd tea.Cmd
+	if updated.Buffer.Version() != prevVersion && signatureHelpTrigger(msg) {
+		m, signatureHelpCmd = m.requestSignatureHelp()
 	}
-
-	// Editor column: tab bar + editor content
-	editorColumn := tabBarView + "\n" + editorView
-
-	// Build sidebar: tab bar (1 line) + active panel
-	sidebarHeight := m.height - 2    // minus divider + status bar
-	panelHeight := sidebarHeight - 1 // minus sidebar tab bar
-	if panelHeight < 1 {
-		panelHeight = 1
-	}
-
-	tw := m.treeWidth()
-	tabBar := m.sidebarTabBar()
-
-	var panelView string
-	switch m.sidebarTab {
-	case SidebarGit:
-		m.gitPanel.SetSize(tw, panelHeight)
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.gitPanel.View())
-	case SidebarProblems:
-		m.problemsPanel.SetSize(tw, panelHeight)
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.problemsPanel.View())
-	case SidebarDebugger:
-		m.debuggerPanel.SetSize(tw, panelHeight)
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.debuggerPanel.View())
-	default:
-		m.tree.SetSize(tw, panelHeight)
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.tree.View())
-	}
-
-	sidebarView := tabBar + "\n" + panelView
-
-	// Border column: full height
-	borderLines := make([]string, sidebarHeight)
-	for i := range sidebarHeight {
-		borderLines[i] = m.theme.TreeBorder.Render("│")
-	}
-	borderCol := strings.Join(borderLines, "\n")
-
-	result := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, borderCol, editorColumn)
-
-	// Agent panel on the right
-	if m.showAgent && m.agentPanelWidth() > 0 {
-		rightBorder := m.agentBorderColumn(sidebarHeight)
-		agentView := m.agentPanel.View()
-		result = lipgloss.JoinHorizontal(lipgloss.Top, result, rightBorder, agentView)
-	}
-
-	return result
-}
-
-// sidebarTabBar renders the 1-line icon bar at the top of the sidebar.
-func (m Model) sidebarTabBar() string {
-	tw := m.treeWidth()
-
-	fileIcon := " \uf413 "     // nf-oct-file_directory_fill
-	gitIcon := " \ue725 "      // nf-dev-git_branch
-	problemsIcon := " \uea88 " // nf-cod-problems
-	debuggerIcon := " \ueb0c " // nf-cod-debug
-
-	var fileTab, gitTab, problemsTab, debuggerTab string
-	if m.sidebarTab == SidebarFiles {
-		fileTab = m.theme.SidebarTabActive.Render(fileIcon)
-	} else {
-		fileTab = m.theme.SidebarTabInactive.Render(fileIcon)
-	}
-	if m.sidebarTab == SidebarGit {
-		gitTab = m.theme.SidebarTabActive.Render(gitIcon)
-	} else {
-		gitTab = m.theme.SidebarTabInactive.Render(gitIcon)
-	}
-	if m.sidebarTab == SidebarProblems {
-		problemsTab = m.theme.SidebarTabActive.Render(problemsIcon)
-	} else {
-		problemsTab = m.theme.SidebarTabInactive.Render(problemsIcon)
-	}
-	if m.sidebarTab == SidebarDebugger {
-		debuggerTab = m.theme.SidebarTabActive.Render(debuggerIcon)
-	} else {
-		debuggerTab = m.theme.SidebarTabInactive.Render(debuggerIcon)
-	}
-
-	fileTab = zone.Mark("sidebar-tab-files", fileTab)
-	gitTab = zone.Mark("sidebar-tab-git", gitTab)
-	problemsTab = zone.Mark("sidebar-tab-problems", problemsTab)
-	debuggerTab = zone.Mark("sidebar-tab-debugger", debuggerTab)
-
-	bar := fileTab + gitTab + problemsTab + debuggerTab
-	// Pad to full sidebar width
-	padWidth := tw - lipgloss.Width(bar)
-	if padWidth > 0 {
-		bar += lipgloss.NewStyle().Background(ui.Nord0).Render(strings.Repeat(" ", padWidth))
-	}
-	return bar
+	return m, tea.Batch(
+		cmd,
+		signatureHelpCmd,
+		m.triggerEditorAutocmds(updated.Buffer.FilePath, prevVersion, updated.Buffer.Version(), prevCursor, updated.Buffer.Cursor),
+	)
 }
 
 // handleGitPanelClick routes a click in the git panel area.
@@ -2618,115 +2338,6 @@ func (m *Model) relayout() {
 	}
 }
 
-func (m Model) renderStatusBar() string {
-	// Left: F1 Help + git branch (or project name fallback)
-	helpHint := m.theme.TabInactive.Render(" F1 Help ")
-	var branchPart string
-	if m.gitBranch != "" {
-		branchLabel := fmt.Sprintf("  %s", m.gitBranch)
-		branchPart = zone.Mark("status-bar-branch", branchLabel)
-	} else if m.rootDir != "" {
-		branchPart = "  " + filepath.Base(m.rootDir)
-	}
-	left := helpHint + branchPart
-
-	var right string
-	if ed := m.activeEditor(); ed != nil {
-		buf := ed.Buffer
-		tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
-		scrollPos := m.scrollIndicator()
-		lspStatus := m.lspIndicator()
-		problemsStatus := m.problemsStatus()
-		agentStatus := m.agentIndicator()
-		right = m.theme.StatusText.Render(
-			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s%s ",
-				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus, problemsStatus),
-		) + agentStatus
-	}
-
-	// Center: status message
-	center := m.status
-
-	// Calculate padding
-	usedWidth := lipglossWidth(left) + lipglossWidth(right) + len(center)
-	padding := max(0, m.width-usedWidth)
-
-	bar := left + " " + center + strings.Repeat(" ", max(0, padding-1)) + right
-
-	// Divider line above status bar
-	divider := m.theme.TreeBorder.Render(strings.Repeat("─", m.width))
-	return divider + "\n" + m.theme.StatusBar.Width(m.width).Render(bar)
-}
-
-func (m Model) scrollIndicator() string {
-	if m.activeEditor() == nil {
-		return ""
-	}
-	ed := m.activeEditor()
-	buf := ed.Buffer
-	totalLines := buf.LineCount()
-	viewHeight := ed.Viewport.Height
-	scrollY := ed.Viewport.ScrollY
-
-	if totalLines <= viewHeight {
-		return "All"
-	}
-	if scrollY == 0 {
-		return "Top"
-	}
-	maxScroll := totalLines - viewHeight
-	if scrollY >= maxScroll {
-		return "Bot"
-	}
-	pct := scrollY * 100 / maxScroll
-	return fmt.Sprintf("%d%%", pct)
-}
-
-func (m Model) lspIndicator() string {
-	if m.activeEditor() == nil {
-		return ""
-	}
-	buf := m.activeEditor().Buffer
-	if buf.FilePath == "" {
-		return ""
-	}
-	name, running, ready := m.lspMgr.ServerStatus(buf.FilePath)
-	if name == "" {
-		return ""
-	}
-	if running && ready {
-		return "  " + name + " ●"
-	}
-	if running {
-		return "  " + name + " ◐"
-	}
-	return "  " + name + " ○"
-}
-
-// problemsStatus returns a string showing the problem count for the status bar.
-func (m Model) problemsStatus() string {
-	errors := m.problemsPanel.ErrorCount()
-	warnings := m.problemsPanel.WarningCount()
-	total := m.problemsPanel.ProblemCount()
-
-	if total == 0 {
-		return ""
-	}
-
-	parts := []string{}
-	if errors > 0 {
-		parts = append(parts, fmt.Sprintf("✗ %d", errors))
-	}
-	if warnings > 0 {
-		parts = append(parts, fmt.Sprintf("⚠ %d", warnings))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, fmt.Sprintf("ℹ %d", total))
-	}
-
-	return "  " + strings.Join(parts, "  ")
-}
-
 func (m Model) openFile(path string) (tea.Model, tea.Cmd) {
 	return m.openFileAs(path, true)
 }
@@ -2763,7 +2374,7 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 			ed := m.activeEditor()
 			ed.Buffer.Cursor = *m.pendingCursor
 			ed.EnsureCursorVisible()
-			m.editors[m.activeTab] = *ed
+			m.setEditor(m.activeTab, *ed)
 			m.pendingCursor = nil
 		}
 		if idx == oldActiveIdx || oldActivePath == path {
@@ -2795,7 +2406,7 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 		if m.watcher != nil && replacedPath != "" && replacedPath != path {
 			m.watcher.UnwatchFile(replacedPath)
 		}
-		m.editors[replaceIdx] = ed
+		m.setEditor(replaceIdx, ed)
 		m.tabBar.Tabs[replaceIdx].Label = filepath.Base(path)
 		m.tabBar.Tabs[replaceIdx].FilePath = path
 		m.tabBar.Tabs[replaceIdx].Dirty = false
@@ -2842,7 +2453,7 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 	cfg.CommentPrefix = editor.CommentPrefixForFile(msg.Path)
 	ed.Config = cfg
 	newEd := editor.New(ed.Buffer, m.theme, ed.Config)
-	m.editors[tabIdx] = newEd
+	m.setEditor(tabIdx, newEd)
 	m.relayout()
 	m.status = ""
 
@@ -3087,7 +2698,8 @@ func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
 		m.welcome.Dismiss()
 	}
 	m.untitledCounter++
-	label := fmt.Sprintf("Untitled-%d", m.untitledCounter)
+	untitledNum := m.untitledCounter
+	label := fmt.Sprintf("Untitled-%d", untitledNum)
 	buf := text.NewBuffer()
 	cfg := editor.DefaultConfig()
 	if len(m.editors) > 0 {
@@ -3180,9 +2792,10 @@ func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			m.problemsPanel.ScrollUp(3)
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.problemsPanel.ScrollDown(3)
 		}
 		return m, nil
@@ -3332,9 +2945,10 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if mouse.Button == tea.MouseWheelUp {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			m.settingsM.SelectPrevSetting()
-		} else if mouse.Button == tea.MouseWheelDown {
+		case tea.MouseWheelDown:
 			m.settingsM.SelectNextSetting()
 		}
 		return m, nil
@@ -3706,28 +3320,6 @@ func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
 	}
 }
 
-func (m Model) requestCompletion() tea.Cmd {
-	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
-		return nil
-	}
-	mgr := m.lspMgr
-	filePath := ed.Buffer.FilePath
-	line := ed.Buffer.Cursor.Line
-	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
-		client := mgr.ClientForFile(filePath)
-		if client == nil {
-			return nil
-		}
-		items, err := client.Completion(lsp.FileURI(filePath), line, col)
-		if err != nil || len(items) == 0 {
-			return nil
-		}
-		return lsp.CompletionResultMsg{Items: items}
-	}
-}
-
 func (m Model) requestDefinition() tea.Cmd {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
@@ -3749,30 +3341,6 @@ func (m Model) requestDefinition() tea.Cmd {
 		return lsp.DefinitionResultMsg{Locations: locs}
 	}
 }
-
-func (m Model) requestHover() tea.Cmd {
-	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
-		return nil
-	}
-	mgr := m.lspMgr
-	filePath := ed.Buffer.FilePath
-	line := ed.Buffer.Cursor.Line
-	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
-		client := mgr.ClientForFile(filePath)
-		if client == nil {
-			return nil
-		}
-		result, err := client.Hover(lsp.FileURI(filePath), line, col)
-		if err != nil || result == nil {
-			return nil
-		}
-		return lsp.HoverResultMsg{Content: result.Content}
-	}
-}
-
-type hoverTriggerMsg struct{}
 
 func (m Model) requestFoldingRanges(filePath string) tea.Cmd {
 	if filePath == "" {
@@ -3879,7 +3447,7 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		ed.Buffer.Cursor.Line = lineNum
 		ed.Buffer.Cursor.Col = 0
 		ed.EnsureCursorVisible()
-		m.editors[m.activeTab] = *ed
+		m.setEditor(m.activeTab, *ed)
 		return m, nil
 	case "backspace":
 		if len(m.goToLineInput) > 0 {
@@ -3941,9 +3509,9 @@ func (m Model) handleSaveAsInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			newEd.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 			newEd.HasLSP = ed.HasLSP
-			m.editors[m.activeTab] = newEd
+			m.setEditor(m.activeTab, newEd)
 		} else {
-			m.editors[m.activeTab] = *ed
+			m.setEditor(m.activeTab, *ed)
 		}
 		// Update watcher
 		if m.watcher != nil {
@@ -4498,7 +4066,7 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 	if replaceIdx >= 0 {
 		// Clean up any old diff view for this slot
 		delete(m.diffViews, replaceIdx)
-		m.editors[replaceIdx] = ed
+		m.setEditor(replaceIdx, ed)
 		m.tabBar.Tabs[replaceIdx].Label = label
 		m.tabBar.Tabs[replaceIdx].FilePath = diffKey
 		m.tabBar.Tabs[replaceIdx].Dirty = false

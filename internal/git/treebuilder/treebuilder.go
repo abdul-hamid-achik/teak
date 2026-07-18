@@ -6,7 +6,6 @@ import (
 	"teak/internal/git"
 )
 
-// Build creates a tree structure from a flat list of status entries.
 func Build(entries []git.StatusEntry, staged bool) []*git.GitTreeNode {
 	root := &git.GitTreeNode{IsDir: true, Expanded: true}
 
@@ -96,53 +95,4 @@ func addFileNode(root *git.GitTreeNode, path string, e *git.StatusEntry, staged 
 			}
 		}
 	}
-}
-
-// Rebuild creates a new tree while preserving expanded state from previous.
-func Rebuild(entries []git.StatusEntry, staged bool, previous []*git.GitTreeNode) []*git.GitTreeNode {
-	next := Build(entries, staged)
-	if len(previous) == 0 || len(next) == 0 {
-		return next
-	}
-
-	expanded := make(map[string]bool)
-	CollectExpandedDirs(previous, expanded)
-	RestoreExpandedDirs(next, expanded)
-	return next
-}
-
-// CollectExpandedDirs collects which directories are expanded.
-func CollectExpandedDirs(nodes []*git.GitTreeNode, expanded map[string]bool) {
-	for _, node := range nodes {
-		if !node.IsDir {
-			continue
-		}
-		expanded[node.Path] = node.Expanded
-		CollectExpandedDirs(node.Children, expanded)
-	}
-}
-
-// RestoreExpandedDirs restores expanded state from collected map.
-func RestoreExpandedDirs(nodes []*git.GitTreeNode, expanded map[string]bool) {
-	for _, node := range nodes {
-		if !node.IsDir {
-			continue
-		}
-		if state, ok := expanded[node.Path]; ok {
-			node.Expanded = state
-		}
-		RestoreExpandedDirs(node.Children, expanded)
-	}
-}
-
-// Flatten flattens a tree into a list for rendering.
-func Flatten(nodes []*git.GitTreeNode) []*git.GitTreeNode {
-	var flat []*git.GitTreeNode
-	for _, n := range nodes {
-		flat = append(flat, n)
-		if n.IsDir && n.Expanded && n.Children != nil {
-			flat = append(flat, Flatten(n.Children)...)
-		}
-	}
-	return flat
 }

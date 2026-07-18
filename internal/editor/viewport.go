@@ -428,12 +428,6 @@ func wrapSegment(line string, segIdx, width int) string {
 	return line[startByte:endByte]
 }
 
-// foldedScrollStart converts the visual scroll position to the buffer line
-// that should start the visible region, accounting for collapsed folds.
-func (v *Viewport) foldedScrollStart(folds *FoldState, totalLines int) int {
-	return folds.VisualLineToBuffer(v.ScrollY, totalLines)
-}
-
 // findBracketHighlights returns two positions to highlight and whether a match was found.
 func (v *Viewport) findBracketHighlights(buf *text.Buffer) (text.Position, text.Position, bool) {
 	cursor := buf.Cursor
@@ -894,81 +888,6 @@ func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Bu
 		col = len(lineContent)
 	}
 	return text.Position{Line: bufLine, Col: col}
-}
-
-// EnsureCursorVisible scrolls to keep the cursor in view.
-func (v *Viewport) EnsureCursorVisible(cursor text.Position, lineCount int) {
-	// vertical
-	if cursor.Line < v.ScrollY {
-		v.ScrollY = cursor.Line
-	}
-	if cursor.Line >= v.ScrollY+v.Height {
-		v.ScrollY = cursor.Line - v.Height + 1
-	}
-
-	// horizontal — use display width, not byte offset
-	gw := gutterWidth(lineCount) + 1
-	textWidth := v.Width - gw
-	if textWidth < 1 {
-		textWidth = 1
-	}
-	// ScrollX is in display columns, so compare with display width of cursor col
-	displayCol := cursor.Col // for ASCII this is fine, but we don't have line content here
-	if displayCol < v.ScrollX {
-		v.ScrollX = displayCol
-	}
-	if displayCol >= v.ScrollX+textWidth {
-		v.ScrollX = displayCol - textWidth + 1
-	}
-}
-
-func (v *Viewport) ensureCursorVisible(buf *text.Buffer, cursor text.Position, textWidth int) {
-	if cursor.Line < v.ScrollY {
-		v.ScrollY = cursor.Line
-	}
-	if cursor.Line >= v.ScrollY+v.Height {
-		v.ScrollY = cursor.Line - v.Height + 1
-	}
-
-	if cursor.Line < 0 || cursor.Line >= buf.LineCount() {
-		return
-	}
-	if textWidth < 1 {
-		textWidth = 1
-	}
-
-	lineContent := buf.Line(cursor.Line)
-	col := cursor.Col
-	if col > len(lineContent) {
-		col = len(lineContent)
-	}
-	displayCol := displayWidth(string(lineContent[:col]))
-	if displayCol < v.ScrollX {
-		v.ScrollX = displayCol
-	}
-	if displayCol >= v.ScrollX+textWidth {
-		v.ScrollX = displayCol - textWidth + 1
-	}
-}
-
-// ScrollUp scrolls up by n lines.
-func (v *Viewport) ScrollUp(n int) {
-	v.ScrollY -= n
-	if v.ScrollY < 0 {
-		v.ScrollY = 0
-	}
-}
-
-// ScrollDown scrolls down by n lines, clamped to maxLine.
-func (v *Viewport) ScrollDown(n, maxLine int) {
-	v.ScrollY += n
-	maxScroll := maxLine - v.Height + 1
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if v.ScrollY > maxScroll {
-		v.ScrollY = maxScroll
-	}
 }
 
 func applyScrollX(s string, scrollX int) string {

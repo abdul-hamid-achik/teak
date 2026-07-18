@@ -232,8 +232,8 @@ func TestMessageTypesInstantiation(t *testing.T) {
 
 // TestModeValues tests Mode type values
 func TestModeValues(t *testing.T) {
-	var textMode Mode = ModeText
-	var semanticMode Mode = ModeSemantic
+	textMode := ModeText
+	semanticMode := ModeSemantic
 
 	if textMode != 0 {
 		t.Errorf("Expected ModeText to be 0, got %d", textMode)

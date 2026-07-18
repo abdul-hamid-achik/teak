@@ -70,9 +70,10 @@ func findForward(buf *text.Buffer, pos text.Position, open, close byte) (text.Po
 		content := buf.Line(line)
 		for col < len(content) {
 			ch := content[col]
-			if ch == open {
+			switch ch {
+			case open:
 				depth++
-			} else if ch == close {
+			case close:
 				depth--
 				if depth == 0 {
 					return text.Position{Line: line, Col: col}, true
@@ -105,9 +106,10 @@ func findBackward(buf *text.Buffer, pos text.Position, open, close byte) (text.P
 		}
 		for col >= 0 {
 			ch := content[col]
-			if ch == close {
+			switch ch {
+			case close:
 				depth++
-			} else if ch == open {
+			case open:
 				depth--
 				if depth == 0 {
 					return text.Position{Line: line, Col: col}, true

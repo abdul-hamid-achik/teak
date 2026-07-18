@@ -31,6 +31,18 @@ func NewTabManager(theme ui.Theme) *TabManager {
 	}
 }
 
+// Reset reinitializes the tab manager with a fresh state.
+func (tm *TabManager) Reset(theme ui.Theme) {
+	tm.editors = nil
+	tm.activeTab = 0
+	tm.tabBar = editor.NewTabBar(theme)
+	tm.welcome = nil
+	tm.diffViews = make(map[int]diff.Model)
+	tm.closedTabs = nil
+	tm.pendingCloseTab = -1
+	tm.untitledCounter = 0
+}
+
 // EditorCount returns the number of open editors.
 func (tm *TabManager) EditorCount() int {
 	return len(tm.editors)
@@ -71,6 +83,13 @@ func (tm *TabManager) AddEditor(ed editor.Editor, label string, filePath string)
 	idx := len(tm.editors) - 1
 	tm.tabBar.AddTab(label, filePath)
 	return idx
+}
+
+// SetEditor replaces an editor at the given index.
+func (tm *TabManager) SetEditor(idx int, ed editor.Editor) {
+	if idx >= 0 && idx < len(tm.editors) {
+		tm.editors[idx] = ed
+	}
 }
 
 // AddDiffView adds a diff view as a tab.
@@ -178,6 +197,22 @@ func (tm *TabManager) GetTabBar() *editor.TabBar {
 	return &tm.tabBar
 }
 
+// SetTabInfo updates tab properties at the given index.
+func (tm *TabManager) SetTabInfo(idx int, label, filePath string, preview bool) {
+	if idx >= 0 && idx < len(tm.tabBar.Tabs) {
+		tm.tabBar.Tabs[idx].Label = label
+		tm.tabBar.Tabs[idx].FilePath = filePath
+		tm.tabBar.Tabs[idx].Preview = preview
+		tm.tabBar.Tabs[idx].Dirty = false
+		tm.tabBar.Tabs[idx].DiagSeverity = 0
+	}
+}
+
+// SetDiffView sets a diff view at the given tab index.
+func (tm *TabManager) SetDiffView(idx int, dv diff.Model) {
+	tm.diffViews[idx] = dv
+}
+
 // GetWelcome returns the welcome screen model.
 func (tm *TabManager) GetWelcome() *editor.Welcome {
 	return tm.welcome
@@ -186,6 +221,13 @@ func (tm *TabManager) GetWelcome() *editor.Welcome {
 // SetWelcome sets the welcome screen model.
 func (tm *TabManager) SetWelcome(w *editor.Welcome) {
 	tm.welcome = w
+}
+
+// SetTabKind sets the kind (type) of a tab.
+func (tm *TabManager) SetTabKind(idx int, kind editor.TabKind) {
+	if idx >= 0 && idx < len(tm.tabBar.Tabs) {
+		tm.tabBar.Tabs[idx].Kind = kind
+	}
 }
 
 // HasWelcome returns true if welcome screen is active.

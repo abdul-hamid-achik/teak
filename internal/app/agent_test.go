@@ -101,7 +101,8 @@ func TestFilesToAgentPickerItems_RootFile(t *testing.T) {
 func TestFilesToAgentPickerItems_PickerItemInterface(t *testing.T) {
 	items := filesToAgentPickerItems([]string{"test.go"})
 	// overlay.PickerItem is a struct, just verify the fields are set correctly
-	var _ overlay.PickerItem = items[0]
+	assertPickerItem := func(overlay.PickerItem) {}
+	assertPickerItem(items[0])
 }
 
 // TestValidatePathStrict tests validatePathStrict using a real temp directory.

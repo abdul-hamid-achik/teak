@@ -2,6 +2,7 @@ package text
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -116,16 +117,17 @@ func expandTabs(data []byte, tabSize int) []byte {
 	var result []byte
 	col := 0
 	for _, b := range data {
-		if b == '\t' {
+		switch b {
+		case '\t':
 			spaces := tabSize - (col % tabSize)
 			for range spaces {
 				result = append(result, ' ')
 			}
 			col += spaces
-		} else if b == '\n' {
+		case '\n':
 			result = append(result, b)
 			col = 0
-		} else {
+		default:
 			result = append(result, b)
 			col++
 		}
@@ -660,8 +662,11 @@ func (b *Buffer) SaveAs(path string) error {
 
 	// Atomic rename - guarantees file is either old or new, never partial
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file
-		return fmt.Errorf("rename temp file: %w", err)
+		renameErr := fmt.Errorf("rename temp file: %w", err)
+		if cleanupErr := os.Remove(tmpPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return errors.Join(renameErr, fmt.Errorf("remove temp file: %w", cleanupErr))
+		}
+		return renameErr
 	}
 
 	b.FilePath = path

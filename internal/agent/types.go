@@ -1,0 +1,89 @@
+package agent
+
+import (
+	"time"
+
+	sdk "github.com/coder/acp-go-sdk"
+	"teak/internal/acp"
+)
+
+// ChatRole indicates who sent a message.
+type ChatRole int
+
+const (
+	RoleUser ChatRole = iota
+	RoleAgent
+	RoleSystem
+)
+
+// StreamBlockKind distinguishes content blocks during streaming.
+type StreamBlockKind int
+
+const (
+	BlockText StreamBlockKind = iota
+	BlockThought
+	BlockToolCall
+)
+
+const maxToolOutputLines = 100
+
+// StreamBlock is a single chunk of streaming content, preserving chronological order.
+type StreamBlock struct {
+	Kind     StreamBlockKind
+	Content  string
+	ToolCall *ToolCallState
+}
+
+// ChatMessage represents a completed message in the chat history.
+type ChatMessage struct {
+	Role      ChatRole
+	Content   string
+	ToolCalls []*ToolCallState
+}
+
+// ToolCallState tracks a tool call's lifecycle.
+type ToolCallState struct {
+	ID        sdk.ToolCallId
+	Title     string
+	Kind      sdk.ToolKind
+	Status    sdk.ToolCallStatus
+	Locations []sdk.ToolCallLocation
+	Content   []sdk.ToolCallContent
+	Expanded  bool
+	StartTime time.Time
+	EndTime   time.Time
+}
+
+// PermissionPrompt holds state for an inline permission UI.
+type PermissionPrompt struct {
+	ToolCall   sdk.RequestPermissionToolCall
+	Options    []sdk.PermissionOption
+	Selected   int
+	ResponseCh chan sdk.RequestPermissionResponse
+}
+
+// TaggedFile represents a file tagged for inclusion in the next prompt.
+type TaggedFile struct {
+	Path string
+	Name string
+}
+
+// AgentState tracks the agent's current state for the header indicator.
+type AgentState int
+
+const (
+	AgentDisconnected AgentState = iota
+	AgentIdle
+	AgentThinking
+	AgentPermission
+)
+
+// CancelRequestedMsg signals the app to cancel the current agent operation.
+type CancelRequestedMsg struct{}
+
+// WriteDecisionMsg carries the user's decision for an ACP file-write proposal.
+// The app owns responding to the agent and writing to disk.
+type WriteDecisionMsg struct {
+	Proposal acp.AgentWriteFileMsg
+	Accepted bool
+}

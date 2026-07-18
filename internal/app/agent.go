@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -47,6 +48,14 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 	case acp.AgentPlanMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentWriteFileMsg:
+		m.agentPanel, _ = m.agentPanel.Update(inner)
+		if !m.showAgent {
+			m.showAgent = true
+			m.relayout()
+		}
+		m.focus = FocusAgent
+		_ = m.agentPanel.Focus()
+	case acp.AgentWriteCancelledMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentPermissionRequestMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
@@ -376,33 +385,38 @@ func (m Model) cycleAgentMode() (Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
-// validatePathStrict performs stricter validation including symlink resolution
+// validatePathStrict normalizes an agent-provided path and asks os.Root to
+// validate any existing components without allowing traversal outside rootDir.
+// The returned path is relative to rootDir and must be used with os.Root.
 func validatePathStrict(rootDir, path string) (string, error) {
-	// Reject absolute paths
+	if rootDir == "" {
+		return "", fmt.Errorf("root directory is empty")
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("open root directory: %w", err)
+	}
+	defer func() {
+		_ = root.Close()
+	}()
+	return validateAgentWritePath(root, path)
+}
+
+func validateAgentWritePath(root *os.Root, path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
 	if filepath.IsAbs(path) {
 		return "", fmt.Errorf("absolute paths are not allowed: %q", path)
 	}
 
 	cleanPath := filepath.Clean(path)
-
-	absPath, err := filepath.Abs(filepath.Join(rootDir, cleanPath))
-	if err != nil {
-		return "", err
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside root directory", path)
 	}
 
-	realRoot, err := filepath.EvalSymlinks(rootDir)
-	if err != nil {
-		realRoot = rootDir
+	if _, err := root.Stat(cleanPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("validate target path: %w", err)
 	}
-
-	realPath, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		realPath = absPath
-	}
-
-	if !strings.HasPrefix(realPath, realRoot) {
-		return "", fmt.Errorf("path %q is outside root directory %q", path, rootDir)
-	}
-
-	return realPath, nil
+	return cleanPath, nil
 }

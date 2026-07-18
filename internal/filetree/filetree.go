@@ -246,12 +246,13 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	if mouse.Button == tea.MouseWheelUp {
+	switch mouse.Button {
+	case tea.MouseWheelUp:
 		m.ScrollY -= 3
 		if m.ScrollY < 0 {
 			m.ScrollY = 0
 		}
-	} else if mouse.Button == tea.MouseWheelDown {
+	case tea.MouseWheelDown:
 		m.ScrollY += 3
 		if m.ScrollY > maxScroll {
 			m.ScrollY = maxScroll

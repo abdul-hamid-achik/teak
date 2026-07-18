@@ -22,7 +22,6 @@ type ViewportCache struct {
 	width         int
 	height        int
 	selectionHash uint64
-	themeVersion  uint64 // incremented on theme changes
 
 	// Cached rendered lines indexed by viewport row (0 to height-1)
 	lines []cachedLine
@@ -57,11 +56,7 @@ func (vc *ViewportCache) IsValid(buf *text.Buffer, v *Viewport, sel *text.Select
 
 	// Check selection state
 	selHash := computeSelectionHash(sel)
-	if vc.selectionHash != selHash {
-		return false
-	}
-
-	return true
+	return vc.selectionHash == selHash
 }
 
 // UpdateState updates the cache state to match current conditions.

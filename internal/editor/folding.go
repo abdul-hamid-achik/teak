@@ -189,13 +189,15 @@ func DetectIndentRegions(lines func(int) []byte, lineCount int) []FoldRegion {
 			continue
 		}
 		indent := 0
+	indentLoop:
 		for _, b := range line {
-			if b == ' ' {
+			switch b {
+			case ' ':
 				indent++
-			} else if b == '\t' {
+			case '\t':
 				indent += 4
-			} else {
-				break
+			default:
+				break indentLoop
 			}
 		}
 		if indent == len(line) {

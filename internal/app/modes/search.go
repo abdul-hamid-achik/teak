@@ -8,7 +8,6 @@ import (
 // SearchMode handles search input
 type SearchMode struct {
 	BaseMode
-	query string
 }
 
 func (m *SearchMode) ID() ModeID { return ModeSearch }
@@ -32,8 +31,6 @@ func (m *SearchMode) ShouldIntercept(msg tea.Msg) bool {
 // SearchReplaceMode handles search & replace
 type SearchReplaceMode struct {
 	BaseMode
-	query    string
-	replace  string
 }
 
 func (m *SearchReplaceMode) ID() ModeID { return ModeSearchReplace }

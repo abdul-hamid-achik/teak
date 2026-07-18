@@ -124,7 +124,9 @@ func TestFileWatcher_FileDeletion(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Delete the file
-	os.Remove(testFile)
+	if err := os.Remove(testFile); err != nil {
+		t.Fatalf("Remove(delete_me.go) error = %v", err)
+	}
 
 	// Should receive a TreeChangedMsg for the removal
 	select {

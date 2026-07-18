@@ -1,15 +1,50 @@
 package capabilities
 
-import "teak/internal/lsp"
+// SyncKind represents the document synchronization mode
+type SyncKind int
+
+const (
+	SyncNone SyncKind = iota
+	SyncFull
+	SyncIncremental
+)
+
+// ServerCapabilities represents the capabilities of an LSP server
+type ServerCapabilities struct {
+	TextDocumentSync        any                   `json:"textDocumentSync,omitempty"`
+	CompletionProvider      *CompletionOptions    `json:"completionProvider,omitempty"`
+	PositionEncoding        string                `json:"positionEncoding,omitempty"`
+	HoverProvider           any                   `json:"hoverProvider,omitempty"`
+	DefinitionProvider      any                   `json:"definitionProvider,omitempty"`
+	ReferencesProvider      any                   `json:"referencesProvider,omitempty"`
+	RenameProvider          any                   `json:"renameProvider,omitempty"`
+	DocumentSymbolProvider  any                   `json:"documentSymbolProvider,omitempty"`
+	CodeActionProvider      any                   `json:"codeActionProvider,omitempty"`
+	FormattingProvider      any                   `json:"documentFormattingProvider,omitempty"`
+	RangeFormattingProvider any                   `json:"documentRangeFormattingProvider,omitempty"`
+	FoldingRangeProvider    any                   `json:"foldingRangeProvider,omitempty"`
+	SignatureHelpProvider   *SignatureHelpOptions `json:"signatureHelpProvider,omitempty"`
+}
+
+// CompletionOptions represents completion provider options
+type CompletionOptions struct {
+	ResolveProvider   bool     `json:"resolveProvider,omitempty"`
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
+}
+
+// SignatureHelpOptions represents signature help provider options
+type SignatureHelpOptions struct {
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
+}
 
 // Checker provides capability checking for an LSP client
 type Checker struct {
-	caps     lsp.ServerCapabilities
-	syncKind lsp.SyncKind
+	caps     ServerCapabilities
+	syncKind SyncKind
 }
 
 // NewChecker creates a capability checker
-func NewChecker(caps lsp.ServerCapabilities, syncKind lsp.SyncKind) *Checker {
+func NewChecker(caps ServerCapabilities, syncKind SyncKind) *Checker {
 	return &Checker{
 		caps:     caps,
 		syncKind: syncKind,
@@ -88,7 +123,7 @@ func (c *Checker) GetSignatureHelpTriggerCharacters() []string {
 }
 
 // GetSyncKind returns the negotiated document sync mode
-func (c *Checker) GetSyncKind() lsp.SyncKind {
+func (c *Checker) GetSyncKind() SyncKind {
 	return c.syncKind
 }
 

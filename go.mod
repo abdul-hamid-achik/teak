@@ -15,6 +15,7 @@ require (
 	github.com/lrstanley/bubblezone/v2 v2.0.0
 	github.com/mattn/go-runewidth v0.0.20
 	github.com/yuin/gopher-lua v1.1.1
+	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -39,5 +40,4 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 )

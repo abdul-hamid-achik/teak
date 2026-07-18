@@ -111,13 +111,24 @@ type DiagnosticsMsg struct {
 	Diagnostics []Diagnostic
 }
 
+// OverlayRequestMetadata identifies the active-editor state that originated an
+// LSP overlay request. Zero values preserve compatibility with callers that do
+// not provide request identity.
+type OverlayRequestMetadata struct {
+	FilePath   string
+	Version    int
+	Generation uint64
+}
+
 // CompletionResultMsg is sent when completion results arrive.
 type CompletionResultMsg struct {
+	OverlayRequestMetadata
 	Items []CompletionItem
 }
 
 // HoverResultMsg is sent when hover information arrives.
 type HoverResultMsg struct {
+	OverlayRequestMetadata
 	Content string
 }
 
@@ -201,6 +212,7 @@ type ParameterInformation struct {
 
 // SignatureHelpResultMsg is sent when signature help arrives.
 type SignatureHelpResultMsg struct {
+	OverlayRequestMetadata
 	Help *SignatureHelp
 }
 
