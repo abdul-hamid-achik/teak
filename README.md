@@ -26,13 +26,13 @@ Teak brings a familiar, VS Code-like editing experience to the terminal — synt
 ## Install
 
 ```sh
-go install teak/cmd/teak@latest
+brew install abdul-hamid-achik/tap/teak
 ```
 
 Or build from source:
 
 ```sh
-git clone <repo-url> && cd teak
+git clone https://github.com/abdul-hamid-achik/teak.git && cd teak
 go build -o bin/teak ./cmd/teak
 ```
 
@@ -51,6 +51,9 @@ teak
 
 # Open a directory
 teak ~/projects/myapp
+
+# Print the installed version
+teak --version
 ```
 
 ## Plugins
