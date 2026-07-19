@@ -16,7 +16,7 @@ type Manager struct {
 	mu          sync.RWMutex
 	plugins     map[string]*Plugin
 	pluginDir   string
-	luaPool     *luaStatePool
+	luaStates   *luaStateFactory
 	apiRegistry *APIRegistry
 	loaded      bool
 }
@@ -44,7 +44,7 @@ func NewManager(pluginDir string) (*Manager, error) {
 	m := &Manager{
 		plugins:     make(map[string]*Plugin),
 		pluginDir:   pluginDir,
-		luaPool:     newLuaStatePool(),
+		luaStates:   newLuaStateFactory(),
 		apiRegistry: NewAPIRegistry(),
 	}
 
@@ -93,7 +93,7 @@ func (m *Manager) LoadPlugin(path string) error {
 	}
 
 	// Create new Lua state
-	L := m.luaPool.Get()
+	L := m.luaStates.Get()
 
 	// Register APIs in this state
 	m.apiRegistry.RegisterInState(L)
@@ -105,34 +105,33 @@ func (m *Manager) LoadPlugin(path string) error {
 	// Load main plugin file
 	mainFile := filepath.Join(path, config.Main)
 	if err := L.DoFile(mainFile); err != nil {
-		m.luaPool.Put(L)
+		m.luaStates.Put(L)
 		return fmt.Errorf("failed to load plugin %s: %w", config.Name, err)
 	}
 
-	// Store plugin
-	plugin := &Plugin{
+	// Call setup function if it exists
+	if fn := L.GetGlobal("setup"); fn != lua.LNil {
+		setupFn, ok := fn.(*lua.LFunction)
+		if !ok {
+			m.luaStates.Put(L)
+			return fmt.Errorf("plugin %s setup must be a function, got %s", config.Name, fn.Type())
+		}
+		if err := L.CallByParam(lua.P{
+			Fn:      setupFn,
+			NRet:    0,
+			Protect: true,
+		}); err != nil {
+			m.luaStates.Put(L)
+			return fmt.Errorf("plugin setup failed: %w", err)
+		}
+	}
+
+	m.plugins[config.Name] = &Plugin{
 		Name:    config.Name,
 		Path:    path,
 		State:   L,
 		Config:  config,
 		Enabled: true,
-	}
-
-	m.plugins[config.Name] = plugin
-
-	// Call setup function if it exists
-	if fn := L.GetGlobal("setup"); fn != lua.LNil {
-		if setupFn, ok := fn.(*lua.LFunction); ok {
-			if err := L.CallByParam(lua.P{
-				Fn:      setupFn,
-				NRet:    0,
-				Protect: true,
-			}); err != nil {
-				delete(m.plugins, config.Name)
-				m.luaPool.Put(L)
-				return fmt.Errorf("plugin setup failed: %w", err)
-			}
-		}
 	}
 
 	return nil
@@ -178,23 +177,24 @@ func (m *Manager) UnloadPlugin(name string) error {
 		return fmt.Errorf("plugin %s not found", name)
 	}
 
-	// Call teardown function if exists
+	// Teardown failures are reported but cannot prevent resource cleanup.
+	var teardownErr error
 	if fn := plugin.State.GetGlobal("teardown"); fn != lua.LNil {
-		if err := plugin.State.CallByParam(lua.P{
-			Fn:      fn.(*lua.LFunction),
+		teardownFn, ok := fn.(*lua.LFunction)
+		if !ok {
+			teardownErr = fmt.Errorf("plugin %s teardown must be a function, got %s", name, fn.Type())
+		} else if err := plugin.State.CallByParam(lua.P{
+			Fn:      teardownFn,
 			NRet:    0,
 			Protect: true,
 		}); err != nil {
-			return fmt.Errorf("teardown plugin %s: %w", name, err)
+			teardownErr = fmt.Errorf("teardown plugin %s: %w", name, err)
 		}
 	}
 
-	// Return Lua state to pool
-	m.luaPool.Put(plugin.State)
-
+	m.luaStates.Put(plugin.State)
 	delete(m.plugins, name)
-
-	return nil
+	return teardownErr
 }
 
 // CallPlugin calls a function in a plugin.
@@ -211,9 +211,13 @@ func (m *Manager) CallPlugin(pluginName, funcName string, args ...lua.LValue) er
 	if fn == lua.LNil {
 		return fmt.Errorf("function %s not found in plugin %s", funcName, pluginName)
 	}
+	callFn, ok := fn.(*lua.LFunction)
+	if !ok {
+		return fmt.Errorf("function %s in plugin %s must be a function, got %s", funcName, pluginName, fn.Type())
+	}
 
 	if err := plugin.State.CallByParam(lua.P{
-		Fn:      fn.(*lua.LFunction),
+		Fn:      callFn,
 		NRet:    0,
 		Protect: true,
 	}, args...); err != nil {
@@ -261,6 +265,7 @@ func (m *Manager) Shutdown() {
 	for _, name := range names {
 		_ = m.UnloadPlugin(name)
 	}
+	m.luaStates.Close()
 }
 
 // HandleKey dispatches a key sequence to loaded plugins.

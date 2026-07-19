@@ -25,8 +25,8 @@ func TestPluginManagerNew(t *testing.T) {
 		t.Fatal("Plugins map should be initialized")
 	}
 
-	if mgr.luaPool == nil {
-		t.Fatal("Lua pool should be initialized")
+	if mgr.luaStates == nil {
+		t.Fatal("Lua state factory should be initialized")
 	}
 }
 
@@ -160,6 +160,177 @@ main = "init.lua"
 	plugins := mgr.ListPlugins()
 	if len(plugins) != 0 {
 		t.Errorf("Expected 0 plugins after unload, got %d", len(plugins))
+	}
+}
+
+func TestPluginManagerUnloadDisposesLuaStateBeforeNextLoad(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	defer mgr.Shutdown()
+
+	firstDir := filepath.Join(dir, "first")
+	if err := os.MkdirAll(firstDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(first): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(firstDir, "plugin.toml"), []byte("name = \"first\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(first plugin.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(firstDir, "init.lua"), []byte(`
+leaked_global = "first"
+function setup()
+  leaked_setup_ran = true
+end
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(first init.lua): %v", err)
+	}
+	if err := mgr.LoadPlugin(firstDir); err != nil {
+		t.Fatalf("LoadPlugin(first): %v", err)
+	}
+	if err := mgr.UnloadPlugin("first"); err != nil {
+		t.Fatalf("UnloadPlugin(first): %v", err)
+	}
+
+	secondDir := filepath.Join(dir, "second")
+	if err := os.MkdirAll(secondDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(second): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondDir, "plugin.toml"), []byte("name = \"second\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(second plugin.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondDir, "init.lua"), []byte(`
+-- Intentionally no setup(): a stale setup must not run after this file loads.
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(second init.lua): %v", err)
+	}
+	if err := mgr.LoadPlugin(secondDir); err != nil {
+		t.Fatalf("LoadPlugin(second) should use an isolated Lua state: %v", err)
+	}
+	second, err := mgr.GetPlugin("second")
+	if err != nil {
+		t.Fatalf("GetPlugin(second): %v", err)
+	}
+	for _, global := range []string{"leaked_global", "leaked_setup_ran", "setup"} {
+		if value := second.State.GetGlobal(global); value != lua.LNil {
+			t.Fatalf("second plugin inherited %s = %s", global, value)
+		}
+	}
+}
+
+func TestPluginManagerRejectsNonFunctionSetup(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	defer mgr.Shutdown()
+
+	pluginDir := filepath.Join(dir, "bad-setup")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"bad-setup\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(`setup = true`), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua): %v", err)
+	}
+
+	err = mgr.LoadPlugin(pluginDir)
+	if err == nil || !strings.Contains(err.Error(), "setup must be a function") {
+		t.Fatalf("LoadPlugin() error = %v, want non-function setup error", err)
+	}
+	if len(mgr.ListPlugins()) != 0 {
+		t.Fatal("plugin with invalid setup must not remain loaded")
+	}
+}
+
+func TestPluginManagerUnloadAlwaysDisposesStateWhenTeardownFails(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"non-function teardown", `teardown = true`, "teardown must be a function"},
+		{"failing teardown", `function teardown() error("boom") end`, "teardown plugin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mgr, err := NewManager(dir)
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			defer mgr.Shutdown()
+
+			pluginDir := filepath.Join(dir, "bad-teardown")
+			if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(): %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"bad-teardown\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(plugin.toml): %v", err)
+			}
+			initLua := `
+function setup()
+  editor.command("cleanup.command", function() end)
+  keymap.set("n", "ctrl+x", function() end)
+  autocmd.register("BufRead", function() end)
+end
+` + tt.body
+			if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+				t.Fatalf("WriteFile(init.lua): %v", err)
+			}
+			if err := mgr.LoadPlugin(pluginDir); err != nil {
+				t.Fatalf("LoadPlugin(): %v", err)
+			}
+			loaded, err := mgr.GetPlugin("bad-teardown")
+			if err != nil {
+				t.Fatalf("GetPlugin(): %v", err)
+			}
+			state := loaded.State
+
+			err = mgr.UnloadPlugin("bad-teardown")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("UnloadPlugin() error = %v, want %q", err, tt.want)
+			}
+			if len(mgr.ListPlugins()) != 0 {
+				t.Fatal("plugin must be removed even when teardown fails")
+			}
+			if pluginCommands.states[state] != nil || pluginKeymaps.states[state] != nil || pluginAutocommands.states[state] != nil || pluginRuntimes.states[state] != nil {
+				t.Fatal("plugin registries must be cleared even when teardown fails")
+			}
+		})
+	}
+}
+
+func TestPluginManagerCallPluginRejectsNonFunction(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	defer mgr.Shutdown()
+
+	pluginDir := filepath.Join(dir, "bad-call")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"bad-call\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(`not_a_function = true`), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua): %v", err)
+	}
+	if err := mgr.LoadPlugin(pluginDir); err != nil {
+		t.Fatalf("LoadPlugin(): %v", err)
+	}
+
+	err = mgr.CallPlugin("bad-call", "not_a_function")
+	if err == nil || !strings.Contains(err.Error(), "must be a function") {
+		t.Fatalf("CallPlugin() error = %v, want non-function error", err)
 	}
 }
 
@@ -322,52 +493,45 @@ end
 	}
 }
 
-func TestLuaStatePool(t *testing.T) {
-	pool := newLuaStatePool()
+func TestLuaStateFactoryDisposesReturnedStates(t *testing.T) {
+	states := newLuaStateFactory()
 
-	// Get a state
-	L1 := pool.Get()
+	L1 := states.Get()
 	if L1 == nil {
 		t.Fatal("Get should return a Lua state")
 	}
+	L1.SetGlobal("leaked_global", lua.LString("value"))
 
-	// Put it back
-	pool.Put(L1)
+	states.Put(L1)
 
-	// Get again - should reuse the state from pool
-	L2 := pool.Get()
+	L2 := states.Get()
 	if L2 == nil {
 		t.Fatal("Get should return a Lua state")
 	}
+	if L2 == L1 {
+		t.Fatal("Get must create a fresh Lua state after Put")
+	}
 
-	// Clean up
-	pool.Put(L2)
-	pool.Close()
+	states.Put(L2)
+	states.Close()
 }
 
-func TestLuaStatePoolMultipleStates(t *testing.T) {
-	pool := newLuaStatePool()
+func TestLuaStateFactoryDisposesMultipleStates(t *testing.T) {
+	factory := newLuaStateFactory()
 
 	// Get multiple states
 	states := make([]*lua.LState, 5)
 	for i := 0; i < 5; i++ {
-		states[i] = pool.Get()
+		states[i] = factory.Get()
 		if states[i] == nil {
 			t.Fatalf("Get %d should return a Lua state", i)
 		}
 	}
 
-	// Put them all back
 	for _, L := range states {
-		pool.Put(L)
+		factory.Put(L)
 	}
-
-	// Pool should have 5 states
-	if len(pool.pool) != 5 {
-		t.Errorf("Expected 5 states in pool, got %d", len(pool.pool))
-	}
-
-	pool.Close()
+	factory.Close()
 }
 
 func TestAPIRegistry(t *testing.T) {
