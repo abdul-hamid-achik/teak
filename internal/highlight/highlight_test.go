@@ -1,6 +1,7 @@
 package highlight
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -186,4 +187,40 @@ func TestTokenizeViewportEmptyBuffer(t *testing.T) {
 	if len(tokens) != 1 {
 		t.Errorf("expected 1 line for empty buffer, got %d", len(tokens))
 	}
+}
+
+func TestTokenizeViewportSnapshot(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("original value\nsecond line\n"))
+	snapshot := CaptureViewport(buf.Rope(), 0, 1)
+
+	// The snapshot must not be affected by later Buffer edits.
+	buf.Cursor = text.Position{}
+	buf.InsertAtCursor([]byte("changed "))
+
+	h := New("test.go", ui.DefaultTheme())
+	lines, complete := h.TokenizeViewportSnapshot(context.Background(), snapshot)
+	if !complete {
+		t.Fatal("expected completed snapshot tokenization")
+	}
+	if got := tokenText(lines[0]); got != "original value" {
+		t.Errorf("got %q, want content from captured rope", got)
+	}
+}
+
+func TestTokenizationContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h := New("test.go", ui.DefaultTheme())
+	if lines, complete := h.TokenizeToLinesContext(ctx, []byte("package main\n")); complete || lines != nil {
+		t.Fatalf("canceled tokenization = (%v, %v), want (nil, false)", lines, complete)
+	}
+}
+
+func tokenText(tokens []StyledToken) string {
+	var result string
+	for _, token := range tokens {
+		result += token.Text
+	}
+	return result
 }

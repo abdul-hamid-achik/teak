@@ -91,6 +91,12 @@ end
 	if got := p.State.GetGlobal("plugin_triggered").String(); got != "direct" {
 		t.Fatalf("plugin_triggered after direct key = %q, want %q", got, "direct")
 	}
+	if updated.goToLineMode {
+		t.Fatal("plugin ctrl+g leaked into the global go-to-line shortcut")
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != "" {
+		t.Fatalf("plugin ctrl+g leaked into editor content: %q", got)
+	}
 
 	updated.pluginKeySequence = ""
 	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))

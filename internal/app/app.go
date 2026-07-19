@@ -461,422 +461,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.triggerPluginEvents(msg.Events...)
 
 	case tea.KeyPressMsg:
-		// Unsaved changes confirm dialog captures all input when visible
-		if m.unsavedConfirm != nil {
-			updated, cmd := m.unsavedConfirm.Update(msg)
-			if updated.IsDismissed() {
-				m.unsavedConfirm = nil
-			} else {
-				m.unsavedConfirm = updated.(*overlay.Confirm)
-			}
-			return m, cmd
+		model, cmd, handled := m.handleKeyPressPrecedence(msg)
+		m = model
+		if handled {
+			return model, cmd
 		}
-
-		// Overlay stack (quick open, command palette) captures all input
-		if !m.overlayStack.IsEmpty() {
-			cmd := m.overlayStack.Update(msg)
-			return m, cmd
-		}
-
-		// Branch picker captures all input when visible
-		if m.showBranchPicker {
-			return m.updateBranchPicker(msg)
-		}
-
-		// Search overlay captures all input when visible
-		if m.showSearch {
-			return m.updateSearch(msg)
-		}
-
-		// Go-to-line mode captures all input
-		if m.goToLineMode {
-			return m.handleGoToLineInput(msg)
-		}
-
-		// Rename mode captures all input
-		if m.renameMode {
-			return m.handleRenameInput(msg)
-		}
-
-		// Save-as mode captures all input
-		if m.saveAsMode {
-			return m.handleSaveAsInput(msg)
-		}
-
-		// New file/folder mode captures all input
-		if m.newFileMode || m.newFolderMode {
-			return m.handleNewItemInput(msg)
-		}
-
-		// Delete confirmation captures all input
-		if m.deleteConfirm {
-			return m.handleDeleteConfirm(msg)
-		}
-
-		// Tree context menu captures keys
-		if m.treeContextMenu.Visible {
-			switch msg.String() {
-			case "up":
-				m.treeContextMenu.MoveUp()
-				return m, nil
-			case "down":
-				m.treeContextMenu.MoveDown()
-				return m, nil
-			case "enter":
-				if item := m.treeContextMenu.Selected(); item != nil {
-					action := item.Action
-					m.treeContextMenu.Hide()
-					return m.handleTreeContextMenuAction(action)
-				}
-				m.treeContextMenu.Hide()
-				return m, nil
-			case "esc", "escape":
-				m.treeContextMenu.Hide()
-				return m, nil
-			default:
-				m.treeContextMenu.Hide()
-				return m, nil
-			}
-		}
-
-		// Git context menu captures keys
-		if m.gitContextMenu.Visible {
-			switch msg.String() {
-			case "up":
-				m.gitContextMenu.MoveUp()
-				return m, nil
-			case "down":
-				m.gitContextMenu.MoveDown()
-				return m, nil
-			case "enter":
-				if item := m.gitContextMenu.Selected(); item != nil {
-					action := item.Action
-					m.gitContextMenu.Hide()
-					return m.handleGitContextMenuAction(action)
-				}
-				m.gitContextMenu.Hide()
-				return m, nil
-			case "esc", "escape":
-				m.gitContextMenu.Hide()
-				return m, nil
-			default:
-				m.gitContextMenu.Hide()
-				return m, nil
-			}
-		}
-
-		// Help overlay: route input through help model
-		if m.showHelp {
-			key := msg.String()
-			if key == "esc" || key == "escape" || key == "f1" {
-				m.showHelp = false
-				return m, nil
-			}
-			var cmd tea.Cmd
-			m.helpM, cmd = m.helpM.Update(msg)
-			return m, cmd
-		}
-
-		// Settings overlay: captures all input when visible
-		if m.showSettings {
-			return m.updateSettings(msg)
-		}
-
-		if m.pluginFeedDepth == 0 {
-			if model, cmd, handled := m.handlePluginKey(msg); handled {
-				return model, cmd
-			}
-		} else {
-			m.pluginKeySequence = ""
-		}
-
-		// Welcome screen: global shortcuts pass through, others dismiss.
-		// Don't dismiss if git panel commit inputs have focus.
-		gitInputFocused := m.focus == FocusGitPanel && (m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused())
-		if m.welcome != nil && m.welcome.Active && !gitInputFocused {
-			key := msg.String()
-			switch key {
-			case "ctrl+q", "ctrl+b", "ctrl+f", "ctrl+shift+f", "ctrl+h", "f1":
-				// Let these fall through to normal handling
-			default:
-				m.welcome.Dismiss()
-				// Let the key fall through to normal handling
-			}
-		}
-
-		switch msg.String() {
-		case "ctrl+q":
-			// Check for unsaved files before quitting
-			var dirtyNames []string
-			for i, ed := range m.editors {
-				if ed.Buffer.Dirty() {
-					name := filepath.Base(ed.Buffer.FilePath)
-					if name == "." || ed.Buffer.FilePath == "" {
-						name = m.tabBar.Tabs[i].Label
-					}
-					dirtyNames = append(dirtyNames, name)
-				}
-			}
-			if len(dirtyNames) > 0 {
-				msg := fmt.Sprintf("You have %d unsaved file(s):", len(dirtyNames))
-				confirm := overlay.NewConfirm(
-					"Unsaved Changes",
-					msg,
-					dirtyNames,
-					[]overlay.Button{
-						{Label: "Save All & Quit", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAllAndQuitMsg{}},
-						{Label: "Quit Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: QuitWithoutSavingMsg{}},
-						{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
-					},
-					m.theme,
-				)
-				m.unsavedConfirm = confirm
-				return m, nil
-			}
-			m.lspMgr.ShutdownAll()
-			m.cleanup()
-			return m, tea.Quit
-		case "ctrl+s":
-			if m.activeEditor() == nil {
-				return m, nil
-			}
-			buf := m.activeEditor().Buffer
-			if buf.FilePath == "" {
-				// No path yet — trigger save-as
-				m.saveAsMode = true
-				m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
-				return m, nil
-			}
-			return m, m.beginSaveForTab(m.activeTab, false, false)
-		case "ctrl+shift+s":
-			if m.activeEditor() == nil {
-				return m, nil
-			}
-			m.saveAsMode = true
-			if m.activeEditor().Buffer.FilePath != "" {
-				m.saveAsInput = m.activeEditor().Buffer.FilePath
-			} else {
-				m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
-			}
-			return m, nil
-		case "f1":
-			m.showHelp = true
-			m.helpM = editor.NewHelpModel(m.theme)
-			m.helpM.SetSize(m.width, m.height-2)
-			cmd := m.helpM.Focus()
-			return m, cmd
-		case "ctrl+b":
-			m.showTree = !m.showTree
-			if m.showTree && !m.showHelp {
-				m.focus = FocusTree
-			} else {
-				m.focus = FocusEditor
-			}
-			m.relayout()
-			return m, nil
-		case "ctrl+f":
-			return m.openSearch(search.ModeText)
-		case "ctrl+h":
-			return m.openSearchReplace()
-		case "ctrl+shift+f":
-			return m.openSearch(search.ModeSemantic)
-		case "ctrl+space":
-			return m.requestCompletion()
-		case "alt+k":
-			// Show hover tooltip (Alt+K for Knowledge/Documentation)
-			if m.focus == FocusEditor {
-				return m.requestHover()
-			}
-			return m, nil
-		case "ctrl+k":
-			// Code actions (quick fixes)
-			if m.focus == FocusEditor {
-				return m, m.requestCodeActions()
-			}
-			return m, nil
-		case "f12":
-			return m, m.requestDefinition()
-		case "ctrl+shift+[":
-			// Fold at cursor line
-			if ed := m.activeEditor(); ed != nil {
-				ed.Folds.Fold(ed.Buffer.Cursor.Line)
-				m.setEditor(m.activeTab, *ed)
-			}
-			return m, nil
-		case "ctrl+shift+]":
-			// Unfold at cursor line
-			if ed := m.activeEditor(); ed != nil {
-				ed.Folds.Unfold(ed.Buffer.Cursor.Line)
-				m.setEditor(m.activeTab, *ed)
-			}
-			return m, nil
-		case "ctrl+shift+[0]":
-			// Fold all
-			if ed := m.activeEditor(); ed != nil {
-				ed.Folds.FoldAll()
-				m.setEditor(m.activeTab, *ed)
-				m.status = "All regions folded"
-			}
-			return m, nil
-		case "ctrl+shift+[j]":
-			// Unfold all
-			if ed := m.activeEditor(); ed != nil {
-				ed.Folds.UnfoldAll()
-				m.setEditor(m.activeTab, *ed)
-				m.status = "All regions unfolded"
-			}
-			return m, nil
-		case "ctrl+alt+f":
-			// Format document
-			if m.focus == FocusEditor {
-				ed := m.activeEditor()
-				if ed == nil || ed.Buffer.FilePath == "" {
-					return m, nil
-				}
-				return m, m.requestFormatting(ed.Buffer.FilePath, ed.Config, 0)
-			}
-			return m, nil
-		case "ctrl+shift+o":
-			// Document symbols (outline)
-			if m.focus == FocusEditor {
-				return m, m.requestDocumentSymbols()
-			}
-			return m, nil
-		case "f5":
-			// Start debugging
-			if m.activeEditor() != nil && m.activeEditor().Buffer.FilePath != "" {
-				program := m.activeEditor().Buffer.FilePath
-				config := dap.ConfigForProgram(program)
-				if config.Command == "" {
-					m.status = "No debugger configured for this file type"
-					return m, nil
-				}
-				if err := m.debugMgr.Start(config); err != nil {
-					m.status = fmt.Sprintf("Debug error: %v", err)
-					return m, nil
-				}
-				if err := m.debugMgr.Launch(); err != nil {
-					m.debugMgr.Stop()
-					m.status = fmt.Sprintf("Launch error: %v", err)
-					return m, nil
-				}
-				m.debuggerPanel.SetState(dap.StateRunning)
-				m.showTree = true
-				m.sidebarTab = SidebarDebugger
-				m.focus = FocusDebugger
-				m.status = "Debugging started"
-				m.relayout()
-				return m, m.syncAllBreakpointsToDAP()
-			}
-			return m, nil
-		case "shift+f5":
-			// Stop debugging
-			if m.debugMgr.IsRunning() {
-				m.debugMgr.Stop()
-				m.debuggerPanel.SetState(dap.StateInactive)
-				m.currentExecFile = ""
-				m.currentExecLine = -1
-				m.status = "Debugging stopped"
-			}
-			return m, nil
-		case "f9":
-			// Toggle breakpoint on current line
-			if ed := m.activeEditor(); ed != nil && ed.Buffer.FilePath != "" {
-				cmd := m.toggleBreakpoint(ed.Buffer.FilePath, ed.Buffer.Cursor.Line)
-				return m, cmd
-			}
-			return m, nil
-		case "ctrl+w":
-			return m.closeCurrentTabSafe()
-		case "ctrl+shift+t":
-			// Reopen last closed tab
-			if len(m.closedTabs) > 0 {
-				lastClosed := m.closedTabs[len(m.closedTabs)-1]
-				m.closedTabs = m.closedTabs[:len(m.closedTabs)-1]
-				return m.openFilePinned(lastClosed.FilePath)
-			}
-			return m, nil
-		case "f3":
-			return m.findNext()
-		case "shift+f3":
-			return m.findPrev()
-		case "ctrl+n":
-			return m.newUntitledTab()
-		case "ctrl+g":
-			m.goToLineMode = true
-			m.goToLineInput = ""
-			return m, nil
-		case "ctrl+shift+g":
-			if m.gitPanel.IsGitRepo() {
-				m.showTree = true
-				m.sidebarTab = SidebarGit
-				m.focus = FocusGitPanel
-				m.relayout()
-			}
-			return m, nil
-		case "ctrl+p":
-			return m.openQuickOpen()
-		case "ctrl+shift+p":
-			return m.openCommandPalette()
-		case "ctrl+tab":
-			if len(m.editors) > 1 {
-				m.activeTab = (m.activeTab + 1) % len(m.editors)
-				m.tabBar.ActiveIdx = m.activeTab
-			}
-			return m, nil
-		case "ctrl+shift+tab":
-			if len(m.editors) > 1 {
-				m.activeTab = (m.activeTab - 1 + len(m.editors)) % len(m.editors)
-				m.tabBar.ActiveIdx = m.activeTab
-			}
-			return m, nil
-		case "ctrl+j":
-			cmd := m.toggleAgentPanel()
-			return m, cmd
-		case "ctrl+'":
-			if m.showAgent {
-				if m.focus == FocusAgent {
-					m.focus = FocusEditor
-					m.agentPanel.Blur()
-				} else {
-					m.focus = FocusAgent
-					return m, m.agentPanel.Focus()
-				}
-			}
-			return m, nil
-		case "ctrl+,":
-			// Open settings
-			m.showSettings = true
-			m.settingsM.SetSize(m.width, m.height-4)
-			return m, nil
-		case "f8":
-			// Navigate to next problem
-			if m.problemsPanel.ProblemCount() > 0 {
-				m.problemsPanel.SelectNext()
-				if prob := m.problemsPanel.SelectedProblem(); prob != nil {
-					pos := text.Position{Line: prob.Line, Col: prob.Col}
-					m.pendingCursor = &pos
-					model, cmd := m.openFile(prob.FilePath)
-					m2 := model.(Model)
-					m2.status = fmt.Sprintf("Problem %d/%d", m2.problemsPanel.SelectedIndex()+1, m2.problemsPanel.ProblemCount())
-					return m2, cmd
-				}
-			}
-			return m, nil
-		case "shift+f8":
-			// Navigate to previous problem
-			if m.problemsPanel.ProblemCount() > 0 {
-				m.problemsPanel.SelectPrev()
-				if prob := m.problemsPanel.SelectedProblem(); prob != nil {
-					pos := text.Position{Line: prob.Line, Col: prob.Col}
-					m.pendingCursor = &pos
-					model, cmd := m.openFile(prob.FilePath)
-					m2 := model.(Model)
-					m2.status = fmt.Sprintf("Problem %d/%d", m2.problemsPanel.SelectedIndex()+1, m2.problemsPanel.ProblemCount())
-					return m2, cmd
-				}
-			}
-			return m, nil
+		globalModel, cmd, handled := m.handleGlobalKey(msg)
+		m = globalModel.(Model)
+		if handled {
+			return globalModel, cmd
 		}
 
 	case tea.MouseClickMsg:
@@ -943,9 +536,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		endPos := ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Query))
 		ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
 		ed.Buffer.Cursor = ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Replacement))
+		editorID := ed.ID()
 		version := ed.Buffer.Version()
 		return m, func() tea.Msg {
-			return editor.RetokenizeMsg{Version: version}
+			return editor.RetokenizeMsg{EditorID: editorID, Version: version}
 		}
 
 	case search.ReplaceAllMsg:
@@ -973,9 +567,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			endPos := ed.Buffer.Rope().OffsetToPosition(offsets[i] + len(msg.Query))
 			ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
 		}
+		editorID := ed.ID()
 		version := ed.Buffer.Version()
 		return m, func() tea.Msg {
-			return editor.RetokenizeMsg{Version: version}
+			return editor.RetokenizeMsg{EditorID: editorID, Version: version}
 		}
 
 	case search.SearchIndexingMsg:
@@ -1064,21 +659,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editor.RetokenizeMsg:
-		if m.activeEditor() == nil {
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
 			return m, nil
 		}
-		ed := m.activeEditor()
-		updated, cmd := ed.Update(msg)
-		m.setEditor(m.activeTab, updated)
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
 		return m, cmd
 
 	case editor.TokenizeCompleteMsg:
-		if m.activeEditor() == nil {
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
 			return m, nil
 		}
-		ed := m.activeEditor()
-		updated, cmd := ed.Update(msg)
-		m.setEditor(m.activeTab, updated)
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
 		return m, cmd
 
 	case editor.RequestCompletionCmd:
@@ -1690,136 +1285,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Route input to agent panel when focused
-	if m.showAgent && m.focus == FocusAgent {
-		if kp, ok := msg.(tea.KeyPressMsg); ok {
-			if m.agentPanel.HasPendingWrite() {
-				var cmd tea.Cmd
-				m.agentPanel, cmd = m.agentPanel.Update(kp)
-				if cmd == nil {
-					return m, nil
-				}
-				result := cmd()
-				if decision, ok := result.(agent.WriteDecisionMsg); ok {
-					return m.handleAgentWriteDecision(decision)
-				}
-				return m, func() tea.Msg { return result }
-			}
-			key := kp.String()
-			switch key {
-			case "esc", "escape":
-				m.focus = FocusEditor
-				m.agentPanel.Blur()
-				return m, nil
-			case "enter":
-				newM, cmd, handled := m.handleAgentEnter()
-				if handled {
-					return newM, cmd
-				}
-				// Not a slash command — let panel add user message, then send prompt
-				text := strings.TrimSpace(m.agentPanel.InputValue())
-				if text != "" {
-					var panelCmd tea.Cmd
-					m.agentPanel, panelCmd = m.agentPanel.Update(kp)
-					promptCmd := m.sendAgentPrompt(text)
-					return m, tea.Batch(panelCmd, promptCmd)
-				}
-				return m, nil
-			case "ctrl+c":
-				if m.acpMgr != nil {
-					m.acpMgr.Cancel()
-				}
-				return m, nil
-			default:
-				var cmd tea.Cmd
-				m.agentPanel, cmd = m.agentPanel.Update(kp)
-				return m, cmd
-			}
-		}
-		if wm, ok := msg.(tea.MouseWheelMsg); ok {
-			var cmd tea.Cmd
-			m.agentPanel, cmd = m.agentPanel.Update(wm)
-			return m, cmd
-		}
+	if model, cmd, handled := m.routeFocusedInput(msg); handled {
+		return model, cmd
 	}
-
-	// Route input to focused panel
-	if m.showTree && m.focus == FocusTree {
-		// Tab switches between sidebar tabs
-		if kp, ok := msg.(tea.KeyPressMsg); ok && kp.String() == "tab" {
-			switch m.sidebarTab {
-			case SidebarFiles:
-				m.sidebarTab = SidebarGit
-				m.focus = FocusGitPanel
-			case SidebarGit:
-				m.sidebarTab = SidebarProblems
-				m.focus = FocusProblems
-			case SidebarProblems:
-				m.sidebarTab = SidebarDebugger
-				m.focus = FocusDebugger
-			default:
-				m.sidebarTab = SidebarFiles
-				m.focus = FocusTree
-			}
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.tree, cmd = m.tree.Update(msg)
-		return m, cmd
-	}
-	if m.focus == FocusGitPanel {
-		var cmd tea.Cmd
-		m.gitPanel, cmd = m.gitPanel.Update(msg)
-		return m, cmd
-	}
-	if m.focus == FocusProblems {
-		return m.updateProblems(msg)
-	}
-	if m.focus == FocusDebugger {
-		return m.updateDebugger(msg)
-	}
-
-	// Route to diff view if active tab is a diff tab
-	if m.isActiveDiffTab() {
-		if dv, ok := m.diffViews[m.activeTab]; ok {
-			var cmd tea.Cmd
-			dv, cmd = dv.Update(msg)
-			m.diffViews[m.activeTab] = dv
-			return m, cmd
-		}
-		return m, nil
-	}
-
-	if m.activeEditor() == nil {
-		return m, nil
-	}
-
-	var cmd tea.Cmd
-	ed := *m.activeEditor()
-	// Keep HasLSP up to date
-	if ed.Buffer.FilePath != "" {
-		ed.HasLSP = m.lspMgr.ClientForFile(ed.Buffer.FilePath) != nil
-	}
-	prevVersion := ed.Buffer.Version()
-	prevCursor := ed.Buffer.Cursor
-	ed, cmd = ed.Update(msg)
-	m.setEditor(m.activeTab, ed)
-
-	// Update tab dirty state; edits pin preview tabs
-	if m.activeTab < len(m.tabBar.Tabs) {
-		m.tabBar.Tabs[m.activeTab].Dirty = ed.Buffer.Dirty()
-		if ed.Buffer.Dirty() && m.tabBar.Tabs[m.activeTab].Preview {
-			m.tabBar.Tabs[m.activeTab].Preview = false
-		}
-	}
-
-	// Notify LSP of changes
-	if ed.Buffer.Version() != prevVersion && ed.Buffer.FilePath != "" {
-		if client := m.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
-			m.notifyLSPChange(client, &ed)
-		}
-	}
-	return m, tea.Batch(cmd, m.triggerEditorAutocmds(ed.Buffer.FilePath, prevVersion, ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor))
+	return m, nil
 }
 
 // notifyLSPChange sends a didChange notification using incremental sync if
@@ -1855,6 +1324,27 @@ func (m *Model) activeEditor() *editor.Editor {
 		return &m.editors[m.activeTab]
 	}
 	return &m.editors[0]
+}
+
+// editorIndexForAsyncMessage resolves the stable owner of an editor command.
+// ID zero is retained as an explicit compatibility path for legacy tests and
+// callers; production scheduling always carries an editor ID.
+func (m *Model) editorIndexForAsyncMessage(editorID uint64) int {
+	if editorID == 0 {
+		if len(m.editors) == 0 {
+			return -1
+		}
+		if m.activeTab >= 0 && m.activeTab < len(m.editors) {
+			return m.activeTab
+		}
+		return 0
+	}
+	for i := range m.editors {
+		if m.editors[i].ID() == editorID {
+			return i
+		}
+	}
+	return -1
 }
 
 // setEditor updates the editor slice, the single source of truth for tab state.

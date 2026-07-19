@@ -17,6 +17,7 @@ var _ plugin.Runtime = (*pluginRuntime)(nil)
 type pluginRuntime struct {
 	model             *Model
 	cmds              []tea.Cmd
+	retokenizeEditor  uint64
 	retokenizeVersion int
 }
 
@@ -29,10 +30,12 @@ func newPluginRuntime(model *Model) *pluginRuntime {
 
 func (r *pluginRuntime) command() tea.Cmd {
 	if r.retokenizeVersion >= 0 {
+		editorID := r.retokenizeEditor
 		version := r.retokenizeVersion
 		r.cmds = append(r.cmds, func() tea.Msg {
-			return editor.RetokenizeMsg{Version: version}
+			return editor.RetokenizeMsg{EditorID: editorID, Version: version}
 		})
+		r.retokenizeEditor = 0
 		r.retokenizeVersion = -1
 	}
 	if len(r.cmds) == 0 {
@@ -94,6 +97,7 @@ func (r *pluginRuntime) syncActiveEditorAfterEdit(prevVersion int, prevCursor te
 		}
 	}
 	if ed.Highlighter != nil {
+		r.retokenizeEditor = ed.ID()
 		r.retokenizeVersion = ed.Buffer.Version()
 	}
 	if cmd := r.model.triggerEditorAutocmds(ed.Buffer.FilePath, prevVersion, ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor); cmd != nil {

@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"bytes"
+	"context"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -15,6 +16,18 @@ import (
 type StyledToken struct {
 	Text  string
 	Style lipgloss.Style
+}
+
+// ViewportSnapshot is an immutable slice of a rope captured by the UI goroutine
+// before a viewport tokenization command is started. Tokenization commands must
+// not retain a mutable Buffer: an edit may replace its rope while the command is
+// still running.
+type ViewportSnapshot struct {
+	Content   []byte
+	LineCount int
+	StartLine int
+	ViewStart int
+	ViewEnd   int
 }
 
 // Highlighter provides syntax highlighting for a file.
@@ -57,14 +70,29 @@ func (h *Highlighter) Tokenize(content []byte) {
 // TokenizeToLines tokenizes content and returns the result without mutating state.
 // Safe for use from goroutines (lexer and styleMap are immutable after creation).
 func (h *Highlighter) TokenizeToLines(content []byte) [][]StyledToken {
-	return h.tokenizeContent(content, -1, -1)
+	lines, _ := h.TokenizeToLinesContext(context.Background(), content)
+	return lines
+}
+
+// TokenizeToLinesContext is the cancellable variant of TokenizeToLines. A
+// false return means the context was canceled and the returned lines must not
+// be installed.
+func (h *Highlighter) TokenizeToLinesContext(ctx context.Context, content []byte) ([][]StyledToken, bool) {
+	return h.tokenizeContentContext(ctx, content, -1, -1)
 }
 
 // TokenizeViewportToLines tokenizes content but only materializes styled tokens
 // for lines in [viewStart-margin, viewEnd+margin]. The lexer still runs on full
 // content to maintain correct state.
 func (h *Highlighter) TokenizeViewportToLines(content []byte, viewStart, viewEnd int) [][]StyledToken {
-	return h.tokenizeContent(content, viewStart, viewEnd)
+	lines, _ := h.TokenizeViewportToLinesContext(context.Background(), content, viewStart, viewEnd)
+	return lines
+}
+
+// TokenizeViewportToLinesContext is the cancellable variant of
+// TokenizeViewportToLines.
+func (h *Highlighter) TokenizeViewportToLinesContext(ctx context.Context, content []byte, viewStart, viewEnd int) ([][]StyledToken, bool) {
+	return h.tokenizeContentContext(ctx, content, viewStart, viewEnd)
 }
 
 // TokenizeViewport tokenizes only the viewport region of a buffer with a margin
@@ -84,14 +112,28 @@ func (h *Highlighter) TokenizeViewportToLines(content []byte, viewStart, viewEnd
 // Very long multi-line strings/comments (>200 lines) may have incorrect highlighting
 // at viewport boundaries. This is an acceptable trade-off for the performance gain.
 //
-// Thread Safety: Safe to call from goroutines. The buffer is read-only during
-// tokenization. The returned slice should be merged into the highlighter's cache
-// by the caller (usually in the main Bubble Tea Update loop).
+// Thread Safety: This convenience method reads the Buffer while it captures a
+// snapshot, so call it only while the Buffer is not being mutated. For an async
+// tea.Cmd, call CaptureViewport on the UI goroutine and pass the result to
+// TokenizeViewportSnapshot instead. The returned slice should be merged into
+// the highlighter's cache by the caller (usually in the main Bubble Tea Update
+// loop).
 //
 // Returns nil if buf is nil. Returns empty slice if viewStart >= viewEnd.
 func (h *Highlighter) TokenizeViewport(buf *text.Buffer, viewStart, viewEnd int) [][]StyledToken {
 	if buf == nil {
 		return nil
+	}
+	snapshot := CaptureViewport(buf.Rope(), viewStart, viewEnd)
+	lines, _ := h.TokenizeViewportSnapshot(context.Background(), snapshot)
+	return lines
+}
+
+// CaptureViewport copies the needed viewport region from an immutable rope.
+// Call it on the UI goroutine before starting an asynchronous tokenization job.
+func CaptureViewport(rope *text.Rope, viewStart, viewEnd int) ViewportSnapshot {
+	if rope == nil {
+		return ViewportSnapshot{}
 	}
 
 	// Handle edge cases gracefully
@@ -104,8 +146,9 @@ func (h *Highlighter) TokenizeViewport(buf *text.Buffer, viewStart, viewEnd int)
 
 	const margin = 200 // Large margin for multi-line constructs
 
-	startLine := max(0, viewStart-margin)
-	endLine := min(buf.LineCount(), viewEnd+margin)
+	lineCount := rope.LineCount()
+	startLine := min(lineCount, max(0, viewStart-margin))
+	endLine := min(lineCount, max(startLine, viewEnd+margin))
 
 	// Extract content from just the target lines
 	var content bytes.Buffer
@@ -113,22 +156,46 @@ func (h *Highlighter) TokenizeViewport(buf *text.Buffer, viewStart, viewEnd int)
 	content.Grow((endLine - startLine) * 80)
 
 	for i := startLine; i < endLine; i++ {
-		content.Write(buf.Line(i))
+		content.Write(rope.Line(i))
 		content.WriteByte('\n')
 	}
+	return ViewportSnapshot{
+		Content:   content.Bytes(),
+		LineCount: lineCount,
+		StartLine: startLine,
+		ViewStart: viewStart,
+		ViewEnd:   viewEnd,
+	}
+}
 
-	// Tokenize the extracted content
-	tokens := h.tokenizeContent(content.Bytes(), viewStart-startLine, viewEnd-startLine)
+// TokenizeViewportSnapshot tokenizes a snapshot captured by CaptureViewport.
+// It never reads a Buffer or Rope, so it is safe to run in a tea.Cmd.
+func (h *Highlighter) TokenizeViewportSnapshot(ctx context.Context, snapshot ViewportSnapshot) ([][]StyledToken, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false
+	}
+	if snapshot.LineCount == 0 {
+		return nil, true
+	}
+
+	// Tokenize the extracted content.
+	tokens, complete := h.tokenizeContentContext(ctx, snapshot.Content, snapshot.ViewStart-snapshot.StartLine, snapshot.ViewEnd-snapshot.StartLine)
+	if !complete {
+		return nil, false
+	}
 
 	// Pad result to match buffer line count
-	result := make([][]StyledToken, buf.LineCount())
+	result := make([][]StyledToken, snapshot.LineCount)
 	for i := range tokens {
-		if startLine+i < buf.LineCount() {
-			result[startLine+i] = tokens[i]
+		if snapshot.StartLine+i < snapshot.LineCount {
+			result[snapshot.StartLine+i] = tokens[i]
 		}
 	}
 
-	return result
+	return result, true
 }
 
 // SetLines sets cached lines from a full tokenization result, replacing the cache entirely.
@@ -205,7 +272,7 @@ func (h *Highlighter) TokenizePrefix(content []byte, maxLines int) {
 		}
 	}
 
-	result := h.streamTokenize(string(content[:end]), -1, -1)
+	result, _ := h.streamTokenizeContext(context.Background(), string(content[:end]), -1, -1)
 	h.lines = result
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(result)
@@ -213,16 +280,27 @@ func (h *Highlighter) TokenizePrefix(content []byte, maxLines int) {
 }
 
 func (h *Highlighter) tokenizeContent(content []byte, viewStart, viewEnd int) [][]StyledToken {
-	return h.streamTokenize(string(content), viewStart, viewEnd)
+	lines, _ := h.tokenizeContentContext(context.Background(), content, viewStart, viewEnd)
+	return lines
+}
+
+func (h *Highlighter) tokenizeContentContext(ctx context.Context, content []byte, viewStart, viewEnd int) ([][]StyledToken, bool) {
+	return h.streamTokenizeContext(ctx, string(content), viewStart, viewEnd)
 }
 
 // streamTokenize uses Chroma's iterator lazily, streaming tokens and splitting
 // into lines on the fly. When a viewport range is specified, it stops consuming
 // the lexer after passing viewEnd+margin, avoiding lexing the full file tail.
-func (h *Highlighter) streamTokenize(content string, viewStart, viewEnd int) [][]StyledToken {
+func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string, viewStart, viewEnd int) ([][]StyledToken, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false
+	}
 	iterator, err := h.lexer.Tokenise(nil, content)
 	if err != nil {
-		return nil
+		return nil, true
 	}
 
 	const tokenizeMargin = 50
@@ -242,6 +320,9 @@ func (h *Highlighter) streamTokenize(content string, viewStart, viewEnd int) [][
 	}
 
 	for tok := iterator(); tok.Type != chroma.EOFType; tok = iterator() {
+		if err := ctx.Err(); err != nil {
+			return nil, false
+		}
 		if tok.Value == "" {
 			continue
 		}
@@ -251,6 +332,9 @@ func (h *Highlighter) streamTokenize(content string, viewStart, viewEnd int) [][
 		styleResolved := false
 
 		for {
+			if err := ctx.Err(); err != nil {
+				return nil, false
+			}
 			nlIdx := strings.IndexByte(val, '\n')
 			if nlIdx < 0 {
 				break
@@ -271,7 +355,7 @@ func (h *Highlighter) streamTokenize(content string, viewStart, viewEnd int) [][
 
 			// Early exit: past viewport range, stop lexing
 			if rangeEnd >= 0 && lineNum > rangeEnd {
-				return lines
+				return lines, true
 			}
 		}
 		// Remaining text (no newline)
@@ -290,7 +374,7 @@ func (h *Highlighter) streamTokenize(content string, viewStart, viewEnd int) [][
 	if len(lines) == 0 {
 		lines = append(lines, nil)
 	}
-	return lines
+	return lines, true
 }
 
 // Line returns the styled tokens for a given line number (0-based).

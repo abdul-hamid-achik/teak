@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -115,6 +116,30 @@ func TestEditorUpdateTokenizeComplete(t *testing.T) {
 	// The highlighter should have lines set
 }
 
+// The initial asynchronous pass must replace the synchronous prefix cache.
+// New editors deliberately start with lastVersion == -1, so accepting this
+// result cannot depend on a RetokenizeMsg having run first.
+func TestEditorInitialTokenizeResultIsInstalled(t *testing.T) {
+	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("var value = 42\n"), 80))
+	buf.FilePath = "test.go"
+	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
+
+	cmd := editor.ScheduleInitialTokenize()
+	if cmd == nil {
+		t.Fatal("expected initial tokenization command")
+	}
+	msg := cmd()
+	complete, ok := msg.(TokenizeCompleteMsg)
+	if !ok {
+		t.Fatalf("expected TokenizeCompleteMsg, got %T", msg)
+	}
+
+	editor, _ = editor.Update(complete)
+	if got, want := editor.Highlighter.LineCount(), len(complete.Lines); got != want {
+		t.Errorf("initial tokenization was not installed: got %d cached lines, want %d", got, want)
+	}
+}
+
 func TestEditorUpdateRetokenize(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("hello world"))
 	buf.FilePath = "test.go"
@@ -157,6 +182,110 @@ func TestEditorUpdateRetokenizeViewportOnly(t *testing.T) {
 	if len(tokenizeMsg.Lines) == 0 {
 		t.Error("expected some tokenized lines")
 	}
+}
+
+func TestEditorViewportTokenizationUsesCapturedRopeSnapshot(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("original value\nsecond line\nthird line\n"))
+	buf.FilePath = "test.go"
+	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
+	editor.Viewport.Height = 2
+
+	editor, cmd := editor.Update(RetokenizeMsg{Version: buf.Version(), ViewportOnly: true})
+	if cmd == nil {
+		t.Fatal("expected viewport tokenization command")
+	}
+
+	// Execute the command only after an edit. It must still tokenize the rope
+	// that was captured when the command was scheduled, not read the Buffer.
+	buf.Cursor = text.Position{}
+	buf.InsertAtCursor([]byte("changed "))
+	msg := cmd()
+	complete, ok := msg.(TokenizeCompleteMsg)
+	if !ok {
+		t.Fatalf("expected TokenizeCompleteMsg, got %T", msg)
+	}
+	if got := styledLineText(complete.Lines[0]); got != "original value" {
+		t.Errorf("viewport command read mutable buffer: got %q, want original snapshot", got)
+	}
+}
+
+func TestEditorIgnoresSupersededViewportTokenizationGeneration(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("package main\n"))
+	buf.FilePath = "test.go"
+	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
+	editor.Viewport.Height = 1
+
+	var firstCmd tea.Cmd
+	editor, firstCmd = editor.Update(RetokenizeMsg{EditorID: editor.ID(), Version: buf.Version(), ViewportOnly: true})
+	if firstCmd == nil {
+		t.Fatal("expected first viewport tokenization command")
+	}
+	oldGeneration := editor.tokenizer.viewport.generation
+
+	editor.Viewport.ScrollY = 1
+	editor, cmd := editor.Update(RetokenizeMsg{EditorID: editor.ID(), Version: buf.Version(), ViewportOnly: true})
+	if cmd == nil {
+		t.Fatal("expected replacement tokenization command")
+	}
+	if editor.tokenizer.viewport.generation <= oldGeneration {
+		t.Fatal("replacement tokenization did not advance generation")
+	}
+
+	stale := TokenizeCompleteMsg{
+		EditorID:   editor.ID(),
+		Version:    buf.Version(),
+		Generation: oldGeneration,
+		Lines:      [][]highlight.StyledToken{{{Text: "stale", Style: ui.DefaultTheme().Editor}}},
+		Partial:    true,
+	}
+	editor, _ = editor.Update(stale)
+	if got := styledLineText(editor.Highlighter.Line(0)); got == "stale" {
+		t.Error("superseded tokenization result was installed")
+	}
+}
+
+func TestEditorViewportJobDoesNotCancelFullJob(t *testing.T) {
+	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("var value = 42\n"), 800))
+	buf.FilePath = "test.go"
+	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
+
+	fullCmd := editor.ScheduleInitialTokenize()
+	if fullCmd == nil {
+		t.Fatal("expected initial full tokenization command")
+	}
+
+	editor.Viewport.ScrollY = 700
+	editor.Viewport.Height = 20
+	editor, viewportCmd := editor.Update(RetokenizeMsg{Version: buf.Version(), ViewportOnly: true})
+	if viewportCmd == nil {
+		t.Fatal("expected viewport tokenization command")
+	}
+
+	viewportMsg, ok := viewportCmd().(TokenizeCompleteMsg)
+	if !ok {
+		t.Fatal("expected viewport completion")
+	}
+	editor, _ = editor.Update(viewportMsg)
+	if got := editor.Highlighter.Line(300); len(got) != 0 {
+		t.Fatal("line outside prefix and viewport should remain a cache gap before full completion")
+	}
+
+	fullMsg, ok := fullCmd().(TokenizeCompleteMsg)
+	if !ok {
+		t.Fatal("viewport job canceled the still-current full tokenization")
+	}
+	editor, _ = editor.Update(fullMsg)
+	if got := editor.Highlighter.Line(300); len(got) == 0 {
+		t.Fatal("full completion did not fill cache gap after viewport merge")
+	}
+}
+
+func styledLineText(tokens []highlight.StyledToken) string {
+	var text string
+	for _, token := range tokens {
+		text += token.Text
+	}
+	return text
 }
 
 func TestEditorUpdateRetokenizeStaleVersion(t *testing.T) {

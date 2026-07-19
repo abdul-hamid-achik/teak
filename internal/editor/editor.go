@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"context"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -22,9 +24,11 @@ import (
 // will have nil entries, wasting ~8 bytes per line (acceptable for files
 // under 500K lines, ~4MB waste).
 type TokenizeCompleteMsg struct {
-	Version int
-	Lines   [][]highlight.StyledToken
-	Partial bool // true when result is from viewport-only tokenization
+	EditorID   uint64
+	Version    int
+	Generation uint64
+	Lines      [][]highlight.StyledToken
+	Partial    bool // true when result is from viewport-only tokenization
 }
 
 // RequestCompletionCmd is a command that triggers completion from the app layer.
@@ -43,7 +47,6 @@ type Diagnostic struct {
 // BreakpointClickMsg is emitted when the user clicks the line number gutter.
 type BreakpointClickMsg struct{ Line int }
 
-// RetokenizeMsg triggers syntax re-tokenization after edits.
 // RetokenizeMsg triggers syntax re-tokenization after edits or scrolls.
 //
 // Performance Strategy:
@@ -58,12 +61,14 @@ type BreakpointClickMsg struct{ Line int }
 //   - Scroll-triggered: Immediate (scheduleRetokenizeImmediate)
 //     Scrolling should feel instant, so no debounce.
 type RetokenizeMsg struct {
+	EditorID     uint64
 	Version      int  // Buffer version (for staleness detection)
 	ViewportOnly bool // true for scroll-triggered (fast), false for edit-triggered (full)
 }
 
 // Editor is a sub-model managing text editing with mouse and keyboard.
 type Editor struct {
+	id                uint64
 	Buffer            *text.Buffer
 	Viewport          Viewport
 	Config            Config
@@ -81,9 +86,26 @@ type Editor struct {
 	Folds             FoldState   // code folding state
 	Wrap              *WrapLayout // word wrap layout (nil when disabled)
 	lastVersion       int
+	tokenizer         *tokenizeScheduler
 	lastClickTime     time.Time
 	lastClickPos      text.Position
 }
+
+// tokenizeScheduler is shared by value-copied Editor models. Bubble Tea runs
+// Update serially, so only its commands observe the cancellation context.
+// Every started job gets a strictly increasing generation; a completion can be
+// committed only if it belongs to the newest generation.
+type tokenizeScheduler struct {
+	full     tokenizeLane
+	viewport tokenizeLane
+}
+
+type tokenizeLane struct {
+	generation uint64
+	cancel     context.CancelFunc
+}
+
+var nextEditorID atomic.Uint64
 
 // New creates a new Editor with the given buffer, theme, and config.
 // The first screenful is tokenized synchronously so the first render has color.
@@ -98,6 +120,7 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 	}
 
 	return Editor{
+		id:            nextEditorID.Add(1),
 		Buffer:        buf,
 		Config:        cfg,
 		theme:         theme,
@@ -107,23 +130,69 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		signatureHelp: overlays.NewSignatureHelp(theme),
 		contextMenu:   NewContextMenu(theme),
 		lastVersion:   -1,
+		tokenizer:     &tokenizeScheduler{},
 	}
 }
 
 // ScheduleInitialTokenize returns a command that runs full async tokenization.
 // The prefix was already tokenized synchronously in New(), so this fills in
 // the rest of the file. Goes directly to async Cmd, skipping RetokenizeMsg roundtrip.
-func (e Editor) ScheduleInitialTokenize() tea.Cmd {
-	if e.Highlighter == nil {
+func (e *Editor) ScheduleInitialTokenize() tea.Cmd {
+	if e.Highlighter == nil || e.Buffer == nil {
 		return nil
 	}
 	hl := e.Highlighter
-	content := e.Buffer.Bytes()
+	// Capture an immutable rope snapshot on the UI goroutine. The command owns
+	// only this byte slice, never the mutable Buffer.
+	content := e.Buffer.Rope().Bytes()
+	editorID := e.id
 	version := e.Buffer.Version()
+	e.lastVersion = version
+	ctx, generation := e.beginFullTokenize()
 	return func() tea.Msg {
-		lines := hl.TokenizeToLines(content)
-		return TokenizeCompleteMsg{Version: version, Lines: lines}
+		lines, complete := hl.TokenizeToLinesContext(ctx, content)
+		if !complete {
+			return nil
+		}
+		return TokenizeCompleteMsg{EditorID: editorID, Version: version, Generation: generation, Lines: lines}
 	}
+}
+
+// ID returns the stable identity carried by async editor messages.
+func (e Editor) ID() uint64 {
+	return e.id
+}
+
+func (e *Editor) beginFullTokenize() (context.Context, uint64) {
+	if e.tokenizer == nil {
+		e.tokenizer = &tokenizeScheduler{}
+	}
+	// A new full pass represents the newest buffer version. It supersedes both
+	// lanes, including a viewport snapshot captured from the previous version.
+	e.invalidateTokenizeLane(&e.tokenizer.full)
+	e.invalidateTokenizeLane(&e.tokenizer.viewport)
+	ctx, cancel := context.WithCancel(context.Background())
+	e.tokenizer.full.cancel = cancel
+	return ctx, e.tokenizer.full.generation
+}
+
+func (e *Editor) beginViewportTokenize() (context.Context, uint64) {
+	if e.tokenizer == nil {
+		e.tokenizer = &tokenizeScheduler{}
+	}
+	// Scrolling coalesces only other viewport work. A full pass for the same
+	// version remains useful because it fills every cache gap.
+	e.invalidateTokenizeLane(&e.tokenizer.viewport)
+	ctx, cancel := context.WithCancel(context.Background())
+	e.tokenizer.viewport.cancel = cancel
+	return ctx, e.tokenizer.viewport.generation
+}
+
+func (e *Editor) invalidateTokenizeLane(lane *tokenizeLane) {
+	if lane.cancel != nil {
+		lane.cancel()
+	}
+	lane.generation++
 }
 
 // SetSize sets the available editor dimensions.
@@ -224,6 +293,9 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		if e.Highlighter == nil {
 			return e, nil
 		}
+		if msg.EditorID != 0 && msg.EditorID != e.id {
+			return e, nil
+		}
 		// Discard stale retokenize messages
 		if msg.Version != e.Buffer.Version() {
 			return e, nil
@@ -232,30 +304,44 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		if msg.Version == e.lastVersion && !msg.ViewportOnly {
 			return e, nil
 		}
-		e.lastVersion = msg.Version
 		// Launch async tokenization
 		hl := e.Highlighter
-		content := e.Buffer.Bytes()
+		editorID := e.id
 		version := msg.Version
 		if msg.ViewportOnly {
-			// Scroll-triggered: only tokenize viewport region
+			ctx, generation := e.beginViewportTokenize()
+			// Capture the immutable rope region before the async command. Do not
+			// retain e.Buffer: edits may replace its rope while this is running.
 			viewStart := e.Viewport.ScrollY
 			viewEnd := e.Viewport.ScrollY + e.Viewport.Height
+			snapshot := highlight.CaptureViewport(e.Buffer.Rope(), viewStart, viewEnd)
 			return e, func() tea.Msg {
-				lines := hl.TokenizeViewport(e.Buffer, viewStart, viewEnd)
-				return TokenizeCompleteMsg{Version: version, Lines: lines, Partial: true}
+				lines, complete := hl.TokenizeViewportSnapshot(ctx, snapshot)
+				if !complete {
+					return nil
+				}
+				return TokenizeCompleteMsg{EditorID: editorID, Version: version, Generation: generation, Lines: lines, Partial: true}
 			}
 		}
 		// Edit-triggered: tokenize the full file
+		e.lastVersion = msg.Version
+		ctx, generation := e.beginFullTokenize()
+		content := e.Buffer.Rope().Bytes()
 		return e, func() tea.Msg {
-			lines := hl.TokenizeToLines(content)
-			return TokenizeCompleteMsg{Version: version, Lines: lines}
+			lines, complete := hl.TokenizeToLinesContext(ctx, content)
+			if !complete {
+				return nil
+			}
+			return TokenizeCompleteMsg{EditorID: editorID, Version: version, Generation: generation, Lines: lines}
 		}
 	case TokenizeCompleteMsg:
 		if e.Highlighter == nil {
 			return e, nil
 		}
-		if msg.Version == e.lastVersion {
+		if msg.EditorID != 0 && msg.EditorID != e.id {
+			return e, nil
+		}
+		if e.acceptsTokenizeComplete(msg) {
 			if msg.Partial {
 				e.Highlighter.MergeLines(msg.Lines)
 			} else {
@@ -265,6 +351,17 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		return e, nil
 	}
 	return e, nil
+}
+
+func (e Editor) acceptsTokenizeComplete(msg TokenizeCompleteMsg) bool {
+	if e.tokenizer == nil || e.Buffer == nil || msg.Version != e.Buffer.Version() {
+		return false
+	}
+	lane := &e.tokenizer.full
+	if msg.Partial {
+		lane = &e.tokenizer.viewport
+	}
+	return msg.Generation == lane.generation
 }
 
 func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
@@ -625,9 +722,10 @@ func (e Editor) scheduleRetokenizeImmediate() tea.Cmd {
 	if e.Highlighter == nil {
 		return nil
 	}
+	editorID := e.id
 	version := e.Buffer.Version()
 	return func() tea.Msg {
-		return RetokenizeMsg{Version: version, ViewportOnly: true}
+		return RetokenizeMsg{EditorID: editorID, Version: version, ViewportOnly: true}
 	}
 }
 
@@ -635,9 +733,10 @@ func (e Editor) scheduleRetokenize() tea.Cmd {
 	if e.Highlighter == nil {
 		return nil
 	}
+	editorID := e.id
 	version := e.Buffer.Version()
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
-		return RetokenizeMsg{Version: version}
+		return RetokenizeMsg{EditorID: editorID, Version: version}
 	})
 }
 

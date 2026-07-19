@@ -4,7 +4,35 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/editor"
+	"teak/internal/text"
 )
+
+func TestPluginRuntimeTracksRetokenizeEditorIdentity(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	buf := text.NewBufferFromBytes([]byte("package main\n"))
+	buf.FilePath = "main.go"
+	ed := editor.New(buf, model.theme, editor.DefaultConfig())
+	model.editors[0] = ed
+
+	runtime := newPluginRuntime(&model)
+	if err := runtime.InsertText("// edited\n"); err != nil {
+		t.Fatalf("InsertText() error = %v", err)
+	}
+
+	if got, want := runtime.retokenizeEditor, model.activeEditor().ID(); got != want {
+		t.Fatalf("retokenize editor ID = %d, want %d", got, want)
+	}
+	if got, want := runtime.retokenizeVersion, model.activeEditor().Buffer.Version(); got != want {
+		t.Fatalf("retokenize version = %d, want %d", got, want)
+	}
+	if cmd := runtime.command(); cmd == nil {
+		t.Fatal("command() did not schedule retokenization")
+	}
+	if runtime.retokenizeEditor != 0 || runtime.retokenizeVersion != -1 {
+		t.Fatalf("command() did not clear retokenize identity: id=%d version=%d", runtime.retokenizeEditor, runtime.retokenizeVersion)
+	}
+}
 
 func TestParseSyntheticKeys(t *testing.T) {
 	tests := []struct {

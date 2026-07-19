@@ -85,6 +85,27 @@ func TestTokenizeViewportBeyondLineCount(t *testing.T) {
 	t.Logf("allNil=%v (acceptable if margin doesn't reach content)", allNil)
 }
 
+func TestCaptureViewportFarBeyondEOF(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("line 1\nline 2"))
+	snapshot := CaptureViewport(buf.Rope(), 10_000, 10_010)
+
+	if got, want := snapshot.StartLine, buf.LineCount(); got != want {
+		t.Errorf("snapshot start = %d, want clamped EOF %d", got, want)
+	}
+	if len(snapshot.Content) != 0 {
+		t.Errorf("snapshot beyond EOF captured %d bytes, want none", len(snapshot.Content))
+	}
+
+	h := New("test.go", ui.DefaultTheme())
+	lines, complete := h.TokenizeViewportSnapshot(nil, snapshot)
+	if !complete {
+		t.Fatal("expected tokenization to complete")
+	}
+	if got, want := len(lines), buf.LineCount(); got != want {
+		t.Errorf("result length = %d, want %d", got, want)
+	}
+}
+
 func TestTokenizeViewportZeroRange(t *testing.T) {
 	theme := ui.DefaultTheme()
 	buf := text.NewBufferFromBytes([]byte("line 1\nline 2\nline 3"))
