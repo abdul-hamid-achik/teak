@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"teak/internal/highlight"
@@ -215,10 +216,10 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			sb.WriteByte(' ')
 
 			lineContent := string(buf.Line(bufLine))
-			segment := wrapSegment(lineContent, wrapOffset, textWidth)
+			segment, segmentStart, segmentEnd := wrapSegmentBounds(lineContent, wrapOffset, textWidth)
 
-			// Apply syntax highlighting to segment if available
-			rendered := v.renderWrapSegment(theme, hl, buf, bufLine, segment, wrapOffset, textWidth)
+			// Selections take precedence over syntax highlighting, matching regular rendering.
+			rendered := v.renderWrapSegmentWithSelections(theme, hl, buf, bufLine, lineContent, segmentStart, segmentEnd)
 			padLen := max(0, textWidth-displayWidth(segment))
 
 			if bufLine == buf.Cursor.Line {
@@ -254,6 +255,52 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 		}
 
 		visualRow++
+	}
+	return sb.String()
+}
+
+// renderWrapSegmentWithSelections renders a wrapped segment, applying selection
+// styles to any ranges that overlap the segment.
+func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, hl *highlight.Highlighter, buf *text.Buffer, bufLine int, lineContent string, segmentStart, segmentEnd int) string {
+	ranges := selectionRanges(buf, bufLine, len(lineContent))
+	hasOverlap := false
+	for _, r := range ranges {
+		if r.start < segmentEnd && r.end > segmentStart {
+			hasOverlap = true
+			break
+		}
+	}
+	baseStyle := theme.Editor
+	selectionStyle := theme.SecondarySelection
+	if bufLine == buf.Cursor.Line {
+		baseStyle = theme.CursorLine
+		selectionStyle = theme.Selection
+	}
+
+	var tokens []highlight.StyledToken
+	if hl != nil {
+		tokens = hl.Line(bufLine)
+	}
+	if !hasOverlap {
+		return renderTokenByteRange(lineContent, tokens, segmentStart, segmentEnd, baseStyle)
+	}
+
+	var sb strings.Builder
+	pos := segmentStart
+	for _, r := range ranges {
+		start := max(r.start, segmentStart)
+		end := min(r.end, segmentEnd)
+		if start >= end {
+			continue
+		}
+		if pos < start {
+			sb.WriteString(renderTokenByteRange(lineContent, tokens, pos, start, baseStyle))
+		}
+		sb.WriteString(selectionStyle.Render(lineContent[start:end]))
+		pos = end
+	}
+	if pos < segmentEnd {
+		sb.WriteString(renderTokenByteRange(lineContent, tokens, pos, segmentEnd, baseStyle))
 	}
 	return sb.String()
 }
@@ -309,123 +356,68 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 	return sb.String()
 }
 
-// renderWrapSegment renders a wrap segment with syntax highlighting when available.
-func (v *Viewport) renderWrapSegment(theme ui.Theme, hl *highlight.Highlighter, buf *text.Buffer, bufLine int, segment string, wrapOffset, textWidth int) string {
-	defaultStyle := theme.Editor
-	if bufLine == buf.Cursor.Line {
-		defaultStyle = theme.CursorLine
+// renderTokenByteRange renders a byte range using the cached syntax token
+// styles. Gaps or missing tokens fall back to the line's base style.
+func renderTokenByteRange(lineContent string, tokens []highlight.StyledToken, start, end int, baseStyle lipgloss.Style) string {
+	start = max(0, min(start, len(lineContent)))
+	end = max(start, min(end, len(lineContent)))
+	if start == end {
+		return ""
 	}
-
-	if hl == nil || segment == "" {
-		return defaultStyle.Render(segment)
-	}
-
-	tokens := hl.Line(bufLine)
 	if len(tokens) == 0 {
-		return defaultStyle.Render(segment)
+		return baseStyle.Render(lineContent[start:end])
 	}
-
-	// Map segment back to the full line using display-width offsets
-	segStartWidth := wrapOffset * textWidth
-	segEndWidth := segStartWidth + textWidth
 
 	var sb strings.Builder
-	currentWidth := 0
-
-	// Process tokens and accumulate segments with the same style
-	// instead of styling each rune individually
-	for _, tok := range tokens {
-		tokText := tok.Text
-		tokWidth := runewidth.StringWidth(tokText)
-		tokEndWidth := currentWidth + tokWidth
-
-		// Skip tokens completely before the segment
-		if tokEndWidth <= segStartWidth {
-			currentWidth = tokEndWidth
+	pos := start
+	tokenStart := 0
+	for _, token := range tokens {
+		tokenEnd := tokenStart + len(token.Text)
+		if tokenEnd <= start {
+			tokenStart = tokenEnd
 			continue
 		}
-
-		// Stop if we've passed the segment
-		if currentWidth >= segEndWidth {
+		if tokenStart >= end {
 			break
 		}
 
-		// Calculate overlap with visible segment
-		overlapStart := max(0, segStartWidth-currentWidth)
-		overlapEnd := min(tokWidth, segEndWidth-currentWidth)
-
+		overlapStart := max(start, tokenStart)
+		overlapEnd := min(end, tokenEnd)
+		if pos < overlapStart {
+			sb.WriteString(baseStyle.Render(lineContent[pos:overlapStart]))
+		}
 		if overlapStart < overlapEnd {
-			// Extract overlapping text portion efficiently
-			overlapText := extractWidthRange(tokText, overlapStart, overlapEnd)
-
-			// Apply style (with cursor line background if needed)
-			style := tok.Style
-			if bufLine == buf.Cursor.Line {
-				style = style.Background(defaultStyle.GetBackground())
+			style := token.Style
+			if _, noBackground := baseStyle.GetBackground().(lipgloss.NoColor); !noBackground {
+				style = style.Background(baseStyle.GetBackground())
 			}
-
-			// Style the entire overlapping segment at once (not rune-by-rune)
-			sb.WriteString(style.Render(overlapText))
+			sb.WriteString(style.Render(lineContent[overlapStart:overlapEnd]))
+			pos = overlapEnd
 		}
-
-		currentWidth = tokEndWidth
+		tokenStart = tokenEnd
 	}
-
-	result := sb.String()
-	if result == "" && segment != "" {
-		return defaultStyle.Render(segment)
+	if pos < end {
+		sb.WriteString(baseStyle.Render(lineContent[pos:end]))
 	}
-	return result
-}
-
-// extractWidthRange extracts a substring by display width range
-// This is more efficient than styling each rune individually
-func extractWidthRange(text string, startWidth, endWidth int) string {
-	var result strings.Builder
-	currentWidth := 0
-
-	for _, r := range text {
-		rw := runewidth.RuneWidth(r)
-		if currentWidth >= startWidth && currentWidth < endWidth {
-			result.WriteRune(r)
-		}
-		currentWidth += rw
-		if currentWidth >= endWidth {
-			break
-		}
-	}
-
-	return result.String()
+	return sb.String()
 }
 
 // wrapSegment extracts the Nth segment of a line when wrapped at the given width.
 func wrapSegment(line string, segIdx, width int) string {
+	segment, _, _ := wrapSegmentBounds(line, segIdx, width)
+	return segment
+}
+
+// wrapSegmentBounds returns the Nth segment and its byte offsets in line.
+func wrapSegmentBounds(line string, segIdx, width int) (string, int, int) {
 	if width < 1 || segIdx < 0 {
-		return ""
+		return "", 0, 0
 	}
-	// Walk through the string counting display width
-	startWidth := segIdx * width
-	endWidth := startWidth + width
-
-	currentWidth := 0
-	startByte := -1
-	endByte := len(line)
-
-	for i, r := range line {
-		w := runewidth.RuneWidth(r)
-		if currentWidth >= startWidth && startByte < 0 {
-			startByte = i
-		}
-		if currentWidth >= endWidth {
-			endByte = i
-			break
-		}
-		currentWidth += w
+	startByte, endByte, _, ok := wrappedLineSegment(line, segIdx, width)
+	if !ok {
+		return "", 0, 0
 	}
-	if startByte < 0 {
-		return ""
-	}
-	return line[startByte:endByte]
+	return line[startByte:endByte], startByte, endByte
 }
 
 // findBracketHighlights returns two positions to highlight and whether a match was found.
@@ -869,23 +861,25 @@ func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Bu
 		textWidth = 1
 	}
 
-	// Target display-width offset within the full line
-	targetWidth := wrapOffset*textWidth + screenCol
-
 	lineContent := buf.Line(bufLine)
+	_, segmentStart, segmentEnd := wrapSegmentBounds(string(lineContent), wrapOffset, textWidth)
+	if segmentStart == 0 && segmentEnd == 0 && len(lineContent) > 0 {
+		return text.Position{Line: bufLine, Col: len(lineContent)}
+	}
+
 	w := 0
-	col := 0
-	for i, r := range string(lineContent) {
+	col := segmentStart
+	for offset, r := range string(lineContent[segmentStart:segmentEnd]) {
 		rw := runewidth.RuneWidth(r)
-		if w+rw > targetWidth {
-			col = i
+		if w+rw > screenCol {
+			col = segmentStart + offset
 			return text.Position{Line: bufLine, Col: col}
 		}
 		w += rw
-		col = i + utf8.RuneLen(r)
+		col = segmentStart + offset + utf8.RuneLen(r)
 	}
-	if col > len(lineContent) {
-		col = len(lineContent)
+	if col > segmentEnd {
+		col = segmentEnd
 	}
 	return text.Position{Line: bufLine, Col: col}
 }

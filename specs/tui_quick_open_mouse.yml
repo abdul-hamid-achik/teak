@@ -1,0 +1,53 @@
+version: 1
+name: teak_quick_open_mouse
+coversSymbol: ui.RenderOverlay
+metadata:
+    feature: quick-open
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - overlay
+intent: |
+    a user can open Quick Open and choose a visible file result with the mouse.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - quick-open
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "alpha one"
+        timeoutMs: 5000
+    - press: "ctrl+p"
+    - wait:
+        screen:
+            contains: "Open File"
+    - wait:
+        screen:
+            contains: "beta.txt"
+    - snapshot: quick_open_ready
+    - mouse: {x: 15, y: 12, button: left, action: click}
+    - snapshot: after_beta_click
+outcomes:
+    - id: picker_click_opens
+      description: clicking beta.txt closes Quick Open and opens that file
+      verify:
+        screen:
+            contains: "beta one"
+contractHash: sha256:ca9ca85b397a84334d67492927f8d7db932a7260c3f53e23951c70e255bd2ffe

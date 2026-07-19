@@ -1,0 +1,55 @@
+version: 1
+name: teak_unsaved_confirm_mouse
+coversSymbol: ui.RenderOverlay
+metadata:
+    feature: unsaved-confirmation
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - overlay
+intent: |
+    a user can cancel the unsaved-changes confirmation by clicking its Cancel button.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - unsaved-confirm
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "alpha one"
+        timeoutMs: 5000
+    - type: "X"
+    - wait:
+        screen:
+            contains: "Xalpha one"
+        timeoutMs: 5000
+    - press: "ctrl+w"
+    - wait:
+        screen:
+            contains: "Unsaved Changes"
+    - snapshot: confirm_ready
+    - mouse: {x: 19, y: 14, button: left, action: click}
+    - snapshot: after_cancel_click
+outcomes:
+    - id: cancel_click_closes
+      description: clicking Cancel dismisses the confirmation without closing the file
+      verify:
+        screen:
+            notContains: "Unsaved Changes"
+contractHash: sha256:42cc5bf9e1face1fdfe84527845ed698a7d810f38eb6ae4384f6a576d75f083f

@@ -729,6 +729,67 @@ func TestAgentMaxScrollManagement(t *testing.T) {
 	}
 }
 
+func TestAgentScrollControlsRefreshBoundsFromCurrentContent(t *testing.T) {
+	tests := []struct {
+		name       string
+		msg        tea.Msg
+		wantScroll func(maxScroll, pageHeight int) int
+	}{
+		{
+			name: "wheel down",
+			msg:  tea.MouseWheelMsg{Button: tea.MouseWheelDown},
+			wantScroll: func(maxScroll, _ int) int {
+				return min(3, maxScroll)
+			},
+		},
+		{
+			name: "page down",
+			msg:  tea.KeyPressMsg{Text: "pgdown"},
+			wantScroll: func(maxScroll, pageHeight int) int {
+				return min(pageHeight, maxScroll)
+			},
+		},
+		{
+			name: "end",
+			msg:  tea.KeyPressMsg{Text: "end"},
+			wantScroll: func(maxScroll, _ int) int {
+				return maxScroll
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := New(ui.DefaultTheme())
+			model.SetSize(14, 8)
+			model.autoScroll = false
+			for range 12 {
+				model.messages = append(model.messages, ChatMessage{
+					Role:    RoleUser,
+					Content: "one two three four five six seven eight nine ten",
+				})
+			}
+			model.maxScroll = 0 // Simulate View having rendered a stale copy of the model.
+
+			updated, _ := model.Update(tt.msg)
+			chatHeight := model.height - 3
+			wantMax := len(model.buildChatLines(model.width)) - chatHeight
+			if wantMax < 0 {
+				wantMax = 0
+			}
+			if wantMax == 0 {
+				t.Fatal("test setup must require scrolling")
+			}
+			if updated.maxScroll != wantMax {
+				t.Errorf("maxScroll = %d, want %d", updated.maxScroll, wantMax)
+			}
+			if want := tt.wantScroll(wantMax, chatHeight); updated.scrollY != want {
+				t.Errorf("scrollY = %d, want %d", updated.scrollY, want)
+			}
+		})
+	}
+}
+
 // TestAgentLoadingToggle tests loading toggle
 func TestAgentLoadingToggle(t *testing.T) {
 	theme := ui.DefaultTheme()

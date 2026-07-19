@@ -11,3 +11,6 @@ coverage.out
 .opencode/
 .crush/
 .claude/
+.glyphrun/runs/
+.glyphrun/tmp/
+glyphrun-junit.xml

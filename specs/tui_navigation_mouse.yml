@@ -1,0 +1,86 @@
+version: 1
+name: teak_navigation_mouse
+coversSymbol: app.Model.Update
+metadata:
+    feature: mouse-navigation
+    owner: core-ui
+    priority: high
+    tags:
+        - smoke
+        - mouse
+intent: |
+    a user can open a file from the tree, switch editor tabs, change sidebar panels, and drag-select text with the mouse.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - navigation
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "alpha one"
+        timeoutMs: 5000
+    - mouse: {x: 5, y: 2, button: left, action: click}
+    - wait:
+        screen:
+            contains: "beta one"
+    - snapshot: beta_from_tree
+    - mouse: {x: 31, y: 0, button: left, action: click}
+    - wait:
+        screen:
+            contains: "alpha one"
+    - mouse: {x: 7, y: 0, button: left, action: click}
+    - wait:
+        screen:
+            contains: "Not a Git Repository"
+    - mouse: {x: 2, y: 0, button: left, action: click}
+    - wait:
+        screen:
+            contains: "alpha one"
+    - snapshot: files_roundtrip
+    - mouse: {x: 30, y: 1, button: left, action: press}
+    - mouse: {x: 34, y: 1, button: left, action: move}
+    - mouse: {x: 34, y: 1, button: left, action: release}
+    - wait:
+        screen:
+            contains: "Ln 1, Col 5"
+    - snapshot: drag_selection
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: navigation_roundtrip
+      description: tree, editor tab, and sidebar clicks return to the original file
+      verify:
+        screen:
+            contains: "alpha one"
+    - id: drag_selection_visible
+      description: dragging across editor text visibly selects the range
+      verify:
+        cell:
+            x: 30
+            y: 1
+            char: "a"
+            style:
+                bg: "#434c5e"
+    - id: clean_exit
+      description: the editor exits cleanly after the mouse navigation flow
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:b63c529a86e1cf392f34972dfd3e74559cc6a850a1cdc2bbd928c15765f4b1ca

@@ -1,8 +1,10 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -111,6 +113,105 @@ func TestViewportRenderWithSelection(t *testing.T) {
 	result := viewport.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("expected non-empty render result")
+	}
+}
+
+func TestViewportRenderWithWrapHighlightsSelection(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		anchor   text.Position
+		head     text.Position
+		width    int
+		selected string
+	}{
+		{
+			name:     "selection starts on first wrapped row",
+			content:  "abcdefgh",
+			anchor:   text.Position{Line: 0, Col: 0},
+			head:     text.Position{Line: 0, Col: 4},
+			width:    3,
+			selected: "abc",
+		},
+		{
+			name:     "selection continues onto later wrapped row",
+			content:  "abcdefgh",
+			anchor:   text.Position{Line: 0, Col: 1},
+			head:     text.Position{Line: 0, Col: 6},
+			width:    3,
+			selected: "def",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := text.NewBufferFromBytes([]byte(tt.content))
+			buf.SetSelection(tt.anchor, tt.head)
+			theme := ui.DefaultTheme()
+			wrap := NewWrapLayout(buf.Line, buf.LineCount(), tt.width)
+			viewport := Viewport{Width: 20, Height: 4}
+
+			got := viewport.RenderWithWrap(buf, theme, nil, nil, nil, wrap)
+			if want := theme.Selection.Render(tt.selected); !strings.Contains(got, want) {
+				t.Errorf("wrapped selection rendering does not contain selection-styled %q:\n%s", tt.selected, got)
+			}
+		})
+	}
+}
+
+func TestWrapSegmentBoundsKeepsWideRunesWithinRows(t *testing.T) {
+	tests := []struct {
+		name      string
+		segment   int
+		wantText  string
+		wantStart int
+		wantEnd   int
+	}{
+		{name: "first narrow rune", segment: 0, wantText: "a", wantStart: 0, wantEnd: 1},
+		{name: "wide rune moves to next row", segment: 1, wantText: "你", wantStart: 1, wantEnd: 4},
+		{name: "trailing narrow rune", segment: 2, wantText: "a", wantStart: 4, wantEnd: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, gotStart, gotEnd := wrapSegmentBounds("a你a", tt.segment, 2)
+			if gotText != tt.wantText || gotStart != tt.wantStart || gotEnd != tt.wantEnd {
+				t.Errorf(
+					"wrapSegmentBounds(segment=%d) = (%q,%d,%d), want (%q,%d,%d)",
+					tt.segment,
+					gotText,
+					gotStart,
+					gotEnd,
+					tt.wantText,
+					tt.wantStart,
+					tt.wantEnd,
+				)
+			}
+		})
+	}
+}
+
+func TestWrapLayoutCountsRowsWithoutSplittingWideRunes(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("a你a"))
+	wrap := NewWrapLayout(buf.Line, buf.LineCount(), 2)
+
+	if got := wrap.LineRows(0); got != 3 {
+		t.Errorf("LineRows(0) = %d, want 3", got)
+	}
+}
+
+func TestRenderTokenByteRangePreservesTokenStyles(t *testing.T) {
+	bold := lipgloss.NewStyle().Bold(true)
+	italic := lipgloss.NewStyle().Italic(true)
+	tokens := []highlight.StyledToken{
+		{Text: "abc", Style: bold},
+		{Text: "def", Style: italic},
+	}
+
+	got := renderTokenByteRange("abcdef", tokens, 1, 5, lipgloss.NewStyle())
+	want := bold.Render("bc") + italic.Render("de")
+	if got != want {
+		t.Errorf("renderTokenByteRange() = %q, want %q", got, want)
 	}
 }
 

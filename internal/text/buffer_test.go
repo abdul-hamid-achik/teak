@@ -100,6 +100,62 @@ func TestBufferSelection(t *testing.T) {
 	}
 }
 
+func TestBufferClearSelectionCollapsesPrimaryAtCursor(t *testing.T) {
+	tests := []struct {
+		name   string
+		anchor Position
+		head   Position
+	}{
+		{
+			name:   "forward selection",
+			anchor: Position{Line: 0, Col: 1},
+			head:   Position{Line: 0, Col: 4},
+		},
+		{
+			name:   "backward multiline selection",
+			anchor: Position{Line: 1, Col: 2},
+			head:   Position{Line: 0, Col: 3},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBufferFromBytes([]byte("hello\nworld"))
+			b.SetSelection(tt.anchor, tt.head)
+
+			b.ClearSelection()
+
+			if got := b.Selections.Count(); got != 1 {
+				t.Fatalf("selection count = %d, want 1", got)
+			}
+			if got, want := b.Selections.Primary(), (Selection{Anchor: tt.head, Head: tt.head}); got != want {
+				t.Errorf("primary selection = %#v, want %#v", got, want)
+			}
+			if got := b.Cursor; got != tt.head {
+				t.Errorf("cursor = %#v, want %#v", got, tt.head)
+			}
+		})
+	}
+}
+
+func TestBufferClearSelectionInitializesMissingSelections(t *testing.T) {
+	b := NewBufferFromBytes([]byte("hello"))
+	b.Cursor = Position{Line: 0, Col: 3}
+	b.Selections = nil
+
+	b.ClearSelection()
+
+	if b.Selections == nil {
+		t.Fatal("Selections = nil, want a primary cursor selection")
+	}
+	if got, want := b.Selections.Primary(), (Selection{
+		Anchor: b.Cursor,
+		Head:   b.Cursor,
+	}); got != want {
+		t.Errorf("primary selection = %#v, want %#v", got, want)
+	}
+}
+
 func TestBufferFileSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")

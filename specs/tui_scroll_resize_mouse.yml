@@ -1,0 +1,53 @@
+version: 1
+name: teak_scroll_resize_mouse
+coversSymbol: editor.Viewport.ScrollDown
+metadata:
+    feature: viewport-navigation
+    owner: core-ui
+    priority: high
+    tags:
+        - smoke
+        - mouse
+        - resize
+intent: |
+    scrolling changes the viewport, a click maps to the visible buffer line, and resize preserves that position.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - scroll-resize
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/long.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "Ln 1, Col 1"
+        timeoutMs: 5000
+    - mouse: {x: 50, y: 10, button: wheelDown, action: click}
+    - mouse: {x: 30, y: 1, button: left, action: click}
+    - wait:
+        screen:
+            contains: "Ln 4, Col 1"
+    - resize: {cols: 70, rows: 20}
+    - wait:
+        screen:
+            contains: "Ln 4, Col 1"
+    - snapshot: resized_at_line_four
+outcomes:
+    - id: scroll_click_resize_position
+      description: the visible first row maps to line four and remains selected after resize
+      verify:
+        screen:
+            contains: "Ln 4, Col 1"
+contractHash: sha256:9eba0a012eae0f6fb4456b9bdc3e020d74a3f6aa126acb94909f87117a0e4e0e

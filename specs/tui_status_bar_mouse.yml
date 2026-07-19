@@ -1,0 +1,45 @@
+version: 1
+name: teak_status_bar_is_inert
+coversSymbol: app.Model.Update
+metadata:
+    feature: mouse-hit-testing
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - boundary
+intent: |
+    clicking non-interactive status-bar chrome does not move the editor cursor.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - status-bar
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/long.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "Ln 1, Col 1"
+        timeoutMs: 5000
+    - mouse: {x: 60, y: 29, button: left, action: click}
+    - snapshot: after_status_click
+outcomes:
+    - id: cursor_unchanged
+      description: the cursor remains at the first buffer position after a status-bar click
+      verify:
+        screen:
+            contains: "Ln 1, Col 1"
+contractHash: sha256:8b7503a37dc98a5daec398dbb9e8fa52b341f93a47aae62ca06c9582f144a768

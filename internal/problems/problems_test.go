@@ -1,8 +1,12 @@
 package problems
 
 import (
+	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -48,6 +52,39 @@ func TestModel_SetProblems(t *testing.T) {
 	}
 	if m.WarningCount() != 1 {
 		t.Errorf("WarningCount() = %d, want 1", m.WarningCount())
+	}
+}
+
+func TestModelSelectAt(t *testing.T) {
+	tests := []struct {
+		name         string
+		index        int
+		wantSelected int
+		wantOK       bool
+	}{
+		{name: "first", index: 0, wantSelected: 0, wantOK: true},
+		{name: "last", index: 2, wantSelected: 2, wantOK: true},
+		{name: "negative", index: -1, wantSelected: 0, wantOK: false},
+		{name: "past end", index: 3, wantSelected: 0, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(ui.DefaultTheme(), "/tmp")
+			m.SetProblems([]Problem{
+				{FilePath: "/tmp/a.go"},
+				{FilePath: "/tmp/b.go"},
+				{FilePath: "/tmp/c.go"},
+			})
+
+			gotOK := m.SelectAt(tt.index)
+			if gotOK != tt.wantOK {
+				t.Errorf("SelectAt(%d) = %v, want %v", tt.index, gotOK, tt.wantOK)
+			}
+			if got := m.SelectedIndex(); got != tt.wantSelected {
+				t.Errorf("SelectedIndex() = %d, want %d", got, tt.wantSelected)
+			}
+		})
 	}
 }
 
@@ -258,5 +295,56 @@ func TestModel_View_WithProblems(t *testing.T) {
 	view := m.View()
 	if view == "" {
 		t.Error("View() should not return empty string when problems exist")
+	}
+}
+
+func TestModelViewNarrowWidthsTruncatesUnicodeMessagesSafely(t *testing.T) {
+	for _, width := range []int{0, 15, 19, 22, 25} {
+		t.Run("width="+strconv.Itoa(width), func(t *testing.T) {
+			m := New(ui.DefaultTheme(), "/root")
+			m.SetSize(width, 1)
+			m.SetProblems([]Problem{{
+				FilePath: "/root/a.go",
+				Severity: 1,
+				Message:  "\x1b[31m界界界 diagnostic\x1b[0m",
+			}})
+
+			view := m.View()
+			if !utf8.ValidString(ansi.Strip(view)) {
+				t.Fatalf("View() produced invalid UTF-8: %q", view)
+			}
+			if width == 25 {
+				plain := ansi.Strip(view)
+				if !strings.Contains(plain, "界...") {
+					t.Errorf("View() = %q, want display-width truncation containing %q", plain, "界...")
+				}
+				if strings.Contains(plain, "界界") {
+					t.Errorf("View() = %q, want message truncated before a second wide character", plain)
+				}
+			}
+		})
+	}
+}
+
+func TestModelScrollingIsSafeWithNonPositiveHeight(t *testing.T) {
+	for _, height := range []int{0, -1} {
+		t.Run("height="+strconv.Itoa(height), func(t *testing.T) {
+			m := New(ui.DefaultTheme(), "/root")
+			m.SetSize(25, height)
+			m.SetProblems([]Problem{
+				{FilePath: "/root/a.go"},
+				{FilePath: "/root/b.go"},
+			})
+			m.selectedIndex = 1
+			m.scrollY = 1
+
+			m.ensureVisible()
+			m.ScrollDown(3)
+			m.ScrollUp(3)
+
+			if got := m.ScrollY(); got != 0 {
+				t.Errorf("ScrollY() = %d, want 0 when height is non-positive", got)
+			}
+		})
 	}
 }

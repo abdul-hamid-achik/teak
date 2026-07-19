@@ -1,0 +1,18 @@
+version: 1
+
+artifactRoot: .glyphrun/runs
+snapshotRoot: .glyphrun/snapshots
+
+terminal:
+  profile: xterm-256color
+  cols: 100
+  rows: 30
+  normalize:
+    trimRight: true
+    normalizeLineEndings: true
+
+artifacts:
+  frames: true
+  finalScreen: true
+  snapshots: true
+  agentContext: true

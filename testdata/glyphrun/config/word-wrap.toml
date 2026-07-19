@@ -1,0 +1,19 @@
+[editor]
+tab_size = 4
+insert_tabs = false
+auto_indent = true
+format_on_save = false
+word_wrap = true
+
+[ui]
+theme = "nord"
+show_tree = true
+
+[agent]
+enabled = false
+command = ""
+args = []
+
+[session]
+enabled = false
+auto_save_interval = 30

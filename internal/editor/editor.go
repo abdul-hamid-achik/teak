@@ -272,51 +272,51 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	switch msg.String() {
 	// --- Navigation ---
 	case "left":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursor(text.DirLeft)
+		e.Buffer.ClearSelection()
 	case "right":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursor(text.DirRight)
+		e.Buffer.ClearSelection()
 	case "up":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursor(text.DirUp)
+		e.Buffer.ClearSelection()
 	case "down":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursor(text.DirDown)
+		e.Buffer.ClearSelection()
 	case "ctrl+left":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursorWordLeft()
+		e.Buffer.ClearSelection()
 	case "ctrl+right":
-		e.Buffer.ClearSelection()
 		e.Buffer.MoveCursorWordRight()
+		e.Buffer.ClearSelection()
 	case "home":
-		e.Buffer.ClearSelection()
 		e.Buffer.CursorToLineStart()
+		e.Buffer.ClearSelection()
 	case "end":
-		e.Buffer.ClearSelection()
 		e.Buffer.CursorToLineEnd()
+		e.Buffer.ClearSelection()
 	case "ctrl+home":
-		e.Buffer.ClearSelection()
 		e.Buffer.CursorToDocStart()
+		e.Buffer.ClearSelection()
 	case "ctrl+end":
-		e.Buffer.ClearSelection()
 		e.Buffer.CursorToDocEnd()
-	case "pgup":
 		e.Buffer.ClearSelection()
+	case "pgup":
 		target := max(0, e.Buffer.Cursor.Line-e.Viewport.Height)
 		e.Buffer.Cursor.Line = target
 		e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		e.Buffer.ClearSelection()
 		e.Viewport.ScrollUp(e.Viewport.Height)
 		// Trigger viewport tokenization if scrolled outside tokenized range
 		if e.needsRetokenize() {
 			return e, e.scheduleRetokenizeImmediate()
 		}
 	case "pgdown":
-		e.Buffer.ClearSelection()
 		maxLine := e.Buffer.LineCount() - 1
 		target := min(maxLine, e.Buffer.Cursor.Line+e.Viewport.Height)
 		e.Buffer.Cursor.Line = target
 		e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		e.Buffer.ClearSelection()
 		e.Viewport.ScrollDown(e.Viewport.Height, maxLine)
 		// Trigger viewport tokenization if scrolled outside tokenized range
 		if e.needsRetokenize() {
@@ -542,7 +542,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 		pos := e.screenToBuffer(m.X, m.Y)
 		// Only move cursor if no selection (preserve selection for cut/copy)
 		if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 || e.Buffer.Selections.Primary().IsEmpty() {
-			e.Buffer.Cursor = pos
+			e.Buffer.SetCursor(pos)
 		}
 		e.contextMenu.Show(e.buildEditorMenuItems(), m.X, m.Y)
 		return e, nil
@@ -577,15 +577,14 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			now := time.Now()
 			// Double-click detection: same position within 400ms
 			if pos == e.lastClickPos && now.Sub(e.lastClickTime) < 400*time.Millisecond {
-				e.Buffer.Cursor = pos
+				e.Buffer.SetCursor(pos)
 				e.Buffer.SelectWordAtCursor()
 				e.lastClickTime = time.Time{} // reset to prevent triple-click
 				return e, nil
 			}
 			e.lastClickTime = now
 			e.lastClickPos = pos
-			e.Buffer.ClearSelection()
-			e.Buffer.Cursor = pos
+			e.Buffer.SetCursor(pos)
 			e.dragging = true
 		}
 	}
@@ -714,11 +713,8 @@ func (e Editor) CursorPosition() (int, int) {
 		if textWidth < 1 {
 			textWidth = 1
 		}
-		wrapRow := 0
-		if textWidth > 0 {
-			wrapRow = displayCol / textWidth
-		}
-		x := displayCol - wrapRow*textWidth + gw
+		wrapRow, wrapCol := wrappedPosition(string(lineContent), col, textWidth)
+		x := wrapCol + gw
 		visualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow - e.Wrap.VisualRow(e.Viewport.ScrollY)
 		return x, visualRow
 	}

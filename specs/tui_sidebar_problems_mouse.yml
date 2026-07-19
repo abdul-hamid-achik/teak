@@ -1,0 +1,49 @@
+version: 1
+name: teak_sidebar_problems_mouse
+coversSymbol: app.Model.Update
+metadata:
+    feature: sidebar-routing
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - sidebar
+intent: |
+    clicking inside the Problems panel does not activate a file-tree row hidden behind that panel.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - sidebar-problems
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "alpha one"
+        timeoutMs: 5000
+    - mouse: {x: 13, y: 0, button: left, action: click}
+    - wait:
+        screen:
+            contains: "No problems found"
+    - mouse: {x: 5, y: 2, button: left, action: click}
+    - snapshot: problems_after_body_click
+outcomes:
+    - id: hidden_tree_not_activated
+      description: a Problems body click leaves alpha.txt open instead of opening hidden beta.txt
+      verify:
+        screen:
+            contains: "alpha one"
+contractHash: sha256:f861eed562e63d83ae18ce42752176bfd888262e0458aa65976ee9a8e1d0ea99

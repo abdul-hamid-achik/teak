@@ -485,6 +485,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		m.refreshScrollBounds()
 		mouse := msg.Mouse()
 		switch mouse.Button {
 		case tea.MouseWheelUp:
@@ -572,6 +573,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case "pgup", "pageup":
+		m.refreshScrollBounds()
 		m.scrollY -= m.chatViewHeight()
 		if m.scrollY < 0 {
 			m.scrollY = 0
@@ -580,6 +582,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case "pgdown", "pagedown":
+		m.refreshScrollBounds()
 		m.scrollY += m.chatViewHeight()
 		if m.scrollY > m.maxScroll {
 			m.scrollY = m.maxScroll
@@ -595,6 +598,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case "end":
+		m.refreshScrollBounds()
 		m.scrollY = m.maxScroll
 		m.autoScroll = true
 		return m, nil
@@ -699,7 +703,7 @@ func (m Model) handlePermissionKey(key string) (Model, tea.Cmd) {
 }
 
 func (m Model) chatViewHeight() int {
-	h := m.height - 4
+	h := m.height - 3
 	if len(m.taggedFiles) > 0 {
 		h--
 	}
@@ -707,6 +711,34 @@ func (m Model) chatViewHeight() int {
 		h = 1
 	}
 	return h
+}
+
+// refreshScrollBounds recalculates scroll state from the current chat content
+// and panel dimensions. Scroll controls call this instead of relying on View
+// having persisted a previous render's measurements.
+func (m *Model) refreshScrollBounds() {
+	width := m.width
+	if width < 1 {
+		width = 1
+	}
+	m.setScrollBounds(len(m.buildChatLines(width)))
+}
+
+func (m *Model) setScrollBounds(chatLineCount int) {
+	m.lastChatLineCount = chatLineCount
+	m.maxScroll = chatLineCount - m.chatViewHeight()
+	if m.maxScroll < 0 {
+		m.maxScroll = 0
+	}
+	if m.autoScroll {
+		m.scrollY = m.maxScroll
+	}
+	if m.scrollY > m.maxScroll {
+		m.scrollY = m.maxScroll
+	}
+	if m.scrollY < 0 {
+		m.scrollY = 0
+	}
 }
 
 // View renders the agent panel. Call on a *Model (via &m.agentPanel) to
@@ -742,20 +774,8 @@ func (m *Model) View() string {
 	chatLines := m.buildChatLines(innerW)
 	m.lastChatLineCount = len(chatLines)
 
-	// Compute scroll (pointer receiver — persists)
-	m.maxScroll = len(chatLines) - chatHeight
-	if m.maxScroll < 0 {
-		m.maxScroll = 0
-	}
-	if m.autoScroll {
-		m.scrollY = m.maxScroll
-	}
-	if m.scrollY > m.maxScroll {
-		m.scrollY = m.maxScroll
-	}
-	if m.scrollY < 0 {
-		m.scrollY = 0
-	}
+	// Compute scroll (pointer receiver — persists).
+	m.setScrollBounds(len(chatLines))
 
 	// Render visible chat lines
 	for i := 0; i < chatHeight; i++ {

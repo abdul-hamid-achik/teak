@@ -880,277 +880,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
-		// Unsaved changes dialog captures all mouse clicks when visible
-		if m.unsavedConfirm != nil {
-			updated, cmd := m.unsavedConfirm.Update(msg)
-			if updated.IsDismissed() {
-				m.unsavedConfirm = nil
-			} else {
-				m.unsavedConfirm = updated.(*overlay.Confirm)
-			}
-			return m, cmd
-		}
-
-		// Overlay stack captures clicks when active
-		if !m.overlayStack.IsEmpty() {
-			cmd := m.overlayStack.Update(msg)
-			return m, cmd
-		}
-
-		// Branch picker captures clicks when visible
-		if m.showBranchPicker {
-			return m.updateBranchPicker(msg)
-		}
-
-		// Search overlay captures all mouse clicks when visible
-		if m.showSearch {
-			if zone.Get("search-replace-btn").InBounds(msg) {
-				query := m.searchM.Query()
-				replacement := m.searchM.Replacement()
-				if query != "" {
-					return m, func() tea.Msg {
-						return search.ReplaceOneMsg{Query: query, Replacement: replacement}
-					}
-				}
-				return m, nil
-			}
-			if zone.Get("search-replace-all-btn").InBounds(msg) {
-				query := m.searchM.Query()
-				replacement := m.searchM.Replacement()
-				if query != "" {
-					return m, func() tea.Msg {
-						return search.ReplaceAllMsg{Query: query, Replacement: replacement}
-					}
-				}
-				return m, nil
-			}
-			return m.updateSearch(msg)
-		}
-
-		// Help overlay: forward mouse events
-		if m.showHelp {
-			var cmd tea.Cmd
-			m.helpM, cmd = m.helpM.Update(msg)
-			return m, cmd
-		}
-
-		// Handle clicks on tree context menu
-		if m.treeContextMenu.Visible {
-			mouse0 := msg.Mouse()
-			if mouse0.Button == tea.MouseLeft {
-				// Account for the border (1 line top border from RoundedBorder)
-				relY := mouse0.Y - m.treeContextMenu.Y - 1
-				if item := m.treeContextMenu.SelectAt(relY); item != nil {
-					action := item.Action
-					m.treeContextMenu.Hide()
-					return m.handleTreeContextMenuAction(action)
-				}
-			}
-			m.treeContextMenu.Hide()
-			return m, nil
-		}
-
-		// Handle clicks on git context menu
-		if m.gitContextMenu.Visible {
-			mouse0 := msg.Mouse()
-			if mouse0.Button == tea.MouseLeft {
-				relY := mouse0.Y - m.gitContextMenu.Y - 1
-				if item := m.gitContextMenu.SelectAt(relY); item != nil {
-					action := item.Action
-					m.gitContextMenu.Hide()
-					return m.handleGitContextMenuAction(action)
-				}
-			}
-			m.gitContextMenu.Hide()
-			return m, nil
-		}
-
-		// Handle clicks on editor context menu
-		mouse0 := msg.Mouse()
-		if mouse0.Button == tea.MouseLeft && m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
-			_, cmY := m.activeEditor().ContextMenuPosition()
-			cmY += 1 // +1 for tab bar
-			// Account for the border (1 line top border from RoundedBorder)
-			relY := mouse0.Y - cmY - 1
-			ed := m.editors[m.activeTab]
-			result, cmd, action := ed.ClickContextMenuItem(relY)
-			m.setEditor(m.activeTab, result)
-			if action == "goto_definition" || action == "find_references" || action == "rename_symbol" {
-				return m.handleContextMenuAction(action)
-			}
-			return m, cmd
-		}
-
-		// Dismiss welcome on click in editor area
-		if m.welcome != nil && m.welcome.Active {
-			mouse := msg.Mouse()
-			editorStartX := 0
-			if m.showTree {
-				editorStartX = m.treeWidth() + 1
-			}
-			if mouse.X >= editorStartX {
-				m.welcome.Dismiss()
-			}
-		}
-
-		mouse := msg.Mouse()
-
-		// Status bar branch click → open branch picker
-		if zone.Get("status-bar-branch").InBounds(msg) && m.gitPanel.IsGitRepo() {
-			m.showBranchPicker = true
-			m.branchPickerM.SetSize(m.width, m.height)
-			return m, tea.Batch(
-				git.ListBranchesCmd(m.gitPanel.RootDir()),
-				m.branchPickerM.Focus(),
-			)
-		}
-
-		// Agent panel click detection
-		if m.showAgent && m.agentPanelWidth() > 0 {
-			agentStartX := m.width - m.agentPanelWidth()
-			if mouse.X >= agentStartX {
-				m.focus = FocusAgent
-				mouse.X -= agentStartX
-				adjusted := tea.MouseClickMsg(mouse)
-				var cmd tea.Cmd
-				m.agentPanel, cmd = m.agentPanel.Update(adjusted)
-				return m, cmd
-			}
-		}
-
-		if m.showTree {
-			treeWidth := m.treeWidth()
-			if mouse.X < treeWidth {
-				// Y==0 is the sidebar tab bar
-				if mouse.Y == 0 {
-					// Check which sidebar tab was clicked
-					if zone.Get("sidebar-tab-files").InBounds(msg) {
-						m.sidebarTab = SidebarFiles
-						m.focus = FocusTree
-					} else if zone.Get("sidebar-tab-git").InBounds(msg) {
-						m.sidebarTab = SidebarGit
-						m.focus = FocusGitPanel
-					} else if zone.Get("sidebar-tab-problems").InBounds(msg) {
-						m.sidebarTab = SidebarProblems
-						m.focus = FocusProblems
-					} else if zone.Get("sidebar-tab-debugger").InBounds(msg) {
-						m.sidebarTab = SidebarDebugger
-						m.focus = FocusDebugger
-					}
-					return m, nil
-				}
-				// Y>0: forward to active sidebar panel with Y adjusted by -1
-				if m.sidebarTab == SidebarGit {
-					m.focus = FocusGitPanel
-					if mouse.Button == tea.MouseRight {
-						return m.showGitContextMenu(mouse.X, mouse.Y, mouse.Y-1)
-					}
-					// Pass original msg for zone checks, adjusted Y for positional logic
-					return m.handleGitPanelClick(mouse.Y-1, msg)
-				}
-				mouse.Y -= 1
-				// File tree
-				if mouse.Button == tea.MouseRight {
-					return m.showTreeContextMenu(mouse.X, mouse.Y) // mouse.Y is already 0-based after adjustment
-				}
-				m.focus = FocusTree
-				adjusted := tea.MouseClickMsg(mouse)
-				var cmd tea.Cmd
-				m.tree, cmd = m.tree.Update(adjusted)
-				return m, cmd
-			} else {
-				m.focus = FocusEditor
-				// Editor area — check tab bar click (Y==0 in editor column)
-				// Use original msg for zone.InBounds (zones are at absolute positions)
-				if mouse.Y == 0 {
-					return m.handleTabBarClick(msg)
-				}
-				// Adjust for tab bar + tree offset and forward to editor
-				mouse.X -= treeWidth + 1
-				mouse.Y -= 1
-				adjusted := tea.MouseClickMsg(mouse)
-				return m.forwardToEditor(adjusted)
-			}
-		} else {
-			// No tree — check tab bar click (Y==0)
-			if mouse.Y == 0 {
-				return m.handleTabBarClick(msg)
-			}
-			// Adjust Y for tab bar and forward to editor
-			mouse.Y -= 1
-			adjusted := tea.MouseClickMsg(mouse)
-			return m.forwardToEditor(adjusted)
-		}
+		return m.handleMouseClick(msg)
 
 	case tea.MouseMotionMsg:
-		mouse := msg.Mouse()
-		if m.showTree {
-			treeWidth := m.treeWidth()
-			if mouse.X >= treeWidth+1 {
-				mouse.X -= treeWidth + 1
-				mouse.Y -= 1
-				adjusted := tea.MouseMotionMsg(mouse)
-				return m.forwardToEditor(adjusted)
-			}
-		} else {
-			mouse.Y -= 1
-			adjusted := tea.MouseMotionMsg(mouse)
-			return m.forwardToEditor(adjusted)
-		}
+		return m.handleMouseMotion(msg)
+
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
 
 	case tea.MouseWheelMsg:
-		// Overlay stack captures scroll when active
-		if !m.overlayStack.IsEmpty() {
-			cmd := m.overlayStack.Update(msg)
-			return m, cmd
-		}
-		if m.showSearch {
-			return m.updateSearch(msg)
-		}
-		if m.showHelp {
-			var cmd tea.Cmd
-			m.helpM, cmd = m.helpM.Update(msg)
-			return m, cmd
-		}
-		mouse := msg.Mouse()
-		// Agent panel scroll
-		if m.showAgent && m.agentPanelWidth() > 0 {
-			agentStartX := m.width - m.agentPanelWidth()
-			if mouse.X >= agentStartX {
-				mouse.X -= agentStartX
-				adjusted := tea.MouseWheelMsg(mouse)
-				var cmd tea.Cmd
-				m.agentPanel, cmd = m.agentPanel.Update(adjusted)
-				return m, cmd
-			}
-		}
-		if m.showTree {
-			treeWidth := m.treeWidth()
-			if mouse.X < treeWidth {
-				// Route to active sidebar panel (skip tab bar row)
-				mouse.Y -= 1
-				if m.sidebarTab == SidebarGit {
-					adjusted := tea.MouseWheelMsg(mouse)
-					var cmd tea.Cmd
-					m.gitPanel, cmd = m.gitPanel.Update(adjusted)
-					return m, cmd
-				}
-				adjusted := tea.MouseWheelMsg(mouse)
-				var cmd tea.Cmd
-				m.tree, cmd = m.tree.Update(adjusted)
-				return m, cmd
-			}
-			if mouse.X >= treeWidth+1 {
-				mouse.X -= treeWidth + 1
-				mouse.Y -= 1
-				adjusted := tea.MouseWheelMsg(mouse)
-				return m.forwardToEditor(adjusted)
-			}
-		} else {
-			mouse.Y -= 1
-			adjusted := tea.MouseWheelMsg(mouse)
-			return m.forwardToEditor(adjusted)
-		}
+		return m.handleMouseWheel(msg)
 
 	case filetree.DirExpandedMsg:
 		var cmd tea.Cmd
@@ -2264,6 +2003,10 @@ func (m *Model) relayout() {
 
 	// Agent panel width (0 if hidden)
 	aw := m.agentPanelWidth()
+	if m.width > 0 && m.height > 0 && m.showAgent && aw == 0 && m.focus == FocusAgent {
+		m.focus = FocusEditor
+		m.agentPanel.Blur()
+	}
 	agentExtra := 0
 	if aw > 0 {
 		agentExtra = aw + 1 // +1 for border
@@ -2295,6 +2038,8 @@ func (m *Model) relayout() {
 
 		m.tree.SetSize(tw, panelHeight)
 		m.gitPanel.SetSize(tw, panelHeight)
+		m.problemsPanel.SetSize(tw, panelHeight)
+		m.debuggerPanel.SetSize(tw, panelHeight)
 		m.tabBar.Width = editorWidth
 		for i := range m.editors {
 			m.editors[i].SetSize(editorWidth, editorHeight)
@@ -2802,14 +2547,8 @@ func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
-			// Select item at click position
-			clickIdx := m.problemsPanel.ScrollY() + mouse.Y - 1 // -1 for tab bar
-			if clickIdx >= 0 && clickIdx < m.problemsPanel.ProblemCount() {
-				// Set selection to clicked item
-				for i := 0; i < clickIdx-m.problemsPanel.ScrollY(); i++ {
-					m.problemsPanel.SelectNext()
-				}
-			}
+			clickIdx := m.problemsPanel.ScrollY() + mouse.Y
+			m.problemsPanel.SelectAt(clickIdx)
 			return m, nil
 		}
 	}
@@ -3853,9 +3592,9 @@ func workspaceOperationLabel(op lsp.WorkspaceFileOperation) string {
 	}
 }
 
-func (m Model) showTreeContextMenu(x, y int) (tea.Model, tea.Cmd) {
+func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
 	// Get the entry at the clicked position from the tree
-	entry := m.tree.EntryAtY(y)
+	entry := m.tree.EntryAtY(treeY)
 
 	var items []editor.ContextMenuItem
 	if entry == nil {
@@ -3865,7 +3604,7 @@ func (m Model) showTreeContextMenu(x, y int) (tea.Model, tea.Cmd) {
 			{Label: "New File...", Action: "tree_new_file"},
 			{Label: "New Folder...", Action: "tree_new_folder"},
 		}
-		m.treeContextMenu.Show(items, x, y)
+		m.treeContextMenu.Show(items, x, screenY)
 		return m, nil
 	}
 
@@ -3894,7 +3633,7 @@ func (m Model) showTreeContextMenu(x, y int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	m.treeContextMenu.Show(items, x, y)
+	m.treeContextMenu.Show(items, x, screenY)
 	return m, nil
 }
 

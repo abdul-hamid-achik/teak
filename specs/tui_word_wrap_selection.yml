@@ -1,0 +1,54 @@
+version: 1
+name: teak_word_wrap_selection
+coversSymbol: editor.Viewport.RenderWithWrap
+metadata:
+    feature: word-wrap
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - selection
+intent: |
+    a drag selection remains visibly highlighted when word wrap is enabled.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - word-wrap-selection
+        - testdata/glyphrun/config/word-wrap.toml
+        - testdata/glyphrun/workspace/wrap.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "Ln 1, Col 1"
+        timeoutMs: 5000
+    - mouse: {x: 30, y: 1, button: left, action: press}
+    - mouse: {x: 34, y: 1, button: left, action: move}
+    - mouse: {x: 34, y: 1, button: left, action: release}
+    - wait:
+        screen:
+            contains: "Ln 1, Col 5"
+    - snapshot: wrapped_selection
+outcomes:
+    - id: wrapped_selection_visible
+      description: the first selected character uses the Nord selection background
+      verify:
+        cell:
+            x: 30
+            y: 1
+            char: "a"
+            style:
+                bg: "#434c5e"
+contractHash: sha256:0853e79901ec722633c0291be19b6384cb8bea8f4859810021d400d60a739276

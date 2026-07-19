@@ -1,0 +1,53 @@
+version: 1
+name: teak_settings_modal_captures_mouse
+coversSymbol: app.Model.Update
+metadata:
+    feature: modal-routing
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+        - overlay
+intent: |
+    clicks outside the Settings dialog are captured by the modal and do not move the editor cursor behind it.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - settings-modal
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "Ln 1, Col 1"
+        timeoutMs: 5000
+    - send: {bytes: "\\x1b[44;5u"}
+    - wait:
+        screen:
+            contains: "Settings"
+    - mouse: {x: 37, y: 1, button: left, action: click}
+    - press: "esc"
+    - wait:
+        screen:
+            notContains: "Settings"
+    - snapshot: after_settings_closed
+outcomes:
+    - id: background_cursor_unchanged
+      description: the cursor remains at the first position after closing Settings
+      verify:
+        screen:
+            contains: "Ln 1, Col 1"
+contractHash: sha256:ed70ffbb0074d3938b846f4dc392ee549f9241bbb32cd0a668c8718e2bd4bcd8

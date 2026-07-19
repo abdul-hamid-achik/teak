@@ -521,9 +521,7 @@ func (b *Buffer) SetSelection(anchor, head Position) {
 
 // ClearSelection clears any active selection.
 func (b *Buffer) ClearSelection() {
-	if b.Selections != nil {
-		b.Selections.Clear()
-	}
+	b.SetSelection(b.Cursor, b.Cursor)
 }
 
 // CursorToLineStart moves the cursor to the beginning of the current line.

@@ -1,0 +1,57 @@
+version: 1
+name: teak_editor_selection_clears
+coversSymbol: text.Buffer.ClearSelection
+metadata:
+    feature: editor-selection
+    owner: core-ui
+    priority: high
+    tags:
+        - regression
+        - mouse
+intent: |
+    a normal click after a drag selection clears the old range and leaves one cursor at the clicked position.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - selection-clear
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "Ln 1, Col 1"
+        timeoutMs: 5000
+    - mouse: {x: 30, y: 1, button: left, action: press}
+    - mouse: {x: 34, y: 1, button: left, action: move}
+    - mouse: {x: 34, y: 1, button: left, action: release}
+    - wait:
+        screen:
+            contains: "Ln 1, Col 5"
+    - mouse: {x: 35, y: 1, button: left, action: click}
+    - wait:
+        screen:
+            contains: "Ln 1, Col 6"
+    - snapshot: after_single_click
+outcomes:
+    - id: old_selection_cleared
+      description: the formerly selected first character returns to cursor-line styling
+      verify:
+        cell:
+            x: 30
+            y: 1
+            char: "a"
+            style:
+                bg: "#3b4252"
+contractHash: sha256:88ce845f11db7d2fd4044a041f4542d1356aa81e090ff704c0dd2aea7d24cacd

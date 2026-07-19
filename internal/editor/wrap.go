@@ -28,18 +28,71 @@ func NewWrapLayout(lineGetter func(int) []byte, lineCount, width int) *WrapLayou
 
 // computeLineRows returns how many visual rows a line occupies at the given width.
 func (w *WrapLayout) computeLineRows(line []byte, width int) int {
-	if len(line) == 0 {
-		return 1 // empty line still takes 1 row
-	}
-	displayW := runewidth.StringWidth(string(line))
-	if displayW <= width {
-		return 1
-	}
-	rows := (displayW + width - 1) / width
-	if rows < 1 {
-		rows = 1
-	}
+	_, _, rows, _ := wrappedLineSegment(string(line), -1, width)
 	return rows
+}
+
+// wrappedLineSegment returns byte bounds for one visual row and the total row
+// count. Wide runes move to the next row when they do not fit, so no row
+// silently exceeds the configured width merely because a rune straddles a
+// fixed display-width bucket.
+func wrappedLineSegment(line string, segment, width int) (start, end, rows int, ok bool) {
+	if width < 1 {
+		width = 1
+	}
+	if line == "" {
+		return 0, 0, 1, segment == 0
+	}
+
+	row := 0
+	rowStart := 0
+	rowWidth := 0
+	for i, r := range line {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth < 0 {
+			runeWidth = 0
+		}
+		if rowWidth > 0 && rowWidth+runeWidth > width {
+			if row == segment {
+				return rowStart, i, 0, true
+			}
+			row++
+			rowStart = i
+			rowWidth = 0
+		}
+		rowWidth += runeWidth
+	}
+
+	rows = row + 1
+	if row == segment {
+		return rowStart, len(line), rows, true
+	}
+	return 0, 0, rows, false
+}
+
+// wrappedPosition maps a byte column to its packed visual row and display
+// column using the same wide-rune rules as wrappedLineSegment.
+func wrappedPosition(line string, byteCol, width int) (row, displayCol int) {
+	if width < 1 {
+		width = 1
+	}
+	byteCol = max(0, min(byteCol, len(line)))
+
+	for i, r := range line {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth < 0 {
+			runeWidth = 0
+		}
+		if displayCol > 0 && displayCol+runeWidth > width {
+			row++
+			displayCol = 0
+		}
+		if i >= byteCol {
+			return row, displayCol
+		}
+		displayCol += runeWidth
+	}
+	return row, displayCol
 }
 
 // TotalRows returns the total visual rows across all lines.

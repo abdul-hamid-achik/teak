@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/text"
 	"teak/internal/ui"
 )
@@ -78,6 +79,7 @@ func New(theme ui.Theme, rootDir string) Model {
 func (m *Model) SetSize(width, height int) {
 	m.width = width
 	m.height = height
+	m.clampScroll()
 }
 
 // SetProblems updates the problems list and rebuilds groups.
@@ -88,6 +90,7 @@ func (m *Model) SetProblems(problems []Problem) {
 	if m.selectedIndex >= len(m.problems) {
 		m.selectedIndex = max(0, len(m.problems)-1)
 	}
+	m.clampScroll()
 }
 
 // buildGroups groups problems by file.
@@ -170,27 +173,48 @@ func (m *Model) SelectPrev() {
 
 // ensureVisible scrolls to keep the selection visible.
 func (m *Model) ensureVisible() {
+	if m.height <= 0 {
+		m.scrollY = 0
+		return
+	}
 	if m.selectedIndex < m.scrollY {
 		m.scrollY = m.selectedIndex
 	}
 	if m.selectedIndex >= m.scrollY+m.height {
 		m.scrollY = m.selectedIndex - m.height + 1
 	}
+	m.clampScroll()
 }
 
 // ScrollUp scrolls up by n items.
 func (m *Model) ScrollUp(n int) {
-	m.scrollY -= n
-	if m.scrollY < 0 {
+	if m.height <= 0 {
 		m.scrollY = 0
+		return
 	}
+	m.scrollY -= n
+	m.clampScroll()
 }
 
 // ScrollDown scrolls down by n items.
 func (m *Model) ScrollDown(n int) {
-	maxScroll := max(0, len(m.problems)-m.height)
+	if m.height <= 0 {
+		m.scrollY = 0
+		return
+	}
 	m.scrollY += n
-	if m.scrollY > maxScroll {
+	m.clampScroll()
+}
+
+func (m *Model) clampScroll() {
+	if m.height <= 0 {
+		m.scrollY = 0
+		return
+	}
+	maxScroll := max(0, len(m.problems)-m.height)
+	if m.scrollY < 0 {
+		m.scrollY = 0
+	} else if m.scrollY > maxScroll {
 		m.scrollY = maxScroll
 	}
 }
@@ -208,6 +232,16 @@ func (m *Model) ScrollY() int {
 // SelectedIndex returns the current selection index.
 func (m *Model) SelectedIndex() int {
 	return m.selectedIndex
+}
+
+// SelectAt selects a problem by its absolute index.
+func (m *Model) SelectAt(index int) bool {
+	if index < 0 || index >= len(m.problems) {
+		return false
+	}
+	m.selectedIndex = index
+	m.ensureVisible()
+	return true
 }
 
 // View renders the Problems panel.
@@ -272,11 +306,8 @@ func (m *Model) renderProblem(index int) string {
 	location := fmt.Sprintf("%d:%d", p.Line+1, p.Col+1)
 
 	// Message (truncated if needed)
-	message := p.Message
-	maxMessageWidth := m.width - 20 // Reserve space for icon, path, location
-	if len(message) > maxMessageWidth {
-		message = message[:maxMessageWidth-3] + "..."
-	}
+	maxMessageWidth := max(0, m.width-20) // Reserve space for icon, path, location.
+	message := ansi.Truncate(p.Message, maxMessageWidth, "...")
 
 	// Build the line
 	var parts []string

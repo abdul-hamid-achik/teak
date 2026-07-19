@@ -220,6 +220,22 @@ func TestEditorPageUpDown(t *testing.T) {
 	}
 }
 
+func TestEditorNavigationKeepsCollapsedSelectionAtCursor(t *testing.T) {
+	e := newEditor("abcd", 0, 0)
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "right"})
+	e, _ = e.Update(tea.KeyPressMsg{Text: "shift+right"})
+
+	got := e.Buffer.Selections.Primary()
+	want := text.Selection{
+		Anchor: text.Position{Line: 0, Col: 1},
+		Head:   text.Position{Line: 0, Col: 2},
+	}
+	if got != want {
+		t.Errorf("selection after right then shift+right = %#v, want %#v", got, want)
+	}
+}
+
 // --- Selection ---
 
 func TestEditorShiftUpDown(t *testing.T) {
@@ -484,6 +500,22 @@ func TestEditorMouseDrag(t *testing.T) {
 
 	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		t.Error("mouse motion while dragging should create selection")
+	}
+}
+
+func TestEditorMouseClickKeepsCollapsedSelectionAtCursor(t *testing.T) {
+	e := newEditor("hello world", 0, 0)
+
+	e, _ = e.Update(tea.MouseClickMsg{
+		Button: tea.MouseLeft,
+		X:      10,
+		Y:      0,
+	})
+
+	got := e.Buffer.Selections.Primary()
+	want := text.Selection{Anchor: e.Buffer.Cursor, Head: e.Buffer.Cursor}
+	if got != want {
+		t.Errorf("selection after click = %#v, want collapsed at cursor %#v", got, want)
 	}
 }
 

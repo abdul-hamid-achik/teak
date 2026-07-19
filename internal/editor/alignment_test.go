@@ -54,6 +54,45 @@ func TestEditorWrapIgnoresFoldGutterMetrics(t *testing.T) {
 	}
 }
 
+func TestEditorWrapWideRuneCursorUsesPackedVisualRow(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("a你a"))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+
+	ed := New(buf, ui.DefaultTheme(), cfg)
+	ed.Wrap = NewWrapLayout(buf.Line, buf.LineCount(), 2)
+	ed.Buffer.SetCursor(text.Position{Line: 0, Col: len("a你")})
+
+	_, y := ed.CursorPosition()
+	if y != 2 {
+		t.Fatalf("wrapped cursor row = %d, want 2", y)
+	}
+}
+
+func TestScreenToBufferPositionWrapUsesPackedWideRuneRows(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("a你a"))
+	wrap := NewWrapLayout(buf.Line, buf.LineCount(), 2)
+	viewport := Viewport{}
+
+	tests := []struct {
+		name string
+		row  int
+		want text.Position
+	}{
+		{name: "wide rune row", row: 1, want: text.Position{Line: 0, Col: 1}},
+		{name: "trailing rune row", row: 2, want: text.Position{Line: 0, Col: 4}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := viewport.ScreenToBufferPositionWrap(0, tt.row, buf, 0, wrap)
+			if got != tt.want {
+				t.Errorf("ScreenToBufferPositionWrap(0,%d) = %#v, want %#v", tt.row, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEditorEnsureCursorVisibleUsesDisplayWidth(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("你好ab"))
 	ed := New(buf, ui.DefaultTheme(), DefaultConfig())

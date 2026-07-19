@@ -1,0 +1,477 @@
+package app
+
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone/v2"
+	"teak/internal/git"
+	"teak/internal/overlay"
+	"teak/internal/search"
+)
+
+type mouseSurface uint8
+
+const (
+	mouseOutside mouseSurface = iota
+	mouseChrome
+	mouseStatus
+	mouseSidebarTabs
+	mouseSidebarBody
+	mouseEditorTabs
+	mouseEditorBody
+	mouseAgentBody
+)
+
+type mousePoint struct {
+	X int
+	Y int
+}
+
+type mouseRect struct {
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+func newMouseRect(x, y, width, height int) mouseRect {
+	return mouseRect{
+		x:      x,
+		y:      y,
+		width:  max(0, width),
+		height: max(0, height),
+	}
+}
+
+func (r mouseRect) contains(x, y int) bool {
+	return r.width > 0 &&
+		r.height > 0 &&
+		x >= r.x &&
+		x < r.x+r.width &&
+		y >= r.y &&
+		y < r.y+r.height
+}
+
+func (r mouseRect) local(x, y int) mousePoint {
+	return mousePoint{X: x - r.x, Y: y - r.y}
+}
+
+func contextMenuRect(x, y int, view string) mouseRect {
+	if view == "" {
+		return mouseRect{}
+	}
+
+	lines := strings.Split(view, "\n")
+	width := 0
+	for _, line := range lines {
+		width = max(width, ansi.StringWidth(line))
+	}
+	return newMouseRect(x, y, width, len(lines))
+}
+
+// mouseLayout is the input counterpart of View's terminal geometry.
+// Every routed surface owns an explicit rectangle and all remaining cells are
+// chrome, so coordinates cannot leak to a component rendered behind them.
+type mouseLayout struct {
+	window         mouseRect
+	statusDivider  mouseRect
+	statusBar      mouseRect
+	sidebarTabs    mouseRect
+	sidebarBody    mouseRect
+	sidebarDivider mouseRect
+	editorTabs     mouseRect
+	editorBody     mouseRect
+	agentDivider   mouseRect
+	agentBody      mouseRect
+}
+
+func (m Model) mouseLayout() mouseLayout {
+	contentHeight := max(0, m.height-2)
+	editorStart := 0
+	editorEnd := m.width
+
+	layout := mouseLayout{
+		window:        newMouseRect(0, 0, m.width, m.height),
+		statusDivider: newMouseRect(0, m.height-2, m.width, 1),
+		statusBar:     newMouseRect(0, m.height-1, m.width, 1),
+	}
+
+	if m.showTree {
+		treeWidth := m.treeWidth()
+		layout.sidebarTabs = newMouseRect(0, 0, treeWidth, min(1, contentHeight))
+		layout.sidebarBody = newMouseRect(0, 1, treeWidth, contentHeight-1)
+		layout.sidebarDivider = newMouseRect(treeWidth, 0, 1, contentHeight)
+		editorStart = treeWidth + 1
+	}
+
+	if agentWidth := m.agentPanelWidth(); agentWidth > 0 {
+		agentStart := m.width - agentWidth
+		layout.agentDivider = newMouseRect(agentStart-1, 0, 1, contentHeight)
+		layout.agentBody = newMouseRect(agentStart, 0, agentWidth, contentHeight)
+		editorEnd = agentStart - 1
+	}
+
+	editorWidth := max(0, editorEnd-editorStart)
+	layout.editorTabs = newMouseRect(editorStart, 0, editorWidth, min(1, contentHeight))
+	layout.editorBody = newMouseRect(editorStart, 1, editorWidth, contentHeight-1)
+	return layout
+}
+
+func (l mouseLayout) hit(x, y int) (mouseSurface, mousePoint) {
+	point := mousePoint{X: x, Y: y}
+	if !l.window.contains(x, y) {
+		return mouseOutside, point
+	}
+
+	switch {
+	case l.statusBar.contains(x, y):
+		return mouseStatus, l.statusBar.local(x, y)
+	case l.statusDivider.contains(x, y):
+		return mouseChrome, point
+	case l.agentBody.contains(x, y):
+		return mouseAgentBody, l.agentBody.local(x, y)
+	case l.agentDivider.contains(x, y):
+		return mouseChrome, point
+	case l.sidebarTabs.contains(x, y):
+		return mouseSidebarTabs, l.sidebarTabs.local(x, y)
+	case l.sidebarBody.contains(x, y):
+		return mouseSidebarBody, l.sidebarBody.local(x, y)
+	case l.sidebarDivider.contains(x, y):
+		return mouseChrome, point
+	case l.editorTabs.contains(x, y):
+		return mouseEditorTabs, l.editorTabs.local(x, y)
+	case l.editorBody.contains(x, y):
+		return mouseEditorBody, l.editorBody.local(x, y)
+	default:
+		return mouseChrome, point
+	}
+}
+
+func mouseAt(mouse tea.Mouse, point mousePoint) tea.Mouse {
+	mouse.X = point.X
+	mouse.Y = point.Y
+	return mouse
+}
+
+func (m Model) passiveModalVisible() bool {
+	return m.goToLineMode ||
+		m.renameMode ||
+		m.newFileMode ||
+		m.newFolderMode ||
+		m.deleteConfirm ||
+		m.saveAsMode
+}
+
+func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	// Modal priority mirrors View: the topmost visible surface always consumes
+	// the click, even when it has no mouse interaction of its own.
+	if m.unsavedConfirm != nil {
+		updated, cmd := m.unsavedConfirm.Update(msg)
+		if updated.IsDismissed() {
+			m.unsavedConfirm = nil
+		} else {
+			m.unsavedConfirm = updated.(*overlay.Confirm)
+		}
+		return m, cmd
+	}
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
+	}
+	if m.showBranchPicker {
+		return m.updateBranchPicker(msg)
+	}
+	if m.showSearch {
+		if zone.Get("search-replace-btn").InBounds(msg) {
+			query := m.searchM.Query()
+			replacement := m.searchM.Replacement()
+			if query != "" {
+				return m, func() tea.Msg {
+					return search.ReplaceOneMsg{Query: query, Replacement: replacement}
+				}
+			}
+			return m, nil
+		}
+		if zone.Get("search-replace-all-btn").InBounds(msg) {
+			query := m.searchM.Query()
+			replacement := m.searchM.Replacement()
+			if query != "" {
+				return m, func() tea.Msg {
+					return search.ReplaceAllMsg{Query: query, Replacement: replacement}
+				}
+			}
+			return m, nil
+		}
+		return m.updateSearch(msg)
+	}
+	if m.showHelp {
+		var cmd tea.Cmd
+		m.helpM, cmd = m.helpM.Update(msg)
+		return m, cmd
+	}
+	if m.showSettings {
+		return m.updateSettings(msg)
+	}
+	if m.passiveModalVisible() {
+		return m, nil
+	}
+
+	if m.treeContextMenu.Visible {
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseLeft && contextMenuRect(m.treeContextMenu.X, m.treeContextMenu.Y, m.treeContextMenu.View()).contains(mouse.X, mouse.Y) {
+			relY := mouse.Y - m.treeContextMenu.Y - 1
+			if item := m.treeContextMenu.SelectAt(relY); item != nil {
+				action := item.Action
+				m.treeContextMenu.Hide()
+				return m.handleTreeContextMenuAction(action)
+			}
+		}
+		m.treeContextMenu.Hide()
+		return m, nil
+	}
+	if m.gitContextMenu.Visible {
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseLeft && contextMenuRect(m.gitContextMenu.X, m.gitContextMenu.Y, m.gitContextMenu.View()).contains(mouse.X, mouse.Y) {
+			relY := mouse.Y - m.gitContextMenu.Y - 1
+			if item := m.gitContextMenu.SelectAt(relY); item != nil {
+				action := item.Action
+				m.gitContextMenu.Hide()
+				return m.handleGitContextMenuAction(action)
+			}
+		}
+		m.gitContextMenu.Hide()
+		return m, nil
+	}
+	mouse := msg.Mouse()
+	if m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
+		contextX, contextY := m.activeEditor().ContextMenuPosition()
+		if m.showTree {
+			contextX += m.treeWidth() + 1
+		}
+		contextY++ // tab bar
+		if mouse.Button != tea.MouseLeft || !contextMenuRect(contextX, contextY, m.activeEditor().ContextMenuView()).contains(mouse.X, mouse.Y) {
+			m.activeEditor().HideContextMenu()
+			return m, nil
+		}
+		relY := mouse.Y - contextY - 1
+		editorModel := m.editors[m.activeTab]
+		result, cmd, action := editorModel.ClickContextMenuItem(relY)
+		m.setEditor(m.activeTab, result)
+		if action == "goto_definition" || action == "find_references" || action == "rename_symbol" {
+			return m.handleContextMenuAction(action)
+		}
+		return m, cmd
+	}
+
+	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
+	if m.welcome != nil && m.welcome.Active && (surface == mouseEditorTabs || surface == mouseEditorBody) {
+		m.welcome.Dismiss()
+	}
+
+	if surface == mouseStatus {
+		if zone.Get("status-bar-branch").InBounds(msg) && m.gitPanel.IsGitRepo() {
+			m.showBranchPicker = true
+			m.branchPickerM.SetSize(m.width, m.height)
+			return m, tea.Batch(
+				git.ListBranchesCmd(m.gitPanel.RootDir()),
+				m.branchPickerM.Focus(),
+			)
+		}
+		return m, nil
+	}
+
+	switch surface {
+	case mouseAgentBody:
+		m.focus = FocusAgent
+		adjusted := tea.MouseClickMsg(mouseAt(mouse, local))
+		var cmd tea.Cmd
+		m.agentPanel, cmd = m.agentPanel.Update(adjusted)
+		return m, tea.Batch(m.agentPanel.Focus(), cmd)
+
+	case mouseSidebarTabs:
+		switch {
+		case zone.Get("sidebar-tab-files").InBounds(msg):
+			m.sidebarTab = SidebarFiles
+			m.focus = FocusTree
+		case zone.Get("sidebar-tab-git").InBounds(msg):
+			m.sidebarTab = SidebarGit
+			m.focus = FocusGitPanel
+		case zone.Get("sidebar-tab-problems").InBounds(msg):
+			m.sidebarTab = SidebarProblems
+			m.focus = FocusProblems
+		case zone.Get("sidebar-tab-debugger").InBounds(msg):
+			m.sidebarTab = SidebarDebugger
+			m.focus = FocusDebugger
+		}
+		return m, nil
+
+	case mouseSidebarBody:
+		switch m.sidebarTab {
+		case SidebarGit:
+			m.focus = FocusGitPanel
+			if mouse.Button == tea.MouseRight {
+				return m.showGitContextMenu(mouse.X, mouse.Y, local.Y)
+			}
+			return m.handleGitPanelClick(local.Y, msg)
+		case SidebarProblems:
+			m.focus = FocusProblems
+			return m.updateProblems(tea.MouseClickMsg(mouseAt(mouse, local)))
+		case SidebarDebugger:
+			m.focus = FocusDebugger
+			return m.updateDebugger(tea.MouseClickMsg(mouseAt(mouse, local)))
+		default:
+			m.focus = FocusTree
+			if mouse.Button == tea.MouseRight {
+				return m.showTreeContextMenu(local.X, mouse.Y, local.Y)
+			}
+			adjusted := tea.MouseClickMsg(mouseAt(mouse, local))
+			var cmd tea.Cmd
+			m.tree, cmd = m.tree.Update(adjusted)
+			return m, cmd
+		}
+
+	case mouseEditorTabs:
+		m.focus = FocusEditor
+		return m.handleTabBarClick(msg)
+
+	case mouseEditorBody:
+		m.focus = FocusEditor
+		return m.forwardToEditor(tea.MouseClickMsg(mouseAt(mouse, local)))
+
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.unsavedConfirm != nil ||
+		!m.overlayStack.IsEmpty() ||
+		m.showBranchPicker ||
+		m.showSearch ||
+		m.showHelp ||
+		m.showSettings ||
+		m.passiveModalVisible() {
+		return m, nil
+	}
+	if m.treeContextMenu.Visible ||
+		m.gitContextMenu.Visible ||
+		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible()) {
+		return m, nil
+	}
+
+	mouse := msg.Mouse()
+	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
+	if surface != mouseEditorBody {
+		return m, nil
+	}
+	return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, local)))
+}
+
+func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.unsavedConfirm != nil {
+		updated, cmd := m.unsavedConfirm.Update(msg)
+		if updated.IsDismissed() {
+			m.unsavedConfirm = nil
+		} else {
+			m.unsavedConfirm = updated.(*overlay.Confirm)
+		}
+		return m, cmd
+	}
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
+	}
+	if m.showBranchPicker {
+		return m.updateBranchPicker(msg)
+	}
+	if m.showSearch {
+		return m.updateSearch(msg)
+	}
+	if m.showHelp {
+		var cmd tea.Cmd
+		m.helpM, cmd = m.helpM.Update(msg)
+		return m, cmd
+	}
+	if m.showSettings {
+		return m.updateSettings(msg)
+	}
+	if m.passiveModalVisible() ||
+		m.treeContextMenu.Visible ||
+		m.gitContextMenu.Visible ||
+		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible()) {
+		return m, nil
+	}
+
+	// A drag can finish over any surface. Always notify the editor so a release
+	// outside its body cannot leave its selection drag active.
+	mouse := msg.Mouse()
+	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
+	if surface == mouseEditorBody {
+		return m.forwardToEditor(tea.MouseReleaseMsg(mouseAt(mouse, local)))
+	}
+	return m.forwardToEditor(msg)
+}
+
+func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	if m.unsavedConfirm != nil {
+		return m, nil
+	}
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
+	}
+	if m.showBranchPicker {
+		return m.updateBranchPicker(msg)
+	}
+	if m.showSearch {
+		return m.updateSearch(msg)
+	}
+	if m.showHelp {
+		var cmd tea.Cmd
+		m.helpM, cmd = m.helpM.Update(msg)
+		return m, cmd
+	}
+	if m.showSettings {
+		return m.updateSettings(msg)
+	}
+	if m.passiveModalVisible() {
+		return m, nil
+	}
+	if m.treeContextMenu.Visible ||
+		m.gitContextMenu.Visible ||
+		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible()) {
+		return m, nil
+	}
+
+	mouse := msg.Mouse()
+	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
+	switch surface {
+	case mouseAgentBody:
+		adjusted := tea.MouseWheelMsg(mouseAt(mouse, local))
+		var cmd tea.Cmd
+		m.agentPanel, cmd = m.agentPanel.Update(adjusted)
+		return m, cmd
+
+	case mouseSidebarBody:
+		adjusted := tea.MouseWheelMsg(mouseAt(mouse, local))
+		switch m.sidebarTab {
+		case SidebarGit:
+			var cmd tea.Cmd
+			m.gitPanel, cmd = m.gitPanel.Update(adjusted)
+			return m, cmd
+		case SidebarProblems:
+			return m.updateProblems(adjusted)
+		case SidebarDebugger:
+			return m.updateDebugger(adjusted)
+		default:
+			var cmd tea.Cmd
+			m.tree, cmd = m.tree.Update(adjusted)
+			return m, cmd
+		}
+
+	case mouseEditorBody:
+		return m.forwardToEditor(tea.MouseWheelMsg(mouseAt(mouse, local)))
+
+	default:
+		return m, nil
+	}
+}

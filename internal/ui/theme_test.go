@@ -1,7 +1,12 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+	"time"
+
+	"charm.land/lipgloss/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 )
 
 // TestNordColors tests that Nord colors are defined
@@ -184,8 +189,8 @@ func TestThemeCaseSensitivity(t *testing.T) {
 		name string
 	}{
 		{"nord"},
-		{"Nord"},  // Should fall back due to case mismatch
-		{"NORD"},  // Should fall back due to case mismatch
+		{"Nord"}, // Should fall back due to case mismatch
+		{"NORD"}, // Should fall back due to case mismatch
 		{"dracula"},
 		{"Dracula"}, // Should fall back
 	}
@@ -357,7 +362,7 @@ func TestThemeByNameConsistency(t *testing.T) {
 func TestPlaceOverlayAt(t *testing.T) {
 	base := "Hello\nWorld"
 	overlay := "X"
-	
+
 	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -368,7 +373,7 @@ func TestPlaceOverlayAt(t *testing.T) {
 func TestPlaceOverlayAtWithOffset(t *testing.T) {
 	base := "Hello\nWorld"
 	overlay := "X"
-	
+
 	result := PlaceOverlayAt(base, overlay, 2, 1, 10, 5)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -379,7 +384,7 @@ func TestPlaceOverlayAtWithOffset(t *testing.T) {
 func TestPlaceOverlayAtWithLargeOverlay(t *testing.T) {
 	base := "Hi"
 	overlay := "Large overlay text"
-	
+
 	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -390,7 +395,7 @@ func TestPlaceOverlayAtWithLargeOverlay(t *testing.T) {
 func TestPlaceOverlayAtWithEmptyBase(t *testing.T) {
 	base := ""
 	overlay := "X"
-	
+
 	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -401,7 +406,7 @@ func TestPlaceOverlayAtWithEmptyBase(t *testing.T) {
 func TestPlaceOverlayAtWithEmptyOverlay(t *testing.T) {
 	base := "Hello"
 	overlay := ""
-	
+
 	result := PlaceOverlayAt(base, overlay, 0, 0, 10, 5)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -412,7 +417,7 @@ func TestPlaceOverlayAtWithEmptyOverlay(t *testing.T) {
 func TestRenderOverlay(t *testing.T) {
 	base := "Hello World"
 	overlay := "X"
-	
+
 	result := RenderOverlay(base, overlay, 20, 10)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -423,7 +428,7 @@ func TestRenderOverlay(t *testing.T) {
 func TestRenderOverlayWithLargeOverlay(t *testing.T) {
 	base := "Hi"
 	overlay := "This is a very large overlay text"
-	
+
 	result := RenderOverlay(base, overlay, 20, 10)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -434,7 +439,7 @@ func TestRenderOverlayWithLargeOverlay(t *testing.T) {
 func TestRenderOverlayWithSmallCanvas(t *testing.T) {
 	base := "Hello"
 	overlay := "X"
-	
+
 	result := RenderOverlay(base, overlay, 5, 3)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -445,7 +450,7 @@ func TestRenderOverlayWithSmallCanvas(t *testing.T) {
 func TestRenderOverlayWithMultilineOverlay(t *testing.T) {
 	base := "Hello World"
 	overlay := "Line1\nLine2\nLine3"
-	
+
 	result := RenderOverlay(base, overlay, 30, 10)
 	if result == "" {
 		t.Error("Expected non-empty result")
@@ -456,7 +461,7 @@ func TestRenderOverlayWithMultilineOverlay(t *testing.T) {
 func TestRenderOverlayCentersOverlay(t *testing.T) {
 	base := "Hello World"
 	overlay := "X"
-	
+
 	// With a 20-width canvas and 1-char overlay, should be centered at x=9
 	result := RenderOverlay(base, overlay, 20, 10)
 	if result == "" {
@@ -468,10 +473,106 @@ func TestRenderOverlayCentersOverlay(t *testing.T) {
 func TestRenderOverlayHandlesNegativePosition(t *testing.T) {
 	base := "Hello"
 	overlay := "X"
-	
+
 	// Very small canvas should clamp position to 0
 	result := RenderOverlay(base, overlay, 1, 1)
 	if result == "" {
 		t.Error("Expected non-empty result")
+	}
+}
+
+func TestPlaceOverlayAtPreservesBubbleZoneMarkers(t *testing.T) {
+	previous := zone.DefaultManager
+	manager := zone.New()
+	zone.DefaultManager = manager
+	t.Cleanup(func() {
+		manager.Close()
+		zone.DefaultManager = previous
+	})
+
+	const id = "overlay-zone"
+	output := PlaceOverlayAt("base", zone.Mark(id, "click"), 3, 2, 20, 8)
+	zone.Scan(output)
+
+	deadline := time.Now().Add(time.Second)
+	for zone.Get(id) == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	got := zone.Get(id)
+	if got == nil {
+		t.Fatal("zone marker was lost during overlay composition")
+	}
+	if got.StartX != 3 || got.StartY != 2 || got.EndX != 7 || got.EndY != 2 {
+		t.Errorf("zone bounds = (%d,%d)-(%d,%d), want (3,2)-(7,2)", got.StartX, got.StartY, got.EndX, got.EndY)
+	}
+}
+
+func TestPlaceOverlayAtSuppressesBaseZonesOnOverlayRows(t *testing.T) {
+	previous := zone.DefaultManager
+	manager := zone.New()
+	zone.DefaultManager = manager
+	t.Cleanup(func() {
+		manager.Close()
+		zone.DefaultManager = previous
+	})
+
+	base := zone.Mark("base-zone", "abcdefgh")
+	overlay := zone.Mark("overlay-zone", "XY")
+	baseMarker := base[:strings.Index(base, "abcdefgh")]
+	overlayMarker := overlay[:strings.Index(overlay, "XY")]
+
+	output := PlaceOverlayAt(base, overlay, 2, 0, 8, 1)
+
+	if got := strings.Count(output, baseMarker); got != 0 {
+		t.Errorf("base marker count = %d, want 0 to avoid stale hit areas", got)
+	}
+	if got := strings.Count(output, overlayMarker); got != 2 {
+		t.Errorf("overlay marker count = %d, want 2", got)
+	}
+}
+
+func TestPlaceOverlayAtPreservesBaseZonesOnUnaffectedRows(t *testing.T) {
+	previous := zone.DefaultManager
+	manager := zone.New()
+	zone.DefaultManager = manager
+	t.Cleanup(func() {
+		manager.Close()
+		zone.DefaultManager = previous
+	})
+
+	const id = "unaffected-base-zone"
+	base := "first\n" + zone.Mark(id, "click")
+	output := PlaceOverlayAt(base, "XY", 1, 0, 8, 2)
+	zone.Scan(output)
+
+	deadline := time.Now().Add(time.Second)
+	for zone.Get(id) == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	got := zone.Get(id)
+	if got == nil {
+		t.Fatal("base zone on an unaffected row was lost")
+	}
+	if got.StartX != 0 || got.StartY != 1 || got.EndX != 4 || got.EndY != 1 {
+		t.Errorf("zone bounds = (%d,%d)-(%d,%d), want (0,1)-(4,1)", got.StartX, got.StartY, got.EndX, got.EndY)
+	}
+}
+
+func TestPlaceOverlayAtPreservesBaseStyleAfterOverlay(t *testing.T) {
+	const width = 8
+	base := "\x1b[31mabcdefgh\x1b[0m"
+	output := PlaceOverlayAt(base, "XY", 2, 0, width, 1)
+
+	baseCanvas := lipgloss.NewCanvas(width, 1)
+	baseCanvas.Compose(lipgloss.NewLayer(base))
+	outputCanvas := lipgloss.NewCanvas(width, 1)
+	outputCanvas.Compose(lipgloss.NewLayer(output))
+
+	want := baseCanvas.CellAt(4, 0)
+	got := outputCanvas.CellAt(4, 0)
+	if !got.Style.Equal(&want.Style) {
+		t.Errorf("suffix style = %#v, want %#v", got.Style, want.Style)
 	}
 }
