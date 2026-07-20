@@ -196,6 +196,15 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		m.relayout()
 		return m, nil, true
+	case "ctrl+\\":
+		m.toggleSplit()
+		return m, nil, true
+	case "ctrl+shift+\\":
+		m.unsplit()
+		return m, nil, true
+	case "f6":
+		m.cycleSplitFocus()
+		return m, nil, true
 	case "ctrl+f":
 		if ed := m.activeEditor(); ed != nil {
 			ed.ShowFind()

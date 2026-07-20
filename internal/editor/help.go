@@ -117,6 +117,9 @@ var helpGroups = []bindingGroup{
 		title: "Panels",
 		bindings: []keybinding{
 			{"Ctrl+B", "Toggle file tree"},
+			{"Ctrl+\\", "Toggle editor split"},
+			{"Ctrl+Shift+\\", "Close editor split"},
+			{"F6", "Switch split pane focus"},
 			{"Ctrl+Shift+G", "Show git panel"},
 			{"Ctrl+Tab", "Next tab"},
 			{"Ctrl+Shift+Tab", "Previous tab"},

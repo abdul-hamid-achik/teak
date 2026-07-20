@@ -3,6 +3,7 @@ package git
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -247,6 +248,10 @@ type Model struct {
 	spinner    spinner.Model
 	spinning   bool   // true when an async operation is in progress
 	spinStatus string // label shown next to spinner (e.g. "Pushing...")
+
+	// Double-click detection for file nodes
+	lastClickTime  time.Time
+	lastClickIndex int
 }
 
 // New creates a new git panel model.
@@ -534,6 +539,14 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if hit.node.Entry == nil {
+			return m, nil
+		}
+		// Double-click to open diff (single click just selects)
+		now := time.Now()
+		isDouble := hit.index == m.lastClickIndex && now.Sub(m.lastClickTime) < 400*time.Millisecond
+		m.lastClickTime = now
+		m.lastClickIndex = hit.index
+		if !isDouble {
 			return m, nil
 		}
 		e := hit.node.Entry

@@ -148,6 +148,36 @@ func (m *Model) CurrentFrame() int {
 	return m.currentFrame
 }
 
+// StackFrameAtY returns the stack frame index at the given panel-relative Y,
+// or -1 if Y doesn't hit a frame row.
+func (m *Model) StackFrameAtY(y int) int {
+	if m.state == dap.StateInactive || len(m.stackFrames) == 0 {
+		return -1
+	}
+	// Layout: state(1) + blank(1) + controls(1) + blank(1) + "Call Stack"(1) = 5 lines
+	const headerLines = 5
+	frameY := y - headerLines
+	if frameY < 0 {
+		return -1
+	}
+	idx := m.scrollY + frameY
+	if idx >= len(m.stackFrames) || idx >= m.scrollY+8 {
+		return -1
+	}
+	return idx
+}
+
+// ScrollUp scrolls the stack trace up by n lines.
+func (m *Model) ScrollUp(n int) {
+	m.scrollY = max(0, m.scrollY-n)
+}
+
+// ScrollDown scrolls the stack trace down by n lines.
+func (m *Model) ScrollDown(n int) {
+	maxScroll := max(0, len(m.stackFrames)-8)
+	m.scrollY = min(maxScroll, m.scrollY+n)
+}
+
 // View renders the debugger panel.
 func (m *Model) View() string {
 	if m.state == dap.StateInactive {

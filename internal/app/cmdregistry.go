@@ -223,6 +223,48 @@ func (m *Model) commandRegistry() []Command {
 				return commandPaletteMsg{inner: agentCancelMsg{}}
 			},
 		},
+		{
+			ID:    "codemap_callers",
+			Label: "Code Map: Find Callers",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: codemapCallersMsg{}}
+			},
+		},
+		{
+			ID:    "codemap_callees",
+			Label: "Code Map: Find Callees",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: codemapCalleesMsg{}}
+			},
+		},
+		{
+			ID:    "codemap_impact",
+			Label: "Code Map: Symbol Impact",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: codemapImpactMsg{}}
+			},
+		},
+		{
+			ID:    "semantic_search",
+			Label: "Semantic Search",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: openSearchMsg{mode: search.ModeSemantic}}
+			},
+		},
+		{
+			ID:    "bob_plan",
+			Label: "Bob: Plan Review",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: bobPlanMsg{}}
+			},
+		},
+		{
+			ID:    "bob_check",
+			Label: "Bob: Check Drift",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: bobCheckMsg{}}
+			},
+		},
 	}
 }
 
@@ -244,4 +286,9 @@ type (
 	quitMsg              struct{}
 	newFileMsg           struct{}
 	saveAsMsg            struct{}
+	codemapCallersMsg    struct{}
+	codemapCalleesMsg    struct{}
+	codemapImpactMsg     struct{}
+	bobPlanMsg           struct{}
+	bobCheckMsg          struct{}
 )

@@ -5,6 +5,7 @@ import (
 	"teak/internal/dap"
 	"teak/internal/filetree"
 	"teak/internal/lsp"
+	"teak/internal/vault"
 )
 
 // treeLoadedMsg transfers the initial directory listing to the model after
@@ -206,4 +207,14 @@ type BreakpointClickMsg struct{ Line int }
 type JumpToFrameMsg struct {
 	FilePath string
 	Line     int // 0-based
+}
+
+// stashSavedMsg is sent when a file is successfully stashed to the vault.
+type stashSavedMsg struct {
+	result *vault.StashResult
+}
+
+// stashErrMsg is sent when a vault stash operation fails.
+type stashErrMsg struct {
+	err error
 }

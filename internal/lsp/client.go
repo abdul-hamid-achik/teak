@@ -616,6 +616,12 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 
 	cmd := exec.Command(cfg.Command, cfg.Args...)
 	cmd.Dir = rootDir
+	if len(cfg.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range cfg.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

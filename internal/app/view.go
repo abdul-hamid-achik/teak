@@ -80,7 +80,9 @@ func (m Model) View() tea.View {
 	} else {
 		tabBarView := m.tabBar.View()
 		var editorView string
-		if welcomeActive {
+		if m.split.enabled && m.split.secondTab >= 0 && m.split.secondTab < len(m.editors) {
+			editorView = m.renderSplitPanes()
+		} else if welcomeActive {
 			editorView = m.welcome.View()
 		} else if m.isActiveDiffTab() {
 			editorView = m.activeDiffView()
@@ -243,6 +245,55 @@ func (m Model) View() tea.View {
 	return v
 }
 
+// renderSplitPanes renders two editor panes side by side with a divider.
+func (m Model) renderSplitPanes() string {
+	aw := m.agentPanelWidth()
+	agentExtra := 0
+	if m.showAgent && aw > 0 {
+		agentExtra = aw + 1
+	}
+	tw := 0
+	if m.treeVisible() {
+		tw = m.treeWidth() + 1
+	}
+	totalWidth := m.width - tw - agentExtra
+	if totalWidth < 1 {
+		totalWidth = 1
+	}
+
+	paneAW := m.split.paneAWidth(totalWidth)
+	paneBW := m.split.paneBWidth(totalWidth)
+	statusHeight := 2
+	tabBarHeight := 1
+	paneH := m.height - statusHeight - tabBarHeight
+	if paneH < 1 {
+		paneH = 1
+	}
+
+	paneAView := ""
+	if m.activeEditor() != nil {
+		paneAView = m.activeEditor().View()
+	}
+	paneAView = clipViewRows(paneAView, paneH)
+	paneAView = clipViewLines(paneAView, paneAW)
+
+	paneBView := ""
+	if m.split.secondTab >= 0 && m.split.secondTab < len(m.editors) {
+		paneBView = m.editors[m.split.secondTab].View()
+	}
+	paneBView = clipViewRows(paneBView, paneH)
+	paneBView = clipViewLines(paneBView, paneBW)
+
+	dividerStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+	dividerLines := make([]string, paneH)
+	for i := range dividerLines {
+		dividerLines[i] = dividerStyle.Render("│")
+	}
+	divider := strings.Join(dividerLines, "\n")
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, paneAView, divider, paneBView)
+}
+
 func clipViewLines(content string, width int) string {
 	if width <= 0 || content == "" {
 		return ""
@@ -275,17 +326,22 @@ func (m Model) activeDiffView() string {
 // viewWithTree: sidebar tab bar + active panel on left, tab bar + editor on right.
 func (m Model) viewWithTree() string {
 	tabBarView := m.tabBar.View()
-	var editorView string
-	if m.welcome != nil && m.welcome.Active {
-		editorView = m.welcome.View()
-	} else if m.isActiveDiffTab() {
-		editorView = m.activeDiffView()
-	} else if m.activeEditor() != nil {
-		editorView = m.activeEditor().View()
-	}
 
-	// Editor column: tab bar + editor content
-	editorColumn := tabBarView + "\n" + editorView
+	// Editor column: tab bar + editor content (possibly split)
+	var editorColumn string
+	if m.split.enabled && m.split.secondTab >= 0 && m.split.secondTab < len(m.editors) {
+		editorColumn = tabBarView + "\n" + m.renderSplitPanes()
+	} else {
+		var editorView string
+		if m.welcome != nil && m.welcome.Active {
+			editorView = m.welcome.View()
+		} else if m.isActiveDiffTab() {
+			editorView = m.activeDiffView()
+		} else if m.activeEditor() != nil {
+			editorView = m.activeEditor().View()
+		}
+		editorColumn = tabBarView + "\n" + editorView
+	}
 
 	// Build sidebar: tab bar (1 line) + active panel
 	sidebarHeight := m.height - 2 // minus divider + status bar
@@ -404,11 +460,12 @@ func (m Model) renderStatusBar() string {
 		tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
 		scrollPos := m.scrollIndicator()
 		lspStatus := m.lspIndicator()
+		procStatus := m.procMonIndicator()
 		problemsStatus := m.problemsStatus()
 		agentStatus := m.agentIndicator()
 		right = m.theme.StatusText.Render(
 			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s%s ",
-				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus, problemsStatus),
+				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus+procStatus, problemsStatus),
 		) + agentStatus
 	}
 
@@ -494,6 +551,20 @@ func (m Model) lspIndicator() string {
 		return "  " + name + " ◐"
 	}
 	return "  " + name + " ○"
+}
+
+func (m Model) procMonIndicator() string {
+	if m.procMon == nil || !m.procMon.Available() {
+		return ""
+	}
+	label, rss, warning := m.procMon.Status()
+	if label == "" {
+		return ""
+	}
+	if warning {
+		return " (" + label + " " + rss + "!)"
+	}
+	return " (" + label + " " + rss + ")"
 }
 
 // problemsStatus returns a string showing the problem count for the status bar.

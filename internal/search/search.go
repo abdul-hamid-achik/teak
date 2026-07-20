@@ -31,11 +31,14 @@ const (
 
 // Result represents a single search result.
 type Result struct {
-	FilePath string
-	Line     int
-	Col      int
-	Preview  string
-	Score    float64
+	FilePath   string
+	Line       int
+	Col        int
+	Preview    string
+	Score      float64
+	SymbolName string // from vecgrep: function/type name containing the match
+	ChunkType  string // from vecgrep: function, type, file, etc.
+	EndLine    int    // from vecgrep: end line of the matched chunk
 }
 
 // OpenResultMsg is sent when a result is selected.
@@ -576,7 +579,13 @@ func (m Model) View() string {
 
 	for i := m.scrollY; i < endIdx; i++ {
 		r := m.results[i]
-		line := fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, boxWidth-30))
+		var line string
+		if r.SymbolName != "" {
+			symbol := truncStr(r.SymbolName, 20)
+			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, lipgloss.NewStyle().Foreground(ui.Nord14).Render(symbol), truncStr(r.Preview, boxWidth-45))
+		} else {
+			line = fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, boxWidth-30))
+		}
 		if i == m.cursor {
 			sb.WriteString(m.theme.SearchActive.Render(line))
 		} else {

@@ -11,6 +11,7 @@ type ServerConfig struct {
 	Command    string
 	Args       []string
 	LanguageID string
+	Env        map[string]string // extra environment variables for the server process
 }
 
 // DefaultConfigs returns built-in configurations for common language servers.

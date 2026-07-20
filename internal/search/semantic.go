@@ -117,7 +117,7 @@ func SemanticSearchContext(ctx context.Context, rootDir, query string) ([]Result
 		return nil, fmt.Errorf("vecgrep setup failed: %w", err)
 	}
 
-	out, err := runVecgrep(ctx, rootDir, "search", query, "--format", "json", "--limit", "20")
+	out, err := runVecgrep(ctx, rootDir, "search", query, "--format", "json-envelope", "--limit", "20")
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -125,18 +125,18 @@ func SemanticSearchContext(ctx context.Context, rootDir, query string) ([]Result
 		if errors.Is(err, errSemanticOutputLimit) {
 			return nil, err
 		}
-		// Try without --format flag for older versions
-		out2, err2 := runVecgrep(ctx, rootDir, "search", query)
+		// Fallback: try plain json for older versions
+		out2, err2 := runVecgrep(ctx, rootDir, "search", query, "--format", "json", "--limit", "20")
 		if err2 != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
 			return nil, fmt.Errorf("vecgrep search failed: %w", err)
 		}
-		return parsePlainOutput(out2), nil
+		return parseJSONOutput(out2)
 	}
 
-	return parseJSONOutput(out)
+	return parseEnvelopeOutput(out)
 }
 
 func ensureVecgrepReadyContext(ctx context.Context, rootDir string) error {
@@ -251,11 +251,35 @@ type vecgrepResult struct {
 	RelativePath string  `json:"relative_path"`
 	Line         int     `json:"line"`
 	StartLine    int     `json:"start_line"`
+	EndLine      int     `json:"end_line"`
 	Col          int     `json:"col"`
 	Preview      string  `json:"preview"`
 	Score        float64 `json:"score"`
 	Text         string  `json:"text"`
 	Content      string  `json:"content"`
+	SymbolName   string  `json:"symbol_name"`
+	ChunkType    string  `json:"chunk_type"`
+}
+
+// vecgrepEnvelope is the json-envelope output format.
+type vecgrepEnvelope struct {
+	SchemaVersion int `json:"schema_version"`
+	Index         struct {
+		Indexed bool `json:"indexed"`
+		Fresh   bool `json:"fresh"`
+		Chunks  int  `json:"chunks"`
+	} `json:"index"`
+	Hits     []vecgrepResult `json:"hits"`
+	Warnings []string        `json:"warnings"`
+}
+
+func parseEnvelopeOutput(data []byte) ([]Result, error) {
+	var envelope vecgrepEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		// Fall back to plain JSON array parsing
+		return parseJSONOutput(data)
+	}
+	return mapVecgrepResults(envelope.Hits), nil
 }
 
 func parseJSONOutput(data []byte) ([]Result, error) {
@@ -275,46 +299,57 @@ func parseJSONOutput(data []byte) ([]Result, error) {
 
 	var out []Result
 	for _, r := range results {
-		// Resolve file path: prefer relative_path > file_path > file
-		filePath := r.RelativePath
-		if filePath == "" {
-			filePath = r.FilePath
-		}
-		if filePath == "" {
-			filePath = r.File
-		}
-
-		// Resolve line number: prefer start_line > line
-		line := r.StartLine
-		if line == 0 && r.Line > 0 {
-			line = r.Line
-		}
-
-		// Resolve preview: prefer preview > first line of content > text
-		preview := r.Preview
-		if preview == "" && r.Content != "" {
-			// Use first non-empty line of content as preview
-			for _, l := range strings.SplitN(r.Content, "\n", 5) {
-				trimmed := strings.TrimSpace(l)
-				if trimmed != "" {
-					preview = trimmed
-					break
-				}
-			}
-		}
-		if preview == "" {
-			preview = r.Text
-		}
-
-		out = append(out, Result{
-			FilePath: filePath,
-			Line:     line,
-			Col:      r.Col,
-			Preview:  strings.TrimSpace(preview),
-			Score:    r.Score,
-		})
+		out = append(out, mapVecgrepResult(r))
 	}
 	return out, nil
+}
+
+func mapVecgrepResults(results []vecgrepResult) []Result {
+	var out []Result
+	for _, r := range results {
+		out = append(out, mapVecgrepResult(r))
+	}
+	return out
+}
+
+func mapVecgrepResult(r vecgrepResult) Result {
+	filePath := r.RelativePath
+	if filePath == "" {
+		filePath = r.FilePath
+	}
+	if filePath == "" {
+		filePath = r.File
+	}
+
+	line := r.StartLine
+	if line == 0 && r.Line > 0 {
+		line = r.Line
+	}
+
+	preview := r.Preview
+	if preview == "" && r.Content != "" {
+		for _, l := range strings.SplitN(r.Content, "\n", 5) {
+			trimmed := strings.TrimSpace(l)
+			if trimmed != "" {
+				preview = trimmed
+				break
+			}
+		}
+	}
+	if preview == "" {
+		preview = r.Text
+	}
+
+	return Result{
+		FilePath:   filePath,
+		Line:       line,
+		Col:        r.Col,
+		Preview:    strings.TrimSpace(preview),
+		Score:      r.Score,
+		SymbolName: r.SymbolName,
+		ChunkType:  r.ChunkType,
+		EndLine:    r.EndLine,
+	}
 }
 
 func parsePlainOutput(data []byte) []Result {

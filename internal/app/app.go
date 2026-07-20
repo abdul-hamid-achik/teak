@@ -37,6 +37,8 @@ import (
 	"teak/internal/settings"
 	"teak/internal/text"
 	"teak/internal/ui"
+	"teak/internal/vault"
+	"teak/internal/procmon"
 )
 
 // FocusArea indicates which panel has focus.
@@ -83,6 +85,7 @@ type Model struct {
 type modelState struct {
 	editors                   []editor.Editor
 	activeTab                 int
+	split                     splitLayout
 	tabBar                    editor.TabBar
 	tree                      filetree.Model
 	theme                     ui.Theme
@@ -162,6 +165,7 @@ type modelState struct {
 	closedTabs                []ClosedTab                     // history of closed tabs for reopening
 	debuggerPanel             debugger.Model                  // debugger panel
 	debugMgr                  *dap.Manager                    // debug session manager
+	procMon                   *procmon.Monitor                // process resource monitor
 	debugRunner               debugRunner                     // testable boundary for blocking DAP commands
 	debugLifecycle            debugLifecycleState             // DAP command generation and pending state
 	breakpoints               map[string][]breakpointEntry    // file path → sorted breakpoint entries (0-based)
@@ -306,6 +310,7 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		activeThemeName:           appCfg.UI.Theme,
 		rootDir:                   rootDir,
 		tabBar:                    editor.NewTabBar(theme),
+		split:                     defaultSplitLayout(),
 		lspMgr:                    lsp.NewManager(rootDir, lspConfigs),
 		treeContextMenu:           editor.NewContextMenu(theme),
 		fileDiagnostics:           make(map[string]int),
@@ -332,6 +337,7 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		settingsM:                 settings.New(theme, appCfg, config.ConfigPath()),
 		debuggerPanel:             debugger.New(theme),
 		debugMgr:                  dap.NewManager(rootDir),
+		procMon:                   procmon.New(),
 		breakpoints:               make(map[string][]breakpointEntry),
 		debugGutterBreakpoints:    make(map[string]*editor.GutterOpts),
 		currentExecLine:           -1,
@@ -1903,6 +1909,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case stashSavedMsg:
+		m.status = fmt.Sprintf("Stashed → %s", msg.result.ID)
+		return m, nil
+
+	case stashErrMsg:
+		m.status = fmt.Sprintf("Stash failed: %v", msg.err)
+		return m, nil
+
+	case codemapCallersMsg:
+		return m, m.runCodemapQuery("callers")
+	case codemapCalleesMsg:
+		return m, m.runCodemapQuery("callees")
+	case codemapImpactMsg:
+		return m, m.runCodemapQuery("impact")
+
+	case bobPlanMsg:
+		return m, m.runBobPlan()
+	case bobCheckMsg:
+		return m, m.runBobCheck()
+
+	case bobResultMsg:
+		m.handleBobResult(msg)
+		return m, nil
+
+	case codemapResultMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Code map: %v", msg.err)
+			return m, nil
+		}
+		if len(msg.symbols) == 0 {
+			m.status = fmt.Sprintf("Code map: no %s found", msg.kind)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Code map: %d %s found", len(msg.symbols), msg.kind)
+		return m, nil
+
 	case acp.AgentModelChangedMsg:
 		m.agentPanel, _ = m.agentPanel.Update(msg)
 		return m, nil
@@ -3021,8 +3063,22 @@ func (m Model) updateDebugger(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseLeft {
+			if idx := m.debuggerPanel.StackFrameAtY(mouse.Y); idx >= 0 {
+				cmd := m.debuggerPanel.SelectFrame(idx)
+				return m, cmd
+			}
+		}
 		return m, nil
 	case tea.MouseWheelMsg:
+		mouse := msg.Mouse()
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			m.debuggerPanel.ScrollUp(3)
+		case tea.MouseWheelDown:
+			m.debuggerPanel.ScrollDown(3)
+		}
 		return m, nil
 	}
 	return m, nil
@@ -4015,6 +4071,7 @@ func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
 			{Label: "Expand/Collapse", Action: "tree_toggle"},
 			{Label: ""}, // separator
 			{Label: "Copy Path", Action: "tree_copy_path"},
+			{Label: "Stash to Vault", Action: "tree_stash"},
 			{Label: "Delete", Action: "tree_delete"},
 		}
 	} else {
@@ -4026,6 +4083,7 @@ func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
 			{Label: "New Folder...", Action: "tree_new_folder_sibling"},
 			{Label: ""}, // separator
 			{Label: "Copy Path", Action: "tree_copy_path"},
+			{Label: "Stash to Vault", Action: "tree_stash"},
 			{Label: "Delete", Action: "tree_delete"},
 		}
 	}
@@ -4074,6 +4132,15 @@ func (m Model) handleTreeContextMenuAction(action string) (tea.Model, tea.Cmd) {
 		m.deleteConfirm = true
 		m.deleteTarget = m.treeContextPath
 		return m, nil
+	case "tree_stash":
+		path := m.treeContextPath
+		return m, func() tea.Msg {
+			result, err := vault.StashFile(context.Background(), path)
+			if err != nil {
+				return stashErrMsg{err: err}
+			}
+			return stashSavedMsg{result: result}
+		}
 	}
 	return m, nil
 }
