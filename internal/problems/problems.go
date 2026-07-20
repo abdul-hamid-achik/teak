@@ -59,6 +59,8 @@ type Group struct {
 type Model struct {
 	problems      []Problem
 	groups        []Group
+	errorCount    int
+	warningCount  int
 	selectedIndex int // index into problems
 	scrollY       int
 	width         int
@@ -84,13 +86,154 @@ func (m *Model) SetSize(width, height int) {
 
 // SetProblems updates the problems list and rebuilds groups.
 func (m *Model) SetProblems(problems []Problem) {
-	m.problems = problems
+	m.problems = append(m.problems[:0], problems...)
+	slices.SortStableFunc(m.problems, Compare)
 	m.groups = m.buildGroups()
+	m.errorCount, m.warningCount = problemSeverityCounts(m.problems)
 	// Keep selection in bounds
 	if m.selectedIndex >= len(m.problems) {
 		m.selectedIndex = max(0, len(m.problems)-1)
 	}
 	m.clampScroll()
+}
+
+// ReplaceFileProblems replaces diagnostics for one file without rebuilding the
+// complete per-file index. The global list remains ordered for keyboard and
+// mouse navigation; replacing a file is linear in the visible problem count,
+// rather than a full map rebuild plus an O(P log P) re-sort.
+func (m *Model) ReplaceFileProblems(filePath string, fileProblems []Problem) {
+	oldErrors, oldWarnings := problemSeverityCountsForFile(m.problems, filePath)
+	newProblems := append([]Problem(nil), fileProblems...)
+	slices.SortStableFunc(newProblems, Compare)
+	newErrors, newWarnings := problemSeverityCounts(newProblems)
+
+	remaining := m.problems[:0]
+	for _, p := range m.problems {
+		if p.FilePath != filePath {
+			remaining = append(remaining, p)
+		}
+	}
+	m.problems = mergeProblemsInPlace(remaining, newProblems)
+	m.errorCount += newErrors - oldErrors
+	m.warningCount += newWarnings - oldWarnings
+	m.replaceGroup(filePath, newProblems)
+	if m.selectedIndex >= len(m.problems) {
+		m.selectedIndex = max(0, len(m.problems)-1)
+	}
+	m.clampScroll()
+}
+
+// Compare orders problems exactly as the panel presents them. The final
+// comparison leaves truly identical diagnostics stable in their source order.
+func Compare(a, b Problem) int {
+	if a.Severity != b.Severity {
+		if a.Severity < b.Severity {
+			return -1
+		}
+		return 1
+	}
+	if result := strings.Compare(a.FilePath, b.FilePath); result != 0 {
+		return result
+	}
+	if a.Line != b.Line {
+		if a.Line < b.Line {
+			return -1
+		}
+		return 1
+	}
+	if a.Col != b.Col {
+		if a.Col < b.Col {
+			return -1
+		}
+		return 1
+	}
+	if a.EndLine != b.EndLine {
+		if a.EndLine < b.EndLine {
+			return -1
+		}
+		return 1
+	}
+	if a.EndCol != b.EndCol {
+		if a.EndCol < b.EndCol {
+			return -1
+		}
+		return 1
+	}
+	if result := strings.Compare(a.Message, b.Message); result != 0 {
+		return result
+	}
+	return strings.Compare(a.Source, b.Source)
+}
+
+func mergeProblemsInPlace(left, right []Problem) []Problem {
+	total := len(left) + len(right)
+	if cap(left) < total {
+		capacity := max(16, cap(left)*2)
+		if capacity < total {
+			capacity = total
+		}
+		grown := make([]Problem, len(left), capacity)
+		copy(grown, left)
+		left = grown
+	}
+	left = left[:total]
+	for leftIndex, rightIndex, outputIndex := total-len(right)-1, len(right)-1, total-1; outputIndex >= 0; outputIndex-- {
+		if rightIndex < 0 || (leftIndex >= 0 && Compare(left[leftIndex], right[rightIndex]) > 0) {
+			left[outputIndex] = left[leftIndex]
+			leftIndex--
+			continue
+		}
+		left[outputIndex] = right[rightIndex]
+		rightIndex--
+	}
+	return left
+}
+
+func (m *Model) replaceGroup(filePath string, fileProblems []Problem) {
+	index, found := slices.BinarySearchFunc(m.groups, filePath, func(group Group, path string) int {
+		return strings.Compare(group.FilePath, path)
+	})
+	if len(fileProblems) == 0 {
+		if found {
+			m.groups = append(m.groups[:index], m.groups[index+1:]...)
+		}
+		return
+	}
+	group := Group{FilePath: filePath, Problems: append([]Problem(nil), fileProblems...)}
+	if found {
+		m.groups[index] = group
+		return
+	}
+	m.groups = append(m.groups, Group{})
+	copy(m.groups[index+1:], m.groups[index:])
+	m.groups[index] = group
+}
+
+func problemSeverityCounts(problems []Problem) (errors, warnings int) {
+	for _, p := range problems {
+		switch p.Severity {
+		case 1:
+			errors++
+		case 2:
+			warnings++
+		}
+	}
+	return errors, warnings
+}
+
+func problemSeverityCountsForFile(problems []Problem, filePath string) (errors, warnings int) {
+	for _, p := range problems {
+		if p.FilePath != filePath {
+			continue
+		}
+		switch p.Severity {
+		case 1:
+			errors++
+		case 2:
+			warnings++
+		}
+	}
+	return errors, warnings
 }
 
 // buildGroups groups problems by file.
@@ -127,24 +270,12 @@ func (m *Model) ProblemCount() int {
 
 // ErrorCount returns the number of errors.
 func (m *Model) ErrorCount() int {
-	count := 0
-	for _, p := range m.problems {
-		if p.Severity == 1 {
-			count++
-		}
-	}
-	return count
+	return m.errorCount
 }
 
 // WarningCount returns the number of warnings.
 func (m *Model) WarningCount() int {
-	count := 0
-	for _, p := range m.problems {
-		if p.Severity == 2 {
-			count++
-		}
-	}
-	return count
+	return m.warningCount
 }
 
 // SelectedProblem returns the currently selected problem, or nil if none.

@@ -50,7 +50,7 @@ func (v *Viewport) ensureCursorVisible(buf *text.Buffer, cursor text.Position, t
 	if col > len(lineContent) {
 		col = len(lineContent)
 	}
-	displayCol := displayWidth(string(lineContent[:col]))
+	displayCol := displayColumn(lineContent, col, v.tabSize())
 	if displayCol < v.ScrollX {
 		v.ScrollX = displayCol
 	}
@@ -75,4 +75,23 @@ func (v *Viewport) ScrollDown(n, maxLine int) {
 	if v.ScrollY > maxScroll {
 		v.ScrollY = maxScroll
 	}
+}
+
+// ScrollWrapUp moves in visual rows, allowing a single long logical line to
+// be navigated with the mouse wheel.
+func (v *Viewport) ScrollWrapUp(n int) {
+	v.WrapScrollY = max(0, v.WrapScrollY-max(0, n))
+}
+
+// ScrollWrapDown moves in visual rows and clamps to the last full viewport.
+func (v *Viewport) ScrollWrapDown(n int, wrap *WrapLayout) {
+	if wrap == nil {
+		return
+	}
+	if !wrap.TotalRowsKnown() {
+		v.WrapScrollY = max(0, v.WrapScrollY+max(0, n))
+		return
+	}
+	maxScroll := max(0, wrap.TotalRows()-max(1, v.Height))
+	v.WrapScrollY = min(maxScroll, v.WrapScrollY+max(0, n))
 }

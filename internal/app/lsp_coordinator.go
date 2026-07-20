@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -73,7 +74,7 @@ func (c *LSPCoordinator) handleDiagnostics(msg lsp.DiagnosticsMsg) []tea.Cmd {
 	defer c.mu.Unlock()
 	path := lsp.URIToPath(msg.URI)
 	c.diagnostics[path] = msg.Diagnostics
-	
+
 	// Clean old entries if too many files
 	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
 		// Remove first entry (oldest)
@@ -210,7 +211,7 @@ func (c *LSPCoordinator) ClearDiagnostics(path string) {
 func (c *LSPCoordinator) AggregateDiagnostics() []lsp.Diagnostic {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	all := make([]lsp.Diagnostic, 0, len(c.diagnostics))
 	for _, diags := range c.diagnostics {
 		all = append(all, diags...)
@@ -223,4 +224,11 @@ func (c *LSPCoordinator) Shutdown() {
 	if c.mgr != nil {
 		c.mgr.ShutdownAll()
 	}
+}
+
+func (c *LSPCoordinator) WaitForShutdown(ctx context.Context) bool {
+	if c.mgr == nil {
+		return true
+	}
+	return c.mgr.WaitForShutdown(ctx)
 }

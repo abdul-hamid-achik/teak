@@ -56,6 +56,36 @@ func TestHelpModelSetSizeSmall(t *testing.T) {
 	}
 }
 
+func TestHelpModelTinyTerminalUsesNonNegativeDimensions(t *testing.T) {
+	model := NewHelpModel(ui.DefaultTheme())
+	model.SetSize(4, 3)
+
+	if model.input.Width() < 1 {
+		t.Fatalf("input width = %d, want at least one cell", model.input.Width())
+	}
+	if got := model.visibleLines(); got < 1 {
+		t.Fatalf("visible lines = %d, want at least one", got)
+	}
+	if view := model.View(); view == "" {
+		t.Fatal("tiny terminal view must remain renderable")
+	}
+}
+
+func TestHelpModelClickRefocusesFilter(t *testing.T) {
+	model := NewHelpModel(ui.DefaultTheme())
+	model.input.Blur()
+
+	updated, cmd := model.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 4, Y: 4})
+	if cmd == nil {
+		t.Fatal("clicking Help should return a focus command for the filter")
+	}
+	// Bubble Tea applies the focus command asynchronously; the model itself
+	// should nevertheless retain the input and consume the click.
+	if updated.input.Placeholder != "Filter..." {
+		t.Fatal("Help click did not preserve the filter input")
+	}
+}
+
 func TestHelpModelFocus(t *testing.T) {
 	model := NewHelpModel(ui.DefaultTheme())
 
@@ -302,7 +332,7 @@ func TestHelpModelMaxScroll(t *testing.T) {
 
 func TestHelpModelMaxScrollFewLines(t *testing.T) {
 	model := NewHelpModel(ui.DefaultTheme())
-	model.SetSize(80, 100) // Large height, few lines
+	model.SetSize(80, 200) // Large enough to show every documented shortcut
 
 	if ms := model.maxScroll(); ms != 0 {
 		t.Fatalf("maxScroll() = %d, want 0", ms)
@@ -513,6 +543,28 @@ func TestHelpGroups(t *testing.T) {
 	}
 	if !hasEditing {
 		t.Error("expected 'Editing' group")
+	}
+}
+
+func TestHelpUsesUnambiguousSelectionShortcutLabels(t *testing.T) {
+	bindings := make(map[string]string)
+	for _, group := range helpGroups {
+		for _, binding := range group.bindings {
+			bindings[binding.key] = binding.desc
+		}
+	}
+
+	for key, want := range map[string]string{
+		"Ctrl+Shift+Left/Right": "Select words",
+		"Ctrl+U":                "Select all occurrences",
+		"Ctrl+Shift+L":          "Split selection into lines",
+	} {
+		if got := bindings[key]; got != want {
+			t.Errorf("help binding %q = %q, want %q", key, got, want)
+		}
+	}
+	if _, exists := bindings["Ctrl+Shift+L/R"]; exists {
+		t.Error("help must not describe Ctrl+Shift+L as a word-selection shortcut; it splits selections")
 	}
 }
 

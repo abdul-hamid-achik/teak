@@ -1,0 +1,55 @@
+version: 1
+name: teak_ascii_font_fallback
+coversSymbol: ui.NerdFontEnabled
+metadata:
+  feature: terminal-compatibility
+  owner: core-ui
+  priority: high
+  tags:
+    - regression
+    - accessibility
+    - font-fallback
+intent: |
+  a user without Nerd Fonts can opt into a readable ASCII-only interface.
+target:
+  cmd:
+    - env
+    - TEAK_NO_NERD_FONT=1
+    - sh
+    - testdata/glyphrun/run-teak.sh
+    - ascii-font
+    - testdata/glyphrun/config/default.toml
+    - testdata/glyphrun/workspace/alpha.txt
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 80
+  rows: 24
+  profile: xterm-256color
+  alternateScreen: require
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      screen:
+        contains: "- alpha.txt"
+      timeoutMs: 5000
+  - snapshot: ascii_tree
+  - press: "ctrl+q"
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 3000
+outcomes:
+  - id: ascii_file_icon_visible
+    description: the file tree uses the documented ASCII file marker
+    verify:
+      screen:
+        contains: "- alpha.txt"
+  - id: clean_exit
+    description: the ASCII fallback remains fully interactive
+    verify:
+      process:
+        exitCode: 0

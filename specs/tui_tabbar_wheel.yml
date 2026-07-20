@@ -1,0 +1,61 @@
+version: 1
+name: teak_tabbar_wheel
+coversSymbol: app.Model.handleMouseWheel
+metadata:
+  feature: tab-navigation
+  owner: core-ui
+  priority: high
+  tags:
+    - regression
+    - mouse
+    - tabs
+intent: |
+  a user can switch open editor tabs by scrolling the mouse wheel over the tab bar.
+target:
+  cmd:
+    - sh
+    - testdata/glyphrun/run-teak.sh
+    - tabbar-wheel
+    - testdata/glyphrun/config/default.toml
+    - testdata/glyphrun/workspace/alpha.txt
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 80
+  rows: 24
+  profile: xterm-256color
+  alternateScreen: require
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      screen:
+        contains: "alpha one"
+      timeoutMs: 5000
+  - mouse: {x: 5, y: 2, button: left, action: click}
+  - wait:
+      screen:
+        contains: "beta one"
+  - mouse: {x: 31, y: 0, button: wheelUp, action: click}
+  - wait:
+      screen:
+        contains: "alpha one"
+  - snapshot: tab_selected_by_wheel
+  - press: "ctrl+q"
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 3000
+outcomes:
+  - id: wheel_switches_tab
+    description: scrolling up over the tab bar activates the preceding alpha tab
+    verify:
+      screen:
+        contains: "alpha one"
+  - id: clean_exit
+    description: the editor exits normally after wheel tab navigation
+    verify:
+      process:
+        exitCode: 0

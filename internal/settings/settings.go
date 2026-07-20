@@ -47,6 +47,9 @@ type Model struct {
 	height           int
 	theme            ui.Theme
 	configPath       string
+	baseConfig       config.Config
+	dirty            bool
+	status           string
 }
 
 // GetCategories returns the default settings categories.
@@ -63,6 +66,24 @@ func GetCategories(cfg config.Config) []Category {
 					Type:         TypeInt,
 					Value:        cfg.Editor.TabSize,
 					DefaultValue: 4,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.format_on_save",
+					Label:        "Format on Save",
+					Description:  "Ask the language server to format before saving",
+					Type:         TypeBool,
+					Value:        cfg.Editor.FormatOnSave,
+					DefaultValue: false,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.word_wrap",
+					Label:        "Word Wrap",
+					Description:  "Wrap long lines to the editor width",
+					Type:         TypeBool,
+					Value:        cfg.Editor.WordWrap,
+					DefaultValue: false,
 					Category:     "editor",
 				},
 				{
@@ -92,7 +113,7 @@ func GetCategories(cfg config.Config) []Category {
 				{
 					ID:           "ui.theme",
 					Label:        "Theme",
-					Description:  "Color theme (nord, dracula, catppuccin, solarized-dark, one-dark)",
+					Description:  "Color theme; saved now and applied after restarting Teak",
 					Type:         TypeString,
 					Value:        cfg.UI.Theme,
 					DefaultValue: "nord",
@@ -133,13 +154,15 @@ func New(theme ui.Theme, cfg config.Config, configPath string) Model {
 		categories: GetCategories(cfg),
 		theme:      theme,
 		configPath: configPath,
+		baseConfig: cfg,
 	}
 }
 
 // SetSize sets the model dimensions.
 func (m *Model) SetSize(width, height int) {
-	m.width = width
-	m.height = height
+	m.width = max(1, width)
+	m.height = max(1, height)
+	m.ensureSelectedVisible()
 }
 
 // SelectedCategory returns the currently selected category.
@@ -167,14 +190,22 @@ func (m *Model) SelectedSetting() *Setting {
 
 // SelectNextCategory moves to the next category.
 func (m *Model) SelectNextCategory() {
+	if len(m.categories) == 0 {
+		return
+	}
 	m.selectedCategory = (m.selectedCategory + 1) % len(m.categories)
 	m.selectedSetting = 0
+	m.scrollY = 0
 }
 
 // SelectPrevCategory moves to the previous category.
 func (m *Model) SelectPrevCategory() {
+	if len(m.categories) == 0 {
+		return
+	}
 	m.selectedCategory = (m.selectedCategory - 1 + len(m.categories)) % len(m.categories)
 	m.selectedSetting = 0
+	m.scrollY = 0
 }
 
 // SelectNextSetting moves to the next setting.
@@ -185,6 +216,7 @@ func (m *Model) SelectNextSetting() {
 	}
 	if len(cat.Settings) > 0 {
 		m.selectedSetting = (m.selectedSetting + 1) % len(cat.Settings)
+		m.ensureSelectedVisible()
 	}
 }
 
@@ -196,6 +228,7 @@ func (m *Model) SelectPrevSetting() {
 	}
 	if len(cat.Settings) > 0 {
 		m.selectedSetting = (m.selectedSetting - 1 + len(cat.Settings)) % len(cat.Settings)
+		m.ensureSelectedVisible()
 	}
 }
 
@@ -207,6 +240,7 @@ func (m *Model) ToggleBoolValue() {
 	}
 	if val, ok := setting.Value.(bool); ok {
 		setting.Value = !val
+		m.markDirty()
 	}
 }
 
@@ -216,8 +250,9 @@ func (m *Model) IncrementIntValue() {
 	if setting == nil || setting.Type != TypeInt {
 		return
 	}
-	if val, ok := setting.Value.(int); ok {
+	if val, ok := setting.Value.(int); ok && (setting.ID != "editor.tab_size" || val < 8) {
 		setting.Value = val + 1
+		m.markDirty()
 	}
 }
 
@@ -229,6 +264,7 @@ func (m *Model) DecrementIntValue() {
 	}
 	if val, ok := setting.Value.(int); ok && val > 1 {
 		setting.Value = val - 1
+		m.markDirty()
 	}
 }
 
@@ -239,6 +275,162 @@ func (m *Model) ResetCurrentValue() {
 		return
 	}
 	setting.Value = setting.DefaultValue
+	m.markDirty()
+}
+
+// CycleStringValue advances a setting with a fixed, validated list of values.
+// Currently the only editable string is the configured theme.
+func (m *Model) CycleStringValue() {
+	setting := m.SelectedSetting()
+	if setting == nil || setting.ID != "ui.theme" {
+		return
+	}
+	current, ok := setting.Value.(string)
+	if !ok {
+		return
+	}
+	themes := config.KnownThemes()
+	for i, theme := range themes {
+		if theme == current {
+			setting.Value = themes[(i+1)%len(themes)]
+			m.markDirty()
+			return
+		}
+	}
+	setting.Value = themes[0]
+	m.markDirty()
+}
+
+// HandleMouseClick applies a click in Settings content coordinates (that is,
+// after the containing modal border and padding). It returns true whenever the
+// click lands on an interactive tab or setting row. Keeping the geometry here
+// makes the rendered rows and their hit targets evolve together.
+func (m *Model) HandleMouseClick(x, y int) bool {
+	if y == settingsCategoryRow {
+		for i := range m.categories {
+			start, end := m.categoryTabBounds(i)
+			if x >= start && x < end {
+				m.selectedCategory = i
+				m.selectedSetting = 0
+				m.scrollY = 0
+				return true
+			}
+		}
+		return false
+	}
+
+	row := y - settingsFirstRow
+	if row < 0 || row >= m.visibleSettings() {
+		return false
+	}
+	idx := m.scrollY + row
+	cat := m.SelectedCategory()
+	if cat == nil || idx >= len(cat.Settings) {
+		return false
+	}
+	m.selectedSetting = idx
+
+	// A label click selects the row. The bracketed value/control region changes
+	// it, which avoids accidental edits when merely navigating with the mouse.
+	setting := m.SelectedSetting()
+	if setting != nil && x >= m.settingControlStart(setting) {
+		switch setting.Type {
+		case TypeBool:
+			m.ToggleBoolValue()
+		case TypeInt:
+			if x <= m.settingControlStart(setting)+2 {
+				m.DecrementIntValue()
+			} else {
+				m.IncrementIntValue()
+			}
+		case TypeString:
+			m.CycleStringValue()
+		}
+	}
+	m.ensureSelectedVisible()
+	return true
+}
+
+func (m *Model) markDirty() {
+	m.dirty = true
+	m.status = "Unsaved changes — press Ctrl+S to save"
+}
+
+// Dirty reports whether the displayed values differ from the last saved values.
+func (m *Model) Dirty() bool { return m.dirty }
+
+// Status returns the user-visible outcome of the last settings action.
+func (m *Model) Status() string { return m.status }
+
+// SetStatus reports a recoverable error or progress update without discarding
+// the values currently being edited.
+func (m *Model) SetStatus(status string) { m.status = status }
+
+// MarkSaved records a successful persistence operation. It deliberately keeps
+// the current selection and values intact.
+func (m *Model) MarkSaved(cfg config.Config, status string) {
+	m.baseConfig = cfg
+	m.dirty = false
+	m.status = status
+}
+
+// Config returns the full application configuration represented by the
+// editable Settings UI. Settings not exposed by the overlay are retained from
+// the configuration that opened it.
+func (m *Model) Config() (config.Config, error) {
+	cfg := m.baseConfig
+	for _, category := range m.categories {
+		for _, setting := range category.Settings {
+			switch setting.ID {
+			case "editor.tab_size":
+				value, ok := setting.Value.(int)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid tab size setting")
+				}
+				cfg.Editor.TabSize = value
+			case "editor.insert_tabs":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid insert tabs setting")
+				}
+				cfg.Editor.InsertTabs = value
+			case "editor.auto_indent":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid auto indent setting")
+				}
+				cfg.Editor.AutoIndent = value
+			case "editor.format_on_save":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid format on save setting")
+				}
+				cfg.Editor.FormatOnSave = value
+			case "editor.word_wrap":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid word wrap setting")
+				}
+				cfg.Editor.WordWrap = value
+			case "ui.theme":
+				value, ok := setting.Value.(string)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid theme setting")
+				}
+				cfg.UI.Theme = value
+			case "ui.show_tree":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid show tree setting")
+				}
+				cfg.UI.ShowTree = value
+			}
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
 }
 
 // View renders the settings UI.
@@ -246,9 +438,6 @@ func (m *Model) View() string {
 	if len(m.categories) == 0 {
 		return m.theme.Editor.Render("No settings available")
 	}
-
-	// Fixed modal height
-	modalHeight := 18
 
 	var sb strings.Builder
 
@@ -259,6 +448,9 @@ func (m *Model) View() string {
 
 	// Config path hint
 	configHint := fmt.Sprintf("Config: %s", m.configPath)
+	if available := m.width - 6; available > 0 && lipgloss.Width(configHint) > available {
+		configHint = truncateDisplay(configHint, available)
+	}
 	configHint = m.theme.Gutter.Render(configHint)
 	sb.WriteString(configHint)
 	sb.WriteString("\n\n")
@@ -268,7 +460,11 @@ func (m *Model) View() string {
 	sb.WriteString("\n\n")
 
 	// Settings list with fixed height
-	sb.WriteString(m.renderSettingsList(modalHeight - 8))
+	sb.WriteString(m.renderSettingsList(m.visibleSettings()))
+	if m.status != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(m.theme.Gutter.Render(m.status))
+	}
 
 	return sb.String()
 }
@@ -314,18 +510,22 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	case TypeBool:
 		if val, ok := setting.Value.(bool); ok {
 			if val {
-				valueStr = lipgloss.NewStyle().Foreground(ui.Nord14).Render("✓ Enabled")
+				valueStr = lipgloss.NewStyle().Foreground(ui.Nord14).Render("[✓ Enabled]")
 			} else {
-				valueStr = m.theme.Gutter.Render("✗ Disabled")
+				valueStr = m.theme.Gutter.Render("[✗ Disabled]")
 			}
 		}
 	case TypeInt:
 		if val, ok := setting.Value.(int); ok {
-			valueStr = fmt.Sprintf("%d", val)
+			valueStr = fmt.Sprintf("[- %d +]", val)
 		}
 	case TypeString:
 		if val, ok := setting.Value.(string); ok {
-			valueStr = val
+			if setting.ID == "ui.theme" {
+				valueStr = "[" + val + " >]"
+			} else {
+				valueStr = val
+			}
 		}
 	case TypeStringList:
 		if val, ok := setting.Value.([]string); ok {
@@ -349,6 +549,85 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	}
 
 	return line
+}
+
+const (
+	settingsCategoryRow = 4
+	settingsFirstRow    = 6
+)
+
+func (m *Model) visibleSettings() int {
+	// The outer app modal reserves two rows for its border/padding, while this
+	// model needs title, config hint, categories, and a compact footer. On a
+	// tiny terminal still expose one row rather than returning an invalid size.
+	visible := m.height - 10
+	if visible < 1 {
+		return 1
+	}
+	return visible
+}
+
+func (m *Model) ensureSelectedVisible() {
+	cat := m.SelectedCategory()
+	if cat == nil || len(cat.Settings) == 0 {
+		m.scrollY = 0
+		return
+	}
+	if m.selectedSetting < 0 {
+		m.selectedSetting = 0
+	}
+	if m.selectedSetting >= len(cat.Settings) {
+		m.selectedSetting = len(cat.Settings) - 1
+	}
+	visible := m.visibleSettings()
+	if m.selectedSetting < m.scrollY {
+		m.scrollY = m.selectedSetting
+	}
+	if m.selectedSetting >= m.scrollY+visible {
+		m.scrollY = m.selectedSetting - visible + 1
+	}
+	maxScroll := len(cat.Settings) - visible
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.scrollY > maxScroll {
+		m.scrollY = maxScroll
+	}
+}
+
+func (m *Model) categoryTabBounds(index int) (int, int) {
+	start := 0
+	for i, cat := range m.categories {
+		style := m.theme.SidebarTabInactive
+		if i == m.selectedCategory {
+			style = m.theme.SidebarTabActive
+		}
+		width := lipgloss.Width(style.Render(cat.Name))
+		if i == index {
+			return start, start + width
+		}
+		start += width + 2
+	}
+	return 0, 0
+}
+
+func (m *Model) settingControlStart(setting *Setting) int {
+	// Two leading spaces, the label and colon, then two spaces before the
+	// bracketed control. lipgloss.Width handles labels containing non-ASCII.
+	return 2 + lipgloss.Width(setting.Label) + 1 + 2
+}
+
+func truncateDisplay(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width <= 3 {
+		return lipgloss.NewStyle().MaxWidth(width).Render(s)
+	}
+	return lipgloss.NewStyle().MaxWidth(width-3).Render(s) + "..."
 }
 
 // PreviewTOML generates a TOML preview of current settings.

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"teak/internal/ui"
 )
 
 // Nerd Font v3 codicon / material-style icons for a modern look
@@ -120,6 +121,20 @@ var folderColor = lipgloss.Color("#8CAAEE")
 var defaultFileColor color.Color = lipgloss.Color("#C6D0F5")
 
 func iconForEntry(entry Entry) (string, color.Color) {
+	if !ui.NerdFontEnabled() {
+		if entry.IsDir {
+			switch {
+			case entry.Loading:
+				return "~", folderColor
+			case entry.Expanded:
+				return "v", folderColor
+			default:
+				return ">", folderColor
+			}
+		}
+		return "-", defaultFileColor
+	}
+
 	if entry.IsDir {
 		if entry.Loading {
 			return "\U000f0252", folderColor // folder-clock

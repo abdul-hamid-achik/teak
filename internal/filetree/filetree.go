@@ -1,7 +1,12 @@
 package filetree
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
 	"image/color"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -27,6 +33,42 @@ type PinFileMsg struct {
 type DirExpandedMsg struct {
 	Path     string
 	Children []Entry
+	Err      error
+}
+
+// RefreshResult is an immutable directory-tree snapshot built away from the
+// Bubble Tea update loop. It intentionally contains only filesystem-derived
+// state; diagnostics, git state, viewport position and current selection stay
+// owned by the live Model when ApplyRefresh is called.
+type RefreshResult struct {
+	Entries           []Entry
+	GitignorePatterns []string
+}
+
+const (
+	// A refresh is triggered by external events, so it must have a finite cost
+	// even if a generated directory is accidentally expanded. The limits apply
+	// only to the expanded portion of the visible tree and leave the previous
+	// tree intact when exceeded.
+	maxRefreshDirectories = 2_048
+	maxRefreshEntries     = 100_000
+	// A single directory feeds the flattened tree and is rendered as one
+	// allocation-heavy slice. Cap it separately from the recursive refresh
+	// budget so one generated directory cannot exhaust memory on its own.
+	maxDirectoryEntries = 4_096
+	// Gitignore is workspace-controlled input read during startup and every
+	// watcher refresh. Keep a malformed/generated file from allocating an
+	// unbounded string slice or delaying the TUI's background commands.
+	maxGitignoreBytes     = 1 << 20
+	maxGitignorePatterns  = 10_000
+	maxGitignoreLineBytes = 4 << 10
+)
+
+var errDirectoryEntryLimit = errors.New("tree directory entry limit exceeded")
+
+type refreshBudget struct {
+	directories int
+	entries     int
 }
 
 // Entry represents a file or directory in the tree.
@@ -84,13 +126,20 @@ func (m *Model) SetGitStatus(status map[string]string) {
 // New creates a new file tree model rooted at the given directory.
 // Only reads the first level synchronously for fast startup.
 func New(root string, theme ui.Theme) Model {
+	m := NewEmpty(root, theme)
+	m.LoadRoot()
+	return m
+}
+
+// NewEmpty constructs a render-safe tree without touching the filesystem. It
+// is used by the application constructor so a slow network directory cannot
+// delay the first Bubble Tea frame.
+func NewEmpty(root string, theme ui.Theme) Model {
 	m := Model{
-		Root:              root,
-		theme:             theme,
-		sharedFlatCache:   &flatEntryCache{},
-		gitignorePatterns: loadGitignore(root),
+		Root:            root,
+		theme:           theme,
+		sharedFlatCache: &flatEntryCache{},
 	}
-	m.Entries = readDirEntries(root, root, 0, m.gitignorePatterns)
 
 	// Initialize cached styles to avoid per-frame allocations
 	m.cachedStyles.base = lipgloss.NewStyle()
@@ -99,6 +148,15 @@ func New(root string, theme ui.Theme) Model {
 	m.cachedStyles.gitIgnoredColor = ui.Nord3
 
 	return m
+}
+
+// LoadRoot performs the initial top-level read. Call this in a tea.Cmd when
+// startup latency matters; New retains the convenient synchronous API for
+// isolated filetree consumers and tests.
+func (m *Model) LoadRoot() {
+	m.gitignorePatterns = loadGitignore(m.Root)
+	m.Entries = readDirEntries(m.Root, m.Root, 0, m.gitignorePatterns)
+	m.invalidateFlatCache()
 }
 
 // RefreshDir re-reads a directory's children synchronously and updates the tree.
@@ -111,6 +169,207 @@ func (m *Model) RefreshDir(dir string) {
 	}
 	refreshInSlice(m.Entries, m.Root, dir, m.gitignorePatterns)
 	m.invalidateFlatCache()
+}
+
+// SnapshotForRefresh makes the filesystem-facing portion of a Model safe to
+// hand to a background tea.Cmd. Model updates mutate entry slices in place, so
+// passing the live tree to a goroutine would otherwise race with keyboard and
+// mouse interactions.
+func (m Model) SnapshotForRefresh() Model {
+	m.Entries = cloneEntries(m.Entries)
+	m.gitignorePatterns = append([]string(nil), m.gitignorePatterns...)
+	m.cachedFlat = nil
+	m.sharedFlatCache = &flatEntryCache{}
+	return m
+}
+
+// Refresh builds a replacement tree snapshot without mutating the live model.
+// Call it from a tea.Cmd, using SnapshotForRefresh before scheduling the
+// command. Cancellation is checked between directory batches and recursive
+// expanded directories; a single operating-system ReadDir call itself cannot
+// be interrupted by Go.
+func (m Model) Refresh(ctx context.Context, dir string) (RefreshResult, error) {
+	if err := validRefreshDirectory(m.Root, dir); err != nil {
+		return RefreshResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return RefreshResult{}, err
+	}
+
+	patterns, err := loadGitignoreContext(ctx, m.Root)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	budget := &refreshBudget{}
+	if filepath.Clean(dir) == filepath.Clean(m.Root) {
+		entries, err := refreshEntriesPreservingExpansionContext(ctx, m.Root, m.Root, 0, patterns, m.Entries, budget)
+		if err != nil {
+			return RefreshResult{}, err
+		}
+		return RefreshResult{Entries: entries, GitignorePatterns: patterns}, nil
+	}
+	if _, err := refreshInSliceContext(ctx, m.Entries, m.Root, filepath.Clean(dir), patterns, budget); err != nil {
+		return RefreshResult{}, err
+	}
+	return RefreshResult{Entries: m.Entries, GitignorePatterns: patterns}, nil
+}
+
+// ApplyRefresh installs a snapshot generated by Refresh while retaining UI
+// state that may have changed while the disk read was in flight. In particular
+// it preserves the selected path rather than an unstable flattened index.
+func (m *Model) ApplyRefresh(result RefreshResult) {
+	selectedPath := m.selectedPath()
+	m.Entries = mergeRefreshedEntries(m.Entries, result.Entries)
+	m.gitignorePatterns = append([]string(nil), result.GitignorePatterns...)
+	m.invalidateFlatCache()
+	if selectedPath != "" {
+		flat := m.flatEntries()
+		for i, entry := range flat {
+			if entry.Path == selectedPath {
+				m.Cursor = i
+				break
+			}
+		}
+	}
+	m.ensureCursorVisible()
+}
+
+func (m *Model) selectedPath() string {
+	flat := m.flatEntries()
+	if m.Cursor < 0 || m.Cursor >= len(flat) {
+		return ""
+	}
+	return flat[m.Cursor].Path
+}
+
+func cloneEntries(entries []Entry) []Entry {
+	if entries == nil {
+		return nil
+	}
+	cloned := make([]Entry, len(entries))
+	for i, entry := range entries {
+		cloned[i] = entry
+		cloned[i].Children = cloneEntries(entry.Children)
+	}
+	return cloned
+}
+
+// mergeRefreshedEntries gives the live model's expansion/loading state
+// precedence. A user can expand or collapse a directory while a background
+// refresh is running; applying an old snapshot must never undo that action.
+func mergeRefreshedEntries(live, refreshed []Entry) []Entry {
+	if len(live) == 0 || len(refreshed) == 0 {
+		return refreshed
+	}
+	liveByPath := make(map[string]Entry, len(live))
+	for _, entry := range live {
+		liveByPath[entry.Path] = entry
+	}
+	for i := range refreshed {
+		previous, ok := liveByPath[refreshed[i].Path]
+		if !ok || !refreshed[i].IsDir {
+			continue
+		}
+		wasExpanded := refreshed[i].Expanded
+		refreshed[i].Expanded = previous.Expanded
+		if previous.Loading {
+			refreshed[i].Loading = true
+		}
+		if previous.Expanded && !wasExpanded {
+			refreshed[i].Children = previous.Children
+			continue
+		}
+		if len(refreshed[i].Children) > 0 {
+			refreshed[i].Children = mergeRefreshedEntries(previous.Children, refreshed[i].Children)
+		}
+	}
+	return refreshed
+}
+
+func validRefreshDirectory(root, dir string) error {
+	if root == "" || dir == "" {
+		return fmt.Errorf("tree refresh requires a workspace directory")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve tree root: %w", err)
+	}
+	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return fmt.Errorf("resolve tree root symlinks: %w", err)
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve tree refresh directory: %w", err)
+	}
+	dirResolved, err := filepath.EvalSymlinks(dirAbs)
+	if err != nil {
+		return fmt.Errorf("resolve tree refresh directory symlinks: %w", err)
+	}
+	rel, err := filepath.Rel(rootResolved, dirResolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("tree refresh directory is outside the workspace")
+	}
+	return nil
+}
+
+func refreshEntriesPreservingExpansionContext(ctx context.Context, rootDir, dir string, depth int, gitignorePatterns []string, previous []Entry, budget *refreshBudget) ([]Entry, error) {
+	refreshed, err := readDirEntriesContext(ctx, rootDir, dir, depth, gitignorePatterns, budget)
+	if err != nil {
+		return nil, err
+	}
+	if len(previous) == 0 {
+		return refreshed, nil
+	}
+
+	previousByPath := make(map[string]Entry, len(previous))
+	for _, entry := range previous {
+		previousByPath[entry.Path] = entry
+	}
+	for i := range refreshed {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		prev, ok := previousByPath[refreshed[i].Path]
+		if !ok || !refreshed[i].IsDir {
+			continue
+		}
+		refreshed[i].Expanded = prev.Expanded
+		if !prev.Expanded {
+			continue
+		}
+		children, err := refreshEntriesPreservingExpansionContext(ctx, rootDir, refreshed[i].Path, refreshed[i].Depth+1, gitignorePatterns, prev.Children, budget)
+		if err != nil {
+			return nil, err
+		}
+		refreshed[i].Children = children
+		refreshed[i].Loading = false
+	}
+	return refreshed, nil
+}
+
+func refreshInSliceContext(ctx context.Context, entries []Entry, rootDir, dir string, gitignorePatterns []string, budget *refreshBudget) (bool, error) {
+	for i := range entries {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if entries[i].Path == dir && entries[i].IsDir {
+			children, err := refreshEntriesPreservingExpansionContext(ctx, rootDir, dir, entries[i].Depth+1, gitignorePatterns, entries[i].Children, budget)
+			if err != nil {
+				return false, err
+			}
+			entries[i].Children = children
+			entries[i].Loading = false
+			return true, nil
+		}
+		if entries[i].Children != nil {
+			found, err := refreshInSliceContext(ctx, entries[i].Children, rootDir, dir, gitignorePatterns, budget)
+			if err != nil || found {
+				return found, err
+			}
+		}
+	}
+	return false, nil
 }
 
 func refreshEntriesPreservingExpansion(rootDir, dir string, depth int, gitignorePatterns []string, previous []Entry) []Entry {
@@ -212,6 +471,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	mouse := msg.Mouse()
+	if mouse.Y < 0 || (m.Height > 0 && mouse.Y >= m.Height) {
+		return m, nil
+	}
 	idx := m.ScrollY + mouse.Y
 	flat := m.flatEntries()
 	if idx < 0 || idx >= len(flat) {
@@ -262,13 +524,17 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleDirExpanded(msg DirExpandedMsg) (Model, tea.Cmd) {
-	setChildrenInSlice(m.Entries, msg.Path, msg.Children)
+	setDirectoryLoadResultInSlice(m.Entries, msg.Path, msg.Children, msg.Err)
 	m.invalidateFlatCache()
+	m.ensureCursorVisible()
 	return m, nil
 }
 
 // EntryAtY returns the entry at the given screen Y position, or nil.
 func (m Model) EntryAtY(y int) *Entry {
+	if y < 0 || (m.Height > 0 && y >= m.Height) {
+		return nil
+	}
 	flat := m.flatEntries()
 	idx := m.ScrollY + y
 	if idx < 0 || idx >= len(flat) {
@@ -279,7 +545,9 @@ func (m Model) EntryAtY(y int) *Entry {
 
 // ToggleEntry toggles the expand state of a directory entry by path.
 func (m *Model) ToggleEntry(path string) (Model, tea.Cmd) {
-	return m.toggleDir(path)
+	updated, cmd := m.toggleDir(path)
+	updated.ensureCursorVisible()
+	return updated, cmd
 }
 
 // toggleDir toggles a directory's expanded state.
@@ -287,6 +555,7 @@ func (m *Model) ToggleEntry(path string) (Model, tea.Cmd) {
 func (m *Model) toggleDir(path string) (Model, tea.Cmd) {
 	cmd := toggleInSlice(m.Entries, m.Root, path, m.gitignorePatterns)
 	m.invalidateFlatCache()
+	m.ensureCursorVisible()
 	return *m, cmd
 }
 
@@ -301,8 +570,8 @@ func toggleInSlice(entries []Entry, rootDir, path string, gitignorePatterns []st
 				dirPath := entries[i].Path
 				depth := entries[i].Depth + 1
 				return func() tea.Msg {
-					children := readDirEntries(rootDir, dirPath, depth, gitignorePatterns)
-					return DirExpandedMsg{Path: dirPath, Children: children}
+					children, err := readDirEntriesContext(context.Background(), rootDir, dirPath, depth, gitignorePatterns, &refreshBudget{})
+					return DirExpandedMsg{Path: dirPath, Children: children, Err: err}
 				}
 			}
 			return nil
@@ -318,14 +587,23 @@ func toggleInSlice(entries []Entry, rootDir, path string, gitignorePatterns []st
 
 // setChildrenInSlice finds the entry by path and sets its children.
 func setChildrenInSlice(entries []Entry, path string, children []Entry) bool {
+	return setDirectoryLoadResultInSlice(entries, path, children, nil)
+}
+
+// setDirectoryLoadResultInSlice completes an asynchronous read. On failure it
+// clears the spinner but retains cached children: a resource-limit error must
+// never turn a previously visible subtree into a partial or empty listing.
+func setDirectoryLoadResultInSlice(entries []Entry, path string, children []Entry, loadErr error) bool {
 	for i := range entries {
 		if entries[i].Path == path && entries[i].IsDir {
-			entries[i].Children = children
 			entries[i].Loading = false
+			if loadErr == nil {
+				entries[i].Children = children
+			}
 			return true
 		}
 		if entries[i].Children != nil {
-			if setChildrenInSlice(entries[i].Children, path, children) {
+			if setDirectoryLoadResultInSlice(entries[i].Children, path, children, loadErr) {
 				return true
 			}
 		}
@@ -334,11 +612,38 @@ func setChildrenInSlice(entries []Entry, path string, children []Entry) bool {
 }
 
 func (m *Model) ensureCursorVisible() {
+	m.clampCursor()
+	if m.Height <= 0 {
+		m.ScrollY = 0
+		return
+	}
 	if m.Cursor < m.ScrollY {
 		m.ScrollY = m.Cursor
 	}
 	if m.Cursor >= m.ScrollY+m.Height {
 		m.ScrollY = m.Cursor - m.Height + 1
+	}
+}
+
+func (m *Model) clampCursor() {
+	flat := m.flatEntries()
+	if len(flat) == 0 {
+		m.Cursor = 0
+		m.ScrollY = 0
+		return
+	}
+	if m.Cursor < 0 {
+		m.Cursor = 0
+	}
+	if m.Cursor >= len(flat) {
+		m.Cursor = len(flat) - 1
+	}
+	maxScroll := max(0, len(flat)-max(1, m.Height))
+	if m.ScrollY < 0 {
+		m.ScrollY = 0
+	}
+	if m.ScrollY > maxScroll {
+		m.ScrollY = maxScroll
 	}
 }
 
@@ -375,62 +680,156 @@ func flattenEntries(entries []Entry, flat *[]Entry) {
 }
 
 func readDirEntries(rootDir, path string, depth int, gitignorePatterns []string) []Entry {
-	dirEntries, err := os.ReadDir(path)
+	entries, err := readDirEntriesContext(context.Background(), rootDir, path, depth, gitignorePatterns, &refreshBudget{})
 	if err != nil {
 		return nil
 	}
+	return entries
+}
+
+// readDirEntriesContext is the bounded, cancellable counterpart to
+// readDirEntries used for watcher-driven refreshes. Reading in batches lets a
+// superseding filesystem event stop a deep refresh promptly.
+func readDirEntriesContext(ctx context.Context, rootDir, path string, depth int, gitignorePatterns []string, budget *refreshBudget) ([]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if budget.directories >= maxRefreshDirectories {
+		return nil, fmt.Errorf("tree refresh exceeds %d expanded directories", maxRefreshDirectories)
+	}
+	budget.directories++
+
+	dir, err := os.Open(path)
+	if err != nil {
+		// A directory can disappear between fsnotify's event and this command.
+		// Treat it as an empty listing so the next snapshot removes it cleanly.
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
 
 	var dirs, files []Entry
-	for _, de := range dirEntries {
-		name := de.Name()
-		fullPath := filepath.Join(path, name)
-
-		relPath, err := filepath.Rel(rootDir, fullPath)
-		if err != nil {
-			relPath = fullPath
+	directoryEntries := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		isGitIgnored := matchesGitignore(relPath, gitignorePatterns, de.IsDir())
-
-		entry := Entry{
-			Name:         name,
-			Path:         fullPath,
-			IsDir:        de.IsDir(),
-			Depth:        depth,
-			IsGitIgnored: isGitIgnored,
+		dirEntries, readErr := dir.ReadDir(256)
+		for _, de := range dirEntries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if budget.entries >= maxRefreshEntries {
+				return nil, fmt.Errorf("tree refresh exceeds %d entries", maxRefreshEntries)
+			}
+			if directoryEntries >= maxDirectoryEntries {
+				return nil, fmt.Errorf("%w: %q exceeds %d entries", errDirectoryEntryLimit, path, maxDirectoryEntries)
+			}
+			budget.entries++
+			directoryEntries++
+			name := de.Name()
+			fullPath := filepath.Join(path, name)
+			relPath, err := filepath.Rel(rootDir, fullPath)
+			if err != nil {
+				relPath = fullPath
+			}
+			entry := Entry{
+				Name:         name,
+				Path:         fullPath,
+				IsDir:        de.IsDir(),
+				Depth:        depth,
+				IsGitIgnored: matchesGitignore(relPath, gitignorePatterns, de.IsDir()),
+			}
+			if entry.IsDir {
+				dirs = append(dirs, entry)
+			} else {
+				files = append(files, entry)
+			}
 		}
-		if de.IsDir() {
-			dirs = append(dirs, entry)
-		} else {
-			files = append(files, entry)
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, readErr
 		}
 	}
 
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name < dirs[j].Name })
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-
-	return append(dirs, files...)
+	return append(dirs, files...), nil
 }
 
 // loadGitignore reads a top-level .gitignore and returns simple patterns.
 func loadGitignore(rootDir string) []string {
-	data, err := os.ReadFile(filepath.Join(rootDir, ".gitignore"))
+	patterns, err := loadGitignoreContext(context.Background(), rootDir)
 	if err != nil {
 		return nil
 	}
+	return patterns
+}
+
+// loadGitignoreContext reads simple top-level patterns without letting an
+// untrusted workspace file monopolize a refresh command. Invalid, oversized,
+// or symlinked ignore files deliberately act as no patterns; cancellation is
+// still returned to preserve the tree snapshot already visible to the user.
+func loadGitignoreContext(ctx context.Context, rootDir string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(rootDir, ".gitignore")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maxGitignoreBytes {
+		return nil, nil
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Size() > maxGitignoreBytes {
+		return nil, nil
+	}
+
 	var patterns []string
-	for _, line := range strings.Split(string(data), "\n") {
+	scanner := bufio.NewScanner(io.LimitReader(file, maxGitignoreBytes+1))
+	scanner.Buffer(make([]byte, 1024), maxGitignoreLineBytes)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		line := scanner.Text()
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if len(patterns) >= maxGitignorePatterns {
+			return nil, nil
+		}
 		patterns = append(patterns, line)
 	}
-	return patterns
+	if scanner.Err() != nil {
+		return nil, nil
+	}
+	return patterns, nil
 }
 
 // LoadGitignorePatterns reads the top-level .gitignore and returns simple patterns.
 func LoadGitignorePatterns(rootDir string) []string {
 	return loadGitignore(rootDir)
+}
+
+// LoadGitignorePatternsContext is the cancellable counterpart used by
+// background workspace scans outside the tree model. It shares the same
+// bounded, regular-file-only parsing policy as tree refreshes.
+func LoadGitignorePatternsContext(ctx context.Context, rootDir string) ([]string, error) {
+	return loadGitignoreContext(ctx, rootDir)
 }
 
 // matchesGitignore checks if a relative path matches any gitignore pattern.
@@ -477,6 +876,13 @@ func MatchesGitignore(rel string, patterns []string, isDir bool) bool {
 
 // View renders the file tree.
 func (m Model) View() string {
+	// A resize can briefly report a zero-sized terminal. Do not let the
+	// structural columns (indent and icon) escape the available viewport in
+	// that state; an over-wide sidebar makes the whole TUI wrap horizontally.
+	if m.Width <= 0 || m.Height <= 0 {
+		return ""
+	}
+
 	flat := m.flatEntries()
 	var sb strings.Builder
 
@@ -506,7 +912,7 @@ func (m Model) View() string {
 
 			// Build plain text parts to calculate widths accurately
 			indent := " " + strings.Repeat("  ", entry.Depth)
-			const iconWidth = 2 // Nerd Font icons are typically 2 cells
+			iconWidth := ansi.StringWidth(icon)
 			nameStr := entry.Name
 
 			// Git status indicator + color for the filename
@@ -555,15 +961,17 @@ func (m Model) View() string {
 			}
 
 			// Truncate name if needed
-			maxNameWidth := m.Width - (len(indent) + iconWidth + 1)
+			maxNameWidth := m.Width - (ansi.StringWidth(indent) + iconWidth + 1)
 			if hasGitInd {
 				maxNameWidth -= gitIndWidth
 			}
 			if hasDiag {
 				maxNameWidth -= 2
 			}
-			if maxNameWidth > 0 && len(nameStr) > maxNameWidth {
-				nameStr = nameStr[:maxNameWidth]
+			if maxNameWidth <= 0 {
+				nameStr = ""
+			} else if ansi.StringWidth(nameStr) > maxNameWidth {
+				nameStr = ansi.Truncate(nameStr, maxNameWidth, "")
 			}
 
 			// Render parts with consistent background using cached style
@@ -593,7 +1001,7 @@ func (m Model) View() string {
 			}
 
 			// Calculate padding needed
-			contentWidth := len(indent) + iconWidth + 1 + len(nameStr)
+			contentWidth := ansi.StringWidth(indent) + iconWidth + 1 + ansi.StringWidth(nameStr)
 			if hasGitInd {
 				contentWidth += gitIndWidth
 			}
@@ -613,7 +1021,12 @@ func (m Model) View() string {
 			padStyled := cachedBase.Render(padding)
 
 			line := indentStyled + styledIcon + spaceStyled + styledName + gitIndPart + diagPart + padStyled
-			sb.WriteString(line)
+			// Name truncation above only reserves room for the name. At very
+			// narrow widths the fixed indent/icon columns can still exceed the
+			// viewport, so clip the fully styled line by display cells as the
+			// final invariant. ansi.Truncate preserves escape sequences and does
+			// not split a grapheme cluster.
+			sb.WriteString(ansi.Truncate(line, m.Width, ""))
 		} else {
 			// Use entry background for empty lines
 			emptyLine := m.cachedStyles.base.Background(m.cachedStyles.entryBg).
@@ -627,6 +1040,6 @@ func (m Model) View() string {
 
 // SetSize updates the tree dimensions.
 func (m *Model) SetSize(width, height int) {
-	m.Width = width
-	m.Height = height
+	m.Width = max(0, width)
+	m.Height = max(0, height)
 }

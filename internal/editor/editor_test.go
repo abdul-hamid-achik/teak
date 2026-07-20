@@ -2,10 +2,13 @@ package editor
 
 import (
 	"bytes"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/clipboard"
 	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
 	"teak/internal/text"
@@ -22,6 +25,25 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.AutoIndent != true {
 		t.Error("expected AutoIndent to be true")
+	}
+}
+
+func TestOccurrenceShortcutReportsInteractiveScanLimit(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("word ", text.MaxOccurrenceSearchBytes/5+2)))
+	buf.SetSelection(text.Position{}, text.Position{Col: 4})
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+
+	updated, cmd := ed.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+
+	if cmd == nil {
+		t.Fatal("oversized occurrence shortcut did not report its limit")
+	}
+	msg := cmd()
+	if _, ok := msg.(OccurrenceSearchLimitMsg); !ok {
+		t.Fatalf("occurrence limit command returned %T", msg)
+	}
+	if got := updated.Buffer.Selections.Count(); got != 1 {
+		t.Fatalf("selection count = %d, want unchanged primary selection", got)
 	}
 }
 
@@ -59,6 +81,45 @@ func TestEditorSetSize(t *testing.T) {
 	}
 	if editor.Viewport.Height != 24 {
 		t.Errorf("expected Height 24, got %d", editor.Viewport.Height)
+	}
+}
+
+func TestEditorSetSizeKeepsWordWrapForLargeDocument(t *testing.T) {
+	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("x"), largeWrapTestBytes+1))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+	ed := New(buf, ui.DefaultTheme(), cfg)
+
+	ed.SetSize(20, 8)
+
+	if ed.Wrap == nil {
+		t.Fatal("large document must retain a virtual word-wrap layout")
+	}
+	if ed.WordWrapDegraded() {
+		t.Fatal("large document must not fall back to horizontal scrolling")
+	}
+	if got := ed.WordWrapStatus(); got != "" {
+		t.Fatalf("WordWrapStatus() = %q, want empty while wrapping is active", got)
+	}
+	if got := ed.View(); got == "" {
+		t.Fatal("wrapped rendering should remain available")
+	}
+}
+
+func TestEditorSetSizeSameDimensionsDoesNotRebuildWrap(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("one two three four\nfive six seven"))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+	ed := New(buf, ui.DefaultTheme(), cfg)
+	ed.SetSize(8, 3)
+	if ed.Wrap == nil {
+		t.Fatal("expected wrap layout")
+	}
+	builds := ed.Wrap.BuildCount()
+
+	ed.SetSize(8, 3)
+	if got := ed.Wrap.BuildCount(); got != builds {
+		t.Fatalf("same dimensions rebuilt wrap layout: got %d builds, want %d", got, builds)
 	}
 }
 
@@ -577,6 +638,78 @@ func TestEditorUpdatePaste(t *testing.T) {
 	}
 }
 
+func TestEditorClipboardCommandsAreAsyncAndUseFallbackImmediately(t *testing.T) {
+	t.Setenv("TEAK_CLIPBOARD", "internal")
+	buf := text.NewBufferFromBytes([]byte("hello world"))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.Buffer.SetSelection(text.Position{Line: 0, Col: 0}, text.Position{Line: 0, Col: 5})
+
+	updated, copyCmd := ed.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if copyCmd == nil {
+		t.Fatal("Ctrl+C did not schedule clipboard preparation")
+	}
+	updated, _ = updated.Update(copyCmd())
+	if got, _ := clipboard.Paste(); got != "hello" {
+		t.Fatalf("copy fallback = %q, want hello", got)
+	}
+	if got := updated.Buffer.Content(); got != "hello world" {
+		t.Fatalf("Ctrl+C changed buffer to %q", got)
+	}
+
+	updated, cutCmd := updated.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	if cutCmd == nil {
+		t.Fatal("Ctrl+X did not schedule clipboard preparation")
+	}
+	updated, _ = updated.Update(cutCmd())
+	if got, _ := clipboard.Paste(); got != "hello" {
+		t.Fatalf("cut fallback = %q, want hello", got)
+	}
+	if got := updated.Buffer.Content(); got != " world" {
+		t.Fatalf("Ctrl+X buffer = %q, want %q", got, " world")
+	}
+}
+
+func TestEditorClipboardPasteRejectsStaleOrWrongEditorResult(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("base"))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+
+	updated, firstCmd := ed.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	if firstCmd == nil {
+		t.Fatal("first Ctrl+V did not schedule an async clipboard read")
+	}
+	updated, secondCmd := updated.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	if secondCmd == nil {
+		t.Fatal("second Ctrl+V did not schedule an async clipboard read")
+	}
+
+	stale := ClipboardPasteResultMsg{EditorID: updated.ID(), Generation: 1, Content: "stale"}
+	updated, _ = updated.Update(stale)
+	if got := updated.Buffer.Content(); got != "base" {
+		t.Fatalf("stale paste changed buffer to %q", got)
+	}
+
+	wrongEditor := ClipboardPasteResultMsg{EditorID: updated.ID() + 1, Generation: 2, Content: "wrong"}
+	updated, _ = updated.Update(wrongEditor)
+	if got := updated.Buffer.Content(); got != "base" {
+		t.Fatalf("wrong-editor paste changed buffer to %q", got)
+	}
+
+	// A failed OS read still carries the validated process-local fallback and
+	// must be useful to the user.
+	current := ClipboardPasteResultMsg{EditorID: updated.ID(), Generation: 2, Content: "paste", Err: errors.New("clipboard unavailable")}
+	updated, _ = updated.Update(current)
+	if got := updated.Buffer.Content(); got != "pastebase" {
+		t.Fatalf("current paste buffer = %q, want pastebase", got)
+	}
+
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	invalid := ClipboardPasteResultMsg{EditorID: updated.ID(), Generation: 3, Content: "bad\xff"}
+	updated, _ = updated.Update(invalid)
+	if got := updated.Buffer.Content(); got != "pastebase" {
+		t.Fatalf("invalid UTF-8 paste changed buffer to %q", got)
+	}
+}
+
 func TestEditorUpdateContextMenuNavigation(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("hello"))
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
@@ -930,6 +1063,10 @@ func TestEditorDispatchContextMenuActionCut(t *testing.T) {
 	editor.Buffer.SetSelection(text.Position{Line: 0, Col: 0}, text.Position{Line: 0, Col: 5})
 
 	editor, cmd := editor.dispatchContextMenuAction("cut")
+	if cmd == nil {
+		t.Fatal("cut did not prepare clipboard work")
+	}
+	editor, _ = editor.Update(cmd())
 
 	content := string(editor.Buffer.Bytes())
 	if content != " world" {
@@ -950,8 +1087,8 @@ func TestEditorDispatchContextMenuActionCopy(t *testing.T) {
 	if content != "hello world" {
 		t.Errorf("expected 'hello world', got %q", content)
 	}
-	if cmd != nil {
-		t.Error("expected nil cmd for copy")
+	if cmd == nil {
+		t.Error("expected async OS clipboard command for copy")
 	}
 }
 
@@ -962,8 +1099,11 @@ func TestEditorDispatchContextMenuActionPaste(t *testing.T) {
 	editor, cmd := editor.dispatchContextMenuAction("paste")
 
 	content := string(editor.Buffer.Bytes())
-	if cmd == nil && content != "hello" {
-		t.Logf("paste applied synchronously without a follow-up command: %q", content)
+	if cmd == nil {
+		t.Fatal("expected async clipboard read for context-menu paste")
+	}
+	if content != "hello" {
+		t.Fatalf("context-menu paste changed buffer synchronously to %q", content)
 	}
 }
 

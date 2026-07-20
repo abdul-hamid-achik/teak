@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -263,4 +264,14 @@ func (c *ACPCoordinator) Shutdown() {
 		c.mgr.Stop()
 	}
 	c.running = false
+}
+
+func (c *ACPCoordinator) WaitForShutdown(ctx context.Context) bool {
+	c.mu.RLock()
+	mgr := c.mgr
+	c.mu.RUnlock()
+	if mgr == nil {
+		return true
+	}
+	return mgr.WaitForShutdown(ctx)
 }

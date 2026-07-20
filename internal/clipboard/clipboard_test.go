@@ -1,9 +1,21 @@
 package clipboard
 
 import (
+	"errors"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	// The desktop clipboard is global across the package processes that
+	// `go test ./...` runs concurrently. Keep this package deterministic while
+	// command candidate tests still cover every supported platform backend.
+	_ = os.Setenv("TEAK_CLIPBOARD", internalClipboardMode)
+	os.Exit(m.Run())
+}
 
 func TestCopy_InternalFallback(t *testing.T) {
 	// Copy should always succeed (internal fallback)
@@ -195,6 +207,24 @@ func TestCopy_VeryLongString(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsOversizeAndInvalidUTF8WithoutReplacingFallback(t *testing.T) {
+	if err := Store("known-good"); err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	if err := Store(strings.Repeat("x", MaxClipboardBytes+1)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Store(oversize) error = %v, want ErrTooLarge", err)
+	}
+	if got := internalClipboard(); got != "known-good" {
+		t.Fatalf("fallback after oversize = %q, want known-good", got)
+	}
+	if err := Store("bad\xff"); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("Store(invalid UTF-8) error = %v, want ErrInvalidUTF8", err)
+	}
+	if got := internalClipboard(); got != "known-good" {
+		t.Fatalf("fallback after invalid UTF-8 = %q, want known-good", got)
+	}
+}
+
 func TestCopy_Paste_WhitespaceOnly(t *testing.T) {
 	tests := []struct {
 		name string
@@ -221,7 +251,7 @@ func TestCopy_Paste_WhitespaceOnly(t *testing.T) {
 
 func TestCopy_Paste_RepeatedCalls(t *testing.T) {
 	values := []string{"first", "second", "third", "fourth"}
-	
+
 	for i, expected := range values {
 		_ = Copy(expected)
 		if internal != expected {
@@ -233,7 +263,7 @@ func TestCopy_Paste_RepeatedCalls(t *testing.T) {
 func TestPaste_WithoutPriorCopy(t *testing.T) {
 	// Reset internal
 	internal = ""
-	
+
 	// Paste should still return something (OS clipboard or empty internal)
 	content, err := Paste()
 	// We don't care about the error, just that it doesn't panic
@@ -248,7 +278,7 @@ func TestCopy_DoesNotPanicWithNil(t *testing.T) {
 			t.Errorf("Copy panicked with %v", r)
 		}
 	}()
-	
+
 	// Empty string should not panic
 	_ = Copy("")
 }
@@ -260,7 +290,7 @@ func TestPaste_DoesNotPanic(t *testing.T) {
 			t.Errorf("Paste panicked with %v", r)
 		}
 	}()
-	
+
 	// Paste should not panic even if internal is empty
 	internal = ""
 	_, _ = Paste()
@@ -270,7 +300,7 @@ func TestCopy_Paste_PreservesExactBytes(t *testing.T) {
 	// Test that bytes are preserved exactly through the internal fallback
 	original := "test with special chars: \x00\x01\x02"
 	_ = Copy(original)
-	
+
 	if internal != original {
 		t.Errorf("bytes not preserved: got %q, want %q", internal, original)
 	}
@@ -301,7 +331,7 @@ func TestCopy_Paste_EscapeSequences(t *testing.T) {
 func TestCopy_Paste_JSONLikeContent(t *testing.T) {
 	json := `{"key": "value", "number": 42, "array": [1,2,3]}`
 	_ = Copy(json)
-	
+
 	content, _ := Paste()
 	if content != json && internal != json {
 		t.Errorf("JSON roundtrip failed: got %q, internal=%q, want %q", content, internal, json)
@@ -311,7 +341,7 @@ func TestCopy_Paste_JSONLikeContent(t *testing.T) {
 func TestCopy_Paste_XMLLikeContent(t *testing.T) {
 	xml := `<root><element attr="value">content</element></root>`
 	_ = Copy(xml)
-	
+
 	content, _ := Paste()
 	if content != xml && internal != xml {
 		t.Errorf("XML roundtrip failed: got %q, internal=%q, want %q", content, internal, xml)
@@ -327,7 +357,7 @@ func main() {
 	fmt.Println("Hello, 世界")
 }`
 	_ = Copy(code)
-	
+
 	content, _ := Paste()
 	if content != code && internal != code {
 		t.Errorf("code roundtrip failed:\ngot %q\ninternal=%q\nwant %q", content, internal, code)
@@ -338,14 +368,61 @@ func TestInternalVariableIsPackageLevel(t *testing.T) {
 	// Verify internal is package-level by checking it persists across calls
 	_ = Copy("value1")
 	val1 := internal
-	
+
 	_ = Copy("value2")
 	val2 := internal
-	
+
 	if val1 == val2 {
 		t.Error("internal variable should change between Copy calls")
 	}
 	if val1 != "value1" || val2 != "value2" {
 		t.Errorf("internal values incorrect: got %q, %q, want value1, value2", val1, val2)
+	}
+}
+
+func TestClipboardCommandCandidates(t *testing.T) {
+	tests := []struct {
+		name      string
+		goos      string
+		wayland   bool
+		wantCopy  string
+		wantPaste string
+	}{
+		{name: "macOS", goos: "darwin", wantCopy: "pbcopy", wantPaste: "pbpaste"},
+		{name: "Wayland", goos: "linux", wayland: true, wantCopy: "wl-copy", wantPaste: "wl-paste"},
+		{name: "X11", goos: "linux", wantCopy: "xclip", wantPaste: "xclip"},
+		{name: "Windows", goos: "windows", wantCopy: "clip.exe", wantPaste: "powershell.exe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copyCandidates := clipboardCopyCommands(tt.goos, tt.wayland)
+			pasteCandidates := clipboardPasteCommands(tt.goos, tt.wayland)
+			if len(copyCandidates) == 0 || copyCandidates[0][0] != tt.wantCopy {
+				t.Fatalf("copy candidates = %#v, want first command %q", copyCandidates, tt.wantCopy)
+			}
+			if len(pasteCandidates) == 0 || pasteCandidates[0][0] != tt.wantPaste {
+				t.Fatalf("paste candidates = %#v, want first command %q", pasteCandidates, tt.wantPaste)
+			}
+		})
+	}
+}
+
+func TestInternalClipboardConcurrentAccess(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			setInternalClipboard("value")
+		}()
+		go func() {
+			defer wg.Done()
+			_ = internalClipboard()
+		}()
+	}
+	wg.Wait()
+	if runtime.GOOS == "" {
+		t.Fatal("unreachable")
 	}
 }

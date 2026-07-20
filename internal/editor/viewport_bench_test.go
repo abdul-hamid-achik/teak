@@ -1,7 +1,9 @@
 package editor
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
 	"teak/internal/highlight"
@@ -67,6 +69,27 @@ func BenchmarkViewportRenderWithSelection(b *testing.B) {
 	}
 }
 
+func BenchmarkViewportRender1000Selections60Lines(b *testing.B) {
+	theme := ui.NordTheme()
+	buf := text.NewBufferFromBytes(makeSelectionTestDocument(1_000, 80))
+	selections := text.NewSelections(text.Position{Line: 0, Col: 1})
+	for line := 1; line < text.MaxSelections; line++ {
+		selections.Add(text.Selection{
+			Anchor: text.Position{Line: line, Col: 1},
+			Head:   text.Position{Line: line, Col: 12},
+		})
+	}
+	buf.Selections = selections
+	buf.Cursor = selections.PrimaryCursor()
+	v := Viewport{Width: 100, Height: 60, ScrollY: 470}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.Render(buf, theme, nil, nil, nil)
+	}
+}
+
 func BenchmarkViewportRenderWithGutterOpts(b *testing.B) {
 	theme := ui.NordTheme()
 	buf := createTestBuffer(100)
@@ -111,6 +134,81 @@ func BenchmarkViewportRenderWithWrap(b *testing.B) {
 	hl := highlight.New("test.go", theme)
 	wrap := NewWrapLayout(func(i int) []byte { return buf.Line(i) }, buf.LineCount(), 70)
 
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.RenderWithWrap(buf, theme, hl, nil, nil, wrap)
+	}
+}
+
+func BenchmarkWrapLayoutRebuild(b *testing.B) {
+	line := []byte("package teak // representative source line with enough text to wrap\n")
+	buf := text.NewBufferFromBytes(bytes.Repeat(line, 20_000))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 80, 4)
+	}
+}
+
+func BenchmarkEditorSetSizeSameWrap(b *testing.B) {
+	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("some ordinary source text that wraps\n"), 2_000))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+	ed := New(buf, ui.DefaultTheme(), cfg)
+	ed.SetSize(80, 24)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ed.SetSize(80, 24)
+	}
+}
+
+func BenchmarkWrapDeepSegmentLookup(b *testing.B) {
+	line := strings.Repeat("identifier ", 25_000) + "\t你"
+	buf := text.NewBufferFromBytes([]byte(line))
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 80, 4)
+	segment := wrap.LineRows(0) - 1
+
+	b.Run("cached", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _, _, _ = wrap.SegmentBounds(0, segment, len(line))
+		}
+	})
+	b.Run("stateless_rescan", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _, _, _ = wrappedLineSegmentWithTabs(line, segment, 80, 4)
+		}
+	})
+}
+
+func BenchmarkViewportRenderWithWrapDeepLongLine(b *testing.B) {
+	theme := ui.NordTheme()
+	line := strings.Repeat("identifier ", 25_000) + "\t你"
+	buf := text.NewBufferFromBytes([]byte(line))
+	v := Viewport{Width: 90, Height: 24}
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 80, 4)
+	v.WrapScrollY = wrap.LineRows(0) - v.Height
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.RenderWithWrap(buf, theme, nil, nil, nil, wrap)
+	}
+}
+
+func BenchmarkViewportRenderWithWrapDeepLongLineTokens(b *testing.B) {
+	theme := ui.NordTheme()
+	line := strings.Repeat("identifier ", 25_000) + "\t你"
+	buf := text.NewBufferFromBytes([]byte(line))
+	v := Viewport{Width: 90, Height: 24}
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 80, 4)
+	v.WrapScrollY = wrap.LineRows(0) - v.Height
+	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
+
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.RenderWithWrap(buf, theme, hl, nil, nil, wrap)

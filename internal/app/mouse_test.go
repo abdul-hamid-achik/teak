@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -126,12 +127,12 @@ func TestMouseLayoutClassifiesApplicationSurfaces(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := Model{
+			m := testModel(modelState{
 				width:     tt.width,
 				height:    tt.height,
 				showTree:  tt.showTree,
 				showAgent: tt.showAgent,
-			}
+			})
 
 			got, local := m.mouseLayout().hit(tt.x, tt.y)
 			if got != tt.want {
@@ -141,6 +142,47 @@ func TestMouseLayoutClassifiesApplicationSurfaces(t *testing.T) {
 				t.Errorf("local mouse = (%d,%d), want (%d,%d)", local.X, local.Y, tt.wantX, tt.wantY)
 			}
 		})
+	}
+}
+
+func TestMouseLayoutCompactHeightMatchesMinimalView(t *testing.T) {
+	tests := []struct {
+		height int
+		y      int
+		want   mouseSurface
+	}{
+		{height: 2, y: 0, want: mouseEditorTabs},
+		{height: 2, y: 1, want: mouseStatus},
+		{height: 3, y: 0, want: mouseEditorTabs},
+		{height: 3, y: 1, want: mouseEditorBody},
+		{height: 3, y: 2, want: mouseStatus},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("height-%d-row-%d", tt.height, tt.y), func(t *testing.T) {
+			m := testModel(modelState{width: 12, height: tt.height, showTree: true, showAgent: true})
+			got, _ := m.mouseLayout().hit(1, tt.y)
+			if got != tt.want {
+				t.Fatalf("surface = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEditorContextMenuUsesCompactScreenCoordinates(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.width = 80
+	m.height = 3
+	m.relayout()
+
+	openedAny, _ := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseRight, X: 8, Y: 1}))
+	opened := openedAny.(Model)
+	if !opened.activeEditor().IsContextMenuVisible() {
+		t.Fatal("compact editor context menu did not open")
+	}
+	localX, localY := opened.activeEditor().ContextMenuPosition()
+	screenX, screenY := opened.editorContextMenuScreenPosition()
+	if screenX != localX || screenY != localY+1 {
+		t.Fatalf("compact menu screen position = (%d,%d), want editor-local (%d,%d)", screenX, screenY, localX, localY+1)
 	}
 }
 
@@ -160,6 +202,20 @@ func TestStatusBarClickDoesNotMoveEditorCursor(t *testing.T) {
 
 	if got := updated.activeEditor().Buffer.Cursor; got != before {
 		t.Errorf("cursor = %#v, want unchanged %#v", got, before)
+	}
+}
+
+func TestMouseWheelOverTabBarChangesActiveTab(t *testing.T) {
+	m := newViewTestModel(t, false)
+	addDirtyEditor(t, &m, "second.go", "package second\n", "package second\n")
+	m.activeTab = 0
+	m.tabBar.SetActive(0)
+	m.relayout()
+
+	updatedModel, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, X: 2, Y: 0}))
+	updated := updatedModel.(Model)
+	if updated.activeTab != 1 || updated.tabBar.ActiveIdx != 1 {
+		t.Fatalf("active tab = %d / %d, want 1", updated.activeTab, updated.tabBar.ActiveIdx)
 	}
 }
 
@@ -324,6 +380,23 @@ func TestTreeContextMenuUsesAbsoluteScreenRow(t *testing.T) {
 	}
 }
 
+func TestTreeContextMenuStaysInsideInteractiveViewport(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.width = 80
+	m.height = 12
+	m.relayout()
+
+	updatedAny, _ := m.showTreeContextMenu(24, 10, 0)
+	updated := updatedAny.(Model)
+	rect := contextMenuRect(updated.treeContextMenu.X, updated.treeContextMenu.Y, updated.treeContextMenu.View())
+	if rect.x+rect.width > updated.width {
+		t.Errorf("menu right edge = %d, width = %d", rect.x+rect.width, updated.width)
+	}
+	if rect.y+rect.height > updated.height-2 {
+		t.Errorf("menu bottom = %d, content bottom = %d", rect.y+rect.height, updated.height-2)
+	}
+}
+
 func TestMouseReleaseStopsEditorDrag(t *testing.T) {
 	m := newViewTestModel(t, false)
 	m.width = 80
@@ -347,6 +420,31 @@ func TestMouseReleaseStopsEditorDrag(t *testing.T) {
 
 	if got := afterRelease.activeEditor().Buffer.Selections.Primary(); got != beforeRelease {
 		t.Errorf("selection after release and move = %#v, want %#v", got, beforeRelease)
+	}
+}
+
+func TestMouseDragContinuesPastEditorBottom(t *testing.T) {
+	m := newViewTestModel(t, false)
+	m.width = 40
+	m.height = 7 // editor body: rows 1..4; row 5 is the status divider
+	m.activeEditor().Buffer = text.NewBufferFromBytes([]byte("zero\none\ntwo\nthree\nfour\nfive"))
+	m.relayout()
+
+	pressedAny, _ := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 4, Y: 1}))
+	pressed := pressedAny.(Model)
+	if !pressed.activeEditor().IsDragging() {
+		t.Fatal("press did not start an editor drag")
+	}
+
+	// The pointer is outside the editor body, but the drag should still route
+	// to it with a local Y one past the viewport, causing controlled scroll.
+	draggedAny, _ := pressed.Update(tea.MouseMotionMsg(tea.Mouse{Button: tea.MouseLeft, X: 4, Y: 5}))
+	dragged := draggedAny.(Model)
+	if got := dragged.activeEditor().Viewport.ScrollY; got != 1 {
+		t.Fatalf("ScrollY = %d, want 1 after dragging past editor bottom", got)
+	}
+	if dragged.activeEditor().Buffer.Selections.Primary().IsEmpty() {
+		t.Fatal("drag past editor bottom should extend the selection")
 	}
 }
 
@@ -405,4 +503,47 @@ func TestContextMenusConsumeClicksOutsideHorizontalBounds(t *testing.T) {
 			t.Error("editor context menu remained visible after an outside click")
 		}
 	})
+}
+
+func TestBranchPickerMouseIsModalAndActivatesOnlyVisibleRows(t *testing.T) {
+	m := newViewTestModel(t, false)
+	m.showBranchPicker = true
+	m.branchPickerM.SetSize(m.width, m.height)
+	m.branchPickerM.SetBranches([]string{"main", "feature/caf\u00e9", "release"}, "main")
+
+	// The centered 60-cell picker has its list at (32, 19) for a 120x40
+	// terminal. A click in the editor, outside the modal cells, is consumed by
+	// the modal rather than changing editor focus/cursor or starting a switch.
+	before := m.activeEditor().Buffer.Cursor
+	updatedAny, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 2, Y: 2}))
+	updated := updatedAny.(Model)
+	if cmd != nil {
+		t.Fatal("outside branch-picker click returned a command")
+	}
+	if !updated.showBranchPicker {
+		t.Fatal("outside branch-picker click closed the modal")
+	}
+	if got := updated.activeEditor().Buffer.Cursor; got != before {
+		t.Fatalf("outside modal click reached editor: cursor = %+v, want %+v", got, before)
+	}
+
+	// The second visible row is a Unicode branch name. Click its first
+	// rendered terminal cell; the root model must return the exact branch
+	// command and leave subsequent result handling to the normal git route.
+	updatedAny, cmd = updated.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 32, Y: 20}))
+	updated = updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("visible branch row click returned no switch command")
+	}
+	msg := cmd()
+	switchMsg, ok := msg.(git.SwitchBranchMsg)
+	if !ok {
+		t.Fatalf("branch row click command = %T, want git.SwitchBranchMsg", msg)
+	}
+	if switchMsg.Branch != "feature/caf\u00e9" {
+		t.Errorf("branch = %q, want Unicode branch", switchMsg.Branch)
+	}
+	if !updated.showBranchPicker {
+		t.Fatal("picker should close only when its SwitchBranchMsg is processed")
+	}
 }

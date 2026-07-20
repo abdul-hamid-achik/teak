@@ -1,8 +1,14 @@
 package dap
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsDelveDAP(t *testing.T) {
@@ -45,6 +51,224 @@ func TestIsDelveDAP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagerStartAndLaunchLeavesInactiveOnStartFailure(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	err := manager.StartAndLaunch(DebugConfig{Command: "teak-definitely-missing-debug-adapter"})
+	if err == nil {
+		t.Fatal("StartAndLaunch() error = nil, want missing adapter error")
+	}
+	if got := manager.State(); got != StateInactive {
+		t.Fatalf("State() = %v, want inactive after failed start", got)
+	}
+}
+
+func TestHandleEventDoesNotBlockOnFullMessageChannel(t *testing.T) {
+	msgChan := make(chan any)
+	client := &Client{msgChan: msgChan}
+	done := make(chan struct{})
+	go func() {
+		client.handleEvent(&Event{Event: "terminated"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("DAP event delivery blocked on an unread UI channel")
+	}
+}
+
+func TestEventDeliveryPrioritizesLifecycleOverOutputFlood(t *testing.T) {
+	msgChan := make(chan any, 1)
+	client := &Client{msgChan: msgChan}
+	client.initEventDelivery()
+	defer client.stopEventDelivery()
+
+	for range 256 {
+		client.handleEvent(&Event{
+			Event: "output",
+			Body:  map[string]any{"output": "noisy\n"},
+		})
+	}
+	client.handleEvent(&Event{Event: "terminated"})
+
+	// At most two outputs can already be in flight (one in the UI channel and
+	// one selected by the dispatcher). The lifecycle notification must then
+	// beat all output still queued internally.
+	for received := 0; ; received++ {
+		select {
+		case msg := <-msgChan:
+			if _, ok := msg.(TerminatedEventMsg); ok {
+				if received > 2 {
+					t.Fatalf("terminated event followed %d outputs, want at most 2 in-flight outputs", received)
+				}
+				return
+			}
+			if _, ok := msg.(OutputEventMsg); !ok {
+				t.Fatalf("delivered event = %T, want output or TerminatedEventMsg", msg)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("terminated event was not delivered after output flood")
+		}
+	}
+}
+
+func TestEventDeliveryPreservesCriticalEventOrder(t *testing.T) {
+	msgChan := make(chan any)
+	client := &Client{msgChan: msgChan}
+	client.initEventDelivery()
+	defer client.stopEventDelivery()
+
+	client.handleEvent(&Event{Event: "stopped", Body: map[string]any{"reason": "breakpoint"}})
+	client.handleEvent(&Event{Event: "continued", Body: map[string]any{"threadId": float64(1)}})
+	client.handleEvent(&Event{Event: "exited", Body: map[string]any{"exitCode": float64(0)}})
+	client.handleEvent(&Event{Event: "terminated"})
+
+	want := []string{"stopped", "continued", "exited", "terminated"}
+	for _, expected := range want {
+		select {
+		case msg := <-msgChan:
+			var got string
+			switch msg.(type) {
+			case StoppedEventMsg:
+				got = "stopped"
+			case ContinuedEventMsg:
+				got = "continued"
+			case ExitedEventMsg:
+				got = "exited"
+			case TerminatedEventMsg:
+				got = "terminated"
+			}
+			if got != expected {
+				t.Fatalf("critical event order = %q, want %q", got, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s", expected)
+		}
+	}
+}
+
+func TestStopEventDeliveryUnblocksStalledDispatcher(t *testing.T) {
+	msgChan := make(chan any)
+	client := &Client{msgChan: msgChan}
+	client.initEventDelivery()
+	client.handleEvent(&Event{Event: "terminated"})
+
+	client.stopEventDelivery()
+	select {
+	case <-client.eventDone:
+	case <-time.After(time.Second):
+		t.Fatal("event dispatcher remained blocked after stop")
+	}
+}
+
+func TestEventDeliveryStopsAfterProtocolEndsWithNoQueuedEvents(t *testing.T) {
+	msgChan := make(chan any)
+	readDone := make(chan struct{})
+	client := &Client{msgChan: msgChan, readDone: readDone}
+	client.initEventDelivery()
+	close(readDone)
+
+	select {
+	case <-client.eventDone:
+	case <-time.After(time.Second):
+		t.Fatal("idle event dispatcher survived protocol shutdown")
+	}
+}
+
+func TestCriticalQueueKeepsTerminationAfterLifecycleFlood(t *testing.T) {
+	client := &Client{}
+	for range maxDAPQueuedCritical {
+		client.enqueueCriticalEventLocked(StoppedEventMsg{Reason: "step"})
+	}
+	client.enqueueCriticalEventLocked(TerminatedEventMsg{})
+
+	if got := len(client.criticalEvents); got != maxDAPQueuedCritical {
+		t.Fatalf("critical queue length = %d, want %d", got, maxDAPQueuedCritical)
+	}
+	if _, ok := client.criticalEvents[len(client.criticalEvents)-1].(TerminatedEventMsg); !ok {
+		t.Fatalf("last critical event = %T, want TerminatedEventMsg", client.criticalEvents[len(client.criticalEvents)-1])
+	}
+}
+
+func TestClientShutdownReturnsBeforeAStuckAdapterExits(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDAPShutdownHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "TEAK_DAP_SHUTDOWN_HELPER=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdout,
+		pending:     make(map[int]chan callResult),
+		running:     true,
+		processDone: make(chan struct{}),
+	}
+	go client.reapProcess()
+	started := time.Now()
+	client.Shutdown()
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("Shutdown() blocked for %s", elapsed)
+	}
+	if !waitForDone(client.processDone, 4*time.Second) {
+		t.Fatal("adapter was not killed and reaped")
+	}
+}
+
+func TestManagerWaitForShutdownReapsStoppedAdapter(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDAPShutdownHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "TEAK_DAP_SHUTDOWN_HELPER=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdout,
+		pending:     make(map[int]chan callResult),
+		running:     true,
+		processDone: make(chan struct{}),
+	}
+	go client.reapProcess()
+
+	manager := NewManager(t.TempDir())
+	manager.client = client
+	manager.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if !manager.WaitForShutdown(ctx) {
+		t.Fatal("WaitForShutdown() returned before the adapter was reaped")
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("adapter process was not reaped")
+	}
+}
+
+func TestDAPShutdownHelperProcess(t *testing.T) {
+	if os.Getenv("TEAK_DAP_SHUTDOWN_HELPER") != "1" {
+		return
+	}
+	select {}
 }
 
 func TestFindClientAddrArg(t *testing.T) {
@@ -227,6 +451,74 @@ func TestHandleMessage_UnmatchedResponse(t *testing.T) {
 	// Response with no matching pending entry should not panic
 	data := []byte(`{"seq":1,"type":"response","request_seq":999,"command":"test","success":true}`)
 	c.handleMessage(data) // should not panic or block
+}
+
+func TestHandleMessage_DuplicateResponseDoesNotBlockProtocolReader(t *testing.T) {
+	ch := make(chan callResult, 1)
+	c := &Client{
+		pending: map[int]chan callResult{
+			5: ch,
+		},
+	}
+
+	data := []byte(`{"seq":1,"type":"response","request_seq":5,"command":"initialize","success":true,"body":{}}`)
+	c.handleMessage(data) // fills the one response slot for the request.
+
+	done := make(chan struct{})
+	go func() {
+		c.handleMessage(data) // a broken adapter may repeat the same response.
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("duplicate DAP response blocked the protocol reader")
+	}
+}
+
+func TestHandleEventBoundsOutputPayload(t *testing.T) {
+	msgChan := make(chan any, 1)
+	client := &Client{msgChan: msgChan}
+	payload := strings.Repeat("é", maxDAPOutputEventBytes)
+
+	client.handleEvent(&Event{
+		Event: "output",
+		Body: map[string]any{
+			"category": "stdout",
+			"output":   payload,
+		},
+	})
+
+	msg := (<-msgChan).(OutputEventMsg)
+	if len(msg.Output) > maxDAPOutputEventBytes {
+		t.Fatalf("output bytes = %d, want <= %d", len(msg.Output), maxDAPOutputEventBytes)
+	}
+	if !strings.HasSuffix(msg.Output, "é") {
+		t.Fatalf("bounded output split UTF-8 or lost newest tail: %q", msg.Output[len(msg.Output)-8:])
+	}
+}
+
+func TestHandleEventBoundsLifecycleText(t *testing.T) {
+	msgChan := make(chan any, 1)
+	client := &Client{msgChan: msgChan}
+	payload := strings.Repeat("é", maxDAPOutputEventBytes)
+
+	client.handleEvent(&Event{
+		Event: "stopped",
+		Body: map[string]any{
+			"reason":      payload,
+			"description": payload,
+		},
+	})
+
+	msg := (<-msgChan).(StoppedEventMsg)
+	if len(msg.Reason) > maxDAPOutputEventBytes || len(msg.Description) > maxDAPOutputEventBytes {
+		t.Fatalf("lifecycle text escaped cap: reason=%d description=%d", len(msg.Reason), len(msg.Description))
+	}
+	if !strings.HasSuffix(msg.Description, "é") {
+		t.Fatal("bounded lifecycle text split UTF-8")
+	}
 }
 
 func TestHandleMessage_Event(t *testing.T) {
@@ -586,6 +878,64 @@ func TestHandleMessage_EmptyBody(t *testing.T) {
 
 	// Empty bytes should not panic
 	c.handleMessage([]byte{})
+}
+
+func TestReadDAPFrameValidatesContentLength(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		want      string
+		wantError string
+	}{
+		{
+			name:  "valid frame",
+			input: "Content-Length: 2\r\n\r\n{}",
+			want:  "{}",
+		},
+		{
+			name:      "missing content length",
+			input:     "X-Header: value\r\n\r\n",
+			wantError: "missing Content-Length",
+		},
+		{
+			name:      "negative content length",
+			input:     "Content-Length: -1\r\n\r\n",
+			wantError: "invalid Content-Length",
+		},
+		{
+			name:      "zero content length",
+			input:     "Content-Length: 0\r\n\r\n",
+			wantError: "invalid Content-Length",
+		},
+		{
+			name:      "oversized content length",
+			input:     "Content-Length: 16777217\r\n\r\n",
+			wantError: "exceeds limit",
+		},
+		{
+			name:      "malformed content length",
+			input:     "Content-Length: nope\r\n\r\n",
+			wantError: "invalid Content-Length",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readDAPFrame(bufio.NewReader(strings.NewReader(tt.input)))
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("readDAPFrame() error = %v, want containing %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readDAPFrame() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("readDAPFrame() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestHandleMessage_ErrorResponse_BodyWithFormat(t *testing.T) {

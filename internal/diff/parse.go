@@ -16,12 +16,12 @@ const (
 
 // DiffLine represents one row in a side-by-side diff view.
 type DiffLine struct {
-	Left     string
-	Right    string
-	LeftNum  int // 1-based line number, 0 = padding/separator
-	RightNum int
-	LeftKind  LineKind
-	RightKind LineKind
+	Left        string
+	Right       string
+	LeftNum     int // 1-based line number, 0 = padding/separator
+	RightNum    int
+	LeftKind    LineKind
+	RightKind   LineKind
 	IsSeparator bool // true for "..." hunk separators
 }
 

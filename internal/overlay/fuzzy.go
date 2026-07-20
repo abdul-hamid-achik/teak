@@ -1,6 +1,9 @@
 package overlay
 
-import "strings"
+import (
+	"unicode"
+	"unicode/utf8"
+)
 
 // FuzzyMatch scores how well query matches candidate using fuzzy matching.
 // Returns the score (higher is better) and whether all query characters were
@@ -19,16 +22,23 @@ func FuzzyMatch(query, candidate string) (score int, matched bool) {
 		return 0, false
 	}
 
-	qLower := strings.ToLower(query)
-	cLower := strings.ToLower(candidate)
-
-	qi := 0
+	queryOffset := 0
 	consecutive := 0
 	prevMatchIdx := -1
+	candidateRuneIdx := 0
+	var prevCandidateRune rune
+	havePrevCandidateRune := false
 
-	for ci := 0; ci < len(cLower) && qi < len(qLower); ci++ {
-		if cLower[ci] != qLower[qi] {
+	for _, candidateRune := range candidate {
+		if queryOffset >= len(query) {
+			break
+		}
+		queryRune, querySize := utf8.DecodeRuneInString(query[queryOffset:])
+		if unicode.ToLower(candidateRune) != unicode.ToLower(queryRune) {
 			consecutive = 0
+			prevCandidateRune = candidateRune
+			havePrevCandidateRune = true
+			candidateRuneIdx++
 			continue
 		}
 
@@ -36,12 +46,12 @@ func FuzzyMatch(query, candidate string) (score int, matched bool) {
 		score += 1
 
 		// Exact case bonus
-		if candidate[ci] == query[qi] {
+		if candidateRune == queryRune {
 			score += 1
 		}
 
 		// Consecutive bonus
-		if prevMatchIdx == ci-1 {
+		if prevMatchIdx == candidateRuneIdx-1 {
 			consecutive++
 			score += consecutive * 2
 		} else {
@@ -49,20 +59,23 @@ func FuzzyMatch(query, candidate string) (score int, matched bool) {
 		}
 
 		// Start-of-word bonus
-		if ci == 0 || isSeparator(candidate[ci-1]) {
+		if candidateRuneIdx == 0 || (havePrevCandidateRune && isSeparator(prevCandidateRune)) {
 			score += 5
 		}
 
 		// First char of query matching first char of candidate
-		if qi == 0 && ci == 0 {
+		if queryOffset == 0 && candidateRuneIdx == 0 {
 			score += 10
 		}
 
-		prevMatchIdx = ci
-		qi++
+		prevMatchIdx = candidateRuneIdx
+		queryOffset += querySize
+		prevCandidateRune = candidateRune
+		havePrevCandidateRune = true
+		candidateRuneIdx++
 	}
 
-	if qi < len(qLower) {
+	if queryOffset < len(query) {
 		return 0, false
 	}
 
@@ -85,27 +98,28 @@ func MatchPositions(query, candidate string) []int {
 		return nil
 	}
 
-	qLower := strings.ToLower(query)
-	cLower := strings.ToLower(candidate)
-
 	positions := make([]int, 0, len(query))
-	qi := 0
+	queryOffset := 0
 
-	for ci := 0; ci < len(cLower) && qi < len(qLower); ci++ {
-		if cLower[ci] == qLower[qi] {
-			positions = append(positions, ci)
-			qi++
+	for candidateOffset, candidateRune := range candidate {
+		if queryOffset >= len(query) {
+			break
+		}
+		queryRune, querySize := utf8.DecodeRuneInString(query[queryOffset:])
+		if unicode.ToLower(candidateRune) == unicode.ToLower(queryRune) {
+			positions = append(positions, candidateOffset)
+			queryOffset += querySize
 		}
 	}
 
-	if qi < len(qLower) {
+	if queryOffset < len(query) {
 		return nil
 	}
 	return positions
 }
 
-func isSeparator(b byte) bool {
-	switch b {
+func isSeparator(r rune) bool {
+	switch r {
 	case '/', '.', '_', '-', ' ', '\\':
 		return true
 	}

@@ -8,6 +8,99 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestSaveToWritesValidatedPrivateAtomicConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.toml")
+	cfg := DefaultConfig()
+	cfg.Editor.TabSize = 2
+	cfg.Editor.WordWrap = true
+	cfg.UI.ShowTree = false
+
+	if err := SaveTo(path, cfg); err != nil {
+		t.Fatalf("SaveTo() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("config permissions = %#o, want %#o", got, os.FileMode(0o600))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if _, err := toml.Decode(string(data), &got); err != nil {
+		t.Fatalf("decode saved config: %v", err)
+	}
+	if got.Editor.TabSize != 2 || !got.Editor.WordWrap || got.UI.ShowTree {
+		t.Errorf("saved config = %+v, want edited values", got)
+	}
+}
+
+func TestSaveToRejectsInvalidConfigWithoutReplacingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Editor.TabSize = 9
+	if err := SaveTo(path, cfg); err == nil {
+		t.Fatal("SaveTo() succeeded for invalid config")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Errorf("existing config replaced on validation error: %q", data)
+	}
+}
+
+func TestSaveToRejectsSymlinkWithoutTouchingTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.toml")
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(target, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := SaveTo(path, DefaultConfig()); err == nil {
+		t.Fatal("SaveTo() succeeded for a symlink destination")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "original" {
+		t.Errorf("symlink target changed: %q", got)
+	}
+}
+
+func TestReadConfigRejectsOversizedAndSymlinkedInput(t *testing.T) {
+	dir := t.TempDir()
+	over := filepath.Join(dir, "large.toml")
+	if err := os.WriteFile(over, make([]byte, maxConfigBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readConfig(over); err == nil {
+		t.Fatal("readConfig() accepted oversized config")
+	}
+	link := filepath.Join(dir, "link.toml")
+	if err := os.Symlink(over, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readConfig(link); err == nil {
+		t.Fatal("readConfig() accepted symlinked config")
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Editor.TabSize != 4 {

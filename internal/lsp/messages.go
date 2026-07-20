@@ -1,6 +1,9 @@
 package lsp
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // LSP Error Codes (per JSON-RPC and LSP specifications)
 const (
@@ -32,7 +35,9 @@ const (
 	SeverityHint    DiagSeverity = 4
 )
 
-// DiagPosition is a 0-based line/character position from LSP.
+// DiagPosition is a 0-based internal Teak position. Character is always a
+// UTF-8 byte offset once a server notification crosses the client boundary;
+// the client converts the negotiated LSP encoding first.
 type DiagPosition struct {
 	Line      int
 	Character int
@@ -65,13 +70,17 @@ type HoverResult struct {
 	Content string
 }
 
-// Location represents a source code location.
+// Location represents a source code location. Columns are normally UTF-8 byte
+// offsets. For an unopened UTF-16/32 target, ProtocolEncoding preserves the
+// server coordinates until the app has asynchronously loaded that document and
+// can convert against its actual bytes; it is never serialized back to LSP.
 type Location struct {
-	URI       string
-	StartLine int
-	StartCol  int
-	EndLine   int
-	EndCol    int
+	URI              string
+	StartLine        int
+	StartCol         int
+	EndLine          int
+	EndCol           int
+	ProtocolEncoding string `json:"-"`
 }
 
 // ServerCapabilities represents the capabilities of an LSP server.
@@ -120,6 +129,15 @@ type OverlayRequestMetadata struct {
 	Generation uint64
 }
 
+// DocumentRequestMetadata identifies the document snapshot that originated a
+// non-overlay LSP request. Zero values preserve compatibility with legacy
+// callers while app-generated requests always include full identity.
+type DocumentRequestMetadata struct {
+	FilePath   string
+	Version    int
+	Generation uint64
+}
+
 // CompletionResultMsg is sent when completion results arrive.
 type CompletionResultMsg struct {
 	OverlayRequestMetadata
@@ -134,15 +152,18 @@ type HoverResultMsg struct {
 
 // DefinitionResultMsg is sent when go-to-definition results arrive.
 type DefinitionResultMsg struct {
+	DocumentRequestMetadata
 	Locations []Location
 }
 
 // ReferencesResultMsg is sent when find-references results arrive.
 type ReferencesResultMsg struct {
+	DocumentRequestMetadata
 	Locations []Location
 }
 
-// TextEdit represents a text edit from an LSP workspace edit.
+// TextEdit represents an LSP workspace edit after protocol conversion. Its
+// columns are always Teak UTF-8 byte offsets when delivered to the app.
 type TextEdit struct {
 	StartLine int
 	StartCol  int
@@ -173,13 +194,41 @@ type WorkspaceFileOperation struct {
 }
 
 type WorkspaceDocumentChange struct {
-	URI           string
+	URI string
+	// Version is the LSP document version the server used to compute Edits.
+	// A nil value means the server did not provide one (as is allowed by the
+	// protocol). Clients must reject a non-nil version that does not match an
+	// open buffer before applying the edit.
+	Version       *int
 	Edits         []TextEdit
 	FileOperation *WorkspaceFileOperation
 }
 
+// ApplyEditRequestMsg carries a server-initiated workspace/applyEdit request
+// to the UI event loop. Respond must be called exactly once by the UI after it
+// has accepted or rejected the edit; it never mutates editor state itself.
+//
+// The callback intentionally lives on the protocol message rather than in the
+// model so the JSON-RPC reader never touches Bubble Tea state.
+type ApplyEditRequestMsg struct {
+	RequestID int
+	Label     string
+	Edit      WorkspaceEdit
+	// Context is cancelled while the request is pending when the protocol
+	// timeout, process shutdown, or an earlier response wins. Once Claim
+	// succeeds, the UI owns the short commit phase and must send the final
+	// response; the five-second timer is an admission deadline, not a deadline
+	// that can revoke an already-started atomic mutation.
+	Context context.Context
+	// Claim atomically reserves the request immediately before a UI mutation.
+	// It returns false if the LSP timeout already rejected the request.
+	Claim   func() bool
+	Respond func(applied bool, failureReason string)
+}
+
 // RenameResultMsg is sent when a rename result arrives.
 type RenameResultMsg struct {
+	DocumentRequestMetadata
 	Edit WorkspaceEdit
 }
 
@@ -227,6 +276,7 @@ type FoldingRange struct {
 
 // FoldingRangeResultMsg is sent when folding ranges arrive.
 type FoldingRangeResultMsg struct {
+	DocumentRequestMetadata
 	FilePath string
 	Ranges   []FoldingRange
 }
@@ -245,13 +295,20 @@ const (
 type FormatResultMsg struct {
 	RequestID int
 	FilePath  string
-	Status    FormatStatus
-	Edits     []TextEdit
-	Err       error
+	// BaseVersion is the document version used to request formatting. A
+	// request with HasBaseVersion set lets the app reject edits computed for an
+	// older snapshot. The explicit flag preserves compatibility with legacy
+	// callers whose zero value did not carry version identity.
+	BaseVersion    int
+	HasBaseVersion bool
+	Status         FormatStatus
+	Edits          []TextEdit
+	Err            error
 }
 
 // CodeActionResultMsg is sent when code actions arrive.
 type CodeActionResultMsg struct {
+	DocumentRequestMetadata
 	Actions []CodeAction
 }
 
@@ -290,7 +347,8 @@ func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
 	}
 	type textDocumentEdit struct {
 		TextDocument struct {
-			URI string `json:"uri"`
+			URI     string `json:"uri"`
+			Version *int   `json:"version"`
 		} `json:"textDocument"`
 		Edits []rawTextEdit `json:"edits"`
 	}
@@ -311,7 +369,7 @@ func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
 	w.Changes = make(map[string][]TextEdit)
 	w.DocumentChanges = nil
 
-	appendEdits := func(uri string, edits []rawTextEdit, keepOrder bool) {
+	appendEdits := func(uri string, version *int, edits []rawTextEdit, keepOrder bool) {
 		if uri == "" || len(edits) == 0 {
 			return
 		}
@@ -328,14 +386,15 @@ func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
 		w.Changes[uri] = append(w.Changes[uri], converted...)
 		if keepOrder {
 			w.DocumentChanges = append(w.DocumentChanges, WorkspaceDocumentChange{
-				URI:   uri,
-				Edits: converted,
+				URI:     uri,
+				Version: version,
+				Edits:   converted,
 			})
 		}
 	}
 
 	for uri, edits := range raw.Changes {
-		appendEdits(uri, edits, false)
+		appendEdits(uri, nil, edits, false)
 	}
 	for _, rawChange := range raw.DocumentChanges {
 		var op fileOperation
@@ -355,7 +414,7 @@ func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(rawChange, &change); err != nil {
 			continue
 		}
-		appendEdits(change.TextDocument.URI, change.Edits, true)
+		appendEdits(change.TextDocument.URI, change.TextDocument.Version, change.Edits, true)
 	}
 
 	if len(w.Changes) == 0 {
@@ -366,6 +425,7 @@ func (w *WorkspaceEdit) UnmarshalJSON(data []byte) error {
 
 // DocumentSymbolResultMsg is sent when document symbols arrive.
 type DocumentSymbolResultMsg struct {
+	DocumentRequestMetadata
 	Symbols []DocumentSymbol
 }
 

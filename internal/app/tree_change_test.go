@@ -8,8 +8,36 @@ import (
 	tea "charm.land/bubbletea/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/config"
+	"teak/internal/filetree"
 	"teak/internal/git"
 )
+
+func loadInitialTreeForTest(t *testing.T, model *Model) {
+	t.Helper()
+	updated, _ := model.Update(treeLoadedMsg{Tree: filetree.New(model.rootDir, model.theme)})
+	*model = updated.(Model)
+}
+
+func TestNewModelDefersInitialTreeRead(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "visible.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+	if len(model.tree.Entries) != 0 {
+		t.Fatalf("NewModel read the tree synchronously: %v", model.tree.Entries)
+	}
+	loadInitialTreeForTest(t, &model)
+	if len(model.tree.Entries) != 1 {
+		t.Fatalf("async tree result entries = %v, want one file", model.tree.Entries)
+	}
+}
 
 func TestHandleTreeChangeDebouncesGitRefresh(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -78,6 +106,7 @@ func TestHandleTreeChangePreservesExpandedTreeState(t *testing.T) {
 			_ = model.logFile.Close()
 		}()
 	}
+	loadInitialTreeForTest(t, &model)
 
 	updatedTree, cmd := model.tree.ToggleEntry(dirPath)
 	model.tree = updatedTree
@@ -93,11 +122,87 @@ func TestHandleTreeChangePreservesExpandedTreeState(t *testing.T) {
 	updatedModel, _ := model.handleTreeChange(TreeChangedMsg{Dir: tmpDir})
 	updated := updatedModel.(Model)
 
-	if !updated.tree.Entries[0].Expanded {
-		t.Fatal("expected tree change refresh to preserve expanded state")
+	// A filesystem event must only schedule work. Reading every expanded
+	// directory here would block Bubble Tea's Update loop on slow filesystems.
+	if !updated.tree.Entries[0].Expanded || len(updated.tree.Entries[0].Children) != 1 {
+		t.Fatal("tree changed before its asynchronous refresh completed")
 	}
-	if len(updated.tree.Entries[0].Children) != 1 {
-		t.Fatalf("expected 1 child after tree refresh, got %d", len(updated.tree.Entries[0].Children))
+
+	scheduledModel, refreshCmd := updated.Update(treeRefreshDebounceMsg{Generation: updated.treeRefreshGeneration})
+	if refreshCmd == nil {
+		t.Fatal("expected a deferred tree refresh command")
+	}
+	result := refreshCmd()
+	refreshedModel, _ := scheduledModel.Update(result)
+	refreshed := refreshedModel.(Model)
+	if !refreshed.tree.Entries[0].Expanded {
+		t.Fatal("expected async tree refresh to preserve expanded state")
+	}
+	if len(refreshed.tree.Entries[0].Children) != 1 {
+		t.Fatalf("expected 1 child after async tree refresh, got %d", len(refreshed.tree.Entries[0].Children))
+	}
+}
+
+func TestTreeRefreshIgnoresStaleResult(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fresh.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+	loadInitialTreeForTest(t, &model)
+
+	updatedModel, _ := model.handleTreeChange(TreeChangedMsg{Dir: root})
+	updated := updatedModel.(Model)
+	staleTree := filetree.New(root, updated.theme)
+	staleTree.Entries = nil
+	result := treeRefreshResultMsg{
+		Generation: updated.treeRefreshGeneration - 1,
+		Refresh:    filetree.RefreshResult{Entries: staleTree.Entries},
+	}
+
+	ignoredModel, cmd := updated.Update(result)
+	if cmd != nil {
+		t.Fatal("stale tree refresh should not start more work")
+	}
+	ignored := ignoredModel.(Model)
+	if len(ignored.tree.Entries) != 1 || ignored.tree.Entries[0].Name != "fresh.go" {
+		t.Fatalf("stale tree refresh overwrote current tree: %#v", ignored.tree.Entries)
+	}
+}
+
+func TestInitialTreeLoadCannotOverwriteNewerWatcherGeneration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "from-watcher.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+
+	updatedModel, _ := model.handleTreeChange(TreeChangedMsg{Dir: root})
+	updated := updatedModel.(Model)
+	if updated.treeRefreshGeneration == 0 {
+		t.Fatal("watcher event did not advance the tree refresh generation")
+	}
+
+	lateInitial := filetree.New(root, updated.theme)
+	ignoredModel, cmd := updated.Update(treeLoadedMsg{Tree: lateInitial, Generation: 0})
+	if cmd != nil {
+		t.Fatal("stale initial tree load should not schedule work")
+	}
+	ignored := ignoredModel.(Model)
+	if len(ignored.tree.Entries) != 0 {
+		t.Fatalf("late initial tree load overwrote newer state: %#v", ignored.tree.Entries)
 	}
 }
 

@@ -1,8 +1,13 @@
 package app
 
 import (
+	"fmt"
+	"path/filepath"
+	"reflect"
 	"testing"
 
+	"teak/internal/config"
+	"teak/internal/lsp"
 	"teak/internal/problems"
 )
 
@@ -41,6 +46,184 @@ func TestSortProblems(t *testing.T) {
 	}
 }
 
+func TestSortProblemsBreaksSameLocationTiesDeterministically(t *testing.T) {
+	probs := []problems.Problem{
+		{FilePath: "a.go", Line: 1, Col: 2, Severity: 1, Message: "first"},
+		{FilePath: "a.go", Line: 1, Col: 2, Severity: 1, Message: "second"},
+	}
+
+	sortProblems(probs)
+
+	if got, want := []string{probs[0].Message, probs[1].Message}, []string{"first", "second"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("same-location problems order = %v, want %v", got, want)
+	}
+}
+
+func TestHandleDiagnosticsUpdatesOnlyChangedFileAndAncestors(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := t.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	a := filepath.Join(root, "a", "one.go")
+	b := filepath.Join(root, "a", "two.go")
+	c := filepath.Join(root, "b", "three.go")
+	for _, step := range []struct {
+		path     string
+		severity lsp.DiagSeverity
+		clear    bool
+		files    map[string]int
+		dirs     map[string]int
+		count    int
+	}{
+		{a, lsp.SeverityWarning, false, map[string]int{a: 2}, map[string]int{filepath.Join(root, "a"): 2}, 1},
+		{b, lsp.SeverityError, false, map[string]int{a: 2, b: 1}, map[string]int{filepath.Join(root, "a"): 1}, 2},
+		{c, lsp.SeverityInfo, false, map[string]int{a: 2, b: 1, c: 3}, map[string]int{filepath.Join(root, "a"): 1, filepath.Join(root, "b"): 3}, 3},
+		{b, lsp.SeverityHint, false, map[string]int{a: 2, b: 4, c: 3}, map[string]int{filepath.Join(root, "a"): 2, filepath.Join(root, "b"): 3}, 3},
+		{a, 0, true, map[string]int{b: 4, c: 3}, map[string]int{filepath.Join(root, "a"): 4, filepath.Join(root, "b"): 3}, 2},
+	} {
+		var diagnostics []lsp.Diagnostic
+		if !step.clear {
+			diagnostics = []lsp.Diagnostic{{
+				Severity: step.severity,
+				Range:    lsp.DiagRange{Start: lsp.DiagPosition{Line: 3, Character: 2}},
+				Message:  step.path,
+			}}
+		}
+		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{URI: lsp.FileURI(step.path), Diagnostics: diagnostics})
+		m = updated.(Model)
+
+		if !reflect.DeepEqual(m.fileDiagnostics, step.files) {
+			t.Fatalf("file diagnostics after %q = %#v, want %#v", step.path, m.fileDiagnostics, step.files)
+		}
+		if !reflect.DeepEqual(m.dirDiagnostics, step.dirs) {
+			t.Fatalf("directory diagnostics after %q = %#v, want %#v", step.path, m.dirDiagnostics, step.dirs)
+		}
+		if m.problemsPanel.ProblemCount() != step.count {
+			t.Fatalf("ProblemCount after %q = %d, want %d", step.path, m.problemsPanel.ProblemCount(), step.count)
+		}
+		for path, severity := range step.files {
+			if got := m.treeDiagnostics[path]; got != severity {
+				t.Fatalf("tree file severity for %q = %d, want %d", path, got, severity)
+			}
+		}
+		for path, severity := range step.dirs {
+			if got := m.treeDiagnostics[path]; got != severity {
+				t.Fatalf("tree directory severity for %q = %d, want %d", path, got, severity)
+			}
+		}
+	}
+}
+
+func TestHandleDiagnosticsLargeBatchKeepsPanelAndTreeEquivalent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := t.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	const files = 1_000
+	for i := 0; i < files; i++ {
+		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
+		severity := lsp.DiagSeverity((i / 10 % 4) + 1)
+		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
+			URI: lsp.FileURI(path),
+			Diagnostics: []lsp.Diagnostic{{
+				Severity: severity,
+				Range:    lsp.DiagRange{Start: lsp.DiagPosition{Line: i, Character: i % 80}},
+				Message:  "diagnostic",
+			}},
+		})
+		m = updated.(Model)
+	}
+
+	if got := len(m.fileDiagnostics); got != files {
+		t.Fatalf("file diagnostics = %d, want %d", got, files)
+	}
+	if got := m.problemsPanel.ProblemCount(); got != files {
+		t.Fatalf("ProblemCount = %d, want %d", got, files)
+	}
+	for i := 0; i < 10; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("pkg-%02d", i))
+		if got := m.dirDiagnostics[dir]; got != 1 {
+			t.Fatalf("directory %q severity = %d, want 1", dir, got)
+		}
+	}
+}
+
+func BenchmarkUpdateDiagnosticsSingleFile(b *testing.B) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := b.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer m.cleanup()
+
+	for i := 0; i < 1_000; i++ {
+		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
+		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
+			URI:         lsp.FileURI(path),
+			Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning}},
+		})
+		m = updated.(Model)
+	}
+
+	msg := lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(filepath.Join(root, "pkg-00", "file-0000.go")),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "updated"}},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+}
+
+func BenchmarkHandleDiagnosticsSingleFile(b *testing.B) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := b.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer m.cleanup()
+
+	for i := 0; i < 1_000; i++ {
+		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
+		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
+			URI:         lsp.FileURI(path),
+			Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning}},
+		})
+		m = updated.(Model)
+	}
+
+	msg := lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(filepath.Join(root, "pkg-00", "file-0000.go")),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "updated"}},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		updated, _ := m.handleDiagnostics(msg)
+		m = updated.(Model)
+	}
+}
+
 func TestSortProblems_Empty(t *testing.T) {
 	var probs []problems.Problem
 	sortProblems(probs) // should not panic
@@ -60,10 +243,10 @@ func TestFilterLines(t *testing.T) {
 	content := "line0\nline1\nline2\nline3\nline4"
 
 	tests := []struct {
-		name    string
-		line    *int
-		limit   *int
-		want    string
+		name  string
+		line  *int
+		limit *int
+		want  string
 	}{
 		{"no filter", nil, nil, content},
 		{"start at line 2 (1-based)", intPtr(2), nil, "line1\nline2\nline3\nline4"},

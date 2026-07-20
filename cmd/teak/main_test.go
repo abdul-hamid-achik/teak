@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +78,48 @@ func TestHandleCLI(t *testing.T) {
 func TestDevelopmentVersionFallback(t *testing.T) {
 	if version == "" {
 		t.Fatal("version fallback must not be empty")
+	}
+}
+
+func TestResolveWorkspacePathsUsesOneAbsoluteFileIdentity(t *testing.T) {
+	filePath := filepath.Join("relative", "main.go")
+	resolved, root := resolveWorkspacePaths(filePath)
+
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("resolved path = %q, want absolute", resolved)
+	}
+	if got, want := root, filepath.Dir(resolved); got != want {
+		t.Fatalf("root = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalStartupError(t *testing.T) {
+	tests := []struct {
+		name          string
+		stdinIsTTY    bool
+		stdoutIsTTY   bool
+		term          string
+		wantErrorPart string
+	}{
+		{name: "interactive terminal", stdinIsTTY: true, stdoutIsTTY: true, term: "xterm-256color"},
+		{name: "stdin is a pipe", stdoutIsTTY: true, term: "xterm-256color", wantErrorPart: "stdin"},
+		{name: "stdout is a pipe", stdinIsTTY: true, term: "xterm-256color", wantErrorPart: "stdout"},
+		{name: "dumb terminal", stdinIsTTY: true, stdoutIsTTY: true, term: " dumb ", wantErrorPart: "TERM=dumb"},
+		{name: "unset term remains supported", stdinIsTTY: true, stdoutIsTTY: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := terminalStartupError(tt.stdinIsTTY, tt.stdoutIsTTY, tt.term)
+			if tt.wantErrorPart == "" {
+				if err != nil {
+					t.Fatalf("terminalStartupError() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrorPart) {
+				t.Fatalf("terminalStartupError() error = %v, want containing %q", err, tt.wantErrorPart)
+			}
+		})
 	}
 }

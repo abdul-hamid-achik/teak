@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	sdk "github.com/coder/acp-go-sdk"
 	"teak/internal/acp"
 	"teak/internal/ui"
@@ -24,6 +27,9 @@ type Model struct {
 	messages     []ChatMessage
 	streamBlocks []StreamBlock
 	toolCallMap  map[string]*ToolCallState
+	messageBytes int
+	streamBytes  int
+	chatCache    *chatRenderCache
 
 	input     textinput.Model
 	scrollY   int
@@ -58,6 +64,21 @@ type Model struct {
 	lastChatLineCount int
 }
 
+type chatRenderCache struct {
+	width             int
+	dirty             bool
+	lines             []string
+	streamBlockStarts []int
+	streamTailStart   int
+	streamDirtyFrom   int
+
+	// Counters are deliberately kept in the cache so tests can ensure a
+	// streamed update renders only its dirty tail. They do not affect output.
+	fullBuilds           int
+	incrementalBuilds    int
+	renderedStreamBlocks int
+}
+
 // New creates a new agent panel model.
 func New(theme ui.Theme) Model {
 	ti := textinput.New()
@@ -76,6 +97,7 @@ func New(theme ui.Theme) Model {
 		spinner:     sp,
 		autoScroll:  true,
 		state:       AgentDisconnected,
+		chatCache:   &chatRenderCache{dirty: true},
 	}
 }
 
@@ -86,6 +108,9 @@ func (m Model) IsLoading() bool {
 
 // SetSize sets the panel dimensions.
 func (m *Model) SetSize(w, h int) {
+	if m.width != w {
+		m.invalidateChatCache()
+	}
 	m.width = w
 	m.height = h
 	innerW := w - 2
@@ -103,6 +128,7 @@ func (m *Model) SetConnected(connected bool) {
 	} else {
 		m.state = AgentDisconnected
 	}
+	m.invalidateChatCache()
 }
 
 // State returns the current agent state.
@@ -133,6 +159,7 @@ func (m *Model) PruneCancelledWrites() {
 		m.pendingWrite = nil
 		respondToCancelledWrite(cancelled)
 		m.promotePendingWrite()
+		m.invalidateChatCache()
 	}
 
 	kept := m.pendingWrites[:0]
@@ -167,6 +194,7 @@ func (m *Model) resolvePendingWrite(accepted bool) tea.Cmd {
 	proposal := *m.pendingWrite
 	m.pendingWrite = nil
 	m.promotePendingWrite()
+	m.invalidateChatCache()
 	return func() tea.Msg {
 		return WriteDecisionMsg{Proposal: proposal, Accepted: accepted}
 	}
@@ -182,9 +210,11 @@ func (m *Model) promotePendingWrite() {
 			continue
 		}
 		m.pendingWrite = &next
+		m.invalidateChatCache()
 		return
 	}
 	m.pendingWrite = nil
+	m.invalidateChatCache()
 }
 
 func (m *Model) cancelPendingWrite(responseCh chan error) {
@@ -193,6 +223,7 @@ func (m *Model) cancelPendingWrite(responseCh chan error) {
 		m.pendingWrite = nil
 		respondToCancelledWrite(cancelled)
 		m.promotePendingWrite()
+		m.invalidateChatCache()
 		return
 	}
 
@@ -206,6 +237,7 @@ func (m *Model) cancelPendingWrite(responseCh chan error) {
 	}
 	clear(m.pendingWrites[len(kept):])
 	m.pendingWrites = kept
+	m.invalidateChatCache()
 }
 
 func writeProposalCancelled(proposal acp.AgentWriteFileMsg) bool {
@@ -256,6 +288,9 @@ func (m *Model) AddTaggedFile(path string) {
 			return
 		}
 	}
+	if len(m.taggedFiles) >= maxTaggedFiles {
+		return
+	}
 	m.taggedFiles = append(m.taggedFiles, TaggedFile{Path: path, Name: name})
 }
 
@@ -293,7 +328,124 @@ func (m Model) CurrentMode() sdk.SessionModeId {
 
 // AddSystemMessage adds a system/info message to the chat.
 func (m *Model) AddSystemMessage(text string) {
-	m.messages = append(m.messages, ChatMessage{Role: RoleSystem, Content: text})
+	m.appendChatMessage(ChatMessage{Role: RoleSystem, Content: text})
+}
+
+func (m *Model) appendChatMessage(msg ChatMessage) {
+	msg.Content = truncateUTF8Bytes(msg.Content, maxChatMessageBytes)
+	if len(msg.ToolCalls) > maxToolCalls {
+		msg.ToolCalls = msg.ToolCalls[:maxToolCalls]
+	}
+	for i, toolCall := range msg.ToolCalls {
+		msg.ToolCalls[i] = boundedToolCall(toolCall)
+	}
+
+	size := chatMessageSize(msg)
+	m.messages = append(m.messages, msg)
+	m.messageBytes += size
+	for len(m.messages) > maxChatMessages || m.messageBytes > maxChatHistoryBytes {
+		if len(m.messages) == 0 {
+			m.messageBytes = 0
+			break
+		}
+		m.messageBytes -= chatMessageSize(m.messages[0])
+		m.messages[0] = ChatMessage{}
+		m.messages = m.messages[1:]
+	}
+	m.invalidateChatCache()
+}
+
+func chatMessageSize(msg ChatMessage) int {
+	size := len(msg.Content)
+	for _, toolCall := range msg.ToolCalls {
+		if toolCall == nil {
+			continue
+		}
+		size += len(toolCall.Title)
+		for _, location := range toolCall.Locations {
+			size += len(location.Path)
+		}
+		for _, content := range toolCall.Content {
+			size += len(extractToolCallText(content))
+		}
+	}
+	return size
+}
+
+func boundedToolCall(toolCall *ToolCallState) *ToolCallState {
+	if toolCall == nil {
+		return nil
+	}
+	clone := *toolCall
+	clone.Title = truncateUTF8Bytes(clone.Title, 4096)
+	clone.Locations = boundedToolLocations(clone.Locations)
+	clone.Content = boundedToolContent(clone.Content)
+	return &clone
+}
+
+func boundedToolLocations(locations []sdk.ToolCallLocation) []sdk.ToolCallLocation {
+	if len(locations) > maxToolCalls {
+		locations = locations[:maxToolCalls]
+	}
+	result := make([]sdk.ToolCallLocation, len(locations))
+	for i, location := range locations {
+		result[i] = sdk.ToolCallLocation{
+			Path: truncateUTF8Bytes(location.Path, 4096),
+			Line: location.Line,
+		}
+	}
+	return result
+}
+
+func boundedToolContent(contents []sdk.ToolCallContent) []sdk.ToolCallContent {
+	result := make([]sdk.ToolCallContent, 0, min(len(contents), maxToolCalls))
+	remaining := maxToolContentBytes
+	for _, content := range contents {
+		if len(result) >= maxToolCalls || remaining <= 0 {
+			break
+		}
+		switch {
+		case content.Content != nil && content.Content.Content.Text != nil:
+			text := truncateUTF8Bytes(content.Content.Content.Text.Text, remaining)
+			if text == "" {
+				continue
+			}
+			result = append(result, sdk.ToolContent(sdk.TextBlock(text)))
+			remaining -= len(text)
+		case content.Diff != nil:
+			path := truncateUTF8Bytes(content.Diff.Path, min(remaining, 4096))
+			if path == "" {
+				continue
+			}
+			// The panel only renders the path summary. Retaining whole old/new
+			// file bodies here would duplicate potentially huge documents.
+			result = append(result, sdk.ToolDiffContent(path, ""))
+			remaining -= len(path)
+		case content.Terminal != nil:
+			id := truncateUTF8Bytes(content.Terminal.TerminalId, min(remaining, 4096))
+			if id == "" {
+				continue
+			}
+			result = append(result, sdk.ToolTerminalRef(id))
+			remaining -= len(id)
+		}
+	}
+	return result
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	value = strings.ToValidUTF8(value, "�")
+	if len(value) <= limit {
+		return value
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 // ClearHistory clears all chat messages and state.
@@ -301,19 +453,142 @@ func (m *Model) ClearHistory() {
 	m.messages = nil
 	m.streamBlocks = nil
 	m.toolCallMap = make(map[string]*ToolCallState)
+	m.messageBytes = 0
+	m.streamBytes = 0
 	m.scrollY = 0
 	m.autoScroll = true
+	m.invalidateChatCache()
 }
 
 // appendToStreamBlock appends text to the last block of the given kind,
 // or creates a new block if the last block is a different kind.
 func (m *Model) appendToStreamBlock(kind StreamBlockKind, text string) {
-	n := len(m.streamBlocks)
-	if n > 0 && m.streamBlocks[n-1].Kind == kind && m.streamBlocks[n-1].ToolCall == nil {
-		m.streamBlocks[n-1].Content += text
-	} else {
-		m.streamBlocks = append(m.streamBlocks, StreamBlock{Kind: kind, Content: text})
+	if m.streamBytes >= maxStreamContentBytes {
+		return
 	}
+	text = truncateUTF8Bytes(text, maxStreamContentBytes-m.streamBytes)
+	if text == "" {
+		return
+	}
+	firstChanged := len(m.streamBlocks)
+	for len(text) > 0 {
+		n := len(m.streamBlocks)
+		if n > 0 && m.streamBlocks[n-1].Kind == kind && m.streamBlocks[n-1].ToolCall == nil && len(m.streamBlocks[n-1].Content) < streamRenderBlockBytes {
+			available := streamRenderBlockBytes - len(m.streamBlocks[n-1].Content)
+			part := truncateUTF8Bytes(text, available)
+			if part != "" {
+				firstChanged = min(firstChanged, n-1)
+				m.streamBlocks[n-1].Content += part
+				m.streamBytes += len(part)
+				text = text[len(part):]
+				continue
+			}
+			// The remaining space cannot hold a full UTF-8 rune. Preserve
+			// validity by starting the next render block instead of dropping
+			// the remainder of this stream message.
+		}
+		if n >= maxStreamBlocks {
+			break
+		}
+		part := truncateUTF8Bytes(text, streamRenderBlockBytes)
+		if part == "" {
+			break
+		}
+		m.streamBlocks = append(m.streamBlocks, StreamBlock{Kind: kind, Content: part})
+		m.streamBytes += len(part)
+		text = text[len(part):]
+	}
+	if firstChanged == 0 && len(m.streamBlocks) > 0 {
+		// The loading placeholder disappears when the first stream block arrives.
+		m.invalidateChatCache()
+		return
+	}
+	m.invalidateStreamTail(firstChanged)
+}
+
+func (m *Model) invalidateChatCache() {
+	if m.chatCache == nil {
+		m.chatCache = &chatRenderCache{}
+	}
+	m.chatCache.dirty = true
+	m.chatCache.streamDirtyFrom = -1
+}
+
+// invalidateStreamTail records the first changed streaming block. Completed
+// transcript lines stay valid, so the next View only re-renders this tail.
+func (m *Model) invalidateStreamTail(firstChanged int) {
+	if m.chatCache == nil {
+		m.chatCache = &chatRenderCache{dirty: true, streamDirtyFrom: -1}
+		return
+	}
+	if m.chatCache.dirty || m.chatCache.streamTailStart < 0 || firstChanged < 0 {
+		m.chatCache.dirty = true
+		m.chatCache.streamDirtyFrom = -1
+		return
+	}
+	if m.chatCache.streamDirtyFrom < 0 || firstChanged < m.chatCache.streamDirtyFrom {
+		m.chatCache.streamDirtyFrom = firstChanged
+	}
+}
+
+func (m *Model) cachedChatLines(width int) []string {
+	if m.chatCache == nil {
+		m.chatCache = &chatRenderCache{dirty: true, streamDirtyFrom: -1}
+	}
+	if m.chatCache.dirty || m.chatCache.width != width {
+		m.rebuildChatCache(width)
+	} else if m.chatCache.streamDirtyFrom >= 0 {
+		m.rebuildChatStreamTail(width)
+	}
+	return m.chatCache.lines
+}
+
+func (m *Model) rebuildChatCache(width int) {
+	lines, starts, tailStart := m.buildChatLinesWithStreamMetadata(width)
+	// Reserve a modest tail so common streaming updates reuse the backing
+	// array and keep the completed transcript allocation-free.
+	lines = slices.Grow(lines, streamRenderBlockBytes/8)
+	m.chatCache.lines = lines
+	m.chatCache.width = width
+	m.chatCache.dirty = false
+	m.chatCache.streamBlockStarts = starts
+	m.chatCache.streamTailStart = tailStart
+	m.chatCache.streamDirtyFrom = -1
+	m.chatCache.fullBuilds++
+	m.chatCache.renderedStreamBlocks = len(starts)
+}
+
+func (m *Model) rebuildChatStreamTail(width int) {
+	cache := m.chatCache
+	from := cache.streamDirtyFrom
+	if from < 0 || from > len(m.streamBlocks) || len(cache.streamBlockStarts) < from {
+		cache.dirty = true
+		m.rebuildChatCache(width)
+		return
+	}
+
+	start := cache.streamTailStart
+	starts := append([]int(nil), cache.streamBlockStarts[:from]...)
+	if from < len(cache.streamBlockStarts) {
+		start = cache.streamBlockStarts[from]
+	}
+	lines := cache.lines[:start]
+	contentW := width - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+	for i := from; i < len(m.streamBlocks); i++ {
+		starts = append(starts, len(lines))
+		lines = append(lines, m.renderStreamBlock(m.streamBlocks[i], contentW)...)
+	}
+	tailStart := len(lines)
+	lines = append(lines, m.chatSuffixLines(contentW)...)
+	cache.lines = lines
+	cache.streamBlockStarts = starts
+	cache.streamTailStart = tailStart
+	cache.streamDirtyFrom = -1
+	cache.incrementalBuilds++
+	cache.renderedStreamBlocks = len(m.streamBlocks) - from
 }
 
 // Update handles messages for the agent panel.
@@ -336,17 +611,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case acp.AgentToolCallMsg:
+		if len(m.toolCallMap) >= maxToolCalls || len(m.streamBlocks) >= maxStreamBlocks {
+			return m, nil
+		}
 		tc := &ToolCallState{
 			ID:        msg.ID,
-			Title:     msg.Title,
+			Title:     truncateUTF8Bytes(msg.Title, 4096),
 			Kind:      msg.Kind,
 			Status:    msg.Status,
-			Locations: msg.Locations,
-			Content:   msg.Content,
+			Locations: boundedToolLocations(msg.Locations),
+			Content:   boundedToolContent(msg.Content),
 			StartTime: time.Now(),
 		}
 		m.toolCallMap[string(msg.ID)] = tc
 		m.streamBlocks = append(m.streamBlocks, StreamBlock{Kind: BlockToolCall, ToolCall: tc})
+		m.invalidateChatCache()
 		if m.autoScroll {
 			m.scrollY = m.maxScroll + 10
 		}
@@ -355,7 +634,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case acp.AgentToolCallUpdateMsg:
 		if tc, ok := m.toolCallMap[string(msg.ID)]; ok {
 			if msg.Title != nil {
-				tc.Title = *msg.Title
+				tc.Title = truncateUTF8Bytes(*msg.Title, 4096)
 			}
 			if msg.Status != nil {
 				tc.Status = *msg.Status
@@ -364,11 +643,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 			if msg.Content != nil {
-				tc.Content = msg.Content
+				tc.Content = boundedToolContent(msg.Content)
 			}
 			if msg.Locations != nil {
-				tc.Locations = msg.Locations
+				tc.Locations = boundedToolLocations(msg.Locations)
 			}
+			m.invalidateChatCache()
 		}
 		return m, nil
 
@@ -382,9 +662,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		if m.pendingWrite == nil {
 			m.pendingWrite = &msg
+		} else if len(m.pendingWrites) >= maxPendingWrites {
+			select {
+			case msg.ResponseCh <- fmt.Errorf("too many pending agent write proposals"):
+			default:
+			}
+			return m, nil
 		} else {
 			m.pendingWrites = append(m.pendingWrites, msg)
 		}
+		m.invalidateChatCache()
 		if m.autoScroll {
 			m.scrollY = m.maxScroll + 10
 		}
@@ -399,12 +686,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if msg.ToolCall.Kind != nil {
 			kind = string(*msg.ToolCall.Kind)
 		}
-		if m.alwaysAllow[kind] {
+		if kind != "" && m.alwaysAllow[kind] {
 			for _, opt := range msg.Options {
 				if opt.Kind == sdk.PermissionOptionKindAllowOnce || opt.Kind == sdk.PermissionOptionKindAllowAlways {
-					msg.ResponseCh <- sdk.RequestPermissionResponse{
+					deliverPermissionResponse(msg.ResponseCh, sdk.RequestPermissionResponse{
 						Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
-					}
+					})
 					return m, nil
 				}
 			}
@@ -415,12 +702,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			ResponseCh: msg.ResponseCh,
 		}
 		m.state = AgentPermission
+		m.invalidateChatCache()
 		if m.autoScroll {
 			m.scrollY = m.maxScroll + 10
 		}
 		return m, nil
 
 	case acp.AgentPromptResponseMsg:
+		if msg.Err != nil {
+			m.AddSystemMessage("Agent request failed: " + msg.Err.Error())
+		}
 		var toolCalls []*ToolCallState
 		var textParts []string
 		for _, block := range m.streamBlocks {
@@ -435,16 +726,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		content := strings.Join(textParts, "")
 		if content != "" || len(toolCalls) > 0 {
-			m.messages = append(m.messages, ChatMessage{
+			m.appendChatMessage(ChatMessage{
 				Role:      RoleAgent,
 				Content:   content,
 				ToolCalls: toolCalls,
 			})
 		}
 		m.streamBlocks = nil
+		m.streamBytes = 0
 		m.toolCallMap = make(map[string]*ToolCallState)
 		m.loading = false
 		m.state = AgentIdle
+		m.invalidateChatCache()
 		if m.autoScroll {
 			m.scrollY = m.maxScroll + 10
 		}
@@ -468,12 +761,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case acp.AgentStartedMsg:
 		m.connected = true
 		m.state = AgentIdle
+		m.invalidateChatCache()
 		return m, nil
 
 	case acp.AgentStoppedMsg:
 		m.connected = false
 		m.state = AgentDisconnected
 		m.loading = false
+		m.invalidateChatCache()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -540,11 +835,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.messages = append(m.messages, ChatMessage{Role: RoleUser, Content: text})
+		m.appendChatMessage(ChatMessage{Role: RoleUser, Content: text})
 		m.input.SetValue("")
 		m.loading = true
 		m.state = AgentThinking
 		m.autoScroll = true
+		m.invalidateChatCache()
 		return m, m.spinner.Tick
 
 	case "esc", "escape":
@@ -569,6 +865,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "tab":
 		if tc := m.lastVisibleToolCall(); tc != nil {
 			tc.Expanded = !tc.Expanded
+			m.invalidateChatCache()
 		}
 		return m, nil
 
@@ -635,39 +932,43 @@ func (m Model) handlePermissionKey(key string) (Model, tea.Cmd) {
 	case "y", "enter":
 		for _, opt := range perm.Options {
 			if opt.Kind == sdk.PermissionOptionKindAllowOnce {
-				perm.ResponseCh <- sdk.RequestPermissionResponse{
+				deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 					Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
-				}
+				})
 				m.permission = nil
 				m.state = AgentThinking
+				m.invalidateChatCache()
 				return m, nil
 			}
 		}
 		if len(perm.Options) > 0 {
-			perm.ResponseCh <- sdk.RequestPermissionResponse{
+			deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 				Outcome: sdk.NewRequestPermissionOutcomeSelected(perm.Options[0].OptionId),
-			}
+			})
 			m.permission = nil
 			m.state = AgentThinking
+			m.invalidateChatCache()
 		}
 		return m, nil
 
 	case "n":
 		for _, opt := range perm.Options {
 			if opt.Kind == sdk.PermissionOptionKindRejectOnce {
-				perm.ResponseCh <- sdk.RequestPermissionResponse{
+				deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 					Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
-				}
+				})
 				m.permission = nil
 				m.state = AgentThinking
+				m.invalidateChatCache()
 				return m, nil
 			}
 		}
-		perm.ResponseCh <- sdk.RequestPermissionResponse{
+		deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 			Outcome: sdk.NewRequestPermissionOutcomeCancelled(),
-		}
+		})
 		m.permission = nil
 		m.state = AgentThinking
+		m.invalidateChatCache()
 		return m, nil
 
 	case "a":
@@ -675,24 +976,28 @@ func (m Model) handlePermissionKey(key string) (Model, tea.Cmd) {
 		if perm.ToolCall.Kind != nil {
 			kind = string(*perm.ToolCall.Kind)
 		}
-		m.alwaysAllow[kind] = true
+		if kind != "" {
+			m.alwaysAllow[kind] = true
+		}
 		for _, opt := range perm.Options {
 			if opt.Kind == sdk.PermissionOptionKindAllowAlways {
-				perm.ResponseCh <- sdk.RequestPermissionResponse{
+				deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 					Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
-				}
+				})
 				m.permission = nil
 				m.state = AgentThinking
+				m.invalidateChatCache()
 				return m, nil
 			}
 		}
 		for _, opt := range perm.Options {
 			if opt.Kind == sdk.PermissionOptionKindAllowOnce {
-				perm.ResponseCh <- sdk.RequestPermissionResponse{
+				deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 					Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
-				}
+				})
 				m.permission = nil
 				m.state = AgentThinking
+				m.invalidateChatCache()
 				return m, nil
 			}
 		}
@@ -700,6 +1005,13 @@ func (m Model) handlePermissionKey(key string) (Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func deliverPermissionResponse(ch chan sdk.RequestPermissionResponse, response sdk.RequestPermissionResponse) {
+	select {
+	case ch <- response:
+	default:
+	}
 }
 
 func (m Model) chatViewHeight() int {
@@ -721,7 +1033,7 @@ func (m *Model) refreshScrollBounds() {
 	if width < 1 {
 		width = 1
 	}
-	m.setScrollBounds(len(m.buildChatLines(width)))
+	m.setScrollBounds(len(m.cachedChatLines(width)))
 }
 
 func (m *Model) setScrollBounds(chatLineCount int) {
@@ -771,7 +1083,7 @@ func (m *Model) View() string {
 	}
 
 	// Build chat content
-	chatLines := m.buildChatLines(innerW)
+	chatLines := m.cachedChatLines(innerW)
 	m.lastChatLineCount = len(chatLines)
 
 	// Compute scroll (pointer receiver — persists).
@@ -819,7 +1131,7 @@ func (m Model) renderTaggedFiles(width int) string {
 	}
 	line := " " + strings.Join(parts, dimStyle.Render(" "))
 	if lipgloss.Width(line) > width {
-		line = line[:width]
+		line = ansi.Truncate(line, width, "")
 	}
 	return line
 }
@@ -854,8 +1166,8 @@ func (m Model) renderHeader() string {
 	modelLabel := ""
 	if m.currentModel != "" {
 		modelStr := string(m.currentModel)
-		if len(modelStr) > 25 {
-			modelStr = modelStr[:22] + "..."
+		if lipgloss.Width(modelStr) > 25 {
+			modelStr = ansi.Truncate(modelStr, 25, "...")
 		}
 		modelLabel = " " + lipgloss.NewStyle().Foreground(ui.Nord4).Render(modelStr)
 	}
@@ -870,6 +1182,13 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) buildChatLines(width int) []string {
+	lines, _, _ := m.buildChatLinesWithStreamMetadata(width)
+	return lines
+}
+
+// buildChatLinesWithStreamMetadata is the canonical renderer used for a full
+// rebuild. The metadata identifies the independently cacheable stream tail.
+func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int) {
 	var lines []string
 
 	if !m.connected {
@@ -881,7 +1200,7 @@ func (m Model) buildChatLines(width int) []string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   enabled = true"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   command = \"opencode\""))
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   args = [\"acp\"]"))
-		return lines
+		return lines, nil, -1
 	}
 
 	hasContent := len(m.messages) > 0 || len(m.streamBlocks) > 0 || m.loading
@@ -895,7 +1214,7 @@ func (m Model) buildChatLines(width int) []string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render(" Commands:"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   /model  — switch model"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   @       — attach file"))
-		return lines
+		return lines, nil, -1
 	}
 
 	contentW := width - 2
@@ -933,41 +1252,54 @@ func (m Model) buildChatLines(width int) []string {
 		}
 	}
 
-	// Streaming blocks in chronological order
+	var streamBlockStarts []int
+	streamTailStart := -1
+
+	// Streaming blocks in chronological order.
 	if len(m.streamBlocks) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(" Agent:"))
-
-		thoughtStyle := lipgloss.NewStyle().Foreground(ui.Nord3).Italic(true)
 		for _, block := range m.streamBlocks {
-			switch block.Kind {
-			case BlockText:
-				wrapped := wrapText(block.Content, contentW)
-				for _, l := range wrapped {
-					lines = append(lines, "  "+l)
-				}
-			case BlockThought:
-				wrapped := wrapText(block.Content, contentW)
-				for _, l := range wrapped {
-					lines = append(lines, "  "+thoughtStyle.Render(l))
-				}
-			case BlockToolCall:
-				if block.ToolCall != nil {
-					lines = append(lines, m.renderToolCall(block.ToolCall, contentW)...)
-				}
-			}
+			streamBlockStarts = append(streamBlockStarts, len(lines))
+			lines = append(lines, m.renderStreamBlock(block, contentW)...)
 		}
+		streamTailStart = len(lines)
 	}
 
+	lines = append(lines, m.chatSuffixLines(contentW)...)
+
+	return lines, streamBlockStarts, streamTailStart
+}
+
+func (m Model) renderStreamBlock(block StreamBlock, contentW int) []string {
+	var lines []string
+	switch block.Kind {
+	case BlockText:
+		for _, line := range wrapText(block.Content, contentW) {
+			lines = append(lines, "  "+line)
+		}
+	case BlockThought:
+		thoughtStyle := lipgloss.NewStyle().Foreground(ui.Nord3).Italic(true)
+		for _, line := range wrapText(block.Content, contentW) {
+			lines = append(lines, "  "+thoughtStyle.Render(line))
+		}
+	case BlockToolCall:
+		if block.ToolCall != nil {
+			lines = append(lines, m.renderToolCall(block.ToolCall, contentW)...)
+		}
+	}
+	return lines
+}
+
+func (m Model) chatSuffixLines(contentW int) []string {
+	var lines []string
 	if m.loading && len(m.streamBlocks) == 0 {
 		lines = append(lines, "")
 		lines = append(lines, "  "+m.spinner.View()+" Thinking...")
 	}
-
 	if m.permission != nil {
 		lines = append(lines, m.renderPermission(contentW)...)
 	}
-
 	if m.pendingWrite != nil {
 		lines = append(lines, m.renderWriteProposal(contentW)...)
 	}
@@ -1026,8 +1358,8 @@ func (m Model) renderToolCall(tc *ToolCallState, width int) []string {
 	}
 
 	line := fmt.Sprintf("  %s %s  %-6s %-20s %s  %s", arrow, statusIcon, kindStr, loc, dur, title)
-	if len(line) > width+2 {
-		line = line[:width+2]
+	if lipgloss.Width(line) > width+2 {
+		line = ansi.Truncate(line, width+2, "")
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Render(line))
 
@@ -1125,25 +1457,6 @@ func wrapText(text string, width int) []string {
 	if width <= 0 {
 		return []string{text}
 	}
-
-	var result []string
-	for _, paragraph := range strings.Split(text, "\n") {
-		if paragraph == "" {
-			result = append(result, "")
-			continue
-		}
-		for len(paragraph) > width {
-			breakAt := width
-			for breakAt > 0 && paragraph[breakAt] != ' ' {
-				breakAt--
-			}
-			if breakAt == 0 {
-				breakAt = width
-			}
-			result = append(result, paragraph[:breakAt])
-			paragraph = strings.TrimLeft(paragraph[breakAt:], " ")
-		}
-		result = append(result, paragraph)
-	}
-	return result
+	text = strings.ToValidUTF8(text, "�")
+	return strings.Split(ansi.Wrap(text, width, " "), "\n")
 }

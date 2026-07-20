@@ -2,10 +2,19 @@ package text
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"sync"
 )
 
 const maxLeaf = 512
+
+// A line index makes small and medium documents very fast to navigate, but
+// costs one machine word per line. Keep it bounded so opening a generated
+// file with tens of millions of empty lines cannot reserve gigabytes just to
+// paint a viewport.
+const maxCachedLineIndexEntries = 250_000
 
 // Rope is a persistent (immutable) rope data structure for efficient text manipulation.
 // Each mutation returns a new Rope; the original is unchanged.
@@ -31,6 +40,9 @@ var fibs = func() []int {
 }()
 
 // New creates a Rope from a byte slice.
+//
+// New defensively copies data. Callers may retain or mutate their slice after
+// this function returns without affecting the immutable rope snapshot.
 func New(data []byte) *Rope {
 	if len(data) == 0 {
 		return newLeaf(nil)
@@ -49,6 +61,40 @@ func New(data []byte) *Rope {
 	return join(New(data[:mid]), New(data[mid:]))
 }
 
+// NewOwned creates a Rope by taking exclusive ownership of data's backing
+// storage. It does not copy the bytes into its leaves, so callers MUST NOT
+// retain, mutate, or append to data after this call. Use New for ordinary
+// caller-provided input. NewOwned is intended for a freshly-read file or a
+// freshly-created contiguous snapshot whose ownership is being transferred
+// directly into the immutable rope.
+//
+// As with New, this constructor preserves bytes exactly; it does not validate
+// or normalize text. When the input is valid UTF-8, leaves are split only at
+// rune boundaries.
+func NewOwned(data []byte) *Rope {
+	if len(data) == 0 {
+		return newLeafOwned(nil)
+	}
+	// Keep leaf capacities within their logical extent. Besides making the
+	// ownership boundary explicit, this prevents any future internal append
+	// from writing through one leaf into its neighbour's storage.
+	data = data[:len(data):len(data)]
+	if len(data) <= maxLeaf {
+		return newLeafOwned(data)
+	}
+	mid := len(data) / 2
+	// Avoid splitting in the middle of a multi-byte UTF-8 sequence. This is
+	// deliberately the same rule as New so both constructors have identical
+	// text semantics.
+	for mid < len(data) && mid > 0 && data[mid]&0xC0 == 0x80 {
+		mid++
+	}
+	if mid == 0 || mid >= len(data) {
+		return newLeafOwned(data)
+	}
+	return join(NewOwned(data[:mid:mid]), NewOwned(data[mid:len(data):len(data)]))
+}
+
 // NewFromString creates a Rope from a string.
 func NewFromString(s string) *Rope {
 	return New([]byte(s))
@@ -57,10 +103,16 @@ func NewFromString(s string) *Rope {
 func newLeaf(data []byte) *Rope {
 	b := make([]byte, len(data))
 	copy(b, data)
+	return newLeafOwned(b)
+}
+
+// newLeafOwned creates a leaf from storage exclusively owned by the rope.
+// Callers must not retain or mutate data afterwards.
+func newLeafOwned(data []byte) *Rope {
 	return &Rope{
-		value:    b,
-		len:      len(b),
-		newlines: bytes.Count(b, []byte{'\n'}),
+		value:    data,
+		len:      len(data),
+		newlines: bytes.Count(data, []byte{'\n'}),
 		depth:    0,
 	}
 }
@@ -162,6 +214,147 @@ func (r *Rope) Bytes() []byte {
 	return buf
 }
 
+// BytesContext returns a copy of the rope content, stopping between leaves if
+// ctx is canceled. It is intended for background work that needs a contiguous
+// snapshot without making the UI goroutine copy a whole document.
+func (r *Rope) BytesContext(ctx context.Context) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 0, r.len)
+	if err := r.appendToContext(ctx, &buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// EqualBytes compares a contiguous byte slice with the rope leaf-by-leaf.
+// Unlike Bytes, it performs no document-sized allocation, which makes it
+// suitable for background file-watcher attribution and validation.
+func (r *Rope) EqualBytes(data []byte) bool {
+	if r == nil {
+		return len(data) == 0
+	}
+	if len(data) != r.len {
+		return false
+	}
+	offset := 0
+	var equal func(*Rope) bool
+	equal = func(node *Rope) bool {
+		if node.isLeaf() {
+			end := offset + len(node.value)
+			if !bytes.Equal(node.value, data[offset:end]) {
+				return false
+			}
+			offset = end
+			return true
+		}
+		return equal(node.left) && equal(node.right)
+	}
+	return equal(r) && offset == len(data)
+}
+
+// EqualReader compares a stream with the rope leaf-by-leaf without allocating
+// a contiguous document. The reader must reach EOF exactly after the rope;
+// callers should buffer filesystem readers because leaves are intentionally
+// small.
+func (r *Rope) EqualReader(reader io.Reader) (bool, error) {
+	if reader == nil {
+		return false, io.ErrUnexpectedEOF
+	}
+	equal := true
+	buf := make([]byte, maxLeaf)
+	var compareNode func(*Rope) error
+	compareNode = func(node *Rope) error {
+		if node == nil {
+			return nil
+		}
+		if node.isLeaf() {
+			leafBuf := buf[:len(node.value)]
+			if _, err := io.ReadFull(reader, leafBuf); err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					equal = false
+					return nil
+				}
+				return err
+			}
+			if !bytes.Equal(node.value, leafBuf) {
+				equal = false
+			}
+			return nil
+		}
+		if err := compareNode(node.left); err != nil {
+			return err
+		}
+		return compareNode(node.right)
+	}
+	if err := compareNode(r); err != nil {
+		return false, err
+	}
+	var extra [1]byte
+	n, err := reader.Read(extra[:])
+	switch {
+	case err == nil && n > 0:
+		return false, nil
+	case errors.Is(err, io.EOF):
+		return equal, nil
+	case err != nil:
+		return false, err
+	default:
+		// Readers are permitted to return (0, nil). ReadFull avoids treating
+		// that transient result as EOF while still requiring exactly one byte.
+		n, err = io.ReadFull(reader, extra[:])
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return equal, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return n == 0 && equal, nil
+	}
+}
+
+// WriteTo streams the rope in document order without first allocating a
+// contiguous copy. Callers that target files should normally wrap the writer
+// in a modest buffer because rope leaves are intentionally small.
+func (r *Rope) WriteTo(w io.Writer) (int64, error) {
+	if w == nil {
+		return 0, io.ErrClosedPipe
+	}
+	if r == nil {
+		return 0, nil
+	}
+	var written int64
+	var writeNode func(*Rope) error
+	writeNode = func(node *Rope) error {
+		if node.isLeaf() {
+			n, err := w.Write(node.value)
+			written += int64(n)
+			if err != nil {
+				return err
+			}
+			if n != len(node.value) {
+				return io.ErrShortWrite
+			}
+			return nil
+		}
+		if err := writeNode(node.left); err != nil {
+			return err
+		}
+		return writeNode(node.right)
+	}
+	if err := writeNode(r); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
 func (r *Rope) appendTo(buf *[]byte) {
 	if r.isLeaf() {
 		*buf = append(*buf, r.value...)
@@ -169,6 +362,62 @@ func (r *Rope) appendTo(buf *[]byte) {
 	}
 	r.left.appendTo(buf)
 	r.right.appendTo(buf)
+}
+
+func (r *Rope) appendToContext(ctx context.Context, buf *[]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r.isLeaf() {
+		*buf = append(*buf, r.value...)
+		return nil
+	}
+	if err := r.left.appendToContext(ctx, buf); err != nil {
+		return err
+	}
+	return r.right.appendToContext(ctx, buf)
+}
+
+// PrefixLines copies at most maxLines logical lines and maxBytes bytes without
+// constructing the rope's whole-file line index. It is used for the initial
+// syntax-highlighted frame, where bounded work is more important than seeing a
+// very long first line in full.
+func (r *Rope) PrefixLines(maxLines, maxBytes int) []byte {
+	if r == nil || maxLines <= 0 || maxBytes <= 0 {
+		return nil
+	}
+	maxBytes = min(maxBytes, r.len)
+	buf := make([]byte, 0, maxBytes)
+	lines := 0
+	r.appendPrefixLines(&buf, maxLines, maxBytes, &lines)
+	return buf
+}
+
+// appendPrefixLines returns true once either bound has been reached.
+func (r *Rope) appendPrefixLines(buf *[]byte, maxLines, maxBytes int, lines *int) bool {
+	if len(*buf) >= maxBytes || *lines >= maxLines {
+		return true
+	}
+	if !r.isLeaf() {
+		if r.left.appendPrefixLines(buf, maxLines, maxBytes, lines) {
+			return true
+		}
+		return r.right.appendPrefixLines(buf, maxLines, maxBytes, lines)
+	}
+
+	remaining := maxBytes - len(*buf)
+	take := min(len(r.value), remaining)
+	for i := 0; i < take; i++ {
+		if r.value[i] == '\n' {
+			*lines++
+			if *lines >= maxLines {
+				take = i + 1
+				break
+			}
+		}
+	}
+	*buf = append(*buf, r.value[:take]...)
+	return len(*buf) >= maxBytes || *lines >= maxLines
 }
 
 // Slice returns a new Rope containing bytes [start, end).
@@ -205,6 +454,17 @@ func (r *Rope) Insert(offset int, data []byte) *Rope {
 	}
 	if r == nil || r.len == 0 {
 		return New(data)
+	}
+	// Keep ordinary typing in a small leaf as a single immutable copy. Without
+	// this fast path each keystroke creates a new branch, even though the leaf
+	// has ample capacity, which needlessly grows the persistent tree.
+	if r.isLeaf() && r.len+len(data) <= maxLeaf {
+		offset = max(0, min(offset, r.len))
+		combined := make([]byte, r.len+len(data))
+		copy(combined, r.value[:offset])
+		copy(combined[offset:], data)
+		copy(combined[offset+len(data):], r.value[offset:])
+		return newLeafOwned(combined)
 	}
 	if offset <= 0 {
 		return join(New(data), r)
@@ -271,11 +531,36 @@ func (r *Rope) LineStart(line int) ByteOffset {
 	if line <= 0 {
 		return 0
 	}
-	r.ensureLineIndex()
-	if line < len(r.lineIndex) {
-		return r.lineIndex[line]
+	if r.newlines+1 <= maxCachedLineIndexEntries {
+		r.ensureLineIndex()
+		if line < len(r.lineIndex) {
+			return r.lineIndex[line]
+		}
+		return r.len
 	}
-	return r.len
+	return r.lineStartWithoutIndex(line)
+}
+
+func (r *Rope) lineStartWithoutIndex(line int) ByteOffset {
+	if line <= 0 || r == nil {
+		return 0
+	}
+	if r.isLeaf() {
+		seen := 0
+		for i, b := range r.value {
+			if b == '\n' {
+				seen++
+				if seen == line {
+					return i + 1
+				}
+			}
+		}
+		return r.len
+	}
+	if line <= r.left.newlines {
+		return r.left.lineStartWithoutIndex(line)
+	}
+	return r.left.len + r.right.lineStartWithoutIndex(line-r.left.newlines)
 }
 
 // Line returns the content of the given line (0-based), without trailing newline.
@@ -296,22 +581,40 @@ func (r *Rope) Line(line int) []byte {
 
 // LineLen returns the length in bytes of the given line, excluding the newline.
 func (r *Rope) LineLen(line int) int {
-	r.ensureLineIndex()
 	start := r.LineStart(line)
-	// Check if there is a next line in the index (meaning this line ends with \n)
-	if line+1 < len(r.lineIndex) {
-		return r.lineIndex[line+1] - start - 1
+	if line >= 0 && line < r.newlines {
+		end := r.LineStart(line + 1)
+		return end - start - 1
 	}
-	// last line: no trailing newline
 	return r.len - start
 }
 
 // PositionToOffset converts a Position to a byte offset.
 func (r *Rope) PositionToOffset(pos Position) ByteOffset {
 	lineStart := r.LineStart(pos.Line)
-	lineContent := r.Line(pos.Line)
-	col := min(pos.Col, len(lineContent))
+	col := min(pos.Col, r.LineLen(pos.Line))
 	return lineStart + col
+}
+
+// PositionToOffsetUncached returns the offset for a byte position without
+// initializing the full line-index cache. Rendering code uses it for bounded
+// probes (such as bracket matching), where copying a large document merely to
+// find one character would violate the frame budget.
+func (r *Rope) PositionToOffsetUncached(pos Position) (ByteOffset, bool) {
+	if r == nil || pos.Line < 0 || pos.Line >= r.LineCount() || pos.Col < 0 {
+		return 0, false
+	}
+	start := r.lineStartWithoutIndex(pos.Line)
+	end := ByteOffset(r.len)
+	if pos.Line < r.newlines {
+		end = r.lineStartWithoutIndex(pos.Line+1) - 1 // omit the newline
+	}
+	// A position at the end of a line is valid (and is how selections include
+	// the final byte), even though it is not a valid character probe.
+	if pos.Col > end-start {
+		return 0, false
+	}
+	return start + pos.Col, true
 }
 
 // OffsetToPosition converts a byte offset to a Position.

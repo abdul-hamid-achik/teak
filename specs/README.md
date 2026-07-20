@@ -7,7 +7,7 @@ repeatable.
 
 ## Prerequisites
 
-- Go 1.24 or newer
+- Go 1.26 or newer
 - Glyphrun 0.14.3
 
 Build Teak and check the local Glyphrun setup:
@@ -27,12 +27,14 @@ done
 
 ## Regression suite
 
-All nine specs are expected to pass. Together they cover basic navigation,
+All twelve specs are expected to pass. Together they cover basic navigation,
 mouse routing, drag selection, scrolling, resize, modal capture, overlay
-buttons, sidebar isolation, wrapped selections, and clean exit behavior:
+buttons, sidebar isolation, wrapped selections, font fallback, tiny-terminal
+recovery, tab-wheel navigation, and clean exit behavior:
 
 ```sh
 glyph run \
+  specs/tui_ascii_font_fallback.yml \
   specs/tui_editor_selection.yml \
   specs/tui_navigation_mouse.yml \
   specs/tui_quick_open_mouse.yml \
@@ -40,19 +42,24 @@ glyph run \
   specs/tui_settings_modal_mouse.yml \
   specs/tui_sidebar_problems_mouse.yml \
   specs/tui_status_bar_mouse.yml \
+  specs/tui_tabbar_wheel.yml \
+  specs/tui_tiny_resize_recovery.yml \
   specs/tui_unsaved_confirm_mouse.yml \
   specs/tui_word_wrap_selection.yml
 ```
 
-The seven focused regression contracts protect these previously defective
+The focused regression contracts protect these previously defective
 behaviors:
 
+- `tui_ascii_font_fallback.yml` — controls remain readable without Nerd Fonts
 - `tui_editor_selection.yml` — a normal click should clear a drag selection
 - `tui_quick_open_mouse.yml` — clicking a Quick Open result should open it
 - `tui_unsaved_confirm_mouse.yml` — clicking Cancel should dismiss the dialog
 - `tui_status_bar_mouse.yml` — status-bar chrome should not move the cursor
 - `tui_sidebar_problems_mouse.yml` — Problems must not click through to the tree
 - `tui_settings_modal_mouse.yml` — Settings must capture background clicks
+- `tui_tabbar_wheel.yml` — wheel input over tabs changes the active tab
+- `tui_tiny_resize_recovery.yml` — a 1×1 terminal survives and restores layout
 - `tui_word_wrap_selection.yml` — wrapped selections should remain highlighted
 
 Use repeat mode when checking for flakiness. Give each spec its own artifact

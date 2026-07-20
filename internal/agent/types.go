@@ -25,7 +25,22 @@ const (
 	BlockToolCall
 )
 
-const maxToolOutputLines = 100
+const (
+	maxToolOutputLines    = 100
+	maxChatMessages       = 500
+	maxChatMessageBytes   = 512 << 10
+	maxChatHistoryBytes   = 4 << 20
+	maxStreamBlocks       = 256
+	maxStreamContentBytes = 2 << 20
+	// streamRenderBlockBytes bounds the amount of text that a single ACP
+	// chunk can make the renderer revisit. Splitting only affects the
+	// renderer's internal blocks; the final prompt still concatenates them.
+	streamRenderBlockBytes = 64 << 10
+	maxToolCalls           = 64
+	maxToolContentBytes    = 32 << 10
+	maxPendingWrites       = 32
+	maxTaggedFiles         = 64
+)
 
 // StreamBlock is a single chunk of streaming content, preserving chronological order.
 type StreamBlock struct {

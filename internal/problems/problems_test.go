@@ -55,6 +55,46 @@ func TestModel_SetProblems(t *testing.T) {
 	}
 }
 
+func TestModelReplaceFileProblemsPreservesOrderedPanelAndCounts(t *testing.T) {
+	m := New(ui.NordTheme(), "/test/root")
+	m.SetProblems([]Problem{
+		{FilePath: "/test/root/a.go", Line: 2, Severity: 2, Message: "old warning"},
+		{FilePath: "/test/root/b.go", Line: 1, Severity: 1, Message: "existing error"},
+	})
+
+	m.ReplaceFileProblems("/test/root/a.go", []Problem{
+		{FilePath: "/test/root/a.go", Line: 3, Severity: 1, Message: "new error"},
+		{FilePath: "/test/root/a.go", Line: 1, Severity: 1, Message: "first error"},
+	})
+
+	if got, want := m.ProblemCount(), 3; got != want {
+		t.Fatalf("ProblemCount() = %d, want %d", got, want)
+	}
+	if got, want := m.ErrorCount(), 3; got != want {
+		t.Fatalf("ErrorCount() = %d, want %d", got, want)
+	}
+	if got, want := m.WarningCount(), 0; got != want {
+		t.Fatalf("WarningCount() = %d, want %d", got, want)
+	}
+	if got, want := m.problems[0].FilePath, "/test/root/a.go"; got != want {
+		t.Fatalf("first problem path = %q, want %q", got, want)
+	}
+	if got, want := m.problems[0].Line, 1; got != want {
+		t.Fatalf("first problem line = %d, want %d", got, want)
+	}
+
+	m.ReplaceFileProblems("/test/root/a.go", nil)
+	if got, want := m.ProblemCount(), 1; got != want {
+		t.Fatalf("ProblemCount after clear = %d, want %d", got, want)
+	}
+	if got, want := m.ErrorCount(), 1; got != want {
+		t.Fatalf("ErrorCount after clear = %d, want %d", got, want)
+	}
+	if got, want := len(m.groups), 1; got != want {
+		t.Fatalf("groups after clear = %d, want %d", got, want)
+	}
+}
+
 func TestModelSelectAt(t *testing.T) {
 	tests := []struct {
 		name         string

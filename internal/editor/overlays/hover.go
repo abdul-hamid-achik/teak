@@ -3,6 +3,7 @@ package overlays
 import (
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -41,8 +42,8 @@ func (h Hover) View() string {
 	lines := strings.Split(h.Content, "\n")
 	var wrapped []string
 	for _, line := range lines {
-		if len(line) > maxWidth {
-			line = line[:maxWidth-3] + "..."
+		if ansi.StringWidth(line) > maxWidth {
+			line = ansi.Truncate(line, maxWidth-3, "") + "..."
 		}
 		wrapped = append(wrapped, line)
 	}

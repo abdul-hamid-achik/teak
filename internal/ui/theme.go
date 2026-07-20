@@ -26,8 +26,20 @@ var (
 	Nord15 = lipgloss.Color("#B48EAD")
 )
 
-// Theme holds lipgloss styles for the editor UI.
+// Theme is an immutable, small handle to the Lipgloss styles used by the UI.
+//
+// Components store themes by value. Keeping the styles behind a shared pointer
+// prevents a single cursor movement from copying tens of KiB of style state
+// through every nested editor overlay. Theme constructors allocate a fresh
+// immutable themeStyles graph; copied Theme values deliberately share it.
 type Theme struct {
+	*themeStyles
+}
+
+// themeStyles is private to keep construction centralized. Theme values are
+// treated as immutable after construction; callers must not assign to promoted
+// style fields because copied handles intentionally share this backing graph.
+type themeStyles struct {
 	Editor             lipgloss.Style
 	Gutter             lipgloss.Style
 	GutterActive       lipgloss.Style
@@ -171,7 +183,7 @@ func DefaultTheme() Theme {
 }
 
 func defaultNordTheme() Theme {
-	return Theme{
+	return Theme{themeStyles: &themeStyles{
 		Editor: lipgloss.NewStyle().
 			Background(Nord0).
 			Foreground(Nord4),
@@ -428,7 +440,7 @@ func defaultNordTheme() Theme {
 		SyntaxOperator:  Nord9,
 		SyntaxTag:       Nord9,
 		SyntaxAttribute: Nord8,
-	}
+	}}
 }
 
 // palette holds the base colors for building a theme.
@@ -448,7 +460,7 @@ type palette struct {
 }
 
 func buildTheme(p palette) Theme {
-	return Theme{
+	return Theme{themeStyles: &themeStyles{
 		Editor:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
 		Gutter:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).PaddingRight(1),
 		GutterActive:        lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
@@ -529,7 +541,7 @@ func buildTheme(p palette) Theme {
 		SyntaxOperator:      p.operator,
 		SyntaxTag:           p.tag,
 		SyntaxAttribute:     p.attribute,
-	}
+	}}
 }
 
 // DraculaTheme returns Dracula-themed styles.

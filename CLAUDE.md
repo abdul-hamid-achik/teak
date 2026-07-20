@@ -45,7 +45,7 @@ The root model in `internal/app/app.go` receives all messages and routes them:
 
 ## Code Conventions
 
-- **Go 1.24+**, use standard library where possible
+- **Go 1.26+**, use standard library where possible
 - **0-based line and column indexing** throughout the entire codebase
 - **Rope is immutable**: `Insert`/`Delete` return new `*Rope`
 - **Return errors, don't panic**

@@ -42,7 +42,12 @@ func TestEditorCutWithSelection(t *testing.T) {
 	e := newEditor("hello world", 0, 0)
 	e.Buffer.SetSelection(text.Position{Line: 0, Col: 0}, text.Position{Line: 0, Col: 5})
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+x"})
+	var cmd tea.Cmd
+	e, cmd = e.Update(tea.KeyPressMsg{Text: "ctrl+x"})
+	if cmd == nil {
+		t.Fatal("ctrl+x did not prepare clipboard work")
+	}
+	e, _ = e.Update(cmd())
 
 	if got := editorContent(e); got != " world" {
 		t.Errorf("ctrl+x should cut selection, got %q", got)

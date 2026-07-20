@@ -2,10 +2,27 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
+	"teak/internal/atomicfile"
+)
+
+const (
+	maxConfigBytes        = 4 << 20
+	maxLSPConfigs         = 128
+	maxConfigStringSize   = 4 << 10
+	maxConfigStringData   = 256 << 10
+	maxConfigArgs         = 128
+	maxLSPExtensions      = 64
+	maxTotalLSPExtensions = 512
+	maxTotalLSPArgs       = 1024
+	// Keep the integer-to-duration conversion in the app bounded and useful:
+	// longer intervals are indistinguishable from an on-demand session save.
+	maxAutoSaveIntervalSeconds = 24 * 60 * 60
 )
 
 // Config holds all application configuration.
@@ -53,6 +70,13 @@ type LSPConfig struct {
 	LanguageID string   `toml:"language_id"`
 }
 
+var knownThemes = []string{"nord", "dracula", "catppuccin", "solarized-dark", "one-dark"}
+
+// KnownThemes returns the supported UI theme names in display order.
+func KnownThemes() []string {
+	return append([]string(nil), knownThemes...)
+}
+
 // DefaultConfig returns sensible default configuration.
 func DefaultConfig() Config {
 	return Config{
@@ -79,6 +103,9 @@ func DefaultConfig() Config {
 
 // configPath returns the path to the config file.
 func configPath() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
+		return filepath.Join(dir, "teak", "config.toml")
+	}
 	if dir, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(dir, "teak", "config.toml")
 	}
@@ -100,7 +127,7 @@ func Load() (Config, error) {
 	cfg := DefaultConfig()
 
 	path := configPath()
-	data, err := os.ReadFile(path)
+	data, err := readConfig(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
@@ -114,7 +141,61 @@ func Load() (Config, error) {
 	}
 
 	merge(&cfg, &user)
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("invalid config: %w", err)
+	}
 	return cfg, nil
+}
+
+// Save writes cfg to the standard Teak configuration path. The file is
+// validated before any filesystem mutation and is replaced atomically.
+func Save(cfg Config) error {
+	return SaveTo(configPath(), cfg)
+}
+
+// SaveTo writes cfg atomically to path with private permissions. It is
+// exported for callers that need an explicit path (including the Settings UI)
+// and for tests; ordinary application code should use Save.
+func SaveTo(path string, cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+	if path == "" {
+		return fmt.Errorf("config path is empty")
+	}
+
+	if err := atomicfile.Write(path, func(file *os.File) error {
+		return toml.NewEncoder(file).Encode(cfg)
+	}); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
+}
+
+func readConfig(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("config path is not a regular file")
+	}
+	if info.Size() > maxConfigBytes {
+		return nil, fmt.Errorf("config file exceeds %d-byte limit", maxConfigBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxConfigBytes {
+		return nil, fmt.Errorf("config file exceeds %d-byte limit", maxConfigBytes)
+	}
+	return data, nil
 }
 
 // userConfig mirrors Config but with pointer fields for merge detection.
@@ -209,38 +290,141 @@ func (c Config) Validate() error {
 	}
 
 	// Validate theme - check against known valid themes
-	validThemes := map[string]bool{
-		"nord":         true,
-		"dracula":      true,
-		"catppuccin":   true,
-		"solarized-dark": true,
-		"one-dark":     true,
-	}
 	if c.UI.Theme != "" {
-		if !validThemes[c.UI.Theme] {
+		validTheme := false
+		for _, theme := range knownThemes {
+			if c.UI.Theme == theme {
+				validTheme = true
+				break
+			}
+		}
+		if !validTheme {
 			return fmt.Errorf("unknown theme: %q", c.UI.Theme)
 		}
 	}
 
 	// Validate agent config
-	if c.Agent.Enabled && c.Agent.Command == "" {
-		return fmt.Errorf("agent.enabled is true but agent.command is empty")
+	if err := validateCommand("agent.command", c.Agent.Command, c.Agent.Enabled); err != nil {
+		return err
+	}
+	if len(c.Agent.Args) > maxConfigArgs {
+		return fmt.Errorf("agent.args exceeds %d entries", maxConfigArgs)
+	}
+	for i, arg := range c.Agent.Args {
+		if err := validateConfigString(fmt.Sprintf("agent.args[%d]", i), arg); err != nil {
+			return err
+		}
 	}
 
 	// Validate session config
-	if c.Session.Enabled && c.Session.AutoSaveInterval <= 0 {
-		return fmt.Errorf("session.auto_save_interval must be positive when session is enabled")
+	if c.Session.Enabled {
+		if c.Session.AutoSaveInterval <= 0 {
+			return fmt.Errorf("session.auto_save_interval must be positive when session is enabled")
+		}
+		if c.Session.AutoSaveInterval > maxAutoSaveIntervalSeconds {
+			return fmt.Errorf("session.auto_save_interval must not exceed %d seconds", maxAutoSaveIntervalSeconds)
+		}
 	}
 
 	// Validate LSP configs
+	if len(c.LSP) > maxLSPConfigs {
+		return fmt.Errorf("lsp exceeds %d entries", maxLSPConfigs)
+	}
+	seenExtensions := make(map[string]struct{})
+	totalExtensions := 0
+	totalArgs := 0
 	for i, lsp := range c.LSP {
-		if lsp.Command == "" {
-			return fmt.Errorf("lsp[%d].command is empty", i)
-		}
 		if len(lsp.Extensions) == 0 {
 			return fmt.Errorf("lsp[%d].extensions is empty", i)
 		}
+		if err := validateCommand(fmt.Sprintf("lsp[%d].command", i), lsp.Command, true); err != nil {
+			return err
+		}
+		if err := validateConfigString(fmt.Sprintf("lsp[%d].language_id", i), lsp.LanguageID); err != nil {
+			return err
+		}
+		if len(lsp.Extensions) > maxLSPExtensions {
+			return fmt.Errorf("lsp[%d].extensions exceeds %d entries", i, maxLSPExtensions)
+		}
+		totalExtensions += len(lsp.Extensions)
+		if totalExtensions > maxTotalLSPExtensions {
+			return fmt.Errorf("total lsp extensions exceeds %d entries", maxTotalLSPExtensions)
+		}
+		if len(lsp.Args) > maxConfigArgs {
+			return fmt.Errorf("lsp[%d].args exceeds %d entries", i, maxConfigArgs)
+		}
+		totalArgs += len(lsp.Args)
+		if totalArgs > maxTotalLSPArgs {
+			return fmt.Errorf("total lsp args exceeds %d entries", maxTotalLSPArgs)
+		}
+		for j, extension := range lsp.Extensions {
+			name := fmt.Sprintf("lsp[%d].extensions[%d]", i, j)
+			if err := validateConfigString(name, extension); err != nil {
+				return err
+			}
+			if !strings.HasPrefix(extension, ".") || len(extension) == 1 {
+				return fmt.Errorf("%s must start with a non-empty dot extension", name)
+			}
+			if strings.TrimSpace(extension) != extension {
+				return fmt.Errorf("%s must not contain leading or trailing whitespace", name)
+			}
+			if strings.ToLower(extension) != extension {
+				return fmt.Errorf("%s must be lowercase", name)
+			}
+			if _, duplicate := seenExtensions[extension]; duplicate {
+				return fmt.Errorf("duplicate extension %q in lsp[%d]", extension, i)
+			}
+			seenExtensions[extension] = struct{}{}
+		}
+		for j, arg := range lsp.Args {
+			if err := validateConfigString(fmt.Sprintf("lsp[%d].args[%d]", i, j), arg); err != nil {
+				return err
+			}
+		}
+	}
+	if totalConfigStringBytes(c) > maxConfigStringData {
+		return fmt.Errorf("configuration string data exceeds %d bytes", maxConfigStringData)
 	}
 
+	return nil
+}
+
+func validateCommand(name, value string, required bool) error {
+	if value == "" {
+		if required {
+			return fmt.Errorf("%s is empty", name)
+		}
+		return nil
+	}
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s must not be whitespace only", name)
+	}
+	return validateConfigString(name, value)
+}
+
+func totalConfigStringBytes(c Config) int {
+	total := len(c.UI.Theme) + len(c.Agent.Command)
+	for _, arg := range c.Agent.Args {
+		total += len(arg)
+	}
+	for _, lsp := range c.LSP {
+		total += len(lsp.Command) + len(lsp.LanguageID)
+		for _, extension := range lsp.Extensions {
+			total += len(extension)
+		}
+		for _, arg := range lsp.Args {
+			total += len(arg)
+		}
+	}
+	return total
+}
+
+func validateConfigString(name, value string) error {
+	if len(value) > maxConfigStringSize {
+		return fmt.Errorf("%s exceeds %d bytes", name, maxConfigStringSize)
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("%s contains a NUL byte", name)
+	}
 	return nil
 }

@@ -334,7 +334,7 @@ func TestApplyRenameEditsUpdatesUnopenedFilesOnDisk(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	updatedModel, _ := model.applyWorkspaceEdit(lsp.WorkspaceEdit{
+	updated := applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{
 		Changes: map[string][]lsp.TextEdit{
 			lsp.FileURI(path): {{
 				StartLine: 0,
@@ -345,7 +345,6 @@ func TestApplyRenameEditsUpdatesUnopenedFilesOnDisk(t *testing.T) {
 			}},
 		},
 	})
-	updated := updatedModel.(Model)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -354,7 +353,7 @@ func TestApplyRenameEditsUpdatesUnopenedFilesOnDisk(t *testing.T) {
 	if string(data) != "alpha gamma\n" {
 		t.Fatalf("file content = %q, want %q", string(data), "alpha gamma\n")
 	}
-	if updated.status != "Renamed: 1 edit(s) applied" {
+	if updated.status != "Workspace edit applied: 1 change(s)" {
 		t.Fatalf("status = %q", updated.status)
 	}
 }
@@ -377,7 +376,7 @@ func TestApplyWorkspaceEditRenamesFile(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	updatedModel, _ := model.applyWorkspaceEdit(lsp.WorkspaceEdit{
+	updated := applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{
 		DocumentChanges: []lsp.WorkspaceDocumentChange{
 			{
 				FileOperation: &lsp.WorkspaceFileOperation{
@@ -388,7 +387,6 @@ func TestApplyWorkspaceEditRenamesFile(t *testing.T) {
 			},
 		},
 	})
-	updated := updatedModel.(Model)
 
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("expected renamed file to exist: %v", err)
@@ -396,7 +394,7 @@ func TestApplyWorkspaceEditRenamesFile(t *testing.T) {
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("expected old file to be gone, stat err = %v", err)
 	}
-	if updated.status != "Renamed: 1 edit(s) applied" {
+	if updated.status != "Workspace edit applied: 1 change(s)" {
 		t.Fatalf("status = %q", updated.status)
 	}
 }

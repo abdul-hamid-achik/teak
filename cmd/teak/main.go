@@ -28,21 +28,17 @@ func main() {
 	if handled {
 		return
 	}
+	if err := ensureInteractiveTerminal(os.Stdin, os.Stdout, os.Getenv); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	zone.NewGlobal()
 
-	// Derive root directory from file path or use cwd
-	rootDir := "."
-	if filePath != "" {
-		absPath, err := filepath.Abs(filePath)
-		if err == nil {
-			rootDir = filepath.Dir(absPath)
-		}
-	} else {
-		if cwd, err := os.Getwd(); err == nil {
-			rootDir = cwd
-		}
-	}
+	// Keep the initial tab and workspace rooted in the same absolute identity.
+	// Otherwise opening a relative CLI path again from the absolute file tree
+	// creates a duplicate tab and a second LSP document.
+	filePath, rootDir := resolveWorkspacePaths(filePath)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -61,11 +57,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(model, tea.WithFilter(app.QuitFilter))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func resolveWorkspacePaths(filePath string) (string, string) {
+	if filePath != "" {
+		if absolutePath, err := filepath.Abs(filePath); err == nil {
+			return absolutePath, filepath.Dir(absolutePath)
+		}
+		return filePath, filepath.Dir(filePath)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return "", cwd
+	}
+	return "", "."
 }
 
 func handleCLI(args []string, stdout io.Writer, buildVersion string) (filePath string, handled bool, err error) {

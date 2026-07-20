@@ -179,6 +179,57 @@ func TestSettingsSetSize(t *testing.T) {
 	}
 }
 
+func TestSettingsMouseClickSelectsCategoryAndEditsControls(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+	model.SetSize(72, 22)
+
+	// The UI category tab row is rendered at content row 4. A click in the
+	// second tab must select it instead of leaking through to the editor.
+	if !model.HandleMouseClick(12, 4) {
+		t.Fatal("category click was not handled")
+	}
+	if got := model.SelectedCategory().ID; got != "ui" {
+		t.Fatalf("selected category = %q, want ui", got)
+	}
+
+	// The first UI setting is a string control. Its action region must cycle
+	// the value with a mouse click, just as Enter does for keyboard users.
+	before := model.SelectedSetting().Value
+	if !model.HandleMouseClick(24, 6) {
+		t.Fatal("setting control click was not handled")
+	}
+	if got := model.SelectedSetting().Value; got == before {
+		t.Fatalf("theme = %v after control click, want a different value", got)
+	}
+}
+
+func TestSettingsCategoryClickDoesNotTreatTheGapAsATab(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+	model.SetSize(72, 22)
+	_, firstEnd := model.categoryTabBounds(0)
+	if model.HandleMouseClick(firstEnd, settingsCategoryRow) {
+		t.Fatal("the visual gap between category tabs was treated as a click target")
+	}
+	if got := model.SelectedCategory().ID; got != "editor" {
+		t.Fatalf("category after gap click = %q, want editor", got)
+	}
+}
+
+func TestSettingsSmallViewportKeepsSelectedRowVisible(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+	model.SetSize(24, 10)
+
+	for range 4 {
+		model.SelectNextSetting()
+	}
+	if model.scrollY == 0 {
+		t.Fatal("selection below a small viewport did not scroll into view")
+	}
+	if got := model.SelectedSetting().ID; got != "editor.auto_indent" {
+		t.Fatalf("selected setting = %q, want editor.auto_indent", got)
+	}
+}
+
 // TestSettingsSelectedCategory tests SelectedCategory method
 func TestSettingsSelectedCategory(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -472,5 +523,54 @@ func TestSettingsWithEmptyConfigPath(t *testing.T) {
 
 	if model.configPath != "" {
 		t.Errorf("Expected empty configPath, got %q", model.configPath)
+	}
+}
+
+func TestModelConfigIncludesEditableSettingsAndValidates(t *testing.T) {
+	cfg := config.DefaultConfig()
+	model := New(ui.DefaultTheme(), cfg, "/test/config.toml")
+
+	for categoryIndex := range model.categories {
+		for settingIndex := range model.categories[categoryIndex].Settings {
+			setting := &model.categories[categoryIndex].Settings[settingIndex]
+			switch setting.ID {
+			case "editor.tab_size":
+				setting.Value = 2
+			case "editor.format_on_save", "editor.word_wrap":
+				setting.Value = true
+			case "ui.show_tree":
+				setting.Value = false
+			}
+		}
+	}
+
+	got, err := model.Config()
+	if err != nil {
+		t.Fatalf("Config() error = %v", err)
+	}
+	if got.Editor.TabSize != 2 || !got.Editor.FormatOnSave || !got.Editor.WordWrap || got.UI.ShowTree {
+		t.Errorf("Config() = %+v, want edited values", got)
+	}
+}
+
+func TestModelConfigRejectsInvalidTabSize(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+	model.categories[0].Settings[0].Value = 9
+	if _, err := model.Config(); err == nil {
+		t.Fatal("Config() succeeded for invalid tab size")
+	}
+}
+
+func TestSettingsExposesFormatAndWrap(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+	var foundFormat, foundWrap bool
+	for _, category := range model.categories {
+		for _, setting := range category.Settings {
+			foundFormat = foundFormat || setting.ID == "editor.format_on_save"
+			foundWrap = foundWrap || setting.ID == "editor.word_wrap"
+		}
+	}
+	if !foundFormat || !foundWrap {
+		t.Fatalf("visible editor settings omit format_on_save=%v word_wrap=%v", foundFormat, foundWrap)
 	}
 }

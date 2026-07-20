@@ -36,6 +36,82 @@ type GutterOpts struct {
 	ExecLine    int                     // 0-based current execution line, -1 if none
 }
 
+func breakpointGlyph() string {
+	if ui.NerdFontEnabled() {
+		return "\U000f0765"
+	}
+	return "*"
+}
+
+func foldGlyph(indicator string) string {
+	if !ui.NerdFontEnabled() {
+		return indicator
+	}
+	if indicator == ">" {
+		return "\U000f0142"
+	}
+	return "\U000f0140"
+}
+
+// diagnosticSeveritiesForVisibleLines returns only diagnostics that can be
+// rendered in the supplied rows. LSP ranges can span an entire generated file;
+// expanding every range to a line -> severity map on each frame made a small
+// viewport proportional to the document size. The viewport is deliberately
+// small, so intersecting each diagnostic with these rows is bounded by the
+// render budget instead.
+func diagnosticSeveritiesForVisibleLines(diagnostics []Diagnostic, visibleLines []int) map[int]int {
+	if len(diagnostics) == 0 || len(visibleLines) == 0 {
+		return nil
+	}
+
+	severities := make(map[int]int, len(visibleLines))
+	for _, d := range diagnostics {
+		if d.EndLine < d.StartLine {
+			continue
+		}
+		for _, line := range visibleLines {
+			if line < d.StartLine || line > d.EndLine {
+				continue
+			}
+			if current, ok := severities[line]; !ok || d.Severity < current {
+				severities[line] = d.Severity
+			}
+		}
+	}
+	return severities
+}
+
+func diagnosticSeveritiesForLineRange(diagnostics []Diagnostic, startLine, height int) map[int]int {
+	if len(diagnostics) == 0 || height <= 0 {
+		return nil
+	}
+	endLine := startLine + height - 1
+	severities := make(map[int]int, height)
+	for _, d := range diagnostics {
+		start := max(startLine, d.StartLine)
+		end := min(endLine, d.EndLine)
+		for line := start; line <= end; line++ {
+			if current, ok := severities[line]; !ok || d.Severity < current {
+				severities[line] = d.Severity
+			}
+		}
+	}
+	return severities
+}
+
+func diagnosticSeverityAt(diagnostics []Diagnostic, line int) (int, bool) {
+	severity := 0
+	for _, d := range diagnostics {
+		if line < d.StartLine || line > d.EndLine {
+			continue
+		}
+		if severity == 0 || d.Severity < severity {
+			severity = d.Severity
+		}
+	}
+	return severity, severity != 0
+}
+
 // RenderGutter renders line numbers for visible lines with optional diagnostic icons.
 // Returns the rendered gutter string and its width.
 func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, diagnostics []Diagnostic, opts *GutterOpts) (string, int) {
@@ -43,15 +119,7 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 	baseWidth := metrics.lineNumberWidth
 	width := metrics.contentWidth()
 
-	// Build a map of line -> worst diagnostic severity
-	diagMap := make(map[int]int) // line -> severity (1=error, 2=warn, 3=info, 4=hint)
-	for _, d := range diagnostics {
-		for line := d.StartLine; line <= d.EndLine; line++ {
-			if existing, ok := diagMap[line]; !ok || d.Severity < existing {
-				diagMap[line] = d.Severity
-			}
-		}
-	}
+	diagMap := diagnosticSeveritiesForLineRange(diagnostics, scrollY, height)
 
 	var sb strings.Builder
 
@@ -74,11 +142,11 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')
-					sb.WriteString(bpActiveStyle.Render("\U000f0765"))
+					sb.WriteString(bpActiveStyle.Render(breakpointGlyph()))
 					sb.WriteByte(' ')
 				case BPDisabled:
 					sb.WriteByte(' ')
-					sb.WriteString(bpDisabledStyle.Render("\U000f0765"))
+					sb.WriteString(bpDisabledStyle.Render(breakpointGlyph()))
 					sb.WriteByte(' ')
 				default:
 					sb.WriteString("   ")
@@ -131,14 +199,7 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 	baseWidth := metrics.lineNumberWidth
 	width := metrics.contentWidth()
 
-	diagMap := make(map[int]int)
-	for _, d := range diagnostics {
-		for line := d.StartLine; line <= d.EndLine; line++ {
-			if existing, ok := diagMap[line]; !ok || d.Severity < existing {
-				diagMap[line] = d.Severity
-			}
-		}
-	}
+	diagMap := diagnosticSeveritiesForVisibleLines(diagnostics, visibleLines)
 
 	var sb strings.Builder
 	// Use pre-cached theme styles instead of creating new styles each render
@@ -167,11 +228,11 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')
-					sb.WriteString(bpActiveStyle.Render("\U000f0765"))
+					sb.WriteString(bpActiveStyle.Render(breakpointGlyph()))
 					sb.WriteByte(' ')
 				case BPDisabled:
 					sb.WriteByte(' ')
-					sb.WriteString(bpDisabledStyle.Render("\U000f0765"))
+					sb.WriteString(bpDisabledStyle.Render(breakpointGlyph()))
 					sb.WriteByte(' ')
 				default:
 					sb.WriteString("   ")
@@ -207,10 +268,10 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 			indicator := folds.FoldIndicator(line)
 			switch indicator {
 			case ">":
-				sb.WriteString(foldCollapsedStyle.Render("\U000f0142"))
+				sb.WriteString(foldCollapsedStyle.Render(foldGlyph(indicator)))
 				sb.WriteByte(' ')
 			case "v":
-				sb.WriteString(foldExpandedStyle.Render("\U000f0140"))
+				sb.WriteString(foldExpandedStyle.Render(foldGlyph(indicator)))
 				sb.WriteByte(' ')
 			default:
 				sb.WriteString("  ")

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -47,6 +48,22 @@ func TestContextMenuShow(t *testing.T) {
 	}
 	if menu.X != 10 || menu.Y != 20 {
 		t.Errorf("expected position (10,20), got (%d,%d)", menu.X, menu.Y)
+	}
+}
+
+func TestContextMenuUsesTerminalCellWidthForUnicodeLabels(t *testing.T) {
+	menu := NewContextMenu(ui.DefaultTheme())
+	menu.Show([]ContextMenuItem{
+		{Label: "打开文件", Action: "open"},
+		{Label: "保存文件", Action: "save"},
+	}, 0, 0)
+
+	lines := strings.Split(menu.View(), "\n")
+	want := 22 // 20 minimum content cells plus the two box border cells.
+	for _, line := range lines {
+		if got := ansi.StringWidth(line); got != want {
+			t.Fatalf("menu line width = %d, want consistent %d terminal cells: %q", got, want, ansi.Strip(line))
+		}
 	}
 }
 

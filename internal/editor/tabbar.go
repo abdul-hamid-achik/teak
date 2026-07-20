@@ -1,12 +1,20 @@
 package editor
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"github.com/mattn/go-runewidth"
 	"teak/internal/ui"
+)
+
+const (
+	tabLabelPadding  = 2 // Tab styles add one cell on each side.
+	tabCloseWidth    = 3 // " × "
+	maxTabLabelWidth = 30
 )
 
 // TabKind indicates the type of content in a tab.
@@ -33,7 +41,9 @@ type TabBar struct {
 	Tabs      []Tab
 	ActiveIdx int
 	Width     int
+	ScrollIdx int
 	theme     ui.Theme
+	nextID    int
 }
 
 // NewTabBar creates a new tab bar.
@@ -43,13 +53,18 @@ func NewTabBar(theme ui.Theme) TabBar {
 
 // AddTab adds a tab and returns its index.
 func (tb *TabBar) AddTab(label, filePath string) int {
-	id := len(tb.Tabs)
+	for _, tab := range tb.Tabs {
+		tb.nextID = max(tb.nextID, tab.ID+1)
+	}
+	id := tb.nextID
+	tb.nextID++
 	tb.Tabs = append(tb.Tabs, Tab{
 		ID:       id,
 		Label:    label,
 		FilePath: filePath,
 	})
-	return id
+	tb.ensureActiveVisible()
+	return len(tb.Tabs) - 1
 }
 
 // RemoveTab removes the tab at the given index.
@@ -58,9 +73,12 @@ func (tb *TabBar) RemoveTab(idx int) {
 		return
 	}
 	tb.Tabs = append(tb.Tabs[:idx], tb.Tabs[idx+1:]...)
-	if tb.ActiveIdx >= len(tb.Tabs) {
+	if idx < tb.ActiveIdx {
+		tb.ActiveIdx--
+	} else if tb.ActiveIdx >= len(tb.Tabs) {
 		tb.ActiveIdx = max(0, len(tb.Tabs)-1)
 	}
+	tb.ensureActiveVisible()
 }
 
 // FindPreviewTab returns the index of the current preview tab, or -1 if none.
@@ -95,7 +113,7 @@ func TabZoneID(tab Tab) string {
 	if tab.FilePath == "" {
 		return fmt.Sprintf("tab-untitled-%d", tab.ID)
 	}
-	return "tab-" + strings.ReplaceAll(tab.FilePath, "/", "_")
+	return fmt.Sprintf("tab-file-%d-%s", tab.ID, base64.RawURLEncoding.EncodeToString([]byte(tab.FilePath)))
 }
 
 // TabCloseZoneID returns the zone ID for a tab's close button.
@@ -103,26 +121,136 @@ func TabCloseZoneID(tab Tab) string {
 	if tab.FilePath == "" {
 		return fmt.Sprintf("tabclose-untitled-%d", tab.ID)
 	}
-	return "tabclose-" + strings.ReplaceAll(tab.FilePath, "/", "_")
+	return fmt.Sprintf("tabclose-file-%d-%s", tab.ID, base64.RawURLEncoding.EncodeToString([]byte(tab.FilePath)))
 }
 
-// View renders the tab bar. No full-width fill — just the tabs.
+// SetActive changes the active tab and scrolls the tab window so it is visible.
+func (tb *TabBar) SetActive(idx int) {
+	if idx < 0 || idx >= len(tb.Tabs) {
+		return
+	}
+	tb.ActiveIdx = idx
+	tb.ensureActiveVisible()
+}
+
+// ScrollBy changes the leftmost candidate tab. The active tab remains visible
+// on the next render, so wheel navigation cannot strand the selected tab.
+func (tb *TabBar) ScrollBy(delta int) {
+	if len(tb.Tabs) == 0 {
+		tb.ScrollIdx = 0
+		return
+	}
+	tb.ScrollIdx = min(max(0, tb.ScrollIdx+delta), len(tb.Tabs)-1)
+	tb.ensureActiveVisible()
+}
+
+func (tb *TabBar) ensureActiveVisible() {
+	if len(tb.Tabs) == 0 {
+		tb.ActiveIdx = 0
+		tb.ScrollIdx = 0
+		return
+	}
+	tb.ActiveIdx = min(max(0, tb.ActiveIdx), len(tb.Tabs)-1)
+	tb.ScrollIdx = tb.visibleStart(tb.ScrollIdx)
+}
+
+func (tb TabBar) visibleStart(start int) int {
+	if len(tb.Tabs) == 0 || tb.Width <= 0 {
+		return 0
+	}
+	start = min(max(0, start), len(tb.Tabs)-1)
+	if tb.rangeContainsActive(start) {
+		return start
+	}
+	return tb.ActiveIdx
+}
+
+func (tb TabBar) rangeContainsActive(start int) bool {
+	remaining := tb.Width
+	for i := start; i < len(tb.Tabs) && remaining > 0; i++ {
+		width := tabNaturalWidth(tb.Tabs[i])
+		if i == start {
+			width = min(width, remaining)
+		}
+		if i == tb.ActiveIdx {
+			return true
+		}
+		remaining -= width
+	}
+	return false
+}
+
+func tabNaturalWidth(tab Tab) int {
+	return tabLabelPadding + min(runewidth.StringWidth(tabLabelText(tab)), maxTabLabelWidth) + tabCloseWidth
+}
+
+func tabLabelText(tab Tab) string {
+	if tab.DiagSeverity == 1 || tab.DiagSeverity == 2 || tab.Dirty {
+		return "● " + tab.Label
+	}
+	return tab.Label
+}
+
+// truncateTabLabel truncates on rune boundaries and measures terminal cells,
+// not bytes. An ellipsis is used only when it fits alongside content.
+func truncateTabLabel(label string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(label) <= width {
+		return label
+	}
+	const ellipsis = "…"
+	ellipsisWidth := runewidth.StringWidth(ellipsis)
+	if width < ellipsisWidth {
+		return ""
+	}
+	limit := width - ellipsisWidth
+	var b strings.Builder
+	used := 0
+	for _, r := range label {
+		runeWidth := runewidth.RuneWidth(r)
+		if used+runeWidth > limit {
+			break
+		}
+		b.WriteRune(r)
+		used += runeWidth
+	}
+	return b.String() + ellipsis
+}
+
+func styleTabLabel(tab Tab, label string) string {
+	if tab.DiagSeverity == 1 && strings.HasPrefix(label, "● ") {
+		return lipgloss.NewStyle().Foreground(ui.Nord11).Render("●") + " " + strings.TrimPrefix(label, "● ")
+	}
+	if tab.DiagSeverity == 2 && strings.HasPrefix(label, "● ") {
+		return lipgloss.NewStyle().Foreground(ui.Nord13).Render("●") + " " + strings.TrimPrefix(label, "● ")
+	}
+	return label
+}
+
+// View renders the visible tab window. It never exceeds Width and uses the
+// current active tab as an anchor whenever the strip overflows.
 func (tb TabBar) View() string {
 	if len(tb.Tabs) == 0 {
 		return ""
 	}
+	if tb.Width <= 0 {
+		return ""
+	}
+	start := tb.visibleStart(tb.ScrollIdx)
+	remaining := tb.Width
 
 	var tabs []string
 	for i, tab := range tb.Tabs {
-		label := tab.Label
-		// Diagnostic or dirty indicator: error (red) > warning (yellow) > dirty (dim)
-		if tab.DiagSeverity == 1 {
-			label = lipgloss.NewStyle().Foreground(ui.Nord11).Render("●") + " " + label
-		} else if tab.DiagSeverity == 2 {
-			label = lipgloss.NewStyle().Foreground(ui.Nord13).Render("●") + " " + label
-		} else if tab.Dirty {
-			label = "● " + label
+		if i < start || remaining <= 0 {
+			continue
 		}
+		width := min(tabNaturalWidth(tab), remaining)
+		if width <= 0 {
+			break
+		}
+		remaining -= width
 
 		var labelStyle, closeStyle lipgloss.Style
 		if i == tb.ActiveIdx {
@@ -136,9 +264,24 @@ func (tb TabBar) View() string {
 			labelStyle = labelStyle.Italic(true)
 		}
 
-		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(label))
-		styledClose := zone.Mark(TabCloseZoneID(tab), closeStyle.Render(" × "))
-		tabs = append(tabs, styledLabel+styledClose)
+		padding := tabLabelPadding
+		showClose := width >= tabLabelPadding+tabCloseWidth+1
+		if width <= tabLabelPadding {
+			padding = 0
+			labelStyle = labelStyle.Padding(0, 0)
+		}
+		labelWidth := width - padding
+		if showClose {
+			labelWidth -= tabCloseWidth
+		}
+		label := truncateTabLabel(tabLabelText(tab), labelWidth)
+		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label)))
+		if showClose {
+			styledClose := zone.Mark(TabCloseZoneID(tab), closeStyle.Render(" × "))
+			tabs = append(tabs, styledLabel+styledClose)
+		} else {
+			tabs = append(tabs, styledLabel)
+		}
 	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)

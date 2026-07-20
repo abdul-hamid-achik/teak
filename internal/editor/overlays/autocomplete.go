@@ -3,6 +3,7 @@ package overlays
 import (
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -71,9 +72,9 @@ func (a Autocomplete) View() string {
 	maxItems := min(10, len(a.Items))
 	maxWidth := 0
 	for i := range maxItems {
-		w := len(a.Items[i].Label)
+		w := ansi.StringWidth(a.Items[i].Label)
 		if a.Items[i].Detail != "" {
-			w += len(a.Items[i].Detail) + 2
+			w += ansi.StringWidth(a.Items[i].Detail) + 2
 		}
 		if w > maxWidth {
 			maxWidth = w
@@ -89,20 +90,17 @@ func (a Autocomplete) View() string {
 	var sb strings.Builder
 	for i := range maxItems {
 		item := a.Items[i]
-		line := item.Label
+		line := ansi.Truncate(item.Label, maxWidth, "")
 		if item.Detail != "" {
-			remaining := maxWidth - len(line) - 2
+			remaining := maxWidth - ansi.StringWidth(line) - 2
 			if remaining > 0 {
-				detail := item.Detail
-				if len(detail) > remaining {
-					detail = detail[:remaining]
-				}
-				line += strings.Repeat(" ", max(1, maxWidth-len(line)-len(detail))) + detail
+				detail := ansi.Truncate(item.Detail, remaining, "")
+				line += strings.Repeat(" ", max(1, maxWidth-ansi.StringWidth(line)-ansi.StringWidth(detail))) + detail
 			}
 		}
 		// Pad to width
-		if len(line) < maxWidth {
-			line += strings.Repeat(" ", maxWidth-len(line))
+		if ansi.StringWidth(line) < maxWidth {
+			line += strings.Repeat(" ", maxWidth-ansi.StringWidth(line))
 		}
 		if i == a.Cursor {
 			sb.WriteString(a.theme.AutocompleteCursor.Render(line))

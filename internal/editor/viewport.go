@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
 	"teak/internal/highlight"
@@ -33,11 +34,105 @@ func getSpaces(n int) string {
 
 // Viewport manages the visible area of the editor.
 type Viewport struct {
-	ScrollY     int
+	ScrollY int
+	// WrapScrollY is the first visual row when word wrap is active. ScrollY
+	// remains a logical buffer line for the normal and folded renderers.
+	WrapScrollY int
 	ScrollX     int
 	Width       int
 	Height      int
 	GutterWidth int
+	TabSize     int
+
+	wrapTokenCacheLine    int
+	wrapTokenCacheVersion int
+	wrapTokenCacheCount   int
+	wrapTokenCacheStarts  []int
+
+	bracketCacheRope    *text.Rope
+	bracketCacheVersion int
+	bracketCacheCursor  text.Position
+	bracketCachePos1    text.Position
+	bracketCachePos2    text.Position
+	bracketCacheFound   bool
+}
+
+// selectionByteRange is a half-open byte range within one buffer line.
+// It is intentionally local to a viewport render frame and reused by
+// selectionRangeIterator rather than allocated and sorted for every row.
+type selectionByteRange struct {
+	start, end int
+}
+
+// selectionRangeIterator translates the sorted text selection sweep into byte
+// ranges for the current buffer line. A visible viewport advances it once per
+// logical line, even if that line has several word-wrapped terminal rows.
+type selectionRangeIterator struct {
+	selections *text.SelectionLineIterator
+	ranges     []selectionByteRange
+}
+
+func newSelectionRangeIterator(selections *text.Selections) *selectionRangeIterator {
+	return &selectionRangeIterator{selections: selections.LineIterator()}
+}
+
+func (it *selectionRangeIterator) Ranges(line, lineLen int) []selectionByteRange {
+	if it == nil || it.selections == nil {
+		return nil
+	}
+	it.ranges = it.ranges[:0]
+	for _, selection := range it.selections.ForLine(line) {
+		if selection.IsEmpty() {
+			continue
+		}
+		start, end := selection.Ordered()
+		startCol, endCol := 0, lineLen
+		if line == start.Line {
+			startCol = start.Col
+		}
+		if line == end.Line {
+			endCol = end.Col
+		}
+		if startCol < endCol {
+			it.ranges = append(it.ranges, selectionByteRange{start: startCol, end: endCol})
+		}
+	}
+	return it.ranges
+}
+
+func (v *Viewport) tabSize() int {
+	if v.TabSize == 0 {
+		return 4
+	}
+	return normalizeTabSize(v.TabSize)
+}
+
+func (v *Viewport) wrapScrollY(wrap *WrapLayout) int {
+	if wrap == nil {
+		return 0
+	}
+	if !wrap.TotalRowsKnown() {
+		v.WrapScrollY = max(0, v.WrapScrollY)
+		return v.WrapScrollY
+	}
+	if wrap.TotalRows() < 1 {
+		v.WrapScrollY = 0
+		return 0
+	}
+	maxScroll := max(0, wrap.TotalRows()-max(1, v.Height))
+	v.WrapScrollY = max(0, min(v.WrapScrollY, maxScroll))
+	return v.WrapScrollY
+}
+
+func (v *Viewport) wrapTokenStarts(line, version int, tokens []highlight.StyledToken) []int {
+	if v.wrapTokenCacheLine == line && v.wrapTokenCacheVersion == version && v.wrapTokenCacheCount == len(tokens) {
+		return v.wrapTokenCacheStarts
+	}
+	v.wrapTokenCacheLine = line
+	v.wrapTokenCacheVersion = version
+	v.wrapTokenCacheCount = len(tokens)
+	v.wrapTokenCacheStarts = tokenByteStarts(tokens)
+	return v.wrapTokenCacheStarts
 }
 
 // Render renders the visible portion of the buffer with gutter, syntax highlighting, and diagnostics.
@@ -83,6 +178,7 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 
 	// Find matching bracket pair for highlighting
 	bracketPos1, bracketPos2, hasBracketMatch := v.findBracketHighlights(buf)
+	selectionIterator := newSelectionRangeIterator(buf.Selections)
 
 	var sb strings.Builder
 	for i := range v.Height {
@@ -109,7 +205,7 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 			lineLen := len(lineBytes)
 
 			// Check for ALL selections on this line
-			selectionRanges := selectionRanges(buf, line, lineLen)
+			selectionRanges := selectionIterator.Ranges(line, lineLen)
 			hasSelection := len(selectionRanges) > 0
 
 			// Check for syntax highlighting tokens
@@ -119,7 +215,7 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 			}
 
 			if hasSelection {
-				sb.WriteString(v.renderLineWithMultipleSelections(lineContent, lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
+				sb.WriteString(v.renderLineWithMultipleSelectionsTabs(lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
 			} else if len(tokens) > 0 {
 				rendered := v.renderLineWithTokens(tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
 				if hasBracketMatch {
@@ -128,7 +224,7 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 				sb.WriteString(rendered)
 			} else {
 				// plain text rendering
-				displayed := applyScrollX(lineContent, v.ScrollX)
+				displayed := applyScrollX(expandTabsForDisplay(lineBytes, v.tabSize()), v.ScrollX)
 				displayed = truncateToWidth(displayed, textWidth)
 				padLen := max(0, textWidth-displayWidth(displayed))
 				if padLen > 0 {
@@ -169,13 +265,23 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 		textWidth = 1
 	}
 
-	// Scrollbar based on total visual rows
+	// Resolve only the page containing the first requested visual row before
+	// deriving scrollbar geometry. This lets a long first line reveal its
+	// wrapped height without forcing measurement of the rest of the document.
+	visualScrollY := v.wrapScrollY(wrap)
+	bufLine, wrapOffset := wrap.BufferLine(visualScrollY)
+	if clamped := v.wrapScrollY(wrap); clamped != visualScrollY {
+		visualScrollY = clamped
+		bufLine, wrapOffset = wrap.BufferLine(visualScrollY)
+	}
+
+	// Scrollbar uses an exact total once all pages are known, otherwise a safe
+	// lower-bound estimate that is refined as the user visits more pages.
 	totalRows := wrap.TotalRows()
 	showScrollbar := totalRows > v.Height
 	var thumbStart, thumbEnd int
 	if showScrollbar {
 		thumbSize := max(1, v.Height*v.Height/totalRows)
-		visualScrollY := wrap.VisualRow(v.ScrollY)
 		maxScroll := totalRows - v.Height
 		if maxScroll < 1 {
 			maxScroll = 1
@@ -184,21 +290,22 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 		thumbEnd = thumbStart + thumbSize
 	}
 
-	// Build diagnostic map
-	diagMap := make(map[int]int)
-	for _, d := range diagnostics {
-		for line := d.StartLine; line <= d.EndLine; line++ {
-			if existing, ok := diagMap[line]; !ok || d.Severity < existing {
-				diagMap[line] = d.Severity
-			}
-		}
-	}
-
-	// Build visual rows starting from ScrollY
+	// Build visual rows starting from the visual scroll position. This is
+	// intentionally independent of ScrollY so a user can scroll through a
+	// single very long logical line.
 	var sb strings.Builder
 	visualRow := 0
-	bufLine := v.ScrollY
-	wrapOffset := 0
+	// A Rope line may span multiple leaves and therefore materialize a byte
+	// slice. Reuse it for all of its visual rows; without this, a single long
+	// wrapped line was copied once per terminal row.
+	loadedLine := -1
+	var lineBytes []byte
+	var lineContent string
+	var lineTokens []highlight.StyledToken
+	var lineTokenStarts []int
+	selectionIterator := newSelectionRangeIterator(buf.Selections)
+	loadedSelectionLine := -1
+	var lineSelectionRanges []selectionByteRange
 
 	for visualRow < v.Height {
 		if visualRow > 0 {
@@ -208,19 +315,37 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 		if bufLine < buf.LineCount() {
 			// Gutter: show line number on first wrap row, blank on continuation
 			if wrapOffset == 0 {
-				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagMap, bufLine, baseWidth, markerWidth))
+				sb.WriteString(v.renderWrapGutterLine(theme, buf, gutterOpts, diagnostics, bufLine, baseWidth, markerWidth))
 			} else {
 				sb.WriteString(gutterStyle.Render(getSpaces(metrics.contentWidth())))
 			}
 			// Padding between gutter and text
 			sb.WriteByte(' ')
 
-			lineContent := string(buf.Line(bufLine))
-			segment, segmentStart, segmentEnd := wrapSegmentBounds(lineContent, wrapOffset, textWidth)
+			if loadedLine != bufLine {
+				lineBytes = buf.Line(bufLine)
+				lineContent = string(lineBytes)
+				lineTokens = nil
+				lineTokenStarts = nil
+				if hl != nil {
+					lineTokens = hl.Line(bufLine)
+					lineTokenStarts = v.wrapTokenStarts(bufLine, buf.Version(), lineTokens)
+				}
+				loadedLine = bufLine
+			}
+			if loadedSelectionLine != bufLine {
+				lineSelectionRanges = selectionIterator.Ranges(bufLine, len(lineContent))
+				loadedSelectionLine = bufLine
+			}
+			segmentStart, segmentEnd, segmentDisplayStart, ok := wrap.SegmentBoundsForLine(bufLine, wrapOffset, lineBytes)
+			if !ok {
+				segmentStart, segmentEnd, segmentDisplayStart = 0, 0, 0
+			}
 
 			// Selections take precedence over syntax highlighting, matching regular rendering.
-			rendered := v.renderWrapSegmentWithSelections(theme, hl, buf, bufLine, lineContent, segmentStart, segmentEnd)
-			padLen := max(0, textWidth-displayWidth(segment))
+			rendered := v.renderWrapSegmentWithSelections(theme, lineTokens, lineTokenStarts, bufLine == buf.Cursor.Line, lineContent, lineSelectionRanges, segmentStart, segmentEnd, segmentDisplayStart)
+			rendered = ansi.Truncate(rendered, textWidth, "")
+			padLen := max(0, textWidth-ansi.StringWidth(rendered))
 
 			if bufLine == buf.Cursor.Line {
 				sb.WriteString(rendered)
@@ -261,8 +386,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 
 // renderWrapSegmentWithSelections renders a wrapped segment, applying selection
 // styles to any ranges that overlap the segment.
-func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, hl *highlight.Highlighter, buf *text.Buffer, bufLine int, lineContent string, segmentStart, segmentEnd int) string {
-	ranges := selectionRanges(buf, bufLine, len(lineContent))
+func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, tokens []highlight.StyledToken, tokenStarts []int, isCursorLine bool, lineContent string, ranges []selectionByteRange, segmentStart, segmentEnd, segmentDisplayStart int) string {
 	hasOverlap := false
 	for _, r := range ranges {
 		if r.start < segmentEnd && r.end > segmentStart {
@@ -272,21 +396,19 @@ func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, hl *highlight
 	}
 	baseStyle := theme.Editor
 	selectionStyle := theme.SecondarySelection
-	if bufLine == buf.Cursor.Line {
+	if isCursorLine {
 		baseStyle = theme.CursorLine
 		selectionStyle = theme.Selection
 	}
 
-	var tokens []highlight.StyledToken
-	if hl != nil {
-		tokens = hl.Line(bufLine)
-	}
 	if !hasOverlap {
-		return renderTokenByteRange(lineContent, tokens, segmentStart, segmentEnd, baseStyle)
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, segmentStart, segmentEnd, segmentDisplayStart, baseStyle, v.tabSize())
+		return rendered
 	}
 
 	var sb strings.Builder
 	pos := segmentStart
+	displayPos := segmentDisplayStart
 	for _, r := range ranges {
 		start := max(r.start, segmentStart)
 		end := min(r.end, segmentEnd)
@@ -294,19 +416,24 @@ func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, hl *highlight
 			continue
 		}
 		if pos < start {
-			sb.WriteString(renderTokenByteRange(lineContent, tokens, pos, start, baseStyle))
+			rendered, nextDisplay := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, start, displayPos, baseStyle, v.tabSize())
+			sb.WriteString(rendered)
+			displayPos = nextDisplay
 		}
-		sb.WriteString(selectionStyle.Render(lineContent[start:end]))
+		rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, start, end, displayPos, selectionStyle, v.tabSize())
+		sb.WriteString(rendered)
+		displayPos = nextDisplay
 		pos = end
 	}
 	if pos < segmentEnd {
-		sb.WriteString(renderTokenByteRange(lineContent, tokens, pos, segmentEnd, baseStyle))
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, segmentEnd, displayPos, baseStyle, v.tabSize())
+		sb.WriteString(rendered)
 	}
 	return sb.String()
 }
 
 // renderWrapGutterLine renders a single gutter line for wrap mode.
-func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutterOpts *GutterOpts, diagMap map[int]int, line, baseWidth, markerWidth int) string {
+func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutterOpts *GutterOpts, diagnostics []Diagnostic, line, baseWidth, markerWidth int) string {
 	var sb strings.Builder
 	gutterStyle := theme.Gutter.UnsetPadding()
 	gutterActiveStyle := theme.GutterActive.UnsetPadding()
@@ -319,11 +446,11 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 		switch gutterOpts.Breakpoints[line] {
 		case BPActive:
 			sb.WriteByte(' ')
-			sb.WriteString(theme.BreakpointActive.Render("\U000f0765"))
+			sb.WriteString(theme.BreakpointActive.Render(breakpointGlyph()))
 			sb.WriteByte(' ')
 		case BPDisabled:
 			sb.WriteByte(' ')
-			sb.WriteString(theme.BreakpointDisabled.Render("\U000f0765"))
+			sb.WriteString(theme.BreakpointDisabled.Render(breakpointGlyph()))
 			sb.WriteByte(' ')
 		default:
 			sb.WriteString("   ")
@@ -335,7 +462,7 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 	isExecLine := gutterOpts != nil && gutterOpts.ExecLine == line
 	if isExecLine {
 		sb.WriteString(theme.ExecLineMarker.Render(numStr))
-	} else if sev, ok := diagMap[line]; ok {
+	} else if sev, ok := diagnosticSeverityAt(diagnostics, line); ok {
 		switch sev {
 		case 1:
 			sb.WriteString(gutterErrorStyle.Render(numStr))
@@ -402,18 +529,102 @@ func renderTokenByteRange(lineContent string, tokens []highlight.StyledToken, st
 	return sb.String()
 }
 
-// wrapSegment extracts the Nth segment of a line when wrapped at the given width.
-func wrapSegment(line string, segIdx, width int) string {
-	segment, _, _ := wrapSegmentBounds(line, segIdx, width)
-	return segment
+func tokenByteStarts(tokens []highlight.StyledToken) []int {
+	if len(tokens) == 0 {
+		return nil
+	}
+	starts := make([]int, len(tokens))
+	for i := range tokens {
+		if i > 0 {
+			starts[i] = starts[i-1] + len(tokens[i-1].Text)
+		}
+	}
+	return starts
+}
+
+func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []highlight.StyledToken, tokenStarts []int, start, end, displayStart int, baseStyle lipgloss.Style, tabSize int) (string, int) {
+	start = max(0, min(start, len(lineContent)))
+	end = max(start, min(end, len(lineContent)))
+	if start == end {
+		return "", displayStart
+	}
+	if len(tokens) == 0 {
+		return renderStyledByteRangeWithTabsAtDisplay(lineContent, start, end, displayStart, baseStyle, tabSize)
+	}
+
+	var sb strings.Builder
+	pos := start
+	displayPos := displayStart
+	tokenIndex := 0
+	tokenStart := 0
+	if len(tokenStarts) == len(tokens) {
+		tokenIndex = sort.Search(len(tokens), func(i int) bool {
+			return tokenStarts[i]+len(tokens[i].Text) > start
+		})
+		if tokenIndex >= len(tokens) {
+			if pos < end {
+				rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, end, displayPos, baseStyle, tabSize)
+				return rendered, nextDisplay
+			}
+			return "", displayPos
+		}
+		tokenStart = tokenStarts[tokenIndex]
+	}
+	for ; tokenIndex < len(tokens); tokenIndex++ {
+		token := tokens[tokenIndex]
+		tokenEnd := tokenStart + len(token.Text)
+		if tokenEnd <= start {
+			tokenStart = tokenEnd
+			continue
+		}
+		if tokenStart >= end {
+			break
+		}
+
+		overlapStart := max(start, tokenStart)
+		overlapEnd := min(end, tokenEnd)
+		if pos < overlapStart {
+			rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, overlapStart, displayPos, baseStyle, tabSize)
+			sb.WriteString(rendered)
+			displayPos = nextDisplay
+		}
+		if overlapStart < overlapEnd {
+			style := token.Style
+			if _, noBackground := baseStyle.GetBackground().(lipgloss.NoColor); !noBackground {
+				style = style.Background(baseStyle.GetBackground())
+			}
+			rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, overlapStart, overlapEnd, displayPos, style, tabSize)
+			sb.WriteString(rendered)
+			displayPos = nextDisplay
+			pos = overlapEnd
+		}
+		tokenStart = tokenEnd
+	}
+	if pos < end {
+		rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, end, displayPos, baseStyle, tabSize)
+		sb.WriteString(rendered)
+		displayPos = nextDisplay
+	}
+	return sb.String(), displayPos
+}
+
+func renderStyledByteRangeWithTabsAtDisplay(lineContent string, start, end, displayStart int, style lipgloss.Style, tabSize int) (string, int) {
+	start = max(0, min(start, len(lineContent)))
+	end = max(start, min(end, len(lineContent)))
+	expanded, displayEnd := expandTabsAtDisplayColumnWithEnd(lineContent[start:end], displayStart, tabSize)
+	return style.Render(expanded), displayEnd
 }
 
 // wrapSegmentBounds returns the Nth segment and its byte offsets in line.
 func wrapSegmentBounds(line string, segIdx, width int) (string, int, int) {
+	return wrapSegmentBoundsWithTabs(line, segIdx, width, 4)
+}
+
+func wrapSegmentBoundsWithTabs(line string, segIdx, width, tabSize int) (string, int, int) {
 	if width < 1 || segIdx < 0 {
 		return "", 0, 0
 	}
-	startByte, endByte, _, ok := wrappedLineSegment(line, segIdx, width)
+	startByte, endByte, _, ok := wrappedLineSegmentWithTabs(line, segIdx, width, tabSize)
 	if !ok {
 		return "", 0, 0
 	}
@@ -423,26 +634,35 @@ func wrapSegmentBounds(line string, segIdx, width int) (string, int, int) {
 // findBracketHighlights returns two positions to highlight and whether a match was found.
 func (v *Viewport) findBracketHighlights(buf *text.Buffer) (text.Position, text.Position, bool) {
 	cursor := buf.Cursor
-	line := buf.Line(cursor.Line)
-
-	// Check character at cursor
-	if cursor.Col < len(line) {
-		ch := line[cursor.Col]
-		if IsOpenBracket(ch) || IsCloseBracket(ch) {
-			if match, ok := FindMatchingBracket(buf, cursor); ok {
-				return cursor, match, true
-			}
-		}
+	if v.bracketCacheRope == buf.Rope() && v.bracketCacheVersion == buf.Version() && v.bracketCacheCursor == cursor {
+		return v.bracketCachePos1, v.bracketCachePos2, v.bracketCacheFound
 	}
+	pos1, pos2, found := findBracketHighlightsBounded(buf, cursor)
+	v.bracketCacheRope = buf.Rope()
+	v.bracketCacheVersion = buf.Version()
+	v.bracketCacheCursor = cursor
+	v.bracketCachePos1 = pos1
+	v.bracketCachePos2 = pos2
+	v.bracketCacheFound = found
+	return pos1, pos2, found
+}
 
-	// Check character before cursor
-	if cursor.Col > 0 && cursor.Col <= len(line) {
-		prevPos := text.Position{Line: cursor.Line, Col: cursor.Col - 1}
-		ch := line[cursor.Col-1]
-		if IsOpenBracket(ch) || IsCloseBracket(ch) {
-			if match, ok := FindMatchingBracket(buf, prevPos); ok {
-				return prevPos, match, true
-			}
+func findBracketHighlightsBounded(buf *text.Buffer, cursor text.Position) (text.Position, text.Position, bool) {
+	rope := buf.Rope()
+	for _, pos := range []text.Position{cursor, {Line: cursor.Line, Col: cursor.Col - 1}} {
+		if pos.Col < 0 {
+			continue
+		}
+		offset, ok := rope.PositionToOffsetUncached(pos)
+		if !ok {
+			continue
+		}
+		ch, ok := rope.ByteAtSafe(offset)
+		if !ok || (!IsOpenBracket(ch) && !IsCloseBracket(ch)) {
+			continue
+		}
+		if match, ok := FindMatchingBracketWithinBudget(buf, pos, MaxBracketScanBytes); ok {
+			return pos, match, true
 		}
 	}
 
@@ -468,7 +688,7 @@ func (v *Viewport) applyBracketHighlight(rendered, lineContent string, lineNum i
 		if col >= len(lineContent) {
 			continue
 		}
-		displayCol := displayWidth(lineContent[:col]) - v.ScrollX
+		displayCol := displayColumn([]byte(lineContent), col, v.tabSize()) - v.ScrollX
 		if displayCol < 0 || displayCol >= textWidth {
 			continue
 		}
@@ -523,11 +743,13 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 	widthLeft := textWidth
 	scrollRemaining := v.ScrollX
 
+	visualCol := 0
 	for _, tok := range tokens {
 		if widthLeft <= 0 {
 			break
 		}
-		text := tok.Text
+		text := expandTabsAtDisplayColumn(tok.Text, visualCol, v.tabSize())
+		visualCol += displayWidth(text)
 		// Apply horizontal scroll
 		if scrollRemaining > 0 {
 			textW := runewidth.StringWidth(text)
@@ -609,99 +831,86 @@ func selectionRange(sel *text.Selection, line, lineLen int) (int, int) {
 	return startCol, endCol
 }
 
-// selectionRanges returns byte ranges of all selections overlapping a line.
-// Returns nil if no selections overlap.
-func selectionRanges(buf *text.Buffer, line, lineLen int) []struct {
-	start, end int
-} {
-	if buf.Selections == nil {
-		return nil
+// renderLineWithMultipleSelectionsTabs renders selections from raw byte
+// ranges after deriving one display-only tab-expanded line. This is important:
+// expanding each raw range independently would reset tab stops at the range
+// boundary and shift subsequent text.
+func (v *Viewport) renderLineWithMultipleSelectionsTabs(lineBytes []byte, ranges []selectionByteRange, isPrimaryLine bool, textWidth int, theme ui.Theme) string {
+	displayed := expandTabsForDisplay(lineBytes, v.tabSize())
+	visibleStart := v.ScrollX
+	visibleEnd := visibleStart + textWidth
+	lineWidth := displayWidth(displayed)
+	if visibleEnd > lineWidth {
+		visibleEnd = lineWidth
 	}
 
-	var ranges []struct{ start, end int }
-
-	for _, sel := range buf.Selections.All() {
-		if sel.IsEmpty() {
-			continue
+	type visualRange struct{ start, end int }
+	visualRanges := make([]visualRange, 0, len(ranges))
+	for _, r := range ranges {
+		start := displayColumn(lineBytes, r.start, v.tabSize())
+		end := displayColumn(lineBytes, r.end, v.tabSize())
+		if start < visibleEnd && end > visibleStart {
+			visualRanges = append(visualRanges, visualRange{max(start, visibleStart), min(end, visibleEnd)})
 		}
-
-		start, end := sel.Ordered()
-
-		// No overlap
-		if line < start.Line || line > end.Line {
-			continue
-		}
-
-		startCol := 0
-		if line == start.Line {
-			startCol = start.Col
-		}
-
-		endCol := lineLen
-		if line == end.Line {
-			endCol = end.Col
-		}
-
-		if startCol >= endCol {
-			continue
-		}
-
-		ranges = append(ranges, struct{ start, end int }{startCol, endCol})
 	}
 
-	// Sort ranges by start position
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].start < ranges[j].start
-	})
+	base := theme.Editor
+	selected := theme.SecondarySelection
+	if isPrimaryLine {
+		base = theme.CursorLine
+		selected = theme.Selection
+	}
 
-	return ranges
+	var sb strings.Builder
+	pos := visibleStart
+	for _, r := range visualRanges {
+		if pos < r.start {
+			sb.WriteString(base.Render(sliceDisplayColumns(displayed, pos, r.start)))
+		}
+		if r.start < r.end {
+			sb.WriteString(selected.Render(sliceDisplayColumns(displayed, r.start, r.end)))
+		}
+		pos = max(pos, r.end)
+	}
+	if pos < visibleEnd {
+		sb.WriteString(base.Render(sliceDisplayColumns(displayed, pos, visibleEnd)))
+	}
+	if pad := textWidth - (visibleEnd - visibleStart); pad > 0 {
+		sb.WriteString(base.Render(getSpaces(pad)))
+	}
+	return sb.String()
 }
 
-func (v *Viewport) renderLineWithMultipleSelections(lineContent string, lineBytes []byte, ranges []struct{ start, end int }, isPrimaryLine bool, textWidth int, theme ui.Theme) string {
-	var sb strings.Builder
+func sliceDisplayColumns(s string, start, end int) string {
+	if end <= start {
+		return ""
+	}
+	startByte := byteAtDisplayColumn(s, start)
+	endByte := byteAtDisplayColumn(s, end)
+	return s[startByte:endByte]
+}
+
+func byteAtDisplayColumn(s string, target int) int {
+	if target <= 0 {
+		return 0
+	}
 	col := 0
-
-	for _, selRange := range ranges {
-		// Render text before selection
-		if col < selRange.start {
-			before := lineContent[col:selRange.start]
-			displayed := applyScrollX(before, v.ScrollX)
-			displayed = truncateToWidth(displayed, textWidth)
-			sb.WriteString(theme.Editor.Render(displayed))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if size <= 0 {
+			break
 		}
-
-		// Render selected text
-		selected := lineContent[selRange.start:selRange.end]
-		displayed := applyScrollX(selected, v.ScrollX)
-		displayed = truncateToWidth(displayed, textWidth)
-
-		// Primary line gets primary selection style, others get secondary
-		if isPrimaryLine {
-			sb.WriteString(theme.Selection.Render(displayed))
-		} else {
-			sb.WriteString(theme.SecondarySelection.Render(displayed))
+		width := max(0, runewidth.RuneWidth(r))
+		if col+width > target {
+			return i
 		}
-
-		col = selRange.end
+		col += width
+		if col == target {
+			return i + size
+		}
+		i += size
 	}
-
-	// Render remaining text
-	if col < len(lineContent) {
-		remaining := lineContent[col:]
-		displayed := applyScrollX(remaining, v.ScrollX)
-		displayed = truncateToWidth(displayed, textWidth)
-		padLen := max(0, textWidth-displayWidth(displayed))
-		if padLen > 0 {
-			displayed += getSpaces(padLen)
-		}
-		if isPrimaryLine {
-			sb.WriteString(theme.CursorLine.Render(displayed))
-		} else {
-			sb.WriteString(theme.Editor.Render(displayed))
-		}
-	}
-
-	return sb.String()
+	return len(s)
 }
 
 func (v *Viewport) renderLineWithSelection(lineContent string, lineBytes []byte, selStart, selEnd int, isCursorLine bool, textWidth int, theme ui.Theme) string {
@@ -818,30 +1027,13 @@ func (v *Viewport) ScreenToBufferPosition(screenX, screenY int, buf *text.Buffer
 	}
 
 	lineContent := buf.Line(line)
-	// Walk runes summing display widths to convert screen X to buffer column
-	targetWidth := v.ScrollX + screenCol
-	w := 0
-	col := 0
-	for i, r := range string(lineContent) {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > targetWidth {
-			col = i
-			return text.Position{Line: line, Col: col}
-		}
-		w += rw
-		col = i + utf8.RuneLen(r)
-	}
-	// Clamp to line length
-	if col > len(lineContent) {
-		col = len(lineContent)
-	}
-	return text.Position{Line: line, Col: col}
+	return text.Position{Line: line, Col: byteColumnAtDisplay(lineContent, v.ScrollX+screenCol, v.tabSize())}
 }
 
 // ScreenToBufferPositionWrap maps screen coordinates to buffer position in word-wrap mode.
 func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Buffer, gw int, wrap *WrapLayout) text.Position {
 	// Convert screen Y to visual row relative to scroll position
-	visualRow := wrap.VisualRow(v.ScrollY) + screenY
+	visualRow := v.wrapScrollY(wrap) + screenY
 	bufLine, wrapOffset := wrap.BufferLine(visualRow)
 
 	if bufLine < 0 {
@@ -856,32 +1048,17 @@ func (v *Viewport) ScreenToBufferPositionWrap(screenX, screenY int, buf *text.Bu
 		screenCol = 0
 	}
 
-	textWidth := wrap.Width()
-	if textWidth < 1 {
-		textWidth = 1
-	}
-
 	lineContent := buf.Line(bufLine)
-	_, segmentStart, segmentEnd := wrapSegmentBounds(string(lineContent), wrapOffset, textWidth)
-	if segmentStart == 0 && segmentEnd == 0 && len(lineContent) > 0 {
+	segmentStart, segmentEnd, segmentStartDisplay, ok := wrap.SegmentBoundsForLine(bufLine, wrapOffset, lineContent)
+	if !ok {
 		return text.Position{Line: bufLine, Col: len(lineContent)}
 	}
 
-	w := 0
-	col := segmentStart
-	for offset, r := range string(lineContent[segmentStart:segmentEnd]) {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > screenCol {
-			col = segmentStart + offset
-			return text.Position{Line: bufLine, Col: col}
-		}
-		w += rw
-		col = segmentStart + offset + utf8.RuneLen(r)
-	}
-	if col > segmentEnd {
-		col = segmentEnd
-	}
-	return text.Position{Line: bufLine, Col: col}
+	// The segment is at most the viewport width, so this local width scan is
+	// bounded and never depends on the length before the segment.
+	_, segmentEndDisplay := expandTabsAtDisplayColumnWithEnd(string(lineContent[segmentStart:segmentEnd]), segmentStartDisplay, v.tabSize())
+	target := min(segmentStartDisplay+screenCol, segmentEndDisplay)
+	return text.Position{Line: bufLine, Col: byteColumnAtDisplayFrom(lineContent, segmentStart, segmentStartDisplay, target, v.tabSize())}
 }
 
 func applyScrollX(s string, scrollX int) string {

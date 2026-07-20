@@ -14,14 +14,16 @@ This plan tracks the refactoring of the 9 largest source files in Teak, reducing
 ## Progress: [Major phases complete, remaining items deferred due to coupling]
 
 ### Completed Work:
-- ✅ Phase 1.1-1.2: modes/, keybindings/ packages
-- ✅ Phase 1.2.3: context.go - Focus area contexts
-- ✅ Phase 1.3: TabManager, LayoutManager, OverlayManager (exist in separate files)
-- ✅ Phase 1.4: fileops/ package (expanded with delete.go, open.go, save.go, close.go, path helpers, tests)
+- ✅ Removed the orphaned experimental `modes/` and `keybindings/` packages;
+  production input routing remains in the app update/coordinator path
+- ✅ Retired the unused Tab/Layout/Overlay/Sidebar/Protocol manager mirrors;
+  `Model` remains the single owner required by ADR 0001
+- ✅ Retired the unused `app/fileops`, `git/hittest`, and `git/treebuilder`
+  experiments; production already uses the canonical MVU implementations
 - ✅ Phase 2: lsp/capabilities/ package + integration into client.go
 - ✅ Phase 2.2: rpc_gen.go - 10 RPC methods moved to separate file
-- ✅ Phase 3.1: git/treebuilder/ restored, git/types.go - shared types extracted
-- ✅ Phase 3.2: git/hittest/ package (hit.go - click detection)
+- ✅ Git tree building and hit testing remain canonical in `git/panel.go`;
+  unused duplicate packages were removed
 - ✅ Phase 5.1: viewport_scroll.go created (scroll/cursor functions extracted)
 - ✅ Phase 5.2: editor/overlays/ package with autocomplete, hover, signature (95.7% coverage)
 - ✅ Phase 6: agent/types.go and dap/types.go created - shared and protocol types extracted
@@ -33,16 +35,8 @@ This plan tracks the refactoring of the 9 largest source files in Teak, reducing
 - ⚠️ Phase 4: Buffer refactoring (high risk due to coupling)
 
 ### Testing Coverage Added:
-- internal/app/fileops/ - 32 tests (79.1% coverage, up from 29.9%)
 - internal/editor/overlays/ - 43 tests (95.7% coverage)
-- internal/app/keybindings/ - 12 tests (binding, registry)
-- internal/app/modes/ - 4 tests (mode interface)
-- internal/git/hittest/ - 11 tests (hit testing)
 - internal/lsp/capabilities/ - 17 tests (capability checking)
-- internal/git/treebuilder/ - 11 tests + 6 benchmarks (90.7% coverage)
-
-### Benchmarks Added:
-- internal/git/treebuilder/ - 6 benchmarks (Build operations)
 
 ---
 
@@ -52,36 +46,18 @@ This plan tracks the refactoring of the 9 largest source files in Teak, reducing
 
 ### Tasks
 
-- [x] **1.1** Create `internal/app/modes/` package
-  - [x] 1.1.1 `mode.go` - Mode interface + base types
-  - [x] 1.1.2 `normal.go` - Normal editing mode
-  - [x] 1.1.3 `rename.go` - Rename input mode
-  - [x] 1.1.4 `goto_line.go` - Go-to-line dialog
-  - [x] 1.1.5 `search.go` - Search overlay mode
-  - [x] 1.1.6 `input.go` - New file/folder input mode
-  - [x] 1.1.7 `confirm.go` - Confirmation dialogs
-  - [x] 1.1.8 `context_menu.go` - Context menu mode
-  - [x] 1.1.9 `branch_picker.go` - Git branch picker
-  - [x] 1.1.10 `settings.go` - Settings overlay
-  - [x] 1.1.11 `manager.go` - Mode manager
+- [x] **1.1-1.2** Keep input modes and keybindings in the production routing
+  path. The unused experimental packages were removed because they were never
+  imported by the application and their app-facing imports prevented direct
+  integration without an import cycle.
 
-- [x] **1.2** Create `internal/app/keybindings/` package
-  - [x] 1.2.1 `binding.go` - Individual binding definition
-  - [x] 1.2.2 `registry.go` - Key binding registry
-  - [x] 1.2.3 `context.go` - Focus area contexts
-  - [x] 1.2.4 `default.go` - Default keybindings for Teak
+- [x] **1.3** Retire non-canonical manager mirrors
+  - [x] Keep `Model` as the sole owner of tabs, layout, overlays, sidebars,
+    protocol runtime, and lifecycle state
 
-- [x] **1.3** Strengthen Managers
-  - [x] 1.3.1 Enhance `TabManager` - exists in tab_manager.go
-  - [x] 1.3.2 Enhance `LayoutManager` - exists in layout_manager.go
-  - [x] 1.3.3 Create `OverlayManager` - exists in overlay_manager.go
-
-- [x] **1.4** Extract File Operations to `internal/app/fileops/`
-  - [x] 1.4.1 `fileops.go` - File operation interface
-  - [x] 1.4.2 `open.go` - Open file logic
-  - [x] 1.4.3 `save.go` - Save file logic
-  - [x] 1.4.4 `close.go` - Close file logic
-  - [x] 1.4.5 `delete.go` - Delete file logic
+- [x] **1.4** Keep file operations in the production MVU flows
+  - [x] Remove the unused synchronous `internal/app/fileops` experiment
+  - [x] Use typed commands, immutable snapshots, and stale-result identities
 
 - [ ] **1.5** Split app.go into Multiple Files
   - [ ] 1.5.1 `app_update.go` - Update() implementation (~800 lines)
@@ -125,15 +101,13 @@ This plan tracks the refactoring of the 9 largest source files in Teak, reducing
 
 **Goal:** Reduce `internal/git/panel.go` from 1,504 → ~800 lines (47% reduction)
 
-**Status:** Phase 3.1-3.2 complete - treebuilder restored, hittest created
+**Status:** Production implementations remain in `panel.go`; unused duplicate
+packages were retired.
 
 ### Tasks
 
-- [x] **3.1** Extract Tree Builder to `internal/git/treebuilder/`
-  - [x] 3.1.1 `tree.go` - Tree building logic (restored - types extracted to git/types.go)
-
-- [x] **3.2** Extract Hit Testing to `internal/git/hittest/`
-  - [x] 3.2.1 `hit.go` - Click detection logic (created hittest.go)
+- [x] **3.1-3.2** Keep one Git tree/hit-test implementation
+  - [x] Remove the unreferenced `treebuilder` and `hittest` duplicates
 
 - [ ] **3.3** Extract Rendering
   - [ ] 3.3.1 `render.go` - View rendering logic (deferred: tightly coupled to Model)

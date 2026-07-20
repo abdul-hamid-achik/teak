@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
@@ -74,15 +75,21 @@ func (p *Picker) Focus() tea.Cmd {
 
 // SetSize updates the available dimensions.
 func (p *Picker) SetSize(w, h int) {
-	p.width = w
-	p.maxHeight = h
-	p.input.SetWidth(min(w-8, 50))
+	p.width = max(1, w)
+	p.maxHeight = max(1, h)
+	p.input.SetWidth(max(1, min(p.width-8, 50)))
 }
 
 // SetItems replaces the item list and refilters.
 func (p *Picker) SetItems(items []PickerItem) {
 	p.items = items
 	p.refilter()
+}
+
+// ZoneID identifies the picker instance for callers that need to route an
+// asynchronous result without relying on its user-visible title.
+func (p *Picker) ZoneID() string {
+	return p.zoneID
 }
 
 // Update implements Overlay.
@@ -134,7 +141,8 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	case tea.MouseClickMsg:
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
-			for i := range p.filtered {
+			start, end := p.visibleRange()
+			for i := start; i < end; i++ {
 				if zone.Get(p.itemZoneID(i)).InBounds(msg) {
 					item := p.filtered[i].item
 					p.dismissed = true
@@ -178,13 +186,16 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 // View implements Overlay.
 func (p *Picker) View() string {
 	boxWidth := p.width
-	if boxWidth < 30 {
+	if boxWidth < 30 && p.width >= 30 {
 		boxWidth = 30
 	}
 	if boxWidth > 80 {
 		boxWidth = 80
 	}
 	contentWidth := boxWidth - 6 // border + padding
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
 
 	var sb strings.Builder
 
@@ -198,11 +209,7 @@ func (p *Picker) View() string {
 	sb.WriteByte('\n')
 
 	// Results
-	visible := p.visibleCount()
-	endIdx := p.scrollY + visible
-	if endIdx > len(p.filtered) {
-		endIdx = len(p.filtered)
-	}
+	startIdx, endIdx := p.visibleRange()
 
 	itemStyle := lipgloss.NewStyle().
 		Background(ui.Nord1).
@@ -213,11 +220,11 @@ func (p *Picker) View() string {
 	descStyle := lipgloss.NewStyle().
 		Foreground(ui.Nord3)
 
-	for i := p.scrollY; i < endIdx; i++ {
+	for i := startIdx; i < endIdx; i++ {
 		si := p.filtered[i]
 		label := truncStr(si.item.Label, contentWidth)
 		if si.item.Description != "" {
-			descWidth := contentWidth - len(label) - 2
+			descWidth := contentWidth - lipgloss.Width(label) - 2
 			if descWidth > 4 {
 				label += "  " + descStyle.Render(truncStr(si.item.Description, descWidth))
 			}
@@ -239,10 +246,10 @@ func (p *Picker) View() string {
 	}
 
 	// Scroll hint
-	if len(p.filtered) > visible {
+	if len(p.filtered) > p.visibleCount() {
 		sb.WriteByte('\n')
 		hint := lipgloss.NewStyle().Foreground(ui.Nord3)
-		sb.WriteString(hint.Render(strings.Repeat(" ", contentWidth-10) + countStr(p.cursor+1, len(p.filtered))))
+		sb.WriteString(hint.Render(strings.Repeat(" ", max(0, contentWidth-10)) + countStr(p.cursor+1, len(p.filtered))))
 	}
 
 	content := sb.String()
@@ -283,7 +290,12 @@ func (p *Picker) Query() string {
 
 func (p *Picker) refilter() {
 	query := p.input.Value()
-	p.filtered = nil
+	// Keep the backing array between keystrokes. A project picker commonly
+	// contains tens of thousands of files, and dropping this slice used to
+	// allocate several megabytes for every character typed. Clear first so
+	// items removed by a narrower result do not retain their values.
+	clear(p.filtered)
+	p.filtered = p.filtered[:0]
 
 	if query == "" {
 		for _, item := range p.items {
@@ -315,6 +327,12 @@ func (p *Picker) visibleCount() int {
 		v = 20
 	}
 	return v
+}
+
+func (p *Picker) visibleRange() (start, end int) {
+	start = max(0, min(p.scrollY, len(p.filtered)))
+	end = min(len(p.filtered), start+p.visibleCount())
+	return start, end
 }
 
 func (p *Picker) ensureVisible() {
@@ -356,11 +374,5 @@ func truncStr(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
+	return ansi.Truncate(s, maxLen, "...")
 }

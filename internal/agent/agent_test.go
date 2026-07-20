@@ -3,10 +3,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	sdk "github.com/coder/acp-go-sdk"
 	"teak/internal/acp"
 	"teak/internal/ui"
@@ -35,6 +39,303 @@ func TestAgentModelCreation(t *testing.T) {
 	if model.connected {
 		t.Error("Expected connected to be false")
 	}
+}
+
+func TestAgentHistoryIsBounded(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	for i := 0; i < maxChatMessages+25; i++ {
+		model.AddSystemMessage(strings.Repeat("x", maxChatMessageBytes/8))
+	}
+
+	if got := len(model.messages); got > maxChatMessages {
+		t.Fatalf("messages = %d, want at most %d", got, maxChatMessages)
+	}
+	if model.messageBytes > maxChatHistoryBytes {
+		t.Fatalf("messageBytes = %d, want at most %d", model.messageBytes, maxChatHistoryBytes)
+	}
+}
+
+func TestAgentStreamingContentIsBoundedAndValidUTF8(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	oversized := strings.Repeat("界", maxStreamContentBytes)
+
+	model, _ = model.Update(acp.AgentTextMsg{Text: oversized})
+
+	if model.streamBytes > maxStreamContentBytes {
+		t.Fatalf("streamBytes = %d, want at most %d", model.streamBytes, maxStreamContentBytes)
+	}
+	if got, wantMax := len(model.streamBlocks), maxStreamContentBytes/streamRenderBlockBytes+1; got > wantMax {
+		t.Fatalf("stream blocks = %d, want at most %d", got, wantMax)
+	}
+	for _, block := range model.streamBlocks {
+		if !utf8.ValidString(block.Content) {
+			t.Fatal("bounded stream content is not valid UTF-8")
+		}
+	}
+}
+
+func TestAgentTextWrappingAndTagTruncationPreserveUnicode(t *testing.T) {
+	for _, line := range wrapText("界界界 hello 🌳", 4) {
+		if !utf8.ValidString(line) {
+			t.Fatalf("wrapped line %q is not valid UTF-8", line)
+		}
+		if got := lipgloss.Width(line); got > 4 {
+			t.Fatalf("wrapped line width = %d, want at most 4: %q", got, line)
+		}
+	}
+
+	model := New(ui.DefaultTheme())
+	model.taggedFiles = []TaggedFile{{Name: "🌳界-file.go"}}
+	line := model.renderTaggedFiles(5)
+	if !utf8.ValidString(line) {
+		t.Fatalf("tag line %q is not valid UTF-8", line)
+	}
+	if got := lipgloss.Width(line); got > 5 {
+		t.Fatalf("tag line width = %d, want at most 5", got)
+	}
+}
+
+func TestAgentChatRenderCacheIsSharedAcrossValueCopiesAndInvalidated(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.AddSystemMessage("first")
+
+	first := model.cachedChatLines(40)
+	copyOfModel := model
+	second := copyOfModel.cachedChatLines(40)
+	if len(first) == 0 || len(second) == 0 || &first[0] != &second[0] {
+		t.Fatal("unchanged value copy did not reuse the shared render cache")
+	}
+
+	copyOfModel.AddSystemMessage("second")
+	third := copyOfModel.cachedChatLines(40)
+	if len(third) == 0 || &third[0] == &first[0] {
+		t.Fatal("new message did not invalidate the render cache")
+	}
+	if !strings.Contains(strings.Join(third, "\n"), "second") {
+		t.Fatal("rebuilt render cache does not contain the new message")
+	}
+}
+
+func TestAgentStreamRenderCacheRebuildsOnlyDirtyTailAndMatchesCanonicalOutput(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(48, 18)
+	for i := 0; i < 64; i++ {
+		model.AddSystemMessage("history that must stay cached across streaming updates")
+	}
+
+	model, _ = model.Update(acp.AgentTextMsg{Text: strings.Repeat("alpha ", streamRenderBlockBytes/4)})
+	first := slices.Clone(model.cachedChatLines(48))
+	cache := model.chatCache
+	if cache == nil || len(cache.streamBlockStarts) == 0 {
+		t.Fatal("initial render did not record stream block boundaries")
+	}
+	prefixEnd := cache.streamBlockStarts[len(cache.streamBlockStarts)-1]
+	if prefixEnd == 0 {
+		t.Fatal("stream tail unexpectedly starts at the beginning of the transcript")
+	}
+	prefix := &cache.lines[0]
+
+	model, _ = model.Update(acp.AgentTextMsg{Text: "omega"})
+	got := model.cachedChatLines(48)
+	if want := model.buildChatLines(48); !slices.Equal(got, want) {
+		t.Fatalf("incremental lines differ from canonical render\n got: %q\nwant: %q", got, want)
+	}
+	if cache.fullBuilds != 1 || cache.incrementalBuilds != 1 {
+		t.Fatalf("build counts = full %d incremental %d, want 1/1", cache.fullBuilds, cache.incrementalBuilds)
+	}
+	if &cache.lines[0] != prefix {
+		t.Fatal("stream update replaced the cached transcript prefix")
+	}
+	if len(first) < prefixEnd {
+		t.Fatal("test setup produced an invalid stream boundary")
+	}
+}
+
+func TestAgentStreamRenderCachePreservesChunkRenderingAndStyles(t *testing.T) {
+	chunked := New(ui.DefaultTheme())
+	chunked.SetConnected(true)
+	chunked.SetSize(28, 12)
+	chunked, _ = chunked.Update(acp.AgentTextMsg{Text: "A short streamed "})
+	chunked, _ = chunked.Update(acp.AgentTextMsg{Text: "sentence keeps wrapping."})
+	chunked, _ = chunked.Update(acp.AgentThoughtMsg{Text: "a styled thought"})
+
+	single := chunked
+	single.streamBlocks = []StreamBlock{
+		{Kind: BlockText, Content: "A short streamed sentence keeps wrapping."},
+		{Kind: BlockThought, Content: "a styled thought"},
+	}
+	single.chatCache = &chatRenderCache{dirty: true, streamDirtyFrom: -1}
+
+	if got, want := chunked.cachedChatLines(28), single.buildChatLines(28); !slices.Equal(got, want) {
+		t.Fatalf("chunked render differs from a single logical block\n got: %q\nwant: %q", got, want)
+	}
+	if !strings.Contains(strings.Join(chunked.cachedChatLines(28), "\n"), "\x1b[") {
+		t.Fatal("thought style was lost from the cached render")
+	}
+}
+
+func TestAgentStreamRenderCacheInvalidatesOnResizeAndStructuralChanges(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(42, 16)
+	model, _ = model.Update(acp.AgentTextMsg{Text: "first streaming chunk"})
+	_ = model.cachedChatLines(42)
+	cache := model.chatCache
+
+	model.SetSize(60, 16)
+	if !cache.dirty {
+		t.Fatal("resize did not invalidate the render cache")
+	}
+	if got, want := model.cachedChatLines(60), model.buildChatLines(60); !slices.Equal(got, want) {
+		t.Fatal("resized cache differs from canonical render")
+	}
+
+	model, _ = model.Update(acp.AgentToolCallMsg{ID: "tool", Title: "inspect", Status: sdk.ToolCallStatusPending})
+	if !cache.dirty {
+		t.Fatal("structural stream change did not invalidate the render cache")
+	}
+	if got, want := model.cachedChatLines(60), model.buildChatLines(60); !slices.Equal(got, want) {
+		t.Fatal("structurally invalidated cache differs from canonical render")
+	}
+}
+
+func TestAgentStreamRenderCacheLargeStreamHasBoundedBlocksAndIncrementalTail(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(80, 24)
+	chunk := strings.Repeat("data ", streamRenderBlockBytes/5)
+	for model.streamBytes+len(chunk) <= maxStreamContentBytes {
+		model, _ = model.Update(acp.AgentTextMsg{Text: chunk})
+	}
+	_ = model.cachedChatLines(80)
+	cache := model.chatCache
+	if got, wantMax := len(model.streamBlocks), maxStreamContentBytes/streamRenderBlockBytes+1; got > wantMax {
+		t.Fatalf("stream blocks = %d, want at most %d", got, wantMax)
+	}
+	if cache.fullBuilds != 1 {
+		t.Fatalf("full builds = %d, want 1", cache.fullBuilds)
+	}
+
+	model, _ = model.Update(acp.AgentTextMsg{Text: "tail"})
+	_ = model.cachedChatLines(80)
+	if cache.incrementalBuilds != 1 {
+		t.Fatalf("incremental builds = %d, want 1", cache.incrementalBuilds)
+	}
+	if cache.renderedStreamBlocks > 2 {
+		t.Fatalf("tail update rendered %d stream blocks, want at most 2", cache.renderedStreamBlocks)
+	}
+}
+
+func TestAgentAlwaysAllowDoesNotPersistForUnknownToolKind(t *testing.T) {
+	options := []sdk.PermissionOption{
+		{Kind: sdk.PermissionOptionKindAllowAlways, OptionId: "always"},
+		{Kind: sdk.PermissionOptionKindAllowOnce, OptionId: "once"},
+	}
+	model := New(ui.DefaultTheme())
+	model.permission = &PermissionPrompt{
+		ToolCall:   sdk.RequestPermissionToolCall{ToolCallId: "first"},
+		Options:    options,
+		ResponseCh: make(chan sdk.RequestPermissionResponse, 1),
+	}
+
+	model, _ = model.handlePermissionKey("a")
+	if model.alwaysAllow[""] {
+		t.Fatal("unknown tool kind was persisted as an always-allow wildcard")
+	}
+
+	response := make(chan sdk.RequestPermissionResponse, 1)
+	model, _ = model.Update(acp.AgentPermissionRequestMsg{
+		ToolCall:   sdk.RequestPermissionToolCall{ToolCallId: "second"},
+		Options:    options,
+		ResponseCh: response,
+	})
+	if model.permission == nil {
+		t.Fatal("second unknown tool request bypassed the permission prompt")
+	}
+	select {
+	case <-response:
+		t.Fatal("second unknown tool request was auto-approved")
+	default:
+	}
+}
+
+func TestAgentPermissionDecisionNeverBlocksTheUpdateLoop(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.permission = &PermissionPrompt{
+		ToolCall: sdk.RequestPermissionToolCall{ToolCallId: "blocked"},
+		Options: []sdk.PermissionOption{{
+			Kind:     sdk.PermissionOptionKindRejectOnce,
+			OptionId: "reject",
+		}},
+		ResponseCh: make(chan sdk.RequestPermissionResponse),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = model.handlePermissionKey("n")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("permission decision blocked on an unread response channel")
+	}
+}
+
+func BenchmarkAgentViewCachedHistory(b *testing.B) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(48, 30)
+	for i := 0; i < maxChatMessages; i++ {
+		model.AddSystemMessage("bounded chat history line for render-cache benchmark")
+	}
+	_ = model.View()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = model.View()
+	}
+}
+
+func BenchmarkAgentViewStreamingDirtyTail(b *testing.B) {
+	model := benchmarkStreamingRenderModel(b)
+	tail := len(model.streamBlocks) - 1
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		model.invalidateStreamTail(tail)
+		_ = model.View()
+	}
+}
+
+// BenchmarkAgentViewStreamingFullRebuild models the pre-cache behavior: each
+// streamed chunk invalidated the complete chat transcript. Keep it next to the
+// dirty-tail benchmark to make regressions visible in benchmark output.
+func BenchmarkAgentViewStreamingFullRebuild(b *testing.B) {
+	model := benchmarkStreamingRenderModel(b)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		model.invalidateChatCache()
+		_ = model.View()
+	}
+}
+
+func benchmarkStreamingRenderModel(b *testing.B) Model {
+	b.Helper()
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(80, 30)
+	for i := 0; i < maxChatMessages; i++ {
+		model.AddSystemMessage("history retained while ACP sends streamed chunks")
+	}
+	for i := 0; i < maxStreamContentBytes/(2*streamRenderBlockBytes); i++ {
+		model, _ = model.Update(acp.AgentTextMsg{Text: strings.Repeat("stream ", streamRenderBlockBytes/8)})
+	}
+	_ = model.View()
+	return model
 }
 
 // TestAgentIsLoading tests IsLoading method

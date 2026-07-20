@@ -11,7 +11,49 @@ import (
 	"teak/internal/text"
 )
 
-func TestNewModelLoadsPluginsFromDefaultDir(t *testing.T) {
+func loadPluginsForTest(t *testing.T, model *Model) {
+	t.Helper()
+	msg := pluginLoadCmd(plugin.DefaultDir(), model.pluginLoadGeneration)()
+	updated, _ := model.Update(msg)
+	*model = updated.(Model)
+	if model.pluginLoading {
+		t.Fatal("plugin load did not complete")
+	}
+}
+
+// updatePluginTest drains the command chain produced by an input/event. Lua
+// now runs in tea.Cmd and returns an effect message to Update, so plugin
+// integration tests must model Bubble Tea's normal command dispatch rather
+// than assuming a callback runs inside the original keypress Update.
+func updatePluginTest(t *testing.T, model Model, msg tea.Msg) Model {
+	t.Helper()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, child := range batch {
+			model = drainPluginCmd(t, model, child)
+		}
+		return model
+	}
+	updated, cmd := model.Update(msg)
+	return drainPluginCmd(t, updated.(Model), cmd)
+}
+
+func drainPluginCmd(t *testing.T, model Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return model
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, child := range batch {
+			model = drainPluginCmd(t, model, child)
+		}
+		return model
+	}
+	updated, next := model.Update(msg)
+	return drainPluginCmd(t, updated.(Model), next)
+}
+
+func TestNewModelDefersPluginLoadingUntilAsyncResult(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	t.Setenv("HOME", tmpDir)
@@ -35,6 +77,10 @@ func TestNewModelLoadsPluginsFromDefaultDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	if model.pluginMgr != nil || !model.pluginLoading {
+		t.Fatal("NewModel must not load user Lua before the first frame")
+	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 
 	if model.pluginMgr == nil {
@@ -79,11 +125,11 @@ end
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 	model.focus = FocusEditor
 
-	updatedModel, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
-	updated := updatedModel.(Model)
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	p, err := updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -99,18 +145,15 @@ end
 	}
 
 	updated.pluginKeySequence = ""
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
 	if updated.pluginKeySequence != "<leader>" {
 		t.Fatalf("pluginKeySequence after leader = %q", updated.pluginKeySequence)
 	}
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
 	if updated.pluginKeySequence != "<leader>s" {
 		t.Fatalf("pluginKeySequence after leader+s = %q", updated.pluginKeySequence)
 	}
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'c', Text: "c"}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -183,11 +226,11 @@ end
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 	model.focus = FocusEditor
 
-	updatedModel, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 'e', Mod: tea.ModCtrl}))
-	updated := updatedModel.(Model)
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'e', Mod: tea.ModCtrl}))
 	if got := updated.activeEditor().Buffer.Content(); got != "hello" {
 		t.Fatalf("buffer content after ctrl+e = %q, want %q", got, "hello")
 	}
@@ -221,8 +264,7 @@ end
 		t.Fatalf("plugin_cursor_col = %q, want %q", got, "6")
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'o', Mod: tea.ModCtrl}))
 	if got := updated.activeEditor().Buffer.FilePath; got != openedPath {
 		t.Fatalf("opened file path = %q, want %q", got, openedPath)
 	}
@@ -233,8 +275,7 @@ end
 		t.Fatalf("editor count after plugin open = %d, want 2", len(updated.editors))
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -246,16 +287,14 @@ end
 		t.Fatalf("plugin_active_tab = %q, want %q", got, "2")
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'w', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'w', Mod: tea.ModCtrl}))
 	if len(updated.editors) != 1 {
 		t.Fatalf("editor count after plugin close = %d, want 1", len(updated.editors))
 	}
 	if got := updated.activeEditor().Buffer.Content(); got != "hello" {
 		t.Fatalf("active buffer after plugin close = %q, want %q", got, "hello")
 	}
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'f', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'f', Mod: tea.ModCtrl}))
 	if got := updated.activeEditor().Buffer.Content(); got != "helloj" {
 		t.Fatalf("buffer content after plugin feed_keys = %q, want %q", got, "helloj")
 	}
@@ -319,47 +358,41 @@ end
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 	model.focus = FocusEditor
 
-	updatedModel, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 'n', Mod: tea.ModCtrl}))
-	updated := updatedModel.(Model)
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'n', Mod: tea.ModCtrl}))
 	if got := updated.status; got != "Warning: plugin hello" {
 		t.Fatalf("status after ui.notify = %q, want %q", got, "Warning: plugin hello")
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
 	if !updated.showTree || updated.sidebarTab != SidebarFiles || updated.focus != FocusTree {
 		t.Fatalf("show_panel(tree) state = showTree:%v sidebar:%v focus:%v", updated.showTree, updated.sidebarTab, updated.focus)
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
 	if !updated.showTree || updated.sidebarTab != SidebarProblems || updated.focus != FocusProblems {
 		t.Fatalf("show_panel(problems) state = showTree:%v sidebar:%v focus:%v", updated.showTree, updated.sidebarTab, updated.focus)
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'd', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'd', Mod: tea.ModCtrl}))
 	if !updated.showTree || updated.sidebarTab != SidebarDebugger || updated.focus != FocusDebugger {
 		t.Fatalf("show_panel(debugger) state = showTree:%v sidebar:%v focus:%v", updated.showTree, updated.sidebarTab, updated.focus)
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'a', Mod: tea.ModCtrl}))
 	if !updated.showAgent || updated.focus != FocusAgent {
 		t.Fatalf("toggle_panel(agent) on state = showAgent:%v focus:%v", updated.showAgent, updated.focus)
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'a', Mod: tea.ModCtrl}))
 	if updated.showAgent || updated.focus != FocusEditor {
 		t.Fatalf("toggle_panel(agent) off state = showAgent:%v focus:%v", updated.showAgent, updated.focus)
 	}
 
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
 	if updated.showTree || updated.focus != FocusEditor {
 		t.Fatalf("hide_panel(tree) state = showTree:%v focus:%v", updated.showTree, updated.focus)
 	}
@@ -402,11 +435,11 @@ end
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 
 	model.focus = FocusTree
-	updatedModel, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl}))
-	updated := updatedModel.(Model)
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl}))
 	p, err := updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -416,8 +449,7 @@ end
 	}
 
 	updated.focus = FocusGitPanel
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -427,8 +459,7 @@ end
 	}
 
 	updated.focus = FocusTree
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -503,10 +534,10 @@ end
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	defer model.cleanup()
 
-	updatedModel, _ := model.Update(pluginEventMsg{Events: []plugin.EventContext{{Event: plugin.EventVimEnter}}})
-	updated := updatedModel.(Model)
+	updated := updatePluginTest(t, model, pluginEventMsg{Events: []plugin.EventContext{{Event: plugin.EventVimEnter}}})
 	p, err := updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -520,8 +551,7 @@ end
 		t.Fatal("expected load command when opening first file")
 	}
 	fileMsg := loadCmd()
-	updatedModel, _ = openedModel.(Model).Update(fileMsg)
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, openedModel.(Model), fileMsg)
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -537,8 +567,7 @@ end
 	}
 
 	updated.focus = FocusEditor
-	updatedModel, _ = updated.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -550,13 +579,7 @@ end
 		t.Fatalf("cursor_count after edit = %q, want %q", got, "1")
 	}
 
-	updatedModel, saveCmd := updated.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
-	updated = updatedModel.(Model)
-	if saveCmd == nil {
-		t.Fatal("expected save command")
-	}
-	updatedModel, _ = updated.Update(saveCmd())
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -574,8 +597,7 @@ end
 	}
 	updated = openedModel.(Model)
 	fileMsg = loadCmd()
-	updatedModel, _ = updated.Update(fileMsg)
-	updated = updatedModel.(Model)
+	updated = updatePluginTest(t, updated, fileMsg)
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)
@@ -590,8 +612,8 @@ end
 		t.Fatalf("leave_count after switching files = %q, want %q", got, "1")
 	}
 
-	updatedModel, _ = updated.closeTab(updated.activeTab)
-	updated = updatedModel.(Model)
+	updatedModel, closeCmd := updated.closeTab(updated.activeTab)
+	updated = drainPluginCmd(t, updatedModel.(Model), closeCmd)
 	p, err = updated.pluginMgr.GetPlugin("sample")
 	if err != nil {
 		t.Fatalf("GetPlugin() error = %v", err)

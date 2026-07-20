@@ -1,9 +1,10 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	log "github.com/charmbracelet/log"
+	"github.com/charmbracelet/x/ansi"
 	sdk "github.com/coder/acp-go-sdk"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/acp"
@@ -26,7 +28,6 @@ import (
 	"teak/internal/editor/overlays"
 	"teak/internal/filetree"
 	"teak/internal/git"
-	"teak/internal/highlight"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
 	"teak/internal/plugin"
@@ -60,87 +61,180 @@ const (
 	SidebarDebugger
 )
 
-// Model is the root Bubbletea model.
+// Model is the root Bubble Tea value passed through tea.Model.
+//
+// It is intentionally a small handle. Bubble Tea boxes the value returned by
+// every Update in an interface, so keeping the complete UI graph directly in
+// Model used to copy roughly 650 KiB for every event. The mutable graph lives
+// in modelState, which has exactly one owner: the running Bubble Tea program.
+//
+// A copied Model aliases that owner; it is not a state snapshot. Commands must
+// capture only immutable document snapshots and scalar request metadata, never
+// a Model, when their result depends on the state at dispatch time. NewModel
+// always allocates a distinct modelState. The zero value is supported only for
+// View/Update safety and is initialized lazily by Update.
 type Model struct {
-	editors              []editor.Editor
-	activeTab            int
-	tabBar               editor.TabBar
-	tree                 filetree.Model
-	theme                ui.Theme
-	status               string
-	width                int
-	height               int
-	showHelp             bool
-	helpM                editor.HelpModel
-	showTree             bool
-	showSearch           bool
-	searchMode           search.Mode
-	searchM              search.Model
-	focus                FocusArea
-	rootDir              string
-	lspMgr               *lsp.Manager
-	goToLineMode         bool
-	goToLineInput        string
-	welcome              *editor.Welcome
-	treeContextMenu      editor.ContextMenu
-	treeContextPath      string
-	renameMode           bool
-	renameInput          string
-	pendingCursor        *text.Position               // cursor to set after async file load
-	fileDiagnostics      map[string]int               // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
-	dirDiagnostics       map[string]int               // dir path → worst child severity
-	gitBranch            string                       // current git branch name
-	gitPanel             git.Model                    // git sidebar panel
-	watcher              *fileWatcher                 // watches files/dirs for external changes
-	newFileMode          bool                         // input mode for new file name
-	newFolderMode        bool                         // input mode for new folder name
-	newItemInput         string                       // input buffer for new file/folder name
-	newItemDir           string                       // directory to create new item in
-	deleteConfirm        bool                         // confirming deletion
-	deleteTarget         string                       // path to delete
-	diffViews            map[int]diff.Model           // tab index → diff view model
-	sidebarTab           SidebarTab                   // active sidebar tab
-	showBranchPicker     bool                         // branch picker overlay visible
-	branchPickerM        git.BranchPickerModel        // branch picker model
-	gitContextMenu       editor.ContextMenu           // context menu for git panel
-	gitContextEntry      *git.StatusEntry             // entry right-clicked in git panel
-	gitContextStaged     bool                         // whether the right-clicked entry is in staged section
-	gitContextPath       string                       // path of right-clicked entry (file or dir)
-	unsavedConfirm       *overlay.Confirm             // unsaved changes dialog shown on quit
-	overlayStack         overlay.Stack                // stack for picker overlays (quick open, command palette)
-	cachedFiles          []string                     // cached file list for quick open
-	cachedFilesReady     bool                         // true after file list has been loaded
-	fileListGeneration   int                          // invalidates stale async file scans
-	problemsPanel        problems.Model               // problems panel for diagnostics
-	showSettings         bool                         // settings overlay visible
-	settingsM            settings.Model               // settings editor model
-	closedTabs           []ClosedTab                  // history of closed tabs for reopening
-	debuggerPanel        debugger.Model               // debugger panel
-	debugMgr             *dap.Manager                 // debug session manager
-	breakpoints          map[string][]breakpointEntry // file path → sorted breakpoint entries (0-based)
-	currentExecFile      string                       // file with current execution point
-	currentExecLine      int                          // current execution line (0-based), -1 when not paused
-	showAgent            bool                         // agent panel visible
-	agentPanel           agent.Model                  // agent chat panel
-	agentWrites          agentWriteState              // serializes accepted/rejected ACP write decisions
-	agentWriteRoot       *os.Root                     // pinned workspace root for confined ACP writes
-	pluginMgr            *plugin.Manager              // Lua plugin manager
-	pluginKeySequence    string                       // pending plugin key sequence
-	pluginFeedDepth      int                          // nested synthetic key dispatch from plugins
-	acpMgr               *acp.Manager                 // ACP agent manager
-	coordinator          *Coordinator                 // orchestrates LSP/DAP/ACP coordinators
-	logFile              *os.File                     // log file handle for cleanup
-	pendingCloseTab      int                          // tab index pending close-unsaved confirm (-1 = none)
-	untitledCounter      int                          // counter for "Untitled-N" tabs
-	saveAsMode           bool                         // save-as input mode
-	saveAsInput          string                       // save-as path input buffer
-	lastSearchResults    []search.Result              // saved results from last search
-	lastSearchIndex      int                          // current index in lastSearchResults
-	pendingSaves         map[int]pendingSaveRequest   // request id -> save continuation state
-	nextSaveRequestID    int                          // monotonically increasing save request id
-	appCfg               config.Config                // app config for feature flags
-	gitRefreshGeneration int
-	overlayRequests      overlayRequestTracker
+	*modelState
+}
+
+// modelState holds the root UI graph. Keep it private so direct state owners
+// can only be created inside this package; copying Model is explicitly an
+// aliasing operation, not a fork.
+type modelState struct {
+	editors                   []editor.Editor
+	activeTab                 int
+	tabBar                    editor.TabBar
+	tree                      filetree.Model
+	theme                     ui.Theme
+	activeThemeName           string // theme represented by the live, cached style models
+	status                    string
+	width                     int
+	height                    int
+	showHelp                  bool
+	helpM                     editor.HelpModel
+	showTree                  bool
+	showSearch                bool
+	searchMode                search.Mode
+	searchM                   search.Model
+	focus                     FocusArea
+	rootDir                   string
+	lspMgr                    *lsp.Manager
+	goToLineMode              bool
+	goToLineInput             string
+	welcome                   *editor.Welcome
+	treeContextMenu           editor.ContextMenu
+	treeContextPath           string
+	renameMode                bool
+	renameInput               string
+	pendingCursor             *pendingNavigation         // navigation tied to a target path
+	pendingFileLoads          map[uint64]pendingFileLoad // request identity -> target editor
+	nextFileLoadID            uint64
+	pendingDiffLoads          map[uint64]pendingDiffLoad // request identity -> target editor
+	nextDiffLoadID            uint64
+	restoredTabs              map[uint64]session.TabState     // editor identity -> state applied after load
+	sessionRestoreCtx         context.Context                 // cancellation token owned by startup restoration
+	sessionRestoreCancel      context.CancelFunc              // cancels a superseded disk scan
+	sessionRestoreGeneration  uint64                          // rejects late session load results
+	sessionRestoreEligible    bool                            // false after user-created UI state wins
+	fileDiagnostics           map[string]int                  // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
+	dirDiagnostics            map[string]int                  // dir path → worst child severity
+	dirDiagnosticCounts       map[string]map[int]int          // dir path → severity reference counts
+	treeDiagnostics           map[string]int                  // file and directory diagnostics shared with the tree
+	gitBranch                 string                          // current git branch name
+	gitPanel                  git.Model                       // git sidebar panel
+	watcher                   *fileWatcher                    // watches files/dirs for external changes
+	externalConflicts         map[string]externalFileConflict // dirty buffers changed on disk; saving requires a decision
+	externalConflictPrompt    string                          // path owned by the currently visible external-conflict dialog
+	externalConflictBytes     int                             // aggregate retained immutable conflict snapshots
+	externalConflictGen       uint64                          // rejects stale async conflict re-reads
+	externalChangeObserved    map[string]uint64               // newest applied watcher observation per path
+	lastSaveWatcherWatermarks map[string]uint64               // observations older than a completed Teak save
+	externalReads             externalReadState               // one bounded latest-wins disk re-read at a time
+	externalFileReader        externalFileReader              // testable boundary; defaults to readEditorFile
+	newFileMode               bool                            // input mode for new file name
+	newFolderMode             bool                            // input mode for new folder name
+	newItemInput              string                          // input buffer for new file/folder name
+	newItemDir                string                          // directory to create new item in
+	deleteConfirm             bool                            // confirming deletion
+	deleteTarget              string                          // path to delete
+	diffViews                 map[int]diff.Model              // tab index → diff view model
+	sidebarTab                SidebarTab                      // active sidebar tab
+	showBranchPicker          bool                            // branch picker overlay visible
+	branchPickerM             git.BranchPickerModel           // branch picker model
+	gitContextMenu            editor.ContextMenu              // context menu for git panel
+	gitContextEntry           *git.StatusEntry                // entry right-clicked in git panel
+	gitContextStaged          bool                            // whether the right-clicked entry is in staged section
+	gitContextPath            string                          // path of right-clicked entry (file or dir)
+	unsavedConfirm            *overlay.Confirm                // unsaved changes dialog shown on quit
+	quitApproved              bool                            // allows the terminal tea.QuitMsg through QuitFilter
+	shutdownStarted           bool                            // cleanup runs asynchronously before terminal quit
+	sessionSaves              sessionSaveState                // one in-flight disk write plus a latest-wins snapshot
+	sessionSaver              func(session.State) error       // session.Save in production; replaceable by tests
+	overlayStack              overlay.Stack                   // stack for picker overlays (quick open, command palette)
+	cachedFiles               []string                        // cached file list for quick open
+	cachedFilesReady          bool                            // true after file list has been loaded
+	fileListGeneration        int                             // invalidates stale async file scans
+	fileListCancel            context.CancelFunc              // stops a superseded Quick Open scan
+	problemsPanel             problems.Model                  // problems panel for diagnostics
+	showSettings              bool                            // settings overlay visible
+	settingsM                 settings.Model                  // settings editor model
+	settingsSaving            bool                            // settings persistence is in flight
+	closedTabs                []ClosedTab                     // history of closed tabs for reopening
+	debuggerPanel             debugger.Model                  // debugger panel
+	debugMgr                  *dap.Manager                    // debug session manager
+	debugRunner               debugRunner                     // testable boundary for blocking DAP commands
+	debugLifecycle            debugLifecycleState             // DAP command generation and pending state
+	breakpoints               map[string][]breakpointEntry    // file path → sorted breakpoint entries (0-based)
+	debugGutterBreakpoints    map[string]*editor.GutterOpts   // projection cache rebuilt only on breakpoint/execution state changes
+	currentExecFile           string                          // file with current execution point
+	currentExecLine           int                             // current execution line (0-based), -1 when not paused
+	showAgent                 bool                            // agent panel visible
+	agentPanel                agent.Model                     // agent chat panel
+	agentWrites               agentWriteState                 // serializes accepted/rejected ACP write decisions
+	agentWriteRoot            *os.Root                        // pinned workspace root for confined ACP writes
+	pluginMgr                 *plugin.Manager                 // Lua plugin manager
+	pluginLoadGeneration      uint64                          // rejects stale asynchronous Lua loads
+	pluginLoading             bool                            // true until the startup Lua load returns
+	pluginKeySequence         string                          // pending plugin key sequence
+	pluginFeedDepth           int                             // nested synthetic key dispatch from plugins
+	acpMgr                    *acp.Manager                    // ACP agent manager
+	coordinator               *Coordinator                    // orchestrates LSP/DAP/ACP coordinators
+	logFile                   *os.File                        // log file handle for cleanup
+	pendingCloseTab           int                             // tab index pending close-unsaved confirm (-1 = none)
+	untitledCounter           int                             // counter for "Untitled-N" tabs
+	saveAsMode                bool                            // save-as input mode
+	saveAsInput               string                          // save-as path input buffer
+	saveAsDestinationPromptID int                             // pending Save As overwrite confirmation, 0 when none
+	lastSearchResults         []search.Result                 // saved results from last search
+	lastSearchIndex           int                             // current index in lastSearchResults
+	pendingSaves              map[int]pendingSaveRequest      // request id -> save continuation state
+	nextSaveRequestID         int                             // monotonically increasing save request id
+	appCfg                    config.Config                   // app config for feature flags
+	gitRefreshGeneration      int
+	treeRefreshGeneration     uint64
+	treeRefreshCancel         context.CancelFunc
+	treeActionGeneration      uint64             // identity for the one serialized filesystem mutation
+	treeActionCancel          context.CancelFunc // stops work only during shutdown or before logical commit
+	treeActionInFlight        bool               // destructive tree actions are rejected while one is active
+	overlayRequests           overlayRequestTracker
+	documentRequests          documentRequestTracker
+	workspaceEdits            workspaceEditState // serial background workspace-edit preparation/commit
+	replaces                  replaceAsyncState  // latest-wins background search/replace preparation
+	lspChanges                *lspChangePreparer // serializes immutable full-text preparation per LSP document
+	codeActionCommandGen      uint64
+	codeActionCommandStop     context.CancelFunc
+}
+
+// ensureState makes the zero Model safe at the Bubble Tea boundary. It is not
+// used for normal construction: NewModel installs the fully configured state
+// graph. Keeping this minimal avoids doing I/O or starting subsystems for a
+// zero-value view used by tests and embedding hosts.
+func (m Model) ensureState() Model {
+	if m.modelState != nil {
+		return m
+	}
+	theme := ui.DefaultTheme()
+	m.modelState = &modelState{
+		theme:                     theme,
+		tabBar:                    editor.NewTabBar(theme),
+		pendingCloseTab:           -1,
+		pendingSaves:              make(map[int]pendingSaveRequest),
+		pendingFileLoads:          make(map[uint64]pendingFileLoad),
+		pendingDiffLoads:          make(map[uint64]pendingDiffLoad),
+		restoredTabs:              make(map[uint64]session.TabState),
+		externalChangeObserved:    make(map[string]uint64),
+		lastSaveWatcherWatermarks: make(map[string]uint64),
+		fileDiagnostics:           make(map[string]int),
+		dirDiagnostics:            make(map[string]int),
+		dirDiagnosticCounts:       make(map[string]map[int]int),
+		treeDiagnostics:           make(map[string]int),
+		breakpoints:               make(map[string][]breakpointEntry),
+		debugGutterBreakpoints:    make(map[string]*editor.GutterOpts),
+		currentExecLine:           -1,
+		nextSaveRequestID:         1,
+		lspChanges:                newLSPChangePreparer(),
+	}
+	return m
 }
 
 // ClosedTab stores information about a closed tab for reopening.
@@ -153,12 +247,22 @@ type gitRefreshDebounceMsg struct {
 	generation int
 }
 
+// Replace All is prepared outside the UI update path, but remains bounded so a
+// generated/minified file cannot reserve excessive transient memory.
+const (
+	maxReplaceAllBytes    = 8 << 20
+	maxReplaceAllMatches  = 10_000
+	maxReplaceResultBytes = 64 << 20
+)
+
 // NewModel creates a new app model, optionally loading a file.
 func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, error) {
+	if err := appCfg.Validate(); err != nil {
+		return Model{}, fmt.Errorf("invalid config: %w", err)
+	}
+
 	// Configure charmbracelet logger to file (not stderr, which Bubbletea owns)
-	logDir := filepath.Join(os.Getenv("HOME"), ".local", "state", "teak")
-	_ = os.MkdirAll(logDir, 0o755)
-	logFile, err := os.OpenFile(filepath.Join(logDir, "teak.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := openPrivateLogFile(os.Getenv("HOME"))
 	if err != nil {
 		logFile = nil // fall back to discarding logs rather than corrupting TUI
 	}
@@ -197,32 +301,45 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		})
 	}
 
-	m := Model{
-		theme:             theme,
-		rootDir:           rootDir,
-		tabBar:            editor.NewTabBar(theme),
-		lspMgr:            lsp.NewManager(rootDir, lspConfigs),
-		treeContextMenu:   editor.NewContextMenu(theme),
-		fileDiagnostics:   make(map[string]int),
-		dirDiagnostics:    make(map[string]int),
-		logFile:           logFile,
-		pendingCloseTab:   -1,
-		pendingSaves:      make(map[int]pendingSaveRequest),
-		nextSaveRequestID: 1,
-		appCfg:            appCfg,
-		gitBranch:         detectGitBranch(rootDir),
-		gitPanel:          git.New(rootDir, theme),
-		branchPickerM:     git.NewBranchPicker(theme),
-		gitContextMenu:    editor.NewContextMenu(theme),
-		helpM:             editor.NewHelpModel(theme),
-		problemsPanel:     problems.New(theme, rootDir),
-		settingsM:         settings.New(theme, appCfg, config.ConfigPath()),
-		debuggerPanel:     debugger.New(theme),
-		debugMgr:          dap.NewManager(rootDir),
-		breakpoints:       make(map[string][]breakpointEntry),
-		currentExecLine:   -1,
-		agentPanel:        agent.New(theme),
-	}
+	m := Model{modelState: &modelState{
+		theme:                     theme,
+		activeThemeName:           appCfg.UI.Theme,
+		rootDir:                   rootDir,
+		tabBar:                    editor.NewTabBar(theme),
+		lspMgr:                    lsp.NewManager(rootDir, lspConfigs),
+		treeContextMenu:           editor.NewContextMenu(theme),
+		fileDiagnostics:           make(map[string]int),
+		dirDiagnostics:            make(map[string]int),
+		dirDiagnosticCounts:       make(map[string]map[int]int),
+		treeDiagnostics:           make(map[string]int),
+		logFile:                   logFile,
+		pendingCloseTab:           -1,
+		pendingSaves:              make(map[int]pendingSaveRequest),
+		pendingFileLoads:          make(map[uint64]pendingFileLoad),
+		pendingDiffLoads:          make(map[uint64]pendingDiffLoad),
+		restoredTabs:              make(map[uint64]session.TabState),
+		externalChangeObserved:    make(map[string]uint64),
+		lastSaveWatcherWatermarks: make(map[string]uint64),
+		nextSaveRequestID:         1,
+		appCfg:                    appCfg,
+		sessionSaver:              session.Save,
+		gitBranch:                 "",
+		gitPanel:                  git.New(rootDir, theme),
+		branchPickerM:             git.NewBranchPicker(theme),
+		gitContextMenu:            editor.NewContextMenu(theme),
+		helpM:                     editor.NewHelpModel(theme),
+		problemsPanel:             problems.New(theme, rootDir),
+		settingsM:                 settings.New(theme, appCfg, config.ConfigPath()),
+		debuggerPanel:             debugger.New(theme),
+		debugMgr:                  dap.NewManager(rootDir),
+		breakpoints:               make(map[string][]breakpointEntry),
+		debugGutterBreakpoints:    make(map[string]*editor.GutterOpts),
+		currentExecLine:           -1,
+		agentPanel:                agent.New(theme),
+		pluginLoadGeneration:      1,
+		pluginLoading:             true,
+		lspChanges:                newLSPChangePreparer(),
+	}}
 	if rootDir != "" {
 		m.agentWriteRoot, err = os.OpenRoot(rootDir)
 		if err != nil {
@@ -237,20 +354,12 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 	if appCfg.Agent.Enabled && appCfg.Agent.Command != "" {
 		m.acpMgr = acp.NewManager(rootDir, appCfg.Agent.Command, appCfg.Agent.Args)
 	}
-	if mgr, err := plugin.NewManager(plugin.DefaultDir()); err == nil {
-		m.pluginMgr = mgr
-		if err := m.pluginMgr.LoadAllPlugins(); err != nil {
-			log.Error("plugin load failed", "err", err)
-		}
-	} else {
-		log.Error("plugin manager init failed", "err", err)
-	}
-
 	// Create coordinator to orchestrate LSP/DAP/ACP
 	m.coordinator = NewCoordinator(m.lspMgr, m.debugMgr, m.acpMgr)
 
 	if rootDir != "" {
-		m.tree = filetree.New(rootDir, theme)
+		m.tree = filetree.NewEmpty(rootDir, theme)
+		m.tree.SetDiagnostics(m.treeDiagnostics)
 		if w, err := newFileWatcher(rootDir); err == nil {
 			m.watcher = w
 		}
@@ -270,19 +379,18 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 	// Show tree based on config
 	m.showTree = appCfg.UI.ShowTree
 
-	// Show welcome screen when no file is provided
+	// Show welcome screen when no file is provided. Session I/O is deferred to
+	// Init so NewModel can always render its first frame without disk latency.
 	if filePath == "" {
-		// Try to restore session
-		if appCfg.Session.Enabled {
-			if state, err := session.Load(); err == nil && state.RootDir == rootDir && len(state.Tabs) > 0 {
-				m.restoreSession(state)
-				return m, nil
-			}
-		}
 		w := editor.NewWelcome(theme)
 		m.welcome = &w
 		m.showTree = true
 		m.focus = FocusTree
+		if appCfg.Session.Enabled && rootDir != "" {
+			m.sessionRestoreCtx, m.sessionRestoreCancel = context.WithCancel(context.Background())
+			m.sessionRestoreGeneration = 1
+			m.sessionRestoreEligible = true
+		}
 	}
 
 	return m, nil
@@ -290,12 +398,54 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 
 // cleanup closes resources before quitting.
 func (m *Model) cleanup() {
-	_ = m.triggerPluginEvents(plugin.EventContext{Event: plugin.EventVimLeave})
-	// Shutdown all coordinators (which shuts down LSP/DAP/ACP managers)
-	if m.coordinator != nil {
-		m.coordinator.Shutdown()
+	cleanupModelState(m.modelState)
+}
+
+// cleanupModelState is intentionally state-only so the asynchronous shutdown
+// command never captures a live Model handle. At this point the state is no
+// longer routed through Update and is exclusively owned by teardown.
+func cleanupModelState(m *modelState) {
+	if m == nil {
+		return
 	}
-	m.saveSession()
+	if m.sessionRestoreCancel != nil {
+		m.sessionRestoreCancel()
+		m.sessionRestoreCancel = nil
+	}
+	if m.treeRefreshCancel != nil {
+		m.treeRefreshCancel()
+		m.treeRefreshCancel = nil
+	}
+	if m.treeActionCancel != nil {
+		m.treeActionCancel()
+		m.treeActionCancel = nil
+	}
+	if m.replaces.cancel != nil {
+		m.replaces.cancel()
+		m.replaces.cancel = nil
+	}
+	if m.workspaceEdits.cancel != nil {
+		m.workspaceEdits.cancel()
+		m.workspaceEdits.cancel = nil
+	}
+	if m.codeActionCommandStop != nil {
+		m.codeActionCommandStop()
+		m.codeActionCommandStop = nil
+	}
+	if m.externalReads.cancel != nil {
+		m.externalReads.cancel()
+		m.externalReads.cancel = nil
+	}
+	// Shutdown all protocol children outside the Bubble Tea Update path, but
+	// never wait without a global bound. The managers kill and reap stubborn
+	// children before this returns whenever the deadline permits.
+	if m.coordinator != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if !m.coordinator.ShutdownAndWait(ctx) {
+			log.Warn("protocol shutdown deadline reached; forced teardown may still be unwinding")
+		}
+		cancel()
+	}
 	if m.logFile != nil {
 		_ = m.logFile.Close()
 	}
@@ -311,15 +461,16 @@ func (m *Model) cleanup() {
 	}
 }
 
-// saveSession writes session state to disk.
-func (m *Model) saveSession() {
+// sessionSnapshot captures the editor state before a background session save.
+// It only reads model state, so the returned value is safe for a tea.Cmd.
+func (m Model) sessionSnapshot() (session.State, bool) {
 	if !m.appCfg.Session.Enabled {
-		return
+		return session.State{}, false
 	}
 	state := session.State{
 		Version:   1,
 		RootDir:   m.rootDir,
-		ActiveTab: m.activeTab,
+		ActiveTab: -1,
 	}
 	for i, ed := range m.editors {
 		fp := ed.Buffer.FilePath
@@ -329,82 +480,120 @@ func (m *Model) saveSession() {
 		if _, isDiff := m.diffViews[i]; isDiff {
 			continue
 		}
+		if i == m.activeTab {
+			state.ActiveTab = len(state.Tabs)
+		}
 		state.Tabs = append(state.Tabs, session.TabState{
-			FilePath:   fp,
-			CursorLine: ed.Buffer.Cursor.Line,
-			CursorCol:  ed.Buffer.Cursor.Col,
-			ScrollY:    ed.Viewport.ScrollY,
-			Pinned:     i < len(m.tabBar.Tabs) && !m.tabBar.Tabs[i].Preview,
+			FilePath:    fp,
+			CursorLine:  ed.Buffer.Cursor.Line,
+			CursorCol:   ed.Buffer.Cursor.Col,
+			ScrollY:     ed.Viewport.ScrollY,
+			WrapScrollY: ed.Viewport.WrapScrollY,
+			Pinned:      i < len(m.tabBar.Tabs) && !m.tabBar.Tabs[i].Preview,
 		})
 	}
-	_ = session.Save(state)
+	return state, true
 }
 
 type sessionAutoSaveMsg struct{}
 
-// restoreSession rebuilds tabs from a saved session state.
-// Called from NewModel, sets up editors that Init() will load asynchronously.
-func (m *Model) restoreSession(state session.State) {
-	// Clear the initial empty editor.
-	m.editors = nil
-	m.tabBar.Tabs = nil
+type sessionSaveResultMsg struct {
+	generation uint64
+	err        error
+}
 
-	for _, tab := range state.Tabs {
-		// Skip files that no longer exist
-		if _, err := os.Stat(tab.FilePath); err != nil {
-			continue
-		}
-		buf := text.NewBuffer()
-		buf.FilePath = tab.FilePath
-		cfg := editor.DefaultConfig()
-		cfg.TabSize = m.appCfg.Editor.TabSize
-		cfg.InsertTabs = m.appCfg.Editor.InsertTabs
-		cfg.AutoIndent = m.appCfg.Editor.AutoIndent
-		cfg.CommentPrefix = editor.CommentPrefixForFile(tab.FilePath)
-		ed := editor.New(buf, m.theme, cfg)
-		m.editors = append(m.editors, ed)
-		idx := len(m.editors) - 1
-		m.tabBar.AddTab(filepath.Base(tab.FilePath), tab.FilePath)
-		if tab.Pinned {
-			m.tabBar.PinTab(idx)
-		}
+type sessionSaveState struct {
+	inFlight   bool
+	generation uint64
+	queued     *session.State
+}
+
+// startSessionSave starts exactly one background write. Callers must either
+// have no write in flight or deliberately replace the queued latest snapshot.
+func (m Model) startSessionSave(state session.State) (Model, tea.Cmd) {
+	m.sessionSaves.inFlight = true
+	m.sessionSaves.generation++
+	generation := m.sessionSaves.generation
+	saver := m.sessionSaver
+	if saver == nil {
+		saver = session.Save
 	}
-	if len(m.editors) > 0 {
-		activeIdx := state.ActiveTab
-		if activeIdx >= len(m.editors) {
-			activeIdx = 0
-		}
-		m.activeTab = activeIdx
-		m.tabBar.ActiveIdx = activeIdx
-		m.focus = FocusEditor
-		// Set pending cursor for active tab
-		if activeIdx < len(state.Tabs) {
-			tab := state.Tabs[activeIdx]
-			if tab.CursorLine > 0 || tab.CursorCol > 0 {
-				pos := text.Position{Line: tab.CursorLine, Col: tab.CursorCol}
-				m.pendingCursor = &pos
-			}
-		}
+	return m, func() tea.Msg {
+		return sessionSaveResultMsg{generation: generation, err: saver(state)}
 	}
+}
+
+func (m Model) requestSessionSave() (Model, tea.Cmd) {
+	state, ok := m.sessionSnapshot()
+	if !ok {
+		return m, nil
+	}
+	if m.sessionSaves.inFlight {
+		m.sessionSaves.queued = &state
+		return m, nil
+	}
+	return m.startSessionSave(state)
+}
+
+func (m Model) nextSessionAutoSaveTick() tea.Cmd {
+	if !m.appCfg.Session.Enabled || m.appCfg.Session.AutoSaveInterval <= 0 || m.shutdownStarted {
+		return nil
+	}
+	interval := time.Duration(m.appCfg.Session.AutoSaveInterval) * time.Second
+	return tea.Tick(interval, func(time.Time) tea.Msg { return sessionAutoSaveMsg{} })
+}
+
+func (m Model) handleSessionSaveResult(msg sessionSaveResultMsg) (Model, tea.Cmd) {
+	if !m.sessionSaves.inFlight || msg.generation != m.sessionSaves.generation {
+		return m, nil
+	}
+	m.sessionSaves.inFlight = false
+	if msg.err != nil {
+		log.Warn("session save failed", "err", msg.err)
+	}
+	if m.sessionSaves.queued != nil {
+		state := *m.sessionSaves.queued
+		m.sessionSaves.queued = nil
+		return m.startSessionSave(state)
+	}
+	if m.shutdownStarted {
+		return m, m.shutdownCmd()
+	}
+	return m, m.nextSessionAutoSaveTick()
 }
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
+	if m.modelState == nil {
+		return nil
+	}
 	var cmds []tea.Cmd
 
 	// Load initial file content asynchronously
 	for i, ed := range m.editors {
 		if ed.Buffer.FilePath != "" {
-			cmds = append(cmds, loadFileCmd(ed.Buffer.FilePath, i, i > 0))
+			// Init has a value receiver, so mutations to pendingFileLoads would
+			// not survive into Bubble Tea's stored model. The stable editor ID is
+			// sufficient here; all subsequent user-triggered loads have a tracked
+			// cancellable request identity.
+			cmds = append(cmds, loadFileCmd(context.Background(), ed.Buffer.FilePath, ed.ID(), 0, i > 0))
 		}
+	}
+	if m.sessionRestoreEligible && m.sessionRestoreCtx != nil {
+		cmds = append(cmds, sessionRestoreCmd(m.sessionRestoreCtx, m.sessionRestoreGeneration, m.rootDir))
 	}
 
 	// Start listening for LSP messages
 	cmds = append(cmds, m.listenLSP())
 
 	// Initial git panel refresh
-	if refreshCmd := m.gitPanel.Refresh(); refreshCmd != nil {
-		cmds = append(cmds, refreshCmd)
+	cmds = append(cmds, git.DetectRepositoryCmd(m.rootDir))
+	if m.rootDir != "" {
+		rootDir, theme, generation := m.rootDir, m.theme, m.treeRefreshGeneration
+		cmds = append(cmds, func() tea.Msg {
+			tree := filetree.New(rootDir, theme)
+			return treeLoadedMsg{Tree: tree, Generation: generation}
+		})
 	}
 
 	// Start file watcher listener
@@ -433,13 +622,30 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.listenACP(), m.startAgent())
 	}
 
-	cmds = append(cmds, pluginEventCmd(plugin.EventContext{Event: plugin.EventVimEnter}))
+	// Plugin initialization executes user-provided Lua and is intentionally
+	// deferred until after the model can render its first frame.
+	cmds = append(cmds, pluginLoadCmd(plugin.DefaultDir(), m.pluginLoadGeneration))
 
 	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m = m.ensureState()
+	if _, ok := msg.(shutdownCompleteMsg); ok {
+		m.quitApproved = true
+		m.status = "Shutdown complete"
+		return m, tea.Quit
+	}
+	if m.shutdownStarted {
+		if result, ok := msg.(sessionSaveResultMsg); ok {
+			return m.handleSessionSaveResult(result)
+		}
+		// Once cleanup begins, no further UI mutation is allowed. In particular,
+		// an external interrupt must not bypass the process-reaping command.
+		return m, nil
+	}
+
 	m.agentPanel.PruneCancelledWrites()
 
 	switch msg := msg.(type) {
@@ -458,9 +664,104 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case pluginEventMsg:
-		return m, m.triggerPluginEvents(msg.Events...)
+		if m.pluginMgr == nil || len(msg.Events) == 0 {
+			return m, nil
+		}
+		events := make([]plugin.EventContext, 0, len(msg.Events))
+		for _, event := range msg.Events {
+			if ctx := m.enrichPluginEventContext(event); ctx.Event != "" {
+				events = append(events, ctx)
+			}
+		}
+		if len(events) == 0 {
+			return m, nil
+		}
+		return m, pluginEventDispatchCmd(m.pluginMgr, newPluginAsyncRuntime(m), events)
+
+	case pluginDispatchResultMsg:
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Plugin event error: %v", msg.Err)
+		}
+		if msg.Runtime == nil {
+			return m, nil
+		}
+		cmd := msg.Runtime.apply(&m)
+		return m, cmd
+
+	case pluginKeyDispatchResultMsg:
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Plugin key error: %v", msg.Err)
+		}
+		if msg.Runtime == nil {
+			return m, nil
+		}
+		cmd := msg.Runtime.apply(&m)
+		return m, cmd
+
+	case treeLoadedMsg:
+		if msg.Generation != m.treeRefreshGeneration {
+			return m, nil
+		}
+		m.tree = msg.Tree
+		m.tree.SetDiagnostics(m.treeDiagnostics)
+		gitStatusMap := make(map[string]string)
+		for _, entry := range m.gitPanel.Entries {
+			if entry.IsUnstagedChange() {
+				gitStatusMap[entry.Path] = entry.DisplayStatus(false)
+			} else if entry.IsStagedChange() {
+				gitStatusMap[entry.Path] = entry.DisplayStatus(true)
+			}
+		}
+		m.tree.SetGitStatus(gitStatusMap)
+		m.relayout()
+		return m, nil
+
+	case treeRefreshDebounceMsg:
+		if msg.Generation != m.treeRefreshGeneration {
+			return m, nil
+		}
+		return m, m.startTreeRefresh(msg.Generation)
+
+	case treeRefreshResultMsg:
+		if msg.Generation != m.treeRefreshGeneration {
+			return m, nil
+		}
+		m.treeRefreshCancel = nil
+		if msg.Err != nil {
+			if !errors.Is(msg.Err, context.Canceled) {
+				m.status = fmt.Sprintf("Could not refresh file tree: %v", msg.Err)
+			}
+			return m, nil
+		}
+		m.tree.ApplyRefresh(msg.Refresh)
+		return m, nil
+
+	case sessionRestoreResultMsg:
+		cmd := m.applySessionRestore(msg)
+		return m, cmd
+
+	case pluginLoadResultMsg:
+		if msg.Generation != m.pluginLoadGeneration {
+			if msg.Manager != nil {
+				msg.Manager.Shutdown()
+			}
+			return m, nil
+		}
+		m.pluginLoading = false
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Plugin load failed: %v", msg.Err)
+			if msg.Manager != nil {
+				msg.Manager.Shutdown()
+			}
+			return m, nil
+		}
+		m.pluginMgr = msg.Manager
+		return m, pluginEventCmd(plugin.EventContext{Event: plugin.EventVimEnter})
 
 	case tea.KeyPressMsg:
+		// Any explicit keyboard interaction belongs to the user, not a delayed
+		// startup snapshot. Do not let the latter replace a tab or buffer later.
+		m.cancelSessionRestore()
 		model, cmd, handled := m.handleKeyPressPrecedence(msg)
 		m = model
 		if handled {
@@ -473,6 +774,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		m.cancelSessionRestore()
 		return m.handleMouseClick(msg)
 
 	case tea.MouseMotionMsg:
@@ -483,6 +785,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
+
+	case settingsSaveResultMsg:
+		m.settingsSaving = false
+		if msg.Err != nil {
+			m.settingsM.SetStatus(fmt.Sprintf("Could not save settings: %v", msg.Err))
+			m.status = "Settings were not saved"
+			return m, nil
+		}
+		m.applySavedSettings(msg.Config)
+		status := "Settings saved and applied"
+		if msg.Config.UI.Theme != m.activeThemeName {
+			status = "Settings saved; restart Teak to apply the new theme"
+		}
+		m.settingsM.MarkSaved(msg.Config, status)
+		m.status = status
+		return m, nil
+
+	case settingsDiscardMsg:
+		m.unsavedConfirm = nil
+		m.discardSettingsChanges()
+		return m, nil
+
+	case settingsKeepEditingMsg:
+		m.unsavedConfirm = nil
+		m.settingsM.SetStatus("Changes kept — press Ctrl+S to save")
+		return m, nil
 
 	case filetree.DirExpandedMsg:
 		var cmd tea.Cmd
@@ -502,7 +830,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			filePath = filepath.Join(m.rootDir, filePath)
 		}
 		pos := text.Position{Line: msg.Line, Col: msg.Col}
-		m.pendingCursor = &pos
+		m.setPendingCursor(filePath, pos)
 		return m.openFilePinned(filePath)
 
 	case search.CloseSearchMsg:
@@ -515,65 +843,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case search.ReplaceOneMsg:
-		ed := m.activeEditor()
-		if ed == nil {
-			return m, nil
-		}
-		content := ed.Buffer.Content()
-		cursor := ed.Buffer.Cursor
-		cursorOff := ed.Buffer.Rope().PositionToOffset(cursor)
-		idx := strings.Index(content[cursorOff:], msg.Query)
-		if idx < 0 {
-			// Wrap around: search from beginning
-			idx = strings.Index(content, msg.Query)
-			if idx < 0 {
-				return m, nil
-			}
-		} else {
-			idx += cursorOff
-		}
-		startPos := ed.Buffer.Rope().OffsetToPosition(idx)
-		endPos := ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Query))
-		ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
-		ed.Buffer.Cursor = ed.Buffer.Rope().OffsetToPosition(idx + len(msg.Replacement))
-		editorID := ed.ID()
-		version := ed.Buffer.Version()
-		return m, func() tea.Msg {
-			return editor.RetokenizeMsg{EditorID: editorID, Version: version}
-		}
+		return m, m.startSearchReplace(msg.Query, msg.Replacement, false)
 
 	case search.ReplaceAllMsg:
-		ed := m.activeEditor()
-		if ed == nil {
-			return m, nil
-		}
-		content := ed.Buffer.Content()
-		if !strings.Contains(content, msg.Query) {
-			return m, nil
-		}
-		// Find all matches and replace in reverse order to preserve offsets
-		var offsets []int
-		searchFrom := 0
-		for {
-			idx := strings.Index(content[searchFrom:], msg.Query)
-			if idx < 0 {
-				break
-			}
-			offsets = append(offsets, searchFrom+idx)
-			searchFrom += idx + len(msg.Query)
-		}
-		for i := len(offsets) - 1; i >= 0; i-- {
-			startPos := ed.Buffer.Rope().OffsetToPosition(offsets[i])
-			endPos := ed.Buffer.Rope().OffsetToPosition(offsets[i] + len(msg.Query))
-			ed.Buffer.ReplaceRange(startPos, endPos, []byte(msg.Replacement))
-		}
-		editorID := ed.ID()
-		version := ed.Buffer.Version()
-		return m, func() tea.Msg {
-			return editor.RetokenizeMsg{EditorID: editorID, Version: version}
-		}
+		return m, m.startSearchReplace(msg.Query, msg.Replacement, true)
+
+	case replacePreparedMsg:
+		return m.handleReplacePrepared(msg)
 
 	case search.SearchIndexingMsg:
+		if m.showSearch {
+			var cmd tea.Cmd
+			m.searchM, cmd = m.searchM.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case search.DebounceTickMsg:
 		if m.showSearch {
 			var cmd tea.Cmd
 			m.searchM, cmd = m.searchM.Update(msg)
@@ -590,14 +876,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionAutoSaveMsg:
-		m.saveSession()
-		if m.appCfg.Session.Enabled && m.appCfg.Session.AutoSaveInterval > 0 {
-			interval := time.Duration(m.appCfg.Session.AutoSaveInterval) * time.Second
-			return m, tea.Tick(interval, func(t time.Time) tea.Msg {
-				return sessionAutoSaveMsg{}
-			})
-		}
-		return m, nil
+		return m.requestSessionSave()
+
+	case sessionSaveResultMsg:
+		return m.handleSessionSaveResult(msg)
 
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
@@ -622,8 +904,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Index >= 0 && msg.Index < len(m.editors) && msg.Index != m.activeTab {
 			oldPath := m.editors[m.activeTab].Buffer.FilePath
 			newPath := m.editors[msg.Index].Buffer.FilePath
-			m.activeTab = msg.Index
-			m.tabBar.ActiveIdx = msg.Index
+			m.activateTab(msg.Index)
 			return m, tea.Batch(
 				m.triggerPluginEvents(
 					m.pluginEvent(plugin.EventBufLeave, oldPath),
@@ -632,8 +913,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if msg.Index >= 0 && msg.Index < len(m.editors) {
-			m.activeTab = msg.Index
-			m.tabBar.ActiveIdx = msg.Index
+			m.activateTab(msg.Index)
 		}
 		return m, nil
 
@@ -676,31 +956,169 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setEditor(idx, updated)
 		return m, cmd
 
+	case editor.ClipboardPasteResultMsg:
+		// Clipboard reads run outside Update and may finish after focus changes
+		// or after the target tab is gone. The editor ID and generation are
+		// validated by the recipient before any text is inserted.
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
+			return m, nil
+		}
+		previousVersion := m.editors[idx].Buffer.Version()
+		previousCursor := m.editors[idx].Buffer.Cursor
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
+		if updated.Buffer.Version() == previousVersion {
+			// Large clipboard payloads only queue background preparation here;
+			// retain that command even though no edit has committed yet.
+			return m, cmd
+		}
+		if msg.Err != nil {
+			m.status = "Clipboard integration unavailable; pasted local copy"
+		}
+		return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
+
+	case editor.PastePreparedMsg:
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
+			return m, nil
+		}
+		previousVersion := m.editors[idx].Buffer.Version()
+		previousCursor := m.editors[idx].Buffer.Cursor
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
+		if updated.Buffer.Version() == previousVersion {
+			return m, cmd
+		}
+		if msg.SourceErr != nil {
+			m.status = "Clipboard integration unavailable; pasted local copy"
+		}
+		return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
+
+	case editor.ClipboardCopyPreparedMsg:
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
+			return m, nil
+		}
+		previousVersion := m.editors[idx].Buffer.Version()
+		previousCursor := m.editors[idx].Buffer.Cursor
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
+		if updated.Buffer.Version() == previousVersion {
+			return m, cmd
+		}
+		return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
+
+	case editor.ClipboardCopyResultMsg:
+		if m.editorIndexForAsyncMessage(msg.EditorID) < 0 || msg.Err == nil {
+			return m, nil
+		}
+		if !msg.FallbackStored {
+			m.status = fmt.Sprintf("Clipboard copy skipped: %v", msg.Err)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Copied locally; OS clipboard unavailable: %v", msg.Err)
+		return m, nil
+
 	case editor.RequestCompletionCmd:
 		return m.requestCompletion()
 
+	case editor.OccurrenceSearchLimitMsg:
+		m.status = fmt.Sprintf("Select occurrences is limited to files up to %d MiB", msg.MaxBytes>>20)
+		return m, nil
+
+	case editor.ClipboardOperationLimitMsg:
+		m.status = fmt.Sprintf("%s is limited to %d MiB", msg.Operation, msg.MaxBytes>>20)
+		return m, nil
+
+	case editor.MultilineEditLimitMsg:
+		m.status = fmt.Sprintf("%s is limited to %d lines", msg.Operation, msg.MaxLines)
+		return m, nil
+
 	case FileSavedMsg:
+		if msg.WatcherWatermark != 0 {
+			path := cleanExternalConflictPath(msg.Path)
+			m.lastSaveWatcherWatermarks[path] = max(
+				m.lastSaveWatcherWatermarks[path],
+				msg.WatcherWatermark,
+			)
+		}
 		req, hadPendingSave := m.completeSaveRequest(msg.RequestID)
-		m.status = saveSuccessStatus(msg.Path, req.StatusNote)
+		if hadPendingSave && req.AuthorizedConflictGeneration != 0 {
+			path := cleanExternalConflictPath(req.Path)
+			if conflict, ok := m.externalConflicts[path]; ok &&
+				conflict.Generation == req.AuthorizedConflictGeneration {
+				m.clearExternalConflict(path)
+			}
+		}
+		currentSnapshot := false
+		savedEditorIdx := -1
+		var saveAsCmd tea.Cmd
+		var queuedSaveCmd tea.Cmd
+		if hadPendingSave {
+			savedEditorIdx = m.saveRequestEditorIndex(req)
+			if savedEditorIdx >= 0 && req.Snapshot != nil {
+				buf := m.editors[savedEditorIdx].Buffer
+				currentSnapshot = buf.Version() == req.SnapshotVersion && buf.Rope() == req.Snapshot
+				buf.MarkSavedSnapshot(req.Path, req.Snapshot)
+				m.tabBar.Tabs[savedEditorIdx].Dirty = buf.Dirty()
+				if req.SaveAs {
+					saveAsCmd = m.reconcileSaveAs(savedEditorIdx, req.PreviousPath, req.Path)
+				}
+			}
+		}
+		if hadPendingSave && !currentSnapshot {
+			if req.QueuedSnapshot != nil {
+				// A newer snapshot targeting the same successful Save As path is
+				// now an ordinary save: the editor identity has already moved.
+				if req.SaveAs && req.QueuedPath == req.Path {
+					req.QueuedSaveAs = false
+					req.QueuedPreviousPath = ""
+				}
+				m.status = fmt.Sprintf("Saved %s snapshot; saving newer edits", msg.Path)
+				queuedSaveCmd = m.startQueuedSave(msg.RequestID, req)
+			} else {
+				m.status = fmt.Sprintf("Saved %s; newer edits remain unsaved", msg.Path)
+			}
+			if req.QuitAfter && queuedSaveCmd == nil {
+				m.cancelQuitAfterSaves()
+			}
+		} else if hadPendingSave && req.SaveAs {
+			m.status = fmt.Sprintf("Saved as %s", msg.Path)
+			if req.StatusNote != "" {
+				m.status = fmt.Sprintf("%s (%s)", m.status, req.StatusNote)
+			}
+		} else {
+			m.status = saveSuccessStatus(msg.Path, req.StatusNote)
+		}
 		search.InvalidateSemanticIndex(m.rootDir)
-		for i := range m.tabBar.Tabs {
-			if m.tabBar.Tabs[i].FilePath == msg.Path {
-				m.tabBar.Tabs[i].Dirty = false
+		if !hadPendingSave {
+			// Compatibility path for callers that still use SaveFileCmd directly.
+			for i := range m.tabBar.Tabs {
+				if m.tabBar.Tabs[i].FilePath == msg.Path {
+					m.tabBar.Tabs[i].Dirty = m.editors[i].Buffer.Dirty()
+				}
 			}
 		}
 		var cmds []tea.Cmd
-		if client := m.lspMgr.ClientForFile(msg.Path); client != nil {
-			client.DidSave(lsp.FileURI(msg.Path))
+		if saveAsCmd != nil {
+			cmds = append(cmds, saveAsCmd)
 		}
-		if hadPendingSave && req.CloseAfter {
-			var closeIdx int
-			if req.TabIndex >= 0 && req.TabIndex < len(m.editors) && m.editors[req.TabIndex].Buffer.FilePath == msg.Path {
-				closeIdx = req.TabIndex
-			} else {
-				closeIdx = m.findEditorByPath(msg.Path)
+		if (!hadPendingSave || currentSnapshot) && m.lspMgr != nil {
+			if client := m.lspMgr.ClientForFile(msg.Path); client != nil {
+				// A new Save As URI may still need its didOpen command to run.
+				// Sending didSave first creates an invalid LSP notification order;
+				// an already-open formatting document is the sole safe exception.
+				if !hadPendingSave || !req.SaveAs {
+					cmds = append(cmds, lspDidSaveCmd(m.lspMgr, msg.Path))
+				} else if _, isOpen := client.DocumentVersion(lsp.FileURI(msg.Path)); isOpen {
+					cmds = append(cmds, lspDidSaveCmd(m.lspMgr, msg.Path))
+				}
 			}
-			if closeIdx >= 0 {
-				model, closeCmd := m.closeTab(closeIdx)
+		}
+		if hadPendingSave && currentSnapshot && req.CloseAfter {
+			if savedEditorIdx >= 0 {
+				model, closeCmd := m.closeTab(savedEditorIdx)
 				m = model.(Model)
 				if closeCmd != nil {
 					cmds = append(cmds, closeCmd)
@@ -711,8 +1129,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if refreshCmd := m.gitPanel.Refresh(); refreshCmd != nil {
 			cmds = append(cmds, refreshCmd)
 		}
-		cmds = append(cmds, m.triggerPluginEvents(m.pluginEvent(plugin.EventBufWrite, msg.Path)))
-		if hadPendingSave && req.QuitAfter && !m.hasPendingQuitAfterSaves() {
+		if !hadPendingSave || currentSnapshot {
+			cmds = append(cmds, m.triggerPluginEvents(m.pluginEvent(plugin.EventBufWrite, msg.Path)))
+		}
+		if queuedSaveCmd != nil {
+			cmds = append(cmds, queuedSaveCmd)
+		}
+		if hadPendingSave && currentSnapshot && req.QuitAfter && !m.hasPendingQuitAfterSaves() {
 			cmds = append(cmds, func() tea.Msg { return QuitWithoutSavingMsg{} })
 		}
 		return m, tea.Batch(cmds...)
@@ -742,16 +1165,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(saveCmds) == 0 {
-			m.lspMgr.ShutdownAll()
-			m.cleanup()
-			return m, tea.Quit
+			return m.finalizeQuit()
 		}
 		return m, tea.Batch(saveCmds...)
 
 	case QuitWithoutSavingMsg:
-		m.lspMgr.ShutdownAll()
-		m.cleanup()
-		return m, tea.Quit
+		return m.finalizeQuit()
+
+	case requestQuitMsg:
+		return m.requestQuit()
 
 	case overlay.PickerSelectMsg:
 		m.overlayStack.Clear()
@@ -769,12 +1191,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentPanel.AddTaggedFile(absPath)
 			return m, nil
 		}
+		// LSP code action picker. Revalidate the originating document here,
+		// not only when the server response first arrived: the user may edit or
+		// switch files while the picker is open.
+		if sel, ok := item.Value.(lspCodeActionPickerMsg); ok {
+			if !m.acceptsDocumentResult(documentRequestCodeAction, sel.Metadata, true) {
+				m.status = "Code action expired; request it again"
+				return m, nil
+			}
+
+			if sel.Action.Edit != nil {
+				action := sel.Action
+				return m.startWorkspaceEditAsync(*action.Edit, workspaceEditContinuation{
+					CodeAction:    &action,
+					CodeActionURI: sel.Metadata.FilePath,
+				})
+			}
+
+			if sel.Action.Command == nil {
+				if sel.Action.Edit == nil {
+					m.status = fmt.Sprintf("Code action %q has no edit or command", sel.Action.Title)
+				}
+				return m, nil
+			}
+
+			return m.executeSelectedCodeAction(sel.Action, sel.Metadata)
+		}
 		// LSP location picker (go-to-definition / references)
 		if sel, ok := item.Value.(lspLocationPickerMsg); ok {
 			loc := sel.Location
 			path := lsp.URIToPath(loc.URI)
 			pos := text.Position{Line: loc.StartLine, Col: loc.StartCol}
-			m.pendingCursor = &pos
+			m.setPendingLSPCursor(path, pos, loc.ProtocolEncoding)
 			return m.openFilePinned(path)
 		}
 		// LSP symbol picker
@@ -802,21 +1250,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.PickerCloseMsg:
 		m.overlayStack.Clear()
+		m.cancelFileListScan()
 		return m, nil
 
 	case FileListMsg:
 		if msg.Generation != m.fileListGeneration {
 			return m, nil
 		}
+		m.fileListCancel = nil
+		if msg.Err != nil && !errors.Is(msg.Err, context.Canceled) {
+			if errors.Is(msg.Err, errQuickOpenLimit) {
+				m.status = fmt.Sprintf("Quick Open limited to %d files", maxQuickOpenFiles)
+			} else {
+				m.status = fmt.Sprintf("Quick Open scan: %v", msg.Err)
+			}
+		}
 		m.cachedFiles = msg.Files
 		m.cachedFilesReady = true
 		// If quick open picker is showing, update its items
 		if !m.overlayStack.IsEmpty() {
 			if picker, ok := m.overlayStack.Top().(*overlay.Picker); ok {
-				picker.SetItems(filesToPickerItems(m.cachedFiles))
+				switch picker.ZoneID() {
+				case "quickopen":
+					picker.SetItems(filesToPickerItems(m.cachedFiles))
+				case "agent-file-picker":
+					picker.SetItems(filesToAgentPickerItems(m.cachedFiles))
+				}
 			}
 		}
 		return m, nil
+
+	case git.RepositoryDetectedMsg:
+		m.gitPanel.SetIsGitRepo(msg.IsRepository)
+		if !msg.IsRepository {
+			m.gitBranch = ""
+			return m, nil
+		}
+		return m, m.gitPanel.Refresh()
 
 	case commandPaletteMsg:
 		return m.handleCommandPaletteAction(msg.inner)
@@ -882,6 +1352,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.gitPanel.Refresh()
 
 	case git.OpenBranchPickerMsg:
+		m.cancelActiveEditorDrag()
 		m.showBranchPicker = true
 		m.branchPickerM.SetSize(m.width, m.height)
 		return m, tea.Batch(
@@ -917,6 +1388,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case FileErrorMsg:
 		req, hadPendingSave := m.completeSaveRequest(msg.RequestID)
+		if hadPendingSave && m.watcher != nil {
+			m.watcher.cancelOwnWrite(req.Path, req.Snapshot)
+		}
 		if hadPendingSave && req.QuitAfter {
 			m.cancelQuitAfterSaves()
 		}
@@ -927,18 +1401,105 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case savePreconditionFailedMsg:
+		req, hadPendingSave := m.pendingSaves[msg.RequestID]
+		if !hadPendingSave {
+			return m, nil
+		}
+		if req.SaveAs {
+			switch {
+			case msg.Missing && req.DiskExpectation == saveDiskExact:
+				// The user already authorized replacing the inspected version,
+				// which disappeared before the exact comparison. Requiring the
+				// destination to remain missing still prevents a concurrent
+				// recreation from being overwritten.
+				req.DiskExpectation = saveDiskMissing
+				req.ExpectedDiskSnapshot = nil
+				m.pendingSaves[msg.RequestID] = req
+				return m, m.startSaveRequest(msg.RequestID)
+			case msg.Snapshot != nil:
+				req.DiskExpectation = saveDiskExact
+				req.ExpectedDiskSnapshot = msg.Snapshot
+				m.pendingSaves[msg.RequestID] = req
+				m = m.showSaveAsDestinationConfirmation(msg.RequestID, req.Path)
+				m.status = fmt.Sprintf(
+					"Save As destination %s already exists; confirm before replacing it",
+					filepath.Base(req.Path),
+				)
+				return m, nil
+			default:
+				_, _ = m.completeSaveRequest(msg.RequestID)
+				if req.QuitAfter {
+					m.cancelQuitAfterSaves()
+				}
+				m.status = fmt.Sprintf(
+					"Save As blocked because %s could not be verified safely: %v",
+					filepath.Base(req.Path),
+					msg.Err,
+				)
+				return m, nil
+			}
+		}
+		req, hadPendingSave = m.completeSaveRequest(msg.RequestID)
+		if !hadPendingSave {
+			return m, nil
+		}
+		if req.QuitAfter {
+			m.cancelQuitAfterSaves()
+		}
+		path := cleanExternalConflictPath(msg.Path)
+		m.recordExternalConflict(path, msg.Snapshot, 0, msg.Missing, false)
+		m = m.showExternalConflictConfirmation(path)
+		m.status = fmt.Sprintf(
+			"Save blocked because %s changed after it was loaded: %v",
+			filepath.Base(path),
+			msg.Err,
+		)
+		return m, nil
+
 	case FileLoadedMsg:
 		return m.handleFileLoaded(msg)
 
 	case FileLoadErrorMsg:
-		m.status = fmt.Sprintf("Error loading %s: %v", filepath.Base(msg.Path), msg.Err)
+		if msg.RequestID != 0 {
+			request, ok := m.pendingFileLoads[msg.RequestID]
+			if !ok || request.EditorID != msg.EditorID || request.Path != msg.Path {
+				return m, nil
+			}
+			delete(m.pendingFileLoads, msg.RequestID)
+			request.Cancel()
+		}
+		if !errors.Is(msg.Err, context.Canceled) {
+			m.status = fmt.Sprintf("Error loading %s: %v", filepath.Base(msg.Path), msg.Err)
+		}
 		return m, nil
 
 	case FileChangedMsg:
 		return m.handleExternalFileChange(msg)
 
+	case externalFileReadPreparedMsg:
+		return m.handleExternalFileReadPrepared(msg)
+
+	case saveAsDestinationResolutionMsg:
+		return m.handleSaveAsDestinationResolution(msg)
+
+	case externalConflictResolutionMsg:
+		return m.handleExternalConflictResolution(msg)
+
+	case externalConflictReloadPreparedMsg:
+		return m.handleExternalConflictReloadPrepared(msg)
+
+	case externalFoldRegionsPreparedMsg:
+		return m.handleExternalFoldRegionsPrepared(msg)
+
 	case TreeChangedMsg:
 		return m.handleTreeChange(msg)
+
+	case treeCopyPathResultMsg:
+		return m.handleTreeCopyPathResult(msg)
+
+	case treeActionResultMsg:
+		return m.handleTreeActionResult(msg)
 	case gitRefreshDebounceMsg:
 		if msg.generation != m.gitRefreshGeneration {
 			return m, nil
@@ -1019,17 +1580,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.FormatResultMsg:
 		idx := m.findEditorByPath(msg.FilePath)
-		if msg.Status == lsp.FormatApplied && idx >= 0 {
-			applied := applyTextEditsToBuffer(m.editors[idx].Buffer, msg.Edits)
-			if applied > 0 {
-				if m.editors[idx].Highlighter != nil {
-					m.editors[idx].Highlighter.Invalidate()
+		if msg.RequestID != 0 {
+			req, ok := m.pendingSaves[msg.RequestID]
+			if ok {
+				idx = m.saveRequestEditorIndex(req)
+			}
+			if !ok || idx < 0 || (msg.HasBaseVersion && (req.SnapshotVersion != msg.BaseVersion || m.editors[idx].Buffer.Version() != msg.BaseVersion || m.editors[idx].Buffer.Rope() != req.Snapshot)) {
+				delete(m.pendingSaves, msg.RequestID)
+				if ok && req.QueuedSnapshot != nil {
+					m.status = "Formatting result discarded; formatting newer edits"
+					return m, m.startQueuedSave(msg.RequestID, req)
 				}
-				m.status = "Document formatted"
+				m.status = "Formatting result discarded; newer edits remain unsaved"
+				if ok && req.QuitAfter {
+					m.cancelQuitAfterSaves()
+				}
+				return m, nil
+			}
+		} else if msg.HasBaseVersion && (idx < 0 || m.editors[idx].Buffer.Version() != msg.BaseVersion) {
+			m.status = "Formatting result discarded; newer edits remain unsaved"
+			return m, nil
+		}
+
+		formatStatus := msg.Status
+		formatErr := msg.Err
+		var postMutationCmd tea.Cmd
+		if formatStatus == lsp.FormatApplied && idx >= 0 {
+			if err := validateFormattingTextEdits(m.editors[idx].Buffer, msg.Edits); err != nil {
+				// Format responses are untrusted server input. Do not let the
+				// buffer's interactive position clamping turn an invalid response
+				// into a partial or Unicode-corrupting edit.
+				formatStatus = lsp.FormatError
+				formatErr = fmt.Errorf("invalid formatting edits: %w", err)
+				m.status = fmt.Sprintf("Formatting result rejected: %v", err)
+			} else {
+				prevVersion := m.editors[idx].Buffer.Version()
+				prevCursor := m.editors[idx].Buffer.Cursor
+				applied := applyTextEditsToBuffer(m.editors[idx].Buffer, msg.Edits)
+				if applied > 0 {
+					if m.editors[idx].Highlighter != nil {
+						m.editors[idx].Highlighter.Invalidate()
+					}
+					editorID := m.editors[idx].ID()
+					version := m.editors[idx].Buffer.Version()
+					retokenizeCmd := func() tea.Msg {
+						return editor.RetokenizeMsg{EditorID: editorID, Version: version}
+					}
+					postMutationCmd = tea.Batch(
+						retokenizeCmd,
+						m.syncEditorStateAfterUpdate(idx, prevVersion, prevCursor),
+					)
+					m.status = "Document formatted"
+				}
 			}
 		}
 		if msg.RequestID == 0 {
-			switch msg.Status {
+			switch formatStatus {
 			case lsp.FormatApplied:
 				if idx >= 0 && idx == m.activeTab {
 					m.setEditor(m.activeTab, m.editors[idx])
@@ -1039,33 +1645,66 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case lsp.FormatUnsupported:
 				m.status = "Formatting not supported"
 			case lsp.FormatError:
-				if msg.Err != nil {
-					m.status = fmt.Sprintf("Formatting failed: %v", msg.Err)
+				if formatErr != nil {
+					m.status = fmt.Sprintf("Formatting failed: %v", formatErr)
 				} else {
 					m.status = "Formatting failed"
 				}
 			}
-			return m, nil
+			return m, postMutationCmd
 		}
 
-		m.setPendingSaveNote(msg.RequestID, formatResultNote(msg.Status, msg.Err))
-		return m, m.startSaveRequest(msg.RequestID)
+		if formatStatus == lsp.FormatApplied && idx >= 0 {
+			req := m.pendingSaves[msg.RequestID]
+			req.Snapshot = m.editors[idx].Buffer.Rope()
+			req.SnapshotVersion = m.editors[idx].Buffer.Version()
+			m.pendingSaves[msg.RequestID] = req
+		}
+		m.setPendingSaveNote(msg.RequestID, formatResultNote(formatStatus, formatErr))
+		return m, tea.Batch(postMutationCmd, m.startSaveRequest(msg.RequestID))
 
 	case lsp.CodeActionResultMsg:
-		if len(msg.Actions) > 0 {
-			// For now, apply the first action's edit if available
-			action := msg.Actions[0]
-			if action.Edit != nil {
-				model, cmd := m.applyWorkspaceEdit(*action.Edit)
-				m2 := model.(Model)
-				m2.status = fmt.Sprintf("Applied: %s", action.Title)
-				return m2, cmd
-			}
-			m.status = fmt.Sprintf("Code action: %s (no edit available)", action.Title)
+		if !m.acceptsDocumentResult(documentRequestCodeAction, msg.DocumentRequestMetadata, true) {
+			return m, nil
 		}
+		if len(msg.Actions) == 0 {
+			m.status = "No code actions available"
+			return m, nil
+		}
+		items := lspCodeActionsToPickerItems(msg.Actions, msg.DocumentRequestMetadata)
+		picker := overlay.NewPicker(fmt.Sprintf("Code Actions (%d)", len(items)), items, m.theme, "lsp-code-actions")
+		m.overlayStack.Push(picker)
+		return m, picker.Focus()
+
+	case lsp.ApplyEditRequestMsg:
+		// The protocol reader only transports this request. Filesystem access
+		// and rope preparation happen in a command; Update later performs the
+		// version-checked pointer swap serially with every other buffer change.
+		return m.startWorkspaceEditAsync(msg.Edit, workspaceEditContinuation{Context: msg.Context, Claim: msg.Claim, Respond: msg.Respond})
+
+	case workspaceEditPreparedMsg:
+		return m.handleWorkspaceEditPrepared(msg)
+
+	case workspaceEditCommitResultMsg:
+		return m.handleWorkspaceEditCommitResult(msg)
+
+	case lspCodeActionCommandResultMsg:
+		if msg.Generation != m.codeActionCommandGen ||
+			!m.acceptsDocumentResult(documentRequestCodeAction, msg.Metadata, true) {
+			return m, nil
+		}
+		m.codeActionCommandStop = nil
+		if msg.Err != nil {
+			m.status = fmt.Sprintf("Code action %q failed: %v", msg.Title, msg.Err)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Code action completed: %s", msg.Title)
 		return m, nil
 
 	case lsp.DocumentSymbolResultMsg:
+		if !m.acceptsDocumentResult(documentRequestSymbols, msg.DocumentRequestMetadata, true) {
+			return m, nil
+		}
 		if len(msg.Symbols) > 0 {
 			items := lspSymbolsToPickerItems(msg.Symbols)
 			picker := overlay.NewPicker(fmt.Sprintf("Document Symbols (%d)", len(msg.Symbols)), items, m.theme, "lsp-sym")
@@ -1076,11 +1715,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lsp.DefinitionResultMsg:
+		if !m.acceptsDocumentResult(documentRequestDefinition, msg.DocumentRequestMetadata, true) {
+			return m, nil
+		}
 		if len(msg.Locations) == 1 {
 			loc := msg.Locations[0]
 			path := lsp.URIToPath(loc.URI)
 			pos := text.Position{Line: loc.StartLine, Col: loc.StartCol}
-			m.pendingCursor = &pos
+			m.setPendingLSPCursor(path, pos, loc.ProtocolEncoding)
 			return m.openFilePinned(path)
 		} else if len(msg.Locations) > 1 {
 			items := lspLocationsToPickerItems(msg.Locations, m.rootDir)
@@ -1092,11 +1734,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lsp.ReferencesResultMsg:
+		if !m.acceptsDocumentResult(documentRequestReferences, msg.DocumentRequestMetadata, true) {
+			return m, nil
+		}
 		if len(msg.Locations) == 1 {
 			loc := msg.Locations[0]
 			path := lsp.URIToPath(loc.URI)
 			pos := text.Position{Line: loc.StartLine, Col: loc.StartCol}
-			m.pendingCursor = &pos
+			m.setPendingLSPCursor(path, pos, loc.ProtocolEncoding)
 			model, cmd := m.openFile(path)
 			m2 := model.(Model)
 			m2.status = "Found 1 reference"
@@ -1111,7 +1756,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lsp.RenameResultMsg:
-		return m.applyWorkspaceEdit(msg.Edit)
+		if !m.acceptsDocumentResult(documentRequestRename, msg.DocumentRequestMetadata, true) {
+			return m, nil
+		}
+		return m.startWorkspaceEditAsync(msg.Edit, workspaceEditContinuation{})
 
 	case editor.ContextMenuActionMsg:
 		return m.handleContextMenuAction(msg.Action)
@@ -1137,19 +1785,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one full-sync update to reconcile stale didOpen content.
 			for i := range m.editors {
 				if m.editors[i].Buffer.FilePath == msg.FilePath && m.editors[i].Buffer.Version() > msg.OpenVersion {
-					client.DidChange(
-						lsp.FileURI(msg.FilePath),
-						m.editors[i].Buffer.Version(),
-						m.editors[i].Buffer.Content(),
-					)
-					break
+					version, snapshot := m.editors[i].Buffer.Version(), m.editors[i].Buffer.Rope()
+					_, foldingCmd := m.requestFoldingRanges(msg.FilePath)
+					return m, tea.Sequence(lspDidChangeCmd(m.lspMgr, msg.FilePath, version, snapshot, m.lspMaterializationBudget()), foldingCmd)
 				}
 			}
 		}
 		// Request folding ranges from LSP
-		return m, m.requestFoldingRanges(msg.FilePath)
+		return m.requestFoldingRanges(msg.FilePath)
 
 	case lsp.FoldingRangeResultMsg:
+		if !m.acceptsDocumentResult(documentRequestFolding, msg.DocumentRequestMetadata, false) {
+			return m, nil
+		}
 		for i := range m.editors {
 			if m.editors[i].Buffer.FilePath == msg.FilePath {
 				regions := make([]editor.FoldRegion, len(msg.Ranges))
@@ -1220,23 +1868,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDAPMsg(msg)
 
 	case debugStateMsg:
+		if msg.Generation != 0 && msg.Generation != m.debugLifecycle.generation {
+			return m, nil
+		}
 		m.debuggerPanel.SetStackFrames(msg.Frames)
 		m.debuggerPanel.SetVariables(msg.Variables)
 		if len(msg.Frames) > 0 {
 			frame := msg.Frames[0]
 			if frame.Source.Path != "" {
-				m.currentExecFile = frame.Source.Path
-				m.currentExecLine = frame.Line - 1 // DAP is 1-based, we use 0-based
+				m.setExecutionLocation(frame.Source.Path, frame.Line-1) // DAP is 1-based, we use 0-based
 			}
 		}
 		return m, nil
 
+	case debugStartResultMsg:
+		return m.handleDebugStartResult(msg)
+
+	case debugStopResultMsg:
+		return m.handleDebugStopResult(msg)
+
+	case debugActionResultMsg:
+		return m.handleDebugActionResult(msg)
+
 	case debugger.JumpToFrameMsg:
 		// Open the file and jump to the line
 		if msg.FilePath != "" {
-			pos := &text.Position{Line: msg.Line, Col: 0}
-			m.pendingCursor = pos
-			return m, loadFileCmd(msg.FilePath, -1, false)
+			m.setPendingCursor(msg.FilePath, text.Position{Line: msg.Line, Col: 0})
+			return m.openFilePinned(msg.FilePath)
 		}
 		return m, nil
 
@@ -1291,22 +1949,124 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// lspChangeQueue returns the independent per-document snapshot preparer. It
+// is deliberately not captured through Model by tea.Cmd closures: a command
+// may run after a tab has moved, changed, or closed.
+func (m *Model) lspChangeQueue() *lspChangePreparer {
+	if m == nil || m.modelState == nil {
+		return nil
+	}
+	if m.lspChanges == nil {
+		m.lspChanges = newLSPChangePreparer()
+	}
+	return m.lspChanges
+}
+
+// lspMaterializationBudget returns the process-wide transport budget owned by
+// the change preparer. Commands capture this coordinator, never the live
+// Model, before they flatten an immutable rope.
+func (m Model) lspMaterializationBudget() *lspMaterializationBudget {
+	if m.modelState != nil && m.lspChanges != nil {
+		return lspMaterializationsFor(m.lspChanges.budget)
+	}
+	return sharedLSPMaterializations
+}
+
+// cancelLSPChangePreparation drops a pending full-text conversion when the
+// document lifecycle is retired. Manager.CloseDocument remains the protocol
+// authority; this is the memory/CPU half of the same cancellation.
+func (m *Model) cancelLSPChangePreparation(path string) {
+	if queue := m.lspChangeQueue(); queue != nil {
+		queue.cancel(path)
+	}
+}
+
 // notifyLSPChange sends a didChange notification using incremental sync if
 // the server supports it and the buffer has change info, otherwise full sync.
-func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) {
-	uri := lsp.FileURI(ed.Buffer.FilePath)
+// It copies all protocol metadata and captures an immutable Rope before
+// returning. In particular, the tea.Cmd below never closes over ed or m.
+func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) tea.Cmd {
+	if m == nil || m.modelState == nil || client == nil || ed == nil || ed.Buffer == nil {
+		return nil
+	}
+	path := ed.Buffer.FilePath
+	if path == "" {
+		return nil
+	}
+	uri := lsp.FileURI(path)
+	mgr := m.lspMgr
+	generation := uint64(0)
+	if mgr != nil {
+		generation = mgr.DocumentGeneration(path)
+	}
 	version := ed.Buffer.Version()
-
-	if change := ed.Buffer.LastChange(); change != nil && client.GetSyncKind() == lsp.SyncIncremental {
-		client.DidChangeIncremental(uri, version,
-			change.StartLine, change.StartCol,
-			change.EndLine, change.EndCol,
-			change.Text,
-		)
-		return
+	snapshot := ed.Buffer.Rope()
+	queue := m.lspChangeQueue()
+	if queue == nil || snapshot == nil {
+		return nil
 	}
 
-	client.DidChange(uri, version, ed.Buffer.Content())
+	if _, open := client.DocumentVersion(uri); !open {
+		// lspDidOpen may still be running in another tea.Cmd. LspReady sends a
+		// full catch-up after the didOpen barrier has been queued. A document
+		// that was explicitly retired for exceeding LSP transport capacity is
+		// different: retry it as a fresh full didOpen, so reducing its size can
+		// resume synchronization without reopening the editor tab.
+		if !client.DocumentSyncSuppressed(uri) {
+			return nil
+		}
+		languageID := ""
+		if mgr != nil {
+			if cfg := mgr.ConfigForFile(path); cfg != nil {
+				languageID = cfg.LanguageID
+			}
+		}
+		return queue.queue(lspChangePayload{
+			path:     path,
+			version:  version,
+			snapshot: snapshot,
+			dispatch: func(content string) {
+				if mgr != nil {
+					mgr.OpenDocument(path, generation, languageID, version, content)
+					return
+				}
+				client.DidOpen(uri, languageID, version, content)
+			},
+		})
+	}
+
+	if change := ed.Buffer.LastChange(); change != nil && client.GetSyncKind() == lsp.SyncIncremental {
+		// Copy the last-change values before returning from Update. Buffer owns
+		// and replaces this record on the next edit, so retaining the pointer
+		// would make a delayed command describe the wrong range.
+		startLine, startCol := change.StartLine, change.StartCol
+		endLine, endCol, replacement := change.EndLine, change.EndCol, change.Text
+		return queue.queue(lspChangePayload{
+			path:     path,
+			version:  version,
+			snapshot: snapshot,
+			dispatch: func(content string) {
+				if mgr != nil {
+					mgr.ChangeDocumentIncremental(path, generation, version, startLine, startCol, endLine, endCol, replacement, content)
+					return
+				}
+				client.DidChangeIncrementalWithContent(uri, version, startLine, startCol, endLine, endCol, replacement, content)
+			},
+		})
+	}
+
+	return queue.queue(lspChangePayload{
+		path:     path,
+		version:  version,
+		snapshot: snapshot,
+		dispatch: func(content string) {
+			if mgr != nil {
+				mgr.ChangeDocument(path, generation, version, content)
+				return
+			}
+			client.DidChange(uri, version, content)
+		},
+	})
 }
 
 func (m Model) isActiveDiffTab() bool {
@@ -1349,7 +2109,11 @@ func (m *Model) editorIndexForAsyncMessage(editorID uint64) int {
 
 // setEditor updates the editor slice, the single source of truth for tab state.
 func (m *Model) setEditor(idx int, ed editor.Editor) {
+	if idx < 0 || idx >= len(m.editors) {
+		return
+	}
 	m.editors[idx] = ed
+	m.projectDebugGutterForEditor(idx)
 }
 
 // forwardToEditor sends an adjusted mouse message to the active editor and handles LSP updates.
@@ -1376,15 +2140,11 @@ func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	updated, cmd := ed.Update(msg)
 	m.setEditor(m.activeTab, updated)
+	if updated.IsContextMenuVisible() {
+		m.clampActiveEditorContextMenu()
+	}
 
-	if m.activeTab < len(m.tabBar.Tabs) {
-		m.tabBar.Tabs[m.activeTab].Dirty = updated.Buffer.Dirty()
-	}
-	if updated.Buffer.Version() != prevVersion && updated.Buffer.FilePath != "" {
-		if client := m.lspMgr.ClientForFile(updated.Buffer.FilePath); client != nil {
-			m.notifyLSPChange(client, &updated)
-		}
-	}
+	postUpdateCmd := m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)
 	var signatureHelpCmd tea.Cmd
 	if updated.Buffer.Version() != prevVersion && signatureHelpTrigger(msg) {
 		m, signatureHelpCmd = m.requestSignatureHelp()
@@ -1392,7 +2152,7 @@ func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		cmd,
 		signatureHelpCmd,
-		m.triggerEditorAutocmds(updated.Buffer.FilePath, prevVersion, updated.Buffer.Version(), prevCursor, updated.Buffer.Cursor),
+		postUpdateCmd,
 	)
 }
 
@@ -1470,29 +2230,50 @@ func (m Model) treeWidth() int {
 	// Fixed sidebar width for consistency across all tabs
 	// This ensures the sidebar doesn't change width when switching tabs
 	const fixedWidth = 25
+	// Reserve one column for the divider and one for the editor. Keeping the
+	// sidebar within this budget is important while a terminal is resized: a
+	// minimum sidebar width would otherwise make the complete TUI wrap.
+	maxSidebarWidth := max(0, m.width-2)
+	if maxSidebarWidth == 0 {
+		return 0
+	}
 
 	// Respect screen size constraints
 	if m.width < 80 {
 		// On small screens, use proportional width
 		tw := m.width / 4
-		if tw < 15 {
-			return 15
+		if tw < 1 {
+			tw = 1
 		}
 		if tw > fixedWidth {
-			return fixedWidth
+			tw = fixedWidth
 		}
-		return tw
+		return min(tw, maxSidebarWidth)
 	}
 
-	return fixedWidth
+	return min(fixedWidth, maxSidebarWidth)
+}
+
+// treeVisible is the effective sidebar state for the current terminal size.
+// showTree remains the user's preference, so it comes back automatically once
+// enough columns are available.
+func (m Model) treeVisible() bool {
+	return m.showTree && m.treeWidth() > 0
 }
 
 func (m *Model) relayout() {
 	statusHeight := 2 // divider + status bar
 	tabBarHeight := 1
+	compact := m.height < compactTerminalHeight
+	if compact {
+		statusHeight = 1 // compact view has no divider row
+	}
 
 	// Agent panel width (0 if hidden)
 	aw := m.agentPanelWidth()
+	if compact {
+		aw = 0
+	}
 	if m.width > 0 && m.height > 0 && m.showAgent && aw == 0 && m.focus == FocusAgent {
 		m.focus = FocusEditor
 		m.agentPanel.Blur()
@@ -1506,7 +2287,7 @@ func (m *Model) relayout() {
 
 	sidebarHeight := m.height - statusHeight
 
-	if m.showTree {
+	if !compact && m.treeVisible() {
 		tw := m.treeWidth()
 		editorWidth := m.width - tw - 1 - agentExtra // -1 for left border
 		if editorWidth < 1 {
@@ -1571,6 +2352,16 @@ func (m *Model) relayout() {
 		}
 		m.agentPanel.SetSize(aw, agentHeight)
 	}
+
+	if m.showHelp {
+		m.helpM.SetSize(m.width, m.height-2)
+	}
+	if m.showSettings {
+		m.setSettingsOverlaySize()
+	}
+	if m.unsavedConfirm != nil {
+		m.unsavedConfirm.SetWidth(min(50, max(1, m.width)))
+	}
 }
 
 func (m Model) openFile(path string) (tea.Model, tea.Cmd) {
@@ -1583,6 +2374,20 @@ func (m Model) openFilePinned(path string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
+	m.cancelSessionRestore()
+	normalizedPath, err := m.normalizeEditorFilePath(path)
+	if err != nil {
+		m.status = fmt.Sprintf("Cannot open file: %v", err)
+		return m, nil
+	}
+	path = normalizedPath
+	if m.saveAsDestinationReserved(path) {
+		m.status = fmt.Sprintf(
+			"Cannot open %s while Save As is using that destination",
+			filepath.Base(path),
+		)
+		return m, nil
+	}
 	// Dismiss welcome screen if active
 	if m.welcome != nil {
 		m.welcome.Dismiss()
@@ -1597,20 +2402,25 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 	// Check if already open
 	idx := m.tabBar.FindTab(path)
 	if idx >= 0 {
-		m.activeTab = idx
-		m.tabBar.ActiveIdx = idx
+		m.activateTab(idx)
 		m.focus = FocusEditor
 		// Double-open pins the tab
 		if !preview {
 			m.tabBar.PinTab(idx)
 		}
-		// Apply pending cursor if set
-		if m.pendingCursor != nil {
+		// Apply a pending navigation. UTF-16/32 target positions are deferred
+		// until the document bytes are available, rather than guessed by the
+		// protocol reader.
+		if navigation := m.takePendingNavigation(path); navigation != nil {
 			ed := m.activeEditor()
-			ed.Buffer.Cursor = *m.pendingCursor
-			ed.EnsureCursorVisible()
-			m.setEditor(m.activeTab, *ed)
-			m.pendingCursor = nil
+			position, err := resolvePendingLSPPositionRope(ed.Buffer.Rope(), navigation.Position, navigation.ProtocolEncoding)
+			if err != nil {
+				m.status = fmt.Sprintf("LSP navigation position rejected: %v", err)
+			} else {
+				ed.Buffer.Cursor = position
+				ed.EnsureCursorVisible()
+				m.setEditor(m.activeTab, *ed)
+			}
 		}
 		if idx == oldActiveIdx || oldActivePath == path {
 			return m, nil
@@ -1634,10 +2444,10 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 	ed := editor.New(buf, m.theme, cfg)
 
 	// Try to replace an existing preview tab or empty untitled tab
-	var tabIdx int
 	replaceIdx := m.findReplaceableTab()
 	if replaceIdx >= 0 {
 		replacedPath := m.tabBar.Tabs[replaceIdx].FilePath
+		m.removeLoadsForEditor(m.editors[replaceIdx].ID())
 		if m.watcher != nil && replacedPath != "" && replacedPath != path {
 			m.watcher.UnwatchFile(replacedPath)
 		}
@@ -1647,15 +2457,12 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 		m.tabBar.Tabs[replaceIdx].Dirty = false
 		m.tabBar.Tabs[replaceIdx].Preview = preview
 		m.tabBar.Tabs[replaceIdx].DiagSeverity = 0
-		m.activeTab = replaceIdx
-		m.tabBar.ActiveIdx = replaceIdx
-		tabIdx = replaceIdx
+		m.activateTab(replaceIdx)
 	} else {
 		m.editors = append(m.editors, ed)
-		tabIdx = m.tabBar.AddTab(filepath.Base(path), path)
+		tabIdx := m.tabBar.AddTab(filepath.Base(path), path)
 		m.tabBar.Tabs[tabIdx].Preview = preview
-		m.activeTab = tabIdx
-		m.tabBar.ActiveIdx = tabIdx
+		m.activateTab(tabIdx)
 	}
 
 	m.focus = FocusEditor
@@ -1664,24 +2471,56 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 	// Read file content asynchronously
 	return m, tea.Batch(
 		m.triggerPluginEvents(m.pluginEvent(plugin.EventBufLeave, oldActivePath)),
-		loadFileCmd(path, tabIdx, false),
+		m.startFileLoad(path, ed, false, nil),
 	)
 }
 
 func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
-	// Find the tab that was waiting for this file
-	tabIdx := msg.TabIndex
-	if tabIdx < 0 || tabIdx >= len(m.editors) {
+	var request pendingFileLoad
+	if msg.RequestID != 0 {
+		var ok bool
+		request, ok = m.pendingFileLoads[msg.RequestID]
+		if !ok || request.EditorID != msg.EditorID || request.Path != msg.Path {
+			return m, nil
+		}
+	}
+	tabIdx := m.editorIndexForLoad(msg.EditorID, msg.Path)
+	if msg.RequestID == 0 && msg.EditorID == 0 { // retained only for older direct unit messages
+		tabIdx = msg.TabIndex
+	}
+	if tabIdx < 0 || tabIdx >= len(m.editors) || tabIdx >= len(m.tabBar.Tabs) || m.tabBar.Tabs[tabIdx].FilePath != msg.Path {
 		return m, nil
 	}
-	// Verify this tab still corresponds to the loaded file
-	if tabIdx < len(m.tabBar.Tabs) && m.tabBar.Tabs[tabIdx].FilePath != msg.Path {
-		return m, nil
+	if msg.RequestID != 0 {
+		buffer := m.editors[tabIdx].Buffer
+		if buffer.Version() != request.BaseVersion || buffer.Rope() != request.BaseRope {
+			delete(m.pendingFileLoads, msg.RequestID)
+			request.Cancel()
+			m.status = fmt.Sprintf("Kept edits made while %s was loading", filepath.Base(msg.Path))
+			return m, nil
+		}
 	}
 
-	// Load content into the placeholder buffer (expand tabs to spaces)
+	if msg.Snapshot == nil {
+		// Legacy/direct callers may still provide Data. Convert it in a command,
+		// preserving the same request identity so Update never constructs a
+		// document-sized rope.
+		data := msg.Data
+		msg.Data = nil
+		return m, func() tea.Msg {
+			msg.Snapshot = text.New(data)
+			return msg
+		}
+	}
+	if msg.RequestID != 0 {
+		delete(m.pendingFileLoads, msg.RequestID)
+		request.Cancel()
+	}
+
+	// Load source bytes unchanged; tab expansion is handled only by the editor view.
 	ed := &m.editors[tabIdx]
-	ed.Buffer.LoadContentWithTabSize(msg.Data, ed.Config.TabSize)
+	snapshot := msg.Snapshot
+	ed.Buffer.LoadRopeSnapshot(snapshot)
 
 	// Set up syntax highlighting
 	cfg := ed.Config
@@ -1692,22 +2531,39 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 	m.relayout()
 	m.status = ""
 
-	// Apply pending cursor if set (e.g. from go-to-definition)
-	if m.pendingCursor != nil && tabIdx == m.activeTab {
-		m.editors[tabIdx].Buffer.Cursor = *m.pendingCursor
-		m.editors[tabIdx].EnsureCursorVisible()
-		m.pendingCursor = nil
+	// A navigation belongs to this request, not whichever tab happens to be
+	// active when disk I/O completes. Session state gets the same treatment.
+	if request.Cursor != nil {
+		position, err := resolvePendingLSPPositionRope(m.editors[tabIdx].Buffer.Rope(), *request.Cursor, request.CursorEncoding)
+		if err != nil {
+			m.status = fmt.Sprintf("LSP navigation position rejected: %v", err)
+		} else {
+			m.editors[tabIdx].Buffer.Cursor = position
+			m.editors[tabIdx].EnsureCursorVisible()
+		}
+	}
+	if request.Session == nil {
+		if restored, ok := m.restoredTabs[msg.EditorID]; ok {
+			copy := restored
+			request.Session = &copy
+		}
+	}
+	if request.Session != nil {
+		if request.Cursor == nil {
+			line := min(max(0, request.Session.CursorLine), max(0, m.editors[tabIdx].Buffer.LineCount()-1))
+			col := min(max(0, request.Session.CursorCol), m.editors[tabIdx].Buffer.Rope().LineLen(line))
+			m.editors[tabIdx].Buffer.Cursor = text.Position{Line: line, Col: col}
+			m.editors[tabIdx].EnsureCursorVisible()
+		}
+		m.editors[tabIdx].Viewport.ScrollY = max(0, request.Session.ScrollY)
+		m.editors[tabIdx].Viewport.WrapScrollY = max(0, request.Session.WrapScrollY)
+		delete(m.restoredTabs, msg.EditorID)
 	}
 
 	// Watch this file for external changes
 	if m.watcher != nil && msg.Path != "" {
 		m.watcher.WatchFile(msg.Path)
 	}
-
-	// Detect fold regions (indent-based fallback; LSP foldingRange will override)
-	buf := m.editors[tabIdx].Buffer
-	regions := editor.DetectIndentRegions(buf.Line, buf.LineCount())
-	m.editors[tabIdx].Folds.SetRegions(regions)
 
 	// Async tokenize + LSP open
 	var events []plugin.EventContext
@@ -1718,7 +2574,10 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 	if tabIdx == m.activeTab {
 		events = append(events, m.pluginEvent(plugin.EventBufEnter, msg.Path))
 	}
+	editorID := m.editors[tabIdx].ID()
+	version := m.editors[tabIdx].Buffer.Version()
 	return m, tea.Batch(
+		prepareExternalFoldRegionsCmd(editorID, version, snapshot),
 		m.editors[tabIdx].ScheduleInitialTokenize(),
 		m.lspDidOpen(m.editors[tabIdx].Buffer),
 		m.triggerPluginEvents(events...),
@@ -1729,7 +2588,10 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 func (m Model) findReplaceableTab() int {
 	// Prefer replacing an existing preview tab
 	idx := m.tabBar.FindPreviewTab()
-	if idx >= 0 {
+	if idx >= 0 &&
+		idx < len(m.editors) &&
+		!m.tabBar.Tabs[idx].Dirty &&
+		!m.editors[idx].Buffer.Dirty() {
 		return idx
 	}
 	// Fall back to empty untitled tab
@@ -1751,6 +2613,7 @@ func (m Model) closeTabSafe(idx int) (tea.Model, tea.Cmd) {
 	}
 	buf := m.editors[idx].Buffer
 	if buf.Dirty() {
+		m.cancelActiveEditorDrag()
 		name := filepath.Base(buf.FilePath)
 		if name == "." || buf.FilePath == "" {
 			name = m.tabBar.Tabs[idx].Label
@@ -1797,15 +2660,21 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	}
 
 	buf := m.editors[idx].Buffer
+	m.removeLoadsForEditor(m.editors[idx].ID())
 	closingPath := buf.FilePath
 	wasActive := idx == m.activeTab
-	if m.watcher != nil && closingPath != "" {
+	lastPathOwner := closingPath != "" && !m.hasOtherEditorForPath(closingPath, idx)
+	if m.watcher != nil && lastPathOwner {
 		m.watcher.UnwatchFile(closingPath)
 	}
-	if buf.FilePath != "" {
-		if client := m.lspMgr.ClientForFile(buf.FilePath); client != nil {
-			client.DidClose(lsp.FileURI(buf.FilePath))
-		}
+	if lastPathOwner {
+		m.cancelLSPChangePreparation(closingPath)
+	}
+	if lastPathOwner && m.lspMgr != nil {
+		m.lspMgr.CloseDocument(closingPath)
+	}
+	if lastPathOwner {
+		m.clearClosedExternalPathState(closingPath)
 	}
 
 	// If closing the last tab, show the welcome screen with no tabs
@@ -1826,7 +2695,7 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 
 	m.editors = append(m.editors[:idx], m.editors[idx+1:]...)
 	m.tabBar.RemoveTab(idx)
-	m.activeTab = m.tabBar.ActiveIdx
+	m.activateTab(m.tabBar.ActiveIdx)
 
 	// Re-key diff views: remove this index and shift higher indices down
 	delete(m.diffViews, idx)
@@ -1850,6 +2719,35 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	return m, m.triggerPluginEvents(events...)
 }
 
+func (m Model) hasOtherEditorForPath(path string, excluded int) bool {
+	clean := cleanExternalConflictPath(path)
+	if clean == "" {
+		return false
+	}
+	for i := range m.editors {
+		if i == excluded {
+			continue
+		}
+		if cleanExternalConflictPath(m.editors[i].Buffer.FilePath) == clean {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) clearClosedExternalPathState(path string) {
+	clean := cleanExternalConflictPath(path)
+	if clean == "" {
+		return
+	}
+	m.clearExternalConflict(clean)
+	delete(m.externalChangeObserved, clean)
+	delete(m.lastSaveWatcherWatermarks, clean)
+	if m.externalReads.pending != nil {
+		delete(m.externalReads.pending, clean)
+	}
+}
+
 func (m Model) findNext() (tea.Model, tea.Cmd) {
 	if len(m.lastSearchResults) == 0 {
 		m.status = "No search results"
@@ -1871,7 +2769,7 @@ func (m Model) findNext() (tea.Model, tea.Cmd) {
 			if rPath == curFile && (r.Line > curLine || (r.Line == curLine && r.Col > curCol)) {
 				m.lastSearchIndex = idx
 				pos := text.Position{Line: r.Line, Col: r.Col}
-				m.pendingCursor = &pos
+				m.setPendingCursor(rPath, pos)
 				m.status = fmt.Sprintf("Match %d/%d", idx+1, len(m.lastSearchResults))
 				return m.openFilePinned(rPath)
 			}
@@ -1885,7 +2783,7 @@ func (m Model) findNext() (tea.Model, tea.Cmd) {
 		rPath = filepath.Join(m.rootDir, rPath)
 	}
 	pos := text.Position{Line: r.Line, Col: r.Col}
-	m.pendingCursor = &pos
+	m.setPendingCursor(rPath, pos)
 	m.status = fmt.Sprintf("Match %d/%d (wrapped)", m.lastSearchIndex+1, len(m.lastSearchResults))
 	return m.openFilePinned(rPath)
 }
@@ -1910,7 +2808,7 @@ func (m Model) findPrev() (tea.Model, tea.Cmd) {
 			if rPath == curFile && (r.Line < curLine || (r.Line == curLine && r.Col < curCol)) {
 				m.lastSearchIndex = idx
 				pos := text.Position{Line: r.Line, Col: r.Col}
-				m.pendingCursor = &pos
+				m.setPendingCursor(rPath, pos)
 				m.status = fmt.Sprintf("Match %d/%d", idx+1, len(m.lastSearchResults))
 				return m.openFilePinned(rPath)
 			}
@@ -1923,12 +2821,13 @@ func (m Model) findPrev() (tea.Model, tea.Cmd) {
 		rPath = filepath.Join(m.rootDir, rPath)
 	}
 	pos := text.Position{Line: r.Line, Col: r.Col}
-	m.pendingCursor = &pos
+	m.setPendingCursor(rPath, pos)
 	m.status = fmt.Sprintf("Match %d/%d (wrapped)", m.lastSearchIndex+1, len(m.lastSearchResults))
 	return m.openFilePinned(rPath)
 }
 
 func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
+	m.cancelSessionRestore()
 	if m.welcome != nil {
 		m.welcome.Dismiss()
 	}
@@ -1945,8 +2844,7 @@ func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
 	idx := len(m.editors) - 1
 	m.tabBar.AddTab(label, "")
 	m.tabBar.PinTab(idx)
-	m.activeTab = idx
-	m.tabBar.ActiveIdx = idx
+	m.activateTab(idx)
 	m.focus = FocusEditor
 	m.relayout()
 	return m, nil
@@ -1962,8 +2860,7 @@ func (m Model) handleTabBarClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	// Then check label zones for switching
 	for i, tab := range m.tabBar.Tabs {
 		if zone.Get(editor.TabZoneID(tab)).InBounds(msg) {
-			m.activeTab = i
-			m.tabBar.ActiveIdx = i
+			m.activateTab(i)
 			return m, nil
 		}
 	}
@@ -1971,6 +2868,7 @@ func (m Model) handleTabBarClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openSearch(mode search.Mode) (tea.Model, tea.Cmd) {
+	m.cancelActiveEditorDrag()
 	m.showSearch = true
 	m.searchMode = mode
 	m.searchM = search.New(m.theme, m.rootDir, mode)
@@ -1980,6 +2878,7 @@ func (m Model) openSearch(mode search.Mode) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openSearchReplace() (tea.Model, tea.Cmd) {
+	m.cancelActiveEditorDrag()
 	m.showSearch = true
 	m.searchMode = search.ModeText
 	m.searchM = search.New(m.theme, m.rootDir, search.ModeText)
@@ -1991,8 +2890,37 @@ func (m Model) openSearchReplace() (tea.Model, tea.Cmd) {
 
 func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+	msg = m.searchOverlayLocalMouseMsg(msg)
 	m.searchM, cmd = m.searchM.Update(msg)
 	return m, cmd
+}
+
+func (m Model) searchOverlayLocalMouseMsg(msg tea.Msg) tea.Msg {
+	x, y := m.searchM.OverlayOrigin(m.width, m.height)
+	switch msg := msg.(type) {
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		mouse.X -= x
+		mouse.Y -= y
+		return tea.MouseClickMsg(mouse)
+	case tea.MouseMotionMsg:
+		mouse := msg.Mouse()
+		mouse.X -= x
+		mouse.Y -= y
+		return tea.MouseMotionMsg(mouse)
+	case tea.MouseReleaseMsg:
+		mouse := msg.Mouse()
+		mouse.X -= x
+		mouse.Y -= y
+		return tea.MouseReleaseMsg(mouse)
+	case tea.MouseWheelMsg:
+		mouse := msg.Mouse()
+		mouse.X -= x
+		mouse.Y -= y
+		return tea.MouseWheelMsg(mouse)
+	default:
+		return msg
+	}
 }
 
 // updateProblems handles input for the Problems panel.
@@ -2016,7 +2944,7 @@ func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Open the selected problem location
 			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
 				pos := text.Position{Line: prob.Line, Col: prob.Col}
-				m.pendingCursor = &pos
+				m.setPendingCursor(prob.FilePath, pos)
 				return m.openFilePinned(prob.FilePath)
 			}
 			return m, nil
@@ -2054,42 +2982,15 @@ func (m Model) updateDebugger(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = FocusEditor
 			return m, nil
 		case "c":
-			if m.debugMgr.IsRunning() {
-				if err := m.debugMgr.Continue(); err != nil {
-					m.status = fmt.Sprintf("Debug error: %v", err)
-				}
-			}
-			return m, nil
+			return m.handleDebugAction(debugActionContinue)
 		case "n":
-			if m.debugMgr.IsRunning() {
-				if err := m.debugMgr.Next(); err != nil {
-					m.status = fmt.Sprintf("Debug error: %v", err)
-				}
-			}
-			return m, nil
+			return m.handleDebugAction(debugActionNext)
 		case "i":
-			if m.debugMgr.IsRunning() {
-				if err := m.debugMgr.StepIn(); err != nil {
-					m.status = fmt.Sprintf("Debug error: %v", err)
-				}
-			}
-			return m, nil
+			return m.handleDebugAction(debugActionStepIn)
 		case "o":
-			if m.debugMgr.IsRunning() {
-				if err := m.debugMgr.StepOut(); err != nil {
-					m.status = fmt.Sprintf("Debug error: %v", err)
-				}
-			}
-			return m, nil
+			return m.handleDebugAction(debugActionStepOut)
 		case "q":
-			if m.debugMgr.IsRunning() {
-				m.debugMgr.Stop()
-				m.debuggerPanel.SetState(dap.StateInactive)
-				m.currentExecFile = ""
-				m.currentExecLine = -1
-				m.status = "Debugging stopped"
-			}
-			return m, nil
+			return m.handleDebugStop("Debugging stopped")
 		case "up":
 			// Navigate stack frames up
 			cur := m.debuggerPanel.CurrentFrame()
@@ -2118,12 +3019,19 @@ func (m Model) updateDebugger(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateSettings handles input for the Settings overlay.
 func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.settingsSaving {
+		// The command owns a snapshot of every visible value. Do not accept a
+		// second edit until it completes, otherwise a successful older snapshot
+		// could incorrectly clear the dirty state of a newer edit.
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
+		case "ctrl+s":
+			return m.saveSettings()
 		case "esc", "escape", "ctrl+,":
-			// Close settings
-			m.showSettings = false
+			m = m.requestCloseSettings()
 			return m, nil
 		case "up":
 			m.settingsM.SelectPrevSetting()
@@ -2152,6 +3060,8 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case settings.TypeInt:
 					// Could open input dialog, for now just increment
 					m.settingsM.IncrementIntValue()
+				case settings.TypeString:
+					m.settingsM.CycleStringValue()
 				}
 			}
 			return m, nil
@@ -2181,11 +3091,62 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsM.SelectNextSetting()
 		}
 		return m, nil
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		x, y, width, height := m.settingsModalGeometry()
+		if mouse.Button != tea.MouseLeft || mouse.X < x || mouse.X >= x+width || mouse.Y < y || mouse.Y >= y+height {
+			return m, nil
+		}
+		// The model is rendered within a rounded border and one-cell/two-cell
+		// padding, so route clicks in content rather than screen coordinates.
+		m.settingsM.HandleMouseClick(mouse.X-x-3, mouse.Y-y-2)
+		return m, nil
 	}
 	return m, nil
 }
 
+func (m Model) saveSettings() (tea.Model, tea.Cmd) {
+	if m.settingsSaving {
+		return m, nil
+	}
+	cfg, err := m.settingsM.Config()
+	if err != nil {
+		m.settingsM.SetStatus(fmt.Sprintf("Cannot save settings: %v", err))
+		return m, nil
+	}
+	path := m.settingsM.ConfigPath()
+	if path == "" {
+		path = config.ConfigPath()
+	}
+	m.settingsSaving = true
+	m.settingsM.SetStatus("Saving settings…")
+	return m, func() tea.Msg {
+		return settingsSaveResultMsg{Config: cfg, Err: config.SaveTo(path, cfg)}
+	}
+}
+
+// applySavedSettings updates only values that are safe to change in a running
+// TUI. Themes are deliberately deferred: several sub-models cache styles, and
+// Settings explicitly tells the user a restart is required for a theme change.
+func (m *Model) applySavedSettings(cfg config.Config) {
+	m.appCfg = cfg
+	m.showTree = cfg.UI.ShowTree
+	for i := range m.editors {
+		ed := &m.editors[i]
+		ed.Config.TabSize = cfg.Editor.TabSize
+		ed.Config.InsertTabs = cfg.Editor.InsertTabs
+		ed.Config.AutoIndent = cfg.Editor.AutoIndent
+		ed.Config.WordWrap = cfg.Editor.WordWrap
+		if !cfg.Editor.WordWrap {
+			ed.Wrap = nil
+		}
+		ed.SetSize(ed.Viewport.Width, ed.Viewport.Height)
+	}
+	m.relayout()
+}
+
 func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
+	m.ensureDiagnosticIndexes()
 	path := lsp.URIToPath(msg.URI)
 
 	for i := range m.editors {
@@ -2211,17 +3172,21 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 		_ = m.coordinator.HandleMessage(msg)
 	}
 
-	// Update centralized file diagnostics map (worst severity only)
-	if len(msg.Diagnostics) == 0 {
+	// Update the changed file and only its ancestor severity counters. The
+	// shared tree map stays attached to the tree model, so a notification never
+	// copies every file and directory diagnostic.
+	oldSeverity, hadOldSeverity := m.fileDiagnostics[path]
+	newSeverity, hasNewSeverity := worstDiagnosticSeverity(msg.Diagnostics)
+	if hadOldSeverity {
+		m.adjustDirectoryDiagnostics(path, oldSeverity, -1)
+	}
+	if !hasNewSeverity {
 		delete(m.fileDiagnostics, path)
+		delete(m.treeDiagnostics, path)
 	} else {
-		worst := 4
-		for _, d := range msg.Diagnostics {
-			if int(d.Severity) < worst {
-				worst = int(d.Severity)
-			}
-		}
-		m.fileDiagnostics[path] = worst
+		m.fileDiagnostics[path] = newSeverity
+		m.treeDiagnostics[path] = newSeverity
+		m.adjustDirectoryDiagnostics(path, newSeverity, 1)
 	}
 
 	// Sync to matching tab
@@ -2232,90 +3197,90 @@ func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Recompute directory diagnostics and push to file tree
-	m.updateDirDiagnostics()
-	merged := make(map[string]int, len(m.fileDiagnostics)+len(m.dirDiagnostics))
-	for k, v := range m.fileDiagnostics {
-		merged[k] = v
-	}
-	for k, v := range m.dirDiagnostics {
-		merged[k] = v
-	}
-	m.tree.SetDiagnostics(merged)
-
-	// Update problems panel
-	m.updateProblemsPanel()
+	// Update only the received file in the problems panel. Its model keeps the
+	// global presentation order through a linear merge, avoiding an aggregate
+	// coordinator walk and quadratic sort on each LSP notification.
+	m.updateProblemsPanelForFile(path, msg.Diagnostics)
 
 	return m, nil
 }
 
-// updateDirDiagnostics computes worst severity for ancestor directories.
-func (m *Model) updateDirDiagnostics() {
-	m.dirDiagnostics = make(map[string]int)
-	for path, sev := range m.fileDiagnostics {
-		dir := filepath.Dir(path)
-		for dir != m.rootDir && dir != "/" && dir != "." {
-			if existing, ok := m.dirDiagnostics[dir]; !ok || sev < existing {
-				m.dirDiagnostics[dir] = sev
-			}
-			dir = filepath.Dir(dir)
-		}
+func (m *Model) ensureDiagnosticIndexes() {
+	if m.fileDiagnostics == nil {
+		m.fileDiagnostics = make(map[string]int)
+	}
+	if m.dirDiagnostics == nil {
+		m.dirDiagnostics = make(map[string]int)
+	}
+	if m.dirDiagnosticCounts == nil {
+		m.dirDiagnosticCounts = make(map[string]map[int]int)
+	}
+	if m.treeDiagnostics == nil {
+		m.treeDiagnostics = make(map[string]int)
 	}
 }
 
-// updateProblemsPanel rebuilds the problems panel from all received diagnostics.
-func (m *Model) updateProblemsPanel() {
-	var allProblems []problems.Problem
-
-	// Get diagnostics from LSP coordinator (single source of truth)
-	if m.coordinator != nil {
-		lspCoord := m.coordinator.GetLSPCoordinator()
-		for path := range m.fileDiagnostics {
-			diags := lspCoord.GetDiagnostics(path)
-			for _, d := range diags {
-				allProblems = append(allProblems, problems.Problem{
-					FilePath: path,
-					Line:     d.Range.Start.Line,
-					Col:      d.Range.Start.Character,
-					EndLine:  d.Range.End.Line,
-					EndCol:   d.Range.End.Character,
-					Severity: int(d.Severity),
-					Message:  d.Message,
-					Source:   d.Source,
-				})
-			}
+func worstDiagnosticSeverity(diagnostics []lsp.Diagnostic) (int, bool) {
+	if len(diagnostics) == 0 {
+		return 0, false
+	}
+	worst := int(diagnostics[0].Severity)
+	for _, diagnostic := range diagnostics[1:] {
+		if severity := int(diagnostic.Severity); severity < worst {
+			worst = severity
 		}
 	}
+	return worst, true
+}
 
-	// Sort problems by severity (errors first), then by file path, then by line
-	sortProblems(allProblems)
-	m.problemsPanel.SetProblems(allProblems)
+func (m *Model) adjustDirectoryDiagnostics(path string, severity, delta int) {
+	for dir := filepath.Dir(path); dir != m.rootDir && dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		counts := m.dirDiagnosticCounts[dir]
+		if counts == nil {
+			counts = make(map[int]int)
+			m.dirDiagnosticCounts[dir] = counts
+		}
+		counts[severity] += delta
+		if counts[severity] <= 0 {
+			delete(counts, severity)
+		}
+		if len(counts) == 0 {
+			delete(m.dirDiagnosticCounts, dir)
+			delete(m.dirDiagnostics, dir)
+			delete(m.treeDiagnostics, dir)
+			continue
+		}
+		worst := 0
+		for candidate := range counts {
+			if worst == 0 || candidate < worst {
+				worst = candidate
+			}
+		}
+		m.dirDiagnostics[dir] = worst
+		m.treeDiagnostics[dir] = worst
+	}
+}
+
+func (m *Model) updateProblemsPanelForFile(path string, diagnostics []lsp.Diagnostic) {
+	fileProblems := make([]problems.Problem, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		fileProblems = append(fileProblems, problems.Problem{
+			FilePath: path,
+			Line:     diagnostic.Range.Start.Line,
+			Col:      diagnostic.Range.Start.Character,
+			EndLine:  diagnostic.Range.End.Line,
+			EndCol:   diagnostic.Range.End.Character,
+			Severity: int(diagnostic.Severity),
+			Message:  diagnostic.Message,
+			Source:   diagnostic.Source,
+		})
+	}
+	m.problemsPanel.ReplaceFileProblems(path, fileProblems)
 }
 
 // sortProblems sorts problems by severity, path, and line.
 func sortProblems(probs []problems.Problem) {
-	for i := 0; i < len(probs)-1; i++ {
-		for j := i + 1; j < len(probs); j++ {
-			// Sort by severity first (lower = more severe)
-			if probs[i].Severity != probs[j].Severity {
-				if probs[i].Severity > probs[j].Severity {
-					probs[i], probs[j] = probs[j], probs[i]
-				}
-				continue
-			}
-			// Then by file path
-			if probs[i].FilePath != probs[j].FilePath {
-				if probs[i].FilePath > probs[j].FilePath {
-					probs[i], probs[j] = probs[j], probs[i]
-				}
-				continue
-			}
-			// Then by line number
-			if probs[i].Line > probs[j].Line {
-				probs[i], probs[j] = probs[j], probs[i]
-			}
-		}
-	}
+	slices.SortStableFunc(probs, problems.Compare)
 }
 
 // LSP helpers
@@ -2381,6 +3346,8 @@ func (m *Model) toggleBreakpoint(filePath string, line int) tea.Cmd {
 	} else {
 		m.breakpoints[filePath] = entries
 	}
+	m.rebuildBreakpointGutter(filePath)
+	m.projectDebugGutterForPath(filePath)
 
 	// Update debugger panel breakpoint display
 	m.syncDebuggerBreakpoints()
@@ -2460,31 +3427,20 @@ func (m Model) handleDAPMsg(msg dapMsg) (tea.Model, tea.Cmd) {
 		m.debuggerPanel.SetState(dap.StatePaused)
 		m.status = fmt.Sprintf("Stopped: %s", inner.Reason)
 		// Fetch stack trace, scopes, and variables
-		cmd := m.fetchDebugState()
+		cmd := m.fetchDebugStateForGeneration(m.debugLifecycle.generation)
 		return m, tea.Batch(cmd, m.listenDAP())
 
 	case dap.ContinuedEventMsg:
 		m.debuggerPanel.SetState(dap.StateRunning)
-		m.currentExecFile = ""
-		m.currentExecLine = -1
+		m.setExecutionLocation("", -1)
 		m.status = "Debugging"
 		return m, m.listenDAP()
 
 	case dap.TerminatedEventMsg:
-		m.debugMgr.Stop()
-		m.debuggerPanel.SetState(dap.StateInactive)
-		m.currentExecFile = ""
-		m.currentExecLine = -1
-		m.status = "Debug session terminated"
-		return m, m.listenDAP()
+		return m.handleDebugStop("Debug session terminated")
 
 	case dap.ExitedEventMsg:
-		m.debugMgr.Stop()
-		m.debuggerPanel.SetState(dap.StateInactive)
-		m.currentExecFile = ""
-		m.currentExecLine = -1
-		m.status = fmt.Sprintf("Process exited with code %d", inner.ExitCode)
-		return m, m.listenDAP()
+		return m.handleDebugStop(fmt.Sprintf("Process exited with code %d", inner.ExitCode))
 
 	case dap.OutputEventMsg:
 		m.debuggerPanel.AppendOutput(strings.TrimRight(inner.Output, "\n"))
@@ -2500,17 +3456,21 @@ func (m Model) handleDAPMsg(msg dapMsg) (tea.Model, tea.Cmd) {
 
 // fetchDebugState fetches stack trace, scopes, and variables after a stopped event.
 func (m Model) fetchDebugState() tea.Cmd {
+	return m.fetchDebugStateForGeneration(m.debugLifecycle.generation)
+}
+
+func (m Model) fetchDebugStateForGeneration(generation uint64) tea.Cmd {
 	mgr := m.debugMgr
 	return func() tea.Msg {
 		frames, err := mgr.GetStackTrace()
 		if err != nil || len(frames) == 0 {
-			return debugStateMsg{}
+			return debugStateMsg{Generation: generation}
 		}
 
 		// Get scopes for top frame
 		scopes, err := mgr.GetScopes(frames[0].Id)
 		if err != nil {
-			return debugStateMsg{Frames: frames}
+			return debugStateMsg{Generation: generation, Frames: frames}
 		}
 
 		// Get variables from the first non-expensive scope (usually "Locals")
@@ -2522,21 +3482,31 @@ func (m Model) fetchDebugState() tea.Cmd {
 			}
 		}
 
-		return debugStateMsg{Frames: frames, Variables: vars}
+		return debugStateMsg{Generation: generation, Frames: frames, Variables: vars}
 	}
 }
 
 func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
-	if buf.FilePath == "" {
+	if buf.FilePath == "" || m.lspMgr == nil {
 		return nil
 	}
 	mgr := m.lspMgr
 	filePath := buf.FilePath
-	content := buf.Content()
+	snapshot := buf.Rope()
 	version := buf.Version()
+	generation := mgr.BeginDocument(filePath)
+	budget := m.lspMaterializationBudget()
 	return func() tea.Msg {
-		client, err := mgr.EnsureClient(filePath)
-		if err != nil || client == nil {
+		// A close can happen while this command waits behind another large LSP
+		// snapshot. Avoid creating a needless full string copy for that retired
+		// lifecycle; Manager repeats the generation check at its protocol edge.
+		if mgr.DocumentGeneration(filePath) != generation {
+			return nil
+		}
+		content, ok := budget.materializeSnapshotIf(snapshot, nil, func() bool {
+			return mgr.DocumentGeneration(filePath) == generation
+		})
+		if !ok {
 			return nil
 		}
 		cfg := mgr.ConfigForFile(filePath)
@@ -2544,21 +3514,25 @@ func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
 		if cfg != nil {
 			langID = cfg.LanguageID
 		}
-		client.DidOpen(lsp.FileURI(filePath), langID, version, content)
+		mgr.OpenDocument(filePath, generation, langID, version, content)
 		return LspReadyMsg{FilePath: filePath, OpenVersion: version}
 	}
 }
 
-func (m Model) requestDefinition() tea.Cmd {
+func (m Model) requestDefinition() (Model, tea.Cmd) {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
-		return nil
+		return m, nil
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
+	metadata, ok := m.beginDocumentRequest(documentRequestDefinition, filePath)
+	if !ok {
+		return m, nil
+	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2567,16 +3541,20 @@ func (m Model) requestDefinition() tea.Cmd {
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/definition", Message: err.Error()}
 		}
-		return lsp.DefinitionResultMsg{Locations: locs}
+		return lsp.DefinitionResultMsg{DocumentRequestMetadata: metadata, Locations: locs}
 	}
 }
 
-func (m Model) requestFoldingRanges(filePath string) tea.Cmd {
+func (m Model) requestFoldingRanges(filePath string) (Model, tea.Cmd) {
 	if filePath == "" {
-		return nil
+		return m, nil
+	}
+	metadata, ok := m.beginDocumentRequest(documentRequestFolding, filePath)
+	if !ok {
+		return m, nil
 	}
 	mgr := m.lspMgr
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2585,20 +3563,24 @@ func (m Model) requestFoldingRanges(filePath string) tea.Cmd {
 		if err != nil || len(ranges) == 0 {
 			return nil
 		}
-		return lsp.FoldingRangeResultMsg{FilePath: filePath, Ranges: ranges}
+		return lsp.FoldingRangeResultMsg{DocumentRequestMetadata: metadata, FilePath: filePath, Ranges: ranges}
 	}
 }
 
-func (m Model) requestCodeActions() tea.Cmd {
+func (m Model) requestCodeActions() (Model, tea.Cmd) {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
-		return nil
+		return m, nil
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
+	metadata, ok := m.beginDocumentRequest(documentRequestCodeAction, filePath)
+	if !ok {
+		return m, nil
+	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2622,18 +3604,98 @@ func (m Model) requestCodeActions() tea.Cmd {
 		if err != nil || len(actions) == 0 {
 			return nil
 		}
-		return lsp.CodeActionResultMsg{Actions: actions}
+		return lsp.CodeActionResultMsg{DocumentRequestMetadata: metadata, Actions: actions}
 	}
 }
 
-func (m Model) requestDocumentSymbols() tea.Cmd {
+const codeActionCommandTimeout = 5 * time.Second
+
+// executeSelectedCodeAction runs only a command that the user explicitly
+// chose from the code-action picker. The request itself happens in a tea.Cmd;
+// this method only captures immutable identity and cancellation state.
+func (m Model) executeSelectedCodeAction(action lsp.CodeAction, _ lsp.DocumentRequestMetadata) (Model, tea.Cmd) {
+	if action.Command == nil || strings.TrimSpace(action.Command.Command) == "" {
+		m.status = fmt.Sprintf("Code action %q has an empty server command", action.Title)
+		return m, nil
+	}
+	ed := m.activeEditor()
+	if ed == nil || ed.Buffer.FilePath == "" {
+		m.status = "Code action expired; request it again"
+		return m, nil
+	}
+	return m.executeSelectedCodeActionForFile(action, ed.Buffer.FilePath)
+}
+
+// executeSelectedCodeActionForFile lets an asynchronously prepared workspace
+// edit start its explicit server command against the document that produced
+// the action, even if the user focused another tab while disk work ran.
+func (m Model) executeSelectedCodeActionForFile(action lsp.CodeAction, filePath string) (Model, tea.Cmd) {
+	if action.Command == nil || strings.TrimSpace(action.Command.Command) == "" {
+		m.status = fmt.Sprintf("Code action %q has an empty server command", action.Title)
+		return m, nil
+	}
+	metadata, ok := m.beginDocumentRequest(documentRequestCodeAction, filePath)
+	if !ok {
+		m.status = "Code action expired; request it again"
+		return m, nil
+	}
+	if m.codeActionCommandStop != nil {
+		m.codeActionCommandStop()
+	}
+	m.codeActionCommandGen++
+	generation := m.codeActionCommandGen
+	ctx, cancel := context.WithCancel(context.Background())
+	m.codeActionCommandStop = cancel
+	manager := m.lspMgr
+	filePath = metadata.FilePath
+	command := action.Command.Command
+	arguments := append([]any(nil), action.Command.Arguments...)
+	title := action.Title
+	m.status = fmt.Sprintf("Running code action: %s", title)
+
+	return m, func() tea.Msg {
+		defer cancel()
+		requestCtx, requestCancel := context.WithTimeout(ctx, codeActionCommandTimeout)
+		defer requestCancel()
+		if manager == nil {
+			return lspCodeActionCommandResultMsg{
+				Generation: generation,
+				Metadata:   metadata,
+				Title:      title,
+				Err:        errors.New("language server is unavailable"),
+			}
+		}
+		client := manager.ClientForFile(filePath)
+		if client == nil {
+			return lspCodeActionCommandResultMsg{
+				Generation: generation,
+				Metadata:   metadata,
+				Title:      title,
+				Err:        errors.New("language server is unavailable"),
+			}
+		}
+		_, err := client.ExecuteCommand(requestCtx, command, arguments)
+		return lspCodeActionCommandResultMsg{
+			Generation: generation,
+			Metadata:   metadata,
+			Title:      title,
+			Err:        err,
+		}
+	}
+}
+
+func (m Model) requestDocumentSymbols() (Model, tea.Cmd) {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
-		return nil
+		return m, nil
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	return func() tea.Msg {
+	metadata, ok := m.beginDocumentRequest(documentRequestSymbols, filePath)
+	if !ok {
+		return m, nil
+	}
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2642,7 +3704,7 @@ func (m Model) requestDocumentSymbols() tea.Cmd {
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/documentSymbol", Message: err.Error()}
 		}
-		return lsp.DocumentSymbolResultMsg{Symbols: symbols}
+		return lsp.DocumentSymbolResultMsg{DocumentRequestMetadata: metadata, Symbols: symbols}
 	}
 }
 
@@ -2679,9 +3741,7 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setEditor(m.activeTab, *ed)
 		return m, nil
 	case "backspace":
-		if len(m.goToLineInput) > 0 {
-			m.goToLineInput = m.goToLineInput[:len(m.goToLineInput)-1]
-		}
+		m.goToLineInput = deleteLastRune(m.goToLineInput)
 		return m, nil
 	default:
 		if msg.Text != "" && msg.Text >= "0" && msg.Text <= "9" {
@@ -2708,72 +3768,9 @@ func (m Model) handleSaveAsInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if ed == nil {
 			return m, nil
 		}
-		oldPath := ed.Buffer.FilePath
-		oldURI := ""
-		if oldPath != "" {
-			oldURI = lsp.FileURI(oldPath)
-		}
-		// Save to new path
-		if err := ed.Buffer.SaveAs(newPath); err != nil {
-			m.status = fmt.Sprintf("Save-As error: %v", err)
-			return m, nil
-		}
-		search.InvalidateSemanticIndex(m.rootDir)
-		// Update tab label and path
-		m.tabBar.Tabs[m.activeTab].Label = filepath.Base(newPath)
-		m.tabBar.Tabs[m.activeTab].FilePath = newPath
-		m.tabBar.Tabs[m.activeTab].Dirty = false
-		m.tabBar.PinTab(m.activeTab)
-		// Update highlighter if extension changed
-		ext := filepath.Ext(newPath)
-		oldExt := filepath.Ext(oldPath)
-		if ext != oldExt || ed.Highlighter == nil {
-			ed.Highlighter = nil
-			newEd := editor.New(ed.Buffer, m.theme, ed.Config)
-			newEd.Highlighter = nil
-			if newPath != "" {
-				hl := highlight.New(newPath, m.theme)
-				hl.TokenizePrefix(ed.Buffer.Bytes(), 60)
-				newEd.Highlighter = hl
-			}
-			newEd.SetSize(ed.Viewport.Width, ed.Viewport.Height)
-			newEd.HasLSP = ed.HasLSP
-			m.setEditor(m.activeTab, newEd)
-		} else {
-			m.setEditor(m.activeTab, *ed)
-		}
-		// Update watcher
-		if m.watcher != nil {
-			if oldPath != "" && oldPath != newPath {
-				m.watcher.UnwatchFile(oldPath)
-			}
-			m.watcher.WatchFile(newPath)
-		}
-		// LSP: close old, open new
-		if oldURI != "" {
-			if client := m.lspMgr.ClientForFile(oldPath); client != nil {
-				client.DidClose(oldURI)
-			}
-		}
-		// Re-open via lspDidOpen which handles EnsureClient + DidOpen
-		lspCmd := m.lspDidOpen(m.editors[m.activeTab].Buffer)
-		// Update editor comment prefix
-		m.editors[m.activeTab].Config.CommentPrefix = editor.CommentPrefixForFile(newPath)
-		m.status = fmt.Sprintf("Saved as %s", newPath)
-		var events []plugin.EventContext
-		if oldPath == "" {
-			events = append(events,
-				m.pluginEvent(plugin.EventBufNew, newPath),
-				m.pluginEvent(plugin.EventFileType, newPath),
-				m.pluginEvent(plugin.EventBufEnter, newPath),
-			)
-		}
-		events = append(events, m.pluginEvent(plugin.EventBufWrite, newPath))
-		return m, tea.Batch(lspCmd, m.triggerPluginEvents(events...))
+		return m, m.beginSaveAsForTab(m.activeTab, newPath)
 	case "backspace":
-		if len(m.saveAsInput) > 0 {
-			m.saveAsInput = m.saveAsInput[:len(m.saveAsInput)-1]
-		}
+		m.saveAsInput = deleteLastRune(m.saveAsInput)
 		return m, nil
 	default:
 		if msg.Text != "" {
@@ -2786,9 +3783,9 @@ func (m Model) handleSaveAsInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleContextMenuAction(action string) (tea.Model, tea.Cmd) {
 	switch action {
 	case "goto_definition":
-		return m, m.requestDefinition()
+		return m.requestDefinition()
 	case "find_references":
-		return m, m.requestReferences()
+		return m.requestReferences()
 	case "rename_symbol":
 		m.renameMode = true
 		m.renameInput = ""
@@ -2797,16 +3794,20 @@ func (m Model) handleContextMenuAction(action string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) requestReferences() tea.Cmd {
+func (m Model) requestReferences() (Model, tea.Cmd) {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
-		return nil
+		return m, nil
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
+	metadata, ok := m.beginDocumentRequest(documentRequestReferences, filePath)
+	if !ok {
+		return m, nil
+	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2815,7 +3816,7 @@ func (m Model) requestReferences() tea.Cmd {
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/references", Message: err.Error()}
 		}
-		return lsp.ReferencesResultMsg{Locations: locs}
+		return lsp.ReferencesResultMsg{DocumentRequestMetadata: metadata, Locations: locs}
 	}
 }
 
@@ -2926,16 +3927,20 @@ func symbolKindName(kind int) string {
 	}
 }
 
-func (m Model) requestRename(newName string) tea.Cmd {
+func (m Model) requestRename(newName string) (Model, tea.Cmd) {
 	ed := m.activeEditor()
 	if ed.Buffer.FilePath == "" {
-		return nil
+		return m, nil
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
+	metadata, ok := m.beginDocumentRequest(documentRequestRename, filePath)
+	if !ok {
+		return m, nil
+	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		client := mgr.ClientForFile(filePath)
 		if client == nil {
 			return nil
@@ -2944,7 +3949,7 @@ func (m Model) requestRename(newName string) tea.Cmd {
 		if err != nil || (len(edits.Changes) == 0 && len(edits.DocumentChanges) == 0) {
 			return nil
 		}
-		return lsp.RenameResultMsg{Edit: edits}
+		return lsp.RenameResultMsg{DocumentRequestMetadata: metadata, Edit: edits}
 	}
 }
 
@@ -2961,124 +3966,15 @@ func (m Model) handleRenameInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		newName := m.renameInput
 		m.renameInput = ""
-		return m, m.requestRename(newName)
+		return m.requestRename(newName)
 	case "backspace":
-		if len(m.renameInput) > 0 {
-			m.renameInput = m.renameInput[:len(m.renameInput)-1]
-		}
+		m.renameInput = deleteLastRune(m.renameInput)
 		return m, nil
 	default:
 		if msg.Text != "" {
 			m.renameInput += msg.Text
 		}
 		return m, nil
-	}
-}
-
-func (m Model) applyWorkspaceEdit(edit lsp.WorkspaceEdit) (tea.Model, tea.Cmd) {
-	applied := 0
-	var failed []string
-	if len(edit.DocumentChanges) > 0 {
-		for _, change := range edit.DocumentChanges {
-			if change.FileOperation != nil {
-				if err := m.applyWorkspaceFileOperation(*change.FileOperation); err != nil {
-					failed = append(failed, workspaceOperationLabel(*change.FileOperation))
-					continue
-				}
-				applied++
-				continue
-			}
-			fileApplied, err := m.applyWorkspaceTextEdits(change.URI, change.Edits)
-			if err != nil {
-				failed = append(failed, filepath.Base(lsp.URIToPath(change.URI)))
-				continue
-			}
-			applied += fileApplied
-		}
-	} else {
-		for uri, textEdits := range edit.Changes {
-			fileApplied, err := m.applyWorkspaceTextEdits(uri, textEdits)
-			if err != nil {
-				failed = append(failed, filepath.Base(lsp.URIToPath(uri)))
-				continue
-			}
-			applied += fileApplied
-		}
-	}
-	if len(failed) > 0 && applied > 0 {
-		m.status = fmt.Sprintf("Workspace edit applied %d change(s); failed for %s", applied, strings.Join(failed, ", "))
-	} else if len(failed) > 0 {
-		m.status = fmt.Sprintf("Workspace edit failed for %s", strings.Join(failed, ", "))
-	} else if applied > 0 {
-		m.status = fmt.Sprintf("Renamed: %d edit(s) applied", applied)
-	} else {
-		m.status = "Rename: no edits applied"
-	}
-	return m, nil
-}
-
-func (m *Model) applyWorkspaceTextEdits(uri string, textEdits []lsp.TextEdit) (int, error) {
-	path := lsp.URIToPath(uri)
-	if idx := m.findEditorByPath(path); idx >= 0 {
-		applied := applyTextEditsToBuffer(m.editors[idx].Buffer, textEdits)
-		if m.editors[idx].Highlighter != nil {
-			m.editors[idx].Highlighter.Invalidate()
-		}
-		return applied, nil
-	}
-
-	buf, err := text.NewBufferFromFile(path)
-	if err != nil {
-		return 0, err
-	}
-	fileApplied := applyTextEditsToBuffer(buf, textEdits)
-	if err := buf.Save(); err != nil {
-		return 0, err
-	}
-	return fileApplied, nil
-}
-
-func (m *Model) applyWorkspaceFileOperation(op lsp.WorkspaceFileOperation) error {
-	switch op.Kind {
-	case lsp.FileOpCreate:
-		target := lsp.URIToPath(op.URI)
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			return err
-		}
-		return f.Close()
-	case lsp.FileOpDelete:
-		target := lsp.URIToPath(op.URI)
-		return os.RemoveAll(target)
-	case lsp.FileOpRename:
-		oldPath := lsp.URIToPath(op.OldURI)
-		newPath := lsp.URIToPath(op.NewURI)
-		if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
-			return err
-		}
-		if err := os.Rename(oldPath, newPath); err != nil {
-			return err
-		}
-		if idx := m.findEditorByPath(oldPath); idx >= 0 {
-			m.editors[idx].Buffer.FilePath = newPath
-		}
-		return nil
-	default:
-		return fmt.Errorf("unsupported workspace file operation %q", op.Kind)
-	}
-}
-
-func workspaceOperationLabel(op lsp.WorkspaceFileOperation) string {
-	switch op.Kind {
-	case lsp.FileOpRename:
-		return filepath.Base(lsp.URIToPath(op.NewURI))
-	case lsp.FileOpCreate, lsp.FileOpDelete:
-		return filepath.Base(lsp.URIToPath(op.URI))
-	default:
-		return string(op.Kind)
 	}
 }
 
@@ -3094,7 +3990,7 @@ func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
 			{Label: "New File...", Action: "tree_new_file"},
 			{Label: "New Folder...", Action: "tree_new_folder"},
 		}
-		m.treeContextMenu.Show(items, x, screenY)
+		m.showContextMenu(&m.treeContextMenu, items, x, screenY)
 		return m, nil
 	}
 
@@ -3123,7 +4019,7 @@ func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	m.treeContextMenu.Show(items, x, screenY)
+	m.showContextMenu(&m.treeContextMenu, items, x, screenY)
 	return m, nil
 }
 
@@ -3134,14 +4030,11 @@ func (m Model) handleTreeContextMenuAction(action string) (tea.Model, tea.Cmd) {
 	case "tree_open_new_tab":
 		return m.openFileForceNewTab(m.treeContextPath)
 	case "tree_copy_path":
-		// Copy the relative path to clipboard
 		relPath, err := filepath.Rel(m.rootDir, m.treeContextPath)
 		if err != nil {
 			relPath = m.treeContextPath
 		}
-		// Use the clipboard package
-		m.status = fmt.Sprintf("Copied: %s", relPath)
-		return m, nil
+		return m, treeCopyPathCmd(relPath)
 	case "tree_toggle":
 		var cmd tea.Cmd
 		m.tree, cmd = m.tree.ToggleEntry(m.treeContextPath)
@@ -3215,7 +4108,7 @@ func (m Model) showGitContextMenu(x, y, panelY int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.gitContextMenu.Show(items, x, y)
+	m.showContextMenu(&m.gitContextMenu, items, x, y)
 	return m, nil
 }
 
@@ -3245,6 +4138,30 @@ func (m Model) handleGitContextMenuAction(action string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
+	m.cancelSessionRestore()
+	normalizedPath, err := m.normalizeEditorFilePath(path)
+	if err != nil {
+		m.status = fmt.Sprintf("Cannot open file: %v", err)
+		return m, nil
+	}
+	path = normalizedPath
+	if m.saveAsDestinationReserved(path) {
+		m.status = fmt.Sprintf(
+			"Cannot open %s while Save As is using that destination",
+			filepath.Base(path),
+		)
+		return m, nil
+	}
+	// LSP and watcher lifecycle is keyed by file path/URI. Two independent
+	// buffers for one path would diverge and closing either could unsubscribe
+	// the other. Until Teak has shared-buffer views, "new tab" pins and focuses
+	// the existing owner instead of creating an unsafe duplicate.
+	if idx := m.tabBar.FindTab(path); idx >= 0 {
+		m.activateTab(idx)
+		m.tabBar.PinTab(idx)
+		m.focus = FocusEditor
+		return m, nil
+	}
 	// Create a placeholder tab with an empty buffer, then load file async
 	buf := text.NewBuffer()
 	buf.FilePath = path
@@ -3257,12 +4174,11 @@ func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
 
 	m.editors = append(m.editors, ed)
 	idx := m.tabBar.AddTab(filepath.Base(path), path)
-	m.activeTab = idx
-	m.tabBar.ActiveIdx = idx
+	m.activateTab(idx)
 	m.focus = FocusEditor
 	m.relayout()
 
-	return m, loadFileCmd(path, idx, true)
+	return m, m.startFileLoad(path, ed, true, nil)
 }
 
 func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
@@ -3277,8 +4193,7 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 	// Check if already open — pin it (double-open behavior)
 	idx := m.tabBar.FindTab(diffKey)
 	if idx >= 0 {
-		m.activeTab = idx
-		m.tabBar.ActiveIdx = idx
+		m.activateTab(idx)
 		m.tabBar.PinTab(idx)
 		m.focus = FocusEditor
 		return m, nil
@@ -3289,11 +4204,11 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 	ed := editor.New(buf, m.theme, editor.DefaultConfig())
 
 	// Try to reuse a preview tab (same as file opening behavior)
-	var tabIdx int
 	label := "\u0394 " + filepath.Base(relPath)
 	replaceIdx := m.findReplaceableTab()
 	if replaceIdx >= 0 {
 		// Clean up any old diff view for this slot
+		m.removeLoadsForEditor(m.editors[replaceIdx].ID())
 		delete(m.diffViews, replaceIdx)
 		m.setEditor(replaceIdx, ed)
 		m.tabBar.Tabs[replaceIdx].Label = label
@@ -3302,26 +4217,34 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 		m.tabBar.Tabs[replaceIdx].Preview = true
 		m.tabBar.Tabs[replaceIdx].Kind = editor.TabDiff
 		m.tabBar.Tabs[replaceIdx].DiagSeverity = 0
-		m.activeTab = replaceIdx
-		m.tabBar.ActiveIdx = replaceIdx
-		tabIdx = replaceIdx
+		m.activateTab(replaceIdx)
 	} else {
 		m.editors = append(m.editors, ed)
-		tabIdx = m.tabBar.AddTab(label, diffKey)
+		tabIdx := m.tabBar.AddTab(label, diffKey)
 		m.tabBar.Tabs[tabIdx].Kind = editor.TabDiff
 		m.tabBar.Tabs[tabIdx].Preview = true
-		m.activeTab = tabIdx
-		m.tabBar.ActiveIdx = tabIdx
+		m.activateTab(tabIdx)
 	}
 
 	m.focus = FocusEditor
 	m.relayout()
 
-	return m, loadDiffCmd(m.rootDir, relPath, status, tabIdx)
+	return m, m.startDiffLoad(relPath, status, ed)
 }
 
 func (m Model) handleDiffLoaded(msg DiffLoadedMsg) (tea.Model, tea.Cmd) {
-	tabIdx := msg.TabIndex
+	if msg.RequestID != 0 {
+		request, ok := m.pendingDiffLoads[msg.RequestID]
+		if !ok || request.EditorID != msg.EditorID || request.Path != msg.Path {
+			return m, nil
+		}
+		delete(m.pendingDiffLoads, msg.RequestID)
+		request.Cancel()
+	}
+	tabIdx := m.editorIndexForDiffLoad(msg.EditorID, msg.Path)
+	if msg.RequestID == 0 && msg.EditorID == 0 { // retained only for older direct unit messages
+		tabIdx = msg.TabIndex
+	}
 	if tabIdx < 0 || tabIdx >= len(m.tabBar.Tabs) {
 		return m, nil
 	}
@@ -3347,61 +4270,243 @@ func (m Model) handleDiffLoaded(msg DiffLoadedMsg) (tea.Model, tea.Cmd) {
 
 // detectGitBranch returns the current git branch name, or "" if not in a repo.
 func detectGitBranch(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+	return git.CurrentBranch(dir)
+}
+
+// boundedReplaceAll scans at most maxReplaceAllMatches+1 non-overlapping
+// occurrences before allocating the replacement string. Preparation runs in a
+// background command, but the cap still bounds transient memory and latency.
+func boundedReplaceAll(content, query, replacement string) (result string, matches int, ok bool) {
+	result, _, matches, ok = boundedReplaceAllAtOffset(content, query, replacement, 0)
+	return result, matches, ok
+}
+
+// boundedReplaceAllAtOffset also maps an original byte offset through the
+// replacements. Mapping the offset before converting it back to a Position
+// keeps the cursor valid when replacements add/remove lines or UTF-8 bytes.
+func boundedReplaceAllAtOffset(content, query, replacement string, originalOffset int) (result string, mappedOffset, matches int, ok bool) {
+	if query == "" {
+		return content, min(max(0, originalOffset), len(content)), 0, true
 	}
-	return strings.TrimSpace(string(out))
+	originalOffset = min(max(0, originalOffset), len(content))
+	mappedOffset = originalOffset
+	resultBytes := len(content)
+	delta := 0
+	mapped := false
+	for from := 0; from < len(content); {
+		idx := strings.Index(content[from:], query)
+		if idx < 0 {
+			break
+		}
+		start := from + idx
+		end := start + len(query)
+		matches++
+		if matches > maxReplaceAllMatches {
+			return "", 0, matches, false
+		}
+
+		if growth := len(replacement) - len(query); growth > 0 {
+			if resultBytes > maxReplaceResultBytes-growth {
+				return "", 0, matches, false
+			}
+			resultBytes += growth
+		} else {
+			resultBytes += growth
+		}
+
+		if !mapped {
+			switch {
+			case originalOffset <= start:
+				mappedOffset = originalOffset + delta
+				mapped = true
+			case originalOffset < end:
+				withinMatch := originalOffset - start
+				mappedOffset = start + delta + min(withinMatch, len(replacement))
+				mapped = true
+			default:
+				delta += len(replacement) - len(query)
+			}
+		}
+		from = end
+	}
+	if matches == 0 {
+		return content, originalOffset, 0, true
+	}
+	if !mapped {
+		mappedOffset = originalOffset + delta
+	}
+	return strings.ReplaceAll(content, query, replacement), mappedOffset, matches, true
 }
 
 // handleExternalFileChange reloads a file that was modified externally.
 func (m Model) handleExternalFileChange(msg FileChangedMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	search.InvalidateSemanticIndex(m.rootDir)
-	for i, ed := range m.editors {
-		if ed.Buffer.FilePath == msg.Path && !ed.Buffer.Dirty() {
-			prevVersion := m.editors[i].Buffer.Version()
-			prevCursor := m.editors[i].Buffer.Cursor
-			// Reload content into the buffer
-			m.editors[i].Buffer.LoadContentWithTabSize(msg.Data, ed.Config.TabSize)
-			if m.editors[i].Highlighter != nil {
-				m.editors[i].Highlighter.Invalidate()
+	path := cleanExternalConflictPath(msg.Path)
+	if msg.Observation != 0 {
+		if msg.Observation <= m.externalChangeObserved[path] {
+			if m.watcher != nil {
+				cmds = append(cmds, m.watcher.listenCmd())
 			}
-			m.status = fmt.Sprintf("Reloaded: %s (external change)", filepath.Base(msg.Path))
-			// Re-tokenize
-			cmds = append(cmds, m.editors[i].ScheduleInitialTokenize())
-			cmds = append(cmds,
-				m.triggerPluginEvents(
-					m.pluginEvent(plugin.EventBufRead, msg.Path),
-					m.pluginEvent(plugin.EventFileType, msg.Path),
-				),
-				m.triggerEditorAutocmds(msg.Path, prevVersion, m.editors[i].Buffer.Version(), prevCursor, m.editors[i].Buffer.Cursor),
-			)
+			return m, tea.Batch(cmds...)
+		}
+		if msg.Observation <= m.lastSaveWatcherWatermarks[path] {
+			msg.RequiresConflict = true
 		}
 	}
-	// Continue listening for more file events
+	snapshot := msg.Snapshot
+	if snapshot == nil {
+		if msg.NeedsRead || msg.Missing {
+			if cmd := m.enqueueExternalFileRead(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else {
+			// Legacy/direct callers may still supply raw bytes. Convert them in
+			// a command so Update never constructs a document-sized rope.
+			cmds = append(cmds, prepareExternalFileChangedCmd(msg, m.externalBackgroundContext()))
+		}
+		if m.watcher != nil {
+			cmds = append(cmds, m.watcher.listenCmd())
+		}
+		return m, tea.Batch(cmds...)
+	}
+	updated, applyCmd := m.applyPreparedExternalFileChange(msg)
+	m = updated.(Model)
+	if applyCmd != nil {
+		cmds = append(cmds, applyCmd)
+	}
 	if m.watcher != nil {
 		cmds = append(cmds, m.watcher.listenCmd())
 	}
 	return m, tea.Batch(cmds...)
 }
 
+// applyPreparedExternalFileChange mutates only from an immutable snapshot or a
+// confirmed missing-path signal. Disk I/O and Rope construction happen before
+// this point on the serialized external-read worker.
+func (m Model) applyPreparedExternalFileChange(msg FileChangedMsg) (tea.Model, tea.Cmd) {
+	path := cleanExternalConflictPath(msg.Path)
+	if msg.Observation != 0 {
+		// A serialized fallback read can finish after either a newer direct
+		// watcher snapshot or a save whose watermark covers this observation.
+		// Re-evaluate ordering at the final mutation boundary: enqueue-time
+		// knowledge is insufficient while disk I/O is in flight.
+		if msg.Observation <= m.externalChangeObserved[path] {
+			return m, nil
+		}
+		if msg.Observation <= m.lastSaveWatcherWatermarks[path] {
+			msg.RequiresConflict = true
+		}
+		m.externalChangeObserved[path] = msg.Observation
+	}
+	search.InvalidateSemanticIndex(m.rootDir)
+	matched := false
+	for _, ed := range m.editors {
+		if cleanExternalConflictPath(ed.Buffer.FilePath) != path {
+			continue
+		}
+		matched = true
+		if msg.RequiresConflict {
+			m.recordExternalConflict(path, msg.Snapshot, msg.Observation, msg.Missing, true)
+			m = m.showExternalConflictConfirmation(path)
+			m.status = fmt.Sprintf("External change overlapped the completed save: %s", filepath.Base(path))
+			break
+		}
+		if msg.Missing {
+			m.recordExternalConflict(path, nil, msg.Observation, true, msg.RequiresConflict)
+			m = m.showExternalConflictConfirmation(path)
+			m.status = fmt.Sprintf("File removed or renamed outside Teak: %s", filepath.Base(path))
+			break
+		}
+		if existing, ok := m.externalConflicts[path]; ok {
+			if existing.Missing && !existing.PostSave {
+				// An atomic replace commonly produces Remove before the new
+				// bytes become readable. A clean buffer can resolve only that
+				// transient missing-path conflict automatically.
+				m.clearExternalConflict(path)
+			} else {
+				m.recordExternalConflict(path, msg.Snapshot, msg.Observation, false, msg.RequiresConflict)
+				m = m.showExternalConflictConfirmation(path)
+				m.status = fmt.Sprintf("New external change remains unresolved: %s", filepath.Base(path))
+				break
+			}
+		}
+		if ed.Buffer.Dirty() {
+			m.recordExternalConflict(path, msg.Snapshot, msg.Observation, false, msg.RequiresConflict)
+			m = m.showExternalConflictConfirmation(path)
+			m.status = fmt.Sprintf("External change conflicts with local edits: %s", filepath.Base(path))
+			break
+		}
+	}
+	if matched && !m.hasExternalConflict(path) {
+		updated, reloadCmd := m.reloadExternalFile(path, msg.Snapshot)
+		m = updated.(Model)
+		if m.watcher != nil {
+			// A direct watch is invalidated by atomic rename. Re-register after
+			// the replacement is known to exist.
+			m.watcher.WatchFile(path)
+		}
+		return m, reloadCmd
+	}
+	return m, nil
+}
+
+const treeRefreshDebounceWindow = 120 * time.Millisecond
+
+// queueTreeRefresh coalesces filesystem changes before starting an expensive
+// directory walk. It also cancels an in-flight walk immediately; the result
+// carries a generation so an uncancellable OS directory read can never apply
+// after a newer event.
+func (m *Model) queueTreeRefresh() tea.Cmd {
+	m.cancelTreeRefresh()
+	m.treeRefreshGeneration++
+	generation := m.treeRefreshGeneration
+	return tea.Tick(treeRefreshDebounceWindow, func(time.Time) tea.Msg {
+		return treeRefreshDebounceMsg{Generation: generation}
+	})
+}
+
+func (m *Model) cancelTreeRefresh() {
+	if m.treeRefreshCancel != nil {
+		m.treeRefreshCancel()
+		m.treeRefreshCancel = nil
+	}
+}
+
+func (m *Model) startTreeRefresh(generation uint64) tea.Cmd {
+	if m.rootDir == "" || m.tree.Root == "" {
+		return nil
+	}
+	m.cancelTreeRefresh()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.treeRefreshCancel = cancel
+	// Take ownership of entry slices before the command starts. The snapshot
+	// clone is memory-only; filesystem traversal and recursive reads happen in
+	// the command below, never in Update.
+	tree := m.tree.SnapshotForRefresh()
+	return func() tea.Msg {
+		refresh, err := tree.Refresh(ctx, tree.Root)
+		return treeRefreshResultMsg{Generation: generation, Refresh: refresh, Err: err}
+	}
+}
+
 // handleTreeChange refreshes the file tree when the directory structure changes.
 func (m Model) handleTreeChange(msg TreeChangedMsg) (tea.Model, tea.Cmd) {
 	// Invalidate cached file list for quick open
+	m.cancelFileListScan()
 	m.cachedFilesReady = false
 	m.cachedFiles = nil
 	m.fileListGeneration++
 	search.InvalidateSemanticIndex(m.rootDir)
-	// Refresh the file tree by rebuilding it
-	m.tree.RefreshDir(msg.Dir)
+	// Reading a directory (and all expanded descendants) is deliberately
+	// deferred. Watcher events can arrive in bursts while build tools generate
+	// thousands of files, and Update must remain responsive to input.
+	treeRefreshCmd := m.queueTreeRefresh()
 	m.gitRefreshGeneration++
 	var cmds []tea.Cmd
 	cmds = append(cmds, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
 		return gitRefreshDebounceMsg{generation: m.gitRefreshGeneration}
 	}))
+	cmds = append(cmds, treeRefreshCmd)
 	// Continue listening
 	if m.watcher != nil {
 		cmds = append(cmds, m.watcher.listenCmd())
@@ -3427,37 +4532,9 @@ func (m Model) handleNewItemInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if name == "" {
 			return m, nil
 		}
-		fullPath := filepath.Join(dir, name)
-		if isFolder {
-			if err := os.MkdirAll(fullPath, 0o755); err != nil {
-				m.status = fmt.Sprintf("Error creating folder: %v", err)
-				return m, nil
-			}
-			m.status = fmt.Sprintf("Created folder: %s", name)
-			m.tree.RefreshDir(dir)
-			if m.watcher != nil {
-				m.watcher.WatchDir(fullPath)
-			}
-		} else {
-			if err := os.WriteFile(fullPath, []byte(""), 0o644); err != nil {
-				m.status = fmt.Sprintf("Error creating file: %v", err)
-				return m, nil
-			}
-			search.InvalidateSemanticIndex(m.rootDir)
-			m.status = fmt.Sprintf("Created: %s", name)
-			m.tree.RefreshDir(dir)
-			openedModel, openCmd := m.openFilePinned(fullPath)
-			opened := openedModel.(Model)
-			return opened, tea.Batch(
-				opened.triggerPluginEvents(opened.pluginEvent(plugin.EventBufNew, fullPath)),
-				openCmd,
-			)
-		}
-		return m, nil
+		return m, m.startTreeCreate(dir, name, isFolder)
 	case "backspace":
-		if len(m.newItemInput) > 0 {
-			m.newItemInput = m.newItemInput[:len(m.newItemInput)-1]
-		}
+		m.newItemInput = deleteLastRune(m.newItemInput)
 		return m, nil
 	default:
 		if msg.Text != "" {
@@ -3474,26 +4551,7 @@ func (m Model) handleDeleteConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		target := m.deleteTarget
 		m.deleteConfirm = false
 		m.deleteTarget = ""
-		// Close any open tabs for this file
-		closedAny := false
-		for i := len(m.editors) - 1; i >= 0; i-- {
-			if m.editors[i].Buffer.FilePath == target {
-				m2, _ := m.closeTab(i)
-				m = m2.(Model)
-				closedAny = true
-			}
-		}
-		if err := os.RemoveAll(target); err != nil {
-			m.status = fmt.Sprintf("Error deleting: %v", err)
-			return m, nil
-		}
-		search.InvalidateSemanticIndex(m.rootDir)
-		m.status = fmt.Sprintf("Deleted: %s", filepath.Base(target))
-		m.tree.RefreshDir(filepath.Dir(target))
-		if closedAny {
-			return m, nil
-		}
-		return m, m.triggerPluginEvents(m.pluginEvent(plugin.EventBufDelete, target))
+		return m, m.startTreeDelete(target)
 	default:
 		m.deleteConfirm = false
 		m.deleteTarget = ""
@@ -3502,26 +4560,12 @@ func (m Model) handleDeleteConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func lipglossWidth(s string) int {
-	n := 0
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		n++
-	}
-	return n
+	return ansi.StringWidth(s)
 }
 
 // openQuickOpen pushes a Picker overlay for quick file opening.
 func (m Model) openQuickOpen() (tea.Model, tea.Cmd) {
+	m.cancelActiveEditorDrag()
 	picker := overlay.NewPicker("Open File", nil, m.theme, "quickopen")
 	picker.SetSize(min(m.width-4, 60), m.height-4)
 
@@ -3531,11 +4575,28 @@ func (m Model) openQuickOpen() (tea.Model, tea.Cmd) {
 	if m.cachedFilesReady {
 		picker.SetItems(filesToPickerItems(m.cachedFiles))
 	} else {
-		cmds = append(cmds, quickOpenCmd(m.rootDir, m.fileListGeneration))
+		cmds = append(cmds, m.startFileListScan())
 	}
 
 	m.overlayStack.Push(picker)
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) startFileListScan() tea.Cmd {
+	m.cancelFileListScan()
+	m.fileListGeneration++
+	ctx, cancel := context.WithCancel(context.Background())
+	m.fileListCancel = cancel
+	return quickOpenCmd(ctx, m.rootDir, m.fileListGeneration)
+}
+
+func (m *Model) cancelFileListScan() {
+	if m.fileListCancel != nil {
+		m.fileListCancel()
+		m.fileListCancel = nil
+	}
+	// Invalidate a result even if its goroutine returns after cancellation.
+	m.fileListGeneration++
 }
 
 func (m Model) handlePluginKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
@@ -3550,15 +4611,6 @@ func (m Model) handlePluginKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
-	dispatchPluginKeys := func(sequence string) (handled bool, pending bool, cmd tea.Cmd, err error) {
-		runtime := newPluginRuntime(&m)
-		m.pluginMgr.SetRuntime(runtime)
-		defer m.pluginMgr.ClearRuntime()
-		handled, pending, err = m.pluginMgr.HandleKey(mode, sequence)
-		cmd = runtime.command()
-		return handled, pending, cmd, err
-	}
-
 	key := normalizePluginKey(msg.String())
 	if key == "" {
 		m.pluginKeySequence = ""
@@ -3566,34 +4618,25 @@ func (m Model) handlePluginKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	}
 
 	sequence := appendPluginKeySequence(m.pluginKeySequence, key)
-	handled, pending, pluginCmd, err := dispatchPluginKeys(sequence)
-	if err != nil {
+	exact, prefix := m.pluginMgr.MatchKey(mode, sequence)
+	if exact {
 		m.pluginKeySequence = ""
-		m.status = fmt.Sprintf("Plugin key error: %v", err)
-		return m, pluginCmd, true
+		return m, pluginKeyDispatchCmd(m.pluginMgr, newPluginAsyncRuntime(m), mode, sequence), true
 	}
-	if pending {
+	if prefix {
 		m.pluginKeySequence = sequence
-		return m, pluginCmd, true
-	}
-	if handled {
-		m.pluginKeySequence = ""
-		return m, pluginCmd, true
+		return m, nil, true
 	}
 
 	if m.pluginKeySequence != "" {
 		m.pluginKeySequence = ""
-		handled, pending, pluginCmd, err = dispatchPluginKeys(key)
-		if err != nil {
-			m.status = fmt.Sprintf("Plugin key error: %v", err)
-			return m, pluginCmd, true
+		exact, prefix = m.pluginMgr.MatchKey(mode, key)
+		if exact {
+			return m, pluginKeyDispatchCmd(m.pluginMgr, newPluginAsyncRuntime(m), mode, key), true
 		}
-		if pending {
+		if prefix {
 			m.pluginKeySequence = key
-			return m, pluginCmd, true
-		}
-		if handled {
-			return m, pluginCmd, true
+			return m, nil, true
 		}
 	}
 
@@ -3671,6 +4714,7 @@ func applyTextEditsToBuffer(buf *text.Buffer, edits []lsp.TextEdit) int {
 
 // openCommandPalette pushes a Picker overlay with available commands.
 func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
+	m.cancelActiveEditorDrag()
 	items := m.buildCommandList()
 	picker := overlay.NewPicker("Command Palette", items, m.theme, "cmdpalette")
 	picker.SetSize(min(m.width-4, 60), m.height-4)
@@ -3733,8 +4777,7 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.helpM.Focus()
 		return m, cmd
 	case openSettingsMsg:
-		m.showSettings = true
-		m.settingsM.SetSize(m.width, m.height-4)
+		m.openSettingsOverlay()
 		return m, nil
 	case reopenTabMsg:
 		// Reopen last closed tab
@@ -3746,40 +4789,9 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "No closed tabs to reopen"
 		return m, nil
 	case debugStartMsg:
-		// Start debugging
-		if m.activeEditor() != nil && m.activeEditor().Buffer.FilePath != "" {
-			program := m.activeEditor().Buffer.FilePath
-			config := dap.ConfigForProgram(program)
-			if config.Command == "" {
-				m.status = "No debugger configured for this file type"
-				return m, nil
-			}
-			if err := m.debugMgr.Start(config); err != nil {
-				m.status = fmt.Sprintf("Debug error: %v", err)
-				return m, nil
-			}
-			if err := m.debugMgr.Launch(); err != nil {
-				m.debugMgr.Stop()
-				m.status = fmt.Sprintf("Launch error: %v", err)
-				return m, nil
-			}
-			m.debuggerPanel.SetState(dap.StateRunning)
-			m.showTree = true
-			m.sidebarTab = SidebarDebugger
-			m.focus = FocusDebugger
-			m.status = "Debugging started"
-			m.relayout()
-			return m, m.syncAllBreakpointsToDAP()
-		}
-		return m, nil
+		return m.handleDebugStart()
 	case debugStopMsg:
-		// Stop debugging
-		if m.debugMgr.IsRunning() {
-			m.debugMgr.Stop()
-			m.debuggerPanel.SetState(dap.StateInactive)
-			m.status = "Debugging stopped"
-		}
-		return m, nil
+		return m.handleDebugStop("Debugging stopped")
 	case newFileMsg:
 		return m.newUntitledTab()
 	case saveAsMsg:
@@ -3798,9 +4810,7 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FindPrevMsg:
 		return m.findPrev()
 	case quitMsg:
-		m.lspMgr.ShutdownAll()
-		m.cleanup()
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	return m, nil
 }

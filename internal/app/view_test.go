@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -55,6 +56,112 @@ func TestModelViewZeroSize(t *testing.T) {
 	}
 	if v.AltScreen {
 		t.Fatal("AltScreen = true, want false")
+	}
+}
+
+func TestModelViewSingleRowRendersSafely(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.width = 1
+	m.height = 1
+	m.relayout()
+
+	v := m.View()
+	if v.Content != "" {
+		t.Fatalf("single-row content = %q, want empty minimal view", v.Content)
+	}
+}
+
+func TestModelViewTinyTerminalMatrixDoesNotPanic(t *testing.T) {
+	for width := 0; width <= 12; width++ {
+		for height := 0; height <= 6; height++ {
+			t.Run(fmt.Sprintf("%dx%d", width, height), func(t *testing.T) {
+				m := newViewTestModel(t, true)
+				m.width = width
+				m.height = height
+				m.relayout()
+				_ = m.View()
+			})
+		}
+	}
+}
+
+func TestModelViewCompactHeightNeverExceedsTerminalRows(t *testing.T) {
+	for _, showTree := range []bool{false, true} {
+		for height := 2; height <= 3; height++ {
+			t.Run(fmt.Sprintf("tree-%t-height-%d", showTree, height), func(t *testing.T) {
+				m := newViewTestModel(t, showTree)
+				m.width = 12
+				m.height = height
+				m.relayout()
+
+				view := m.View()
+				content := view.Content
+				rows := 0
+				if content != "" {
+					rows = strings.Count(content, "\n") + 1
+				}
+				if rows > height {
+					t.Fatalf("rendered rows = %d, exceed terminal height %d:\n%q", rows, height, ansi.Strip(content))
+				}
+				if height == 3 && showTree && view.Cursor != nil {
+					localX, _ := m.activeEditor().CursorPosition()
+					if view.Cursor.X != localX {
+						t.Fatalf("compact cursor X = %d, want editor-local %d with hidden sidebar", view.Cursor.X, localX)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCompactRelayoutUsesFullEditorWidth(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.width = 120
+	m.height = 3
+	m.showAgent = true
+	m.relayout()
+
+	if got := m.tabBar.Width; got != m.width {
+		t.Fatalf("compact tab width = %d, want terminal width %d", got, m.width)
+	}
+	if got := m.activeEditor().Viewport.Width; got != m.width {
+		t.Fatalf("compact editor width = %d, want terminal width %d", got, m.width)
+	}
+}
+
+func TestTreeLayoutNeverExceedsTinyViewportWidth(t *testing.T) {
+	for width := 1; width <= 24; width++ {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			m := newViewTestModel(t, true)
+			m.width = width
+			m.height = 8
+			m.relayout()
+
+			if got, limit := m.treeWidth(), max(0, width-2); got > limit {
+				t.Fatalf("treeWidth() = %d, exceeds available sidebar width %d", got, limit)
+			}
+
+			for _, line := range strings.Split(m.View().Content, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Fatalf("rendered line width = %d, exceeds viewport %d: %q", got, width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestSidebarTabsUseASCIIWithoutNerdFont(t *testing.T) {
+	t.Setenv("TEAK_NO_NERD_FONT", "1")
+	m := newViewTestModel(t, true)
+	m.width = 80
+	m.relayout()
+
+	bar := ansi.Strip(m.sidebarTabBar())
+	if !strings.Contains(bar, " F ") || !strings.Contains(bar, " G ") {
+		t.Fatalf("ASCII sidebar tabs missing from %q", bar)
+	}
+	if strings.Contains(bar, "\uf413") || strings.Contains(bar, "\ue725") {
+		t.Fatalf("Nerd Font sidebar tab present in %q", bar)
 	}
 }
 
@@ -141,33 +248,22 @@ func TestModelViewHelpOverlaySuppressesCursor(t *testing.T) {
 	}
 }
 
-func TestModelViewProjectsDebugGutter(t *testing.T) {
+func TestModelViewDoesNotMutateDebugGutter(t *testing.T) {
 	m := newViewTestModel(t, false)
 	path := m.activeEditor().Buffer.FilePath
 	m.breakpoints[path] = []breakpointEntry{{Line: 0, Enabled: true}}
 	m.currentExecFile = path
 	m.currentExecLine = 0
+	original := &editor.GutterOpts{
+		Breakpoints: map[int]editor.BreakpointState{1: editor.BPDisabled},
+		ExecLine:    1,
+	}
+	m.activeEditor().DebugGutter = original
 
 	_ = m.View()
 
 	gutter := m.activeEditor().DebugGutter
-	if gutter == nil {
-		t.Fatal("DebugGutter = nil, want projected debugger state")
-	}
-	if got := gutter.Breakpoints[0]; got != editor.BPActive {
-		t.Errorf("Breakpoints[0] = %v, want %v", got, editor.BPActive)
-	}
-	if gutter.ExecLine != 0 {
-		t.Errorf("ExecLine = %d, want 0", gutter.ExecLine)
-	}
-
-	m.breakpoints[path] = nil
-	m.currentExecFile = ""
-	m.currentExecLine = -1
-
-	_ = m.View()
-
-	if m.activeEditor().DebugGutter != nil {
-		t.Fatal("DebugGutter != nil after debugger state was cleared")
+	if gutter != original {
+		t.Fatalf("View replaced DebugGutter = %p, want unchanged %p", gutter, original)
 	}
 }

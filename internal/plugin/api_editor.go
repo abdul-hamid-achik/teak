@@ -56,6 +56,10 @@ func editorCommand(L *lua.LState) int {
 			commands = make(map[string]*lua.LFunction)
 			setCommandsInContext(L, commands)
 		}
+		if _, replacing := commands[name]; !replacing && len(commands) >= maxPluginCommands {
+			L.RaiseError("command resource limit reached (max %d)", maxPluginCommands)
+			return 0
+		}
 		commands[name] = fn
 		return 0
 	}

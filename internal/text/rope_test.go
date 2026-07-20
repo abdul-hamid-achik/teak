@@ -1,9 +1,63 @@
 package text
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+func TestNewCopiesCallerBytes(t *testing.T) {
+	data := []byte("caller-owned bytes")
+	rope := New(data)
+
+	if len(rope.value) == 0 {
+		t.Fatal("New() produced an empty leaf")
+	}
+	if &rope.value[0] == &data[0] {
+		t.Fatal("New() retained caller-owned backing storage")
+	}
+	data[0] = 'C'
+	if got, want := rope.String(), "caller-owned bytes"; got != want {
+		t.Fatalf("New() reflected a caller mutation: got %q, want %q", got, want)
+	}
+}
+
+func TestNewOwnedTransfersExclusiveBackingStorageWithoutSplittingUTF8(t *testing.T) {
+	// Make several leaves and put a multi-byte rune on both sides of a leaf
+	// boundary. NewOwned must retain this exact allocation without allowing a
+	// leaf to start with a UTF-8 continuation byte.
+	data := bytes.Repeat([]byte("ab😀"), 300)
+	rope := NewOwned(data)
+
+	if got, want := rope.String(), string(data); got != want {
+		t.Fatalf("NewOwned() content = %q, want %q", got, want)
+	}
+	var leaves []*Rope
+	var collect func(*Rope)
+	collect = func(node *Rope) {
+		if node.isLeaf() {
+			if len(node.value) != 0 {
+				leaves = append(leaves, node)
+			}
+			return
+		}
+		collect(node.left)
+		collect(node.right)
+	}
+	collect(rope)
+	if len(leaves) < 2 {
+		t.Fatalf("NewOwned() made %d leaves, want multiple leaves", len(leaves))
+	}
+	if &leaves[0].value[0] != &data[0] {
+		t.Fatal("NewOwned() copied the exclusively transferred allocation")
+	}
+	for index, leaf := range leaves {
+		if !utf8.Valid(leaf.value) {
+			t.Fatalf("leaf %d split a UTF-8 sequence: %q", index, leaf.value)
+		}
+	}
+}
 
 func TestNewAndString(t *testing.T) {
 	tests := []struct {
@@ -164,6 +218,34 @@ func TestPositionToOffset(t *testing.T) {
 	}
 }
 
+func TestPositionToOffsetUncachedAllowsLineEnd(t *testing.T) {
+	r := NewFromString("abc\ndef\nghi")
+	tests := []struct {
+		pos  Position
+		want int
+	}{
+		{Position{0, 3}, 3},
+		{Position{1, 3}, 7},
+		{Position{2, 3}, 11},
+	}
+	for _, tt := range tests {
+		got, ok := r.PositionToOffsetUncached(tt.pos)
+		if !ok || got != tt.want {
+			t.Errorf("PositionToOffsetUncached(%v) = (%d, %v), want (%d, true)", tt.pos, got, ok, tt.want)
+		}
+	}
+}
+
+func TestPositionToOffsetUncachedDoesNotBuildWholeDocumentIndex(t *testing.T) {
+	r := NewFromString(strings.Repeat("x", 2<<20))
+	if got, ok := r.PositionToOffsetUncached(Position{Line: 0, Col: r.Len()}); !ok || got != r.Len() {
+		t.Fatalf("PositionToOffsetUncached(line end) = (%d, %v)", got, ok)
+	}
+	if r.lineIndex != nil {
+		t.Fatal("uncached conversion initialized the whole-document line index")
+	}
+}
+
 func TestOffsetToPosition(t *testing.T) {
 	text := "abc\ndef\nghi"
 	r := NewFromString(text)
@@ -259,6 +341,7 @@ func BenchmarkDelete(b *testing.B) {
 func BenchmarkLineStart(b *testing.B) {
 	doc := strings.Repeat("abcdefghij\n", 10000)
 	r := New([]byte(doc))
+	_ = r.LineStart(1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r.LineStart(5000)

@@ -42,15 +42,19 @@ func TestAppCloseTabOperations(t *testing.T) {
 	}
 	defer model.cleanup()
 
-	// Test closeCurrentTabSafe with single tab
-	_, cmd := model.closeCurrentTabSafe()
+	if idx := model.findReplaceableTab(); idx != 0 {
+		t.Fatalf("initial replaceable tab index = %d, want 0", idx)
+	}
+
+	// Test closeCurrentTabSafe with single tab. Model is an owned runtime
+	// handle, so callers must continue from the returned Bubble Tea value.
+	updatedAny, cmd := model.closeCurrentTabSafe()
+	updated := updatedAny.(Model)
 	// Should trigger unsaved confirm or close
 	_ = cmd
 
-	// Test findReplaceableTab
-	idx := model.findReplaceableTab()
-	if idx != 0 {
-		t.Errorf("Expected tab index 0, got %d", idx)
+	if idx := updated.findReplaceableTab(); idx != -1 {
+		t.Errorf("replaceable tab index after closing the only tab = %d, want -1", idx)
 	}
 }
 
@@ -425,7 +429,7 @@ func TestAppApplyWorkspaceEdits(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Test applyWorkspaceTextEdits
+	// Test the asynchronous workspace-edit flow for a closed file.
 	edits := []lsp.TextEdit{
 		{
 			StartLine: 0,
@@ -436,10 +440,9 @@ func TestAppApplyWorkspaceEdits(t *testing.T) {
 		},
 	}
 
-	_, err = model.applyWorkspaceTextEdits(testFile, edits)
-	if err != nil {
-		t.Fatalf("applyWorkspaceTextEdits failed: %v", err)
-	}
+	model = applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		lsp.FileURI(testFile): edits,
+	}})
 
 	// Verify file was modified
 	content, err := os.ReadFile(testFile)
@@ -471,10 +474,7 @@ func TestAppApplyWorkspaceFileOperations(t *testing.T) {
 		URI:  lsp.FileURI(testFile),
 	}
 
-	err = model.applyWorkspaceFileOperation(op)
-	if err != nil {
-		t.Fatalf("applyWorkspaceFileOperation failed: %v", err)
-	}
+	model = applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{DocumentChanges: []lsp.WorkspaceDocumentChange{{FileOperation: &op}}})
 
 	// Verify file was created
 	if _, err := os.Stat(testFile); os.IsNotExist(err) {
@@ -485,7 +485,7 @@ func TestAppApplyWorkspaceFileOperations(t *testing.T) {
 	if _, err := os.Stat(testFile); os.IsNotExist(err) {
 		return // Can't test rename if create failed
 	}
-	
+
 	newPath2 := filepath.Join(root, "renamed.txt")
 	op2 := lsp.WorkspaceFileOperation{
 		Kind:   lsp.FileOpRename,
@@ -493,12 +493,7 @@ func TestAppApplyWorkspaceFileOperations(t *testing.T) {
 		NewURI: lsp.FileURI(newPath2),
 	}
 
-	err = model.applyWorkspaceFileOperation(op2)
-	if err != nil {
-		// Rename may fail in some environments, that's okay for coverage
-		t.Logf("Rename operation failed (expected in some cases): %v", err)
-		return
-	}
+	model = applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{DocumentChanges: []lsp.WorkspaceDocumentChange{{FileOperation: &op2}}})
 
 	// Test delete operation - skip if rename failed
 	if _, err := os.Stat(newPath2); os.IsNotExist(err) {
@@ -510,10 +505,7 @@ func TestAppApplyWorkspaceFileOperations(t *testing.T) {
 		URI:  lsp.FileURI(newPath2),
 	}
 
-	err = model.applyWorkspaceFileOperation(op3)
-	if err != nil {
-		t.Logf("Delete operation failed: %v", err)
-	}
+	model = applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{DocumentChanges: []lsp.WorkspaceDocumentChange{{FileOperation: &op3}}})
 }
 
 // TestAppApplyWorkspaceEdit tests full workspace edit application
@@ -550,10 +542,7 @@ func TestAppApplyWorkspaceEdit(t *testing.T) {
 		},
 	}
 
-	// applyWorkspaceEdit returns model and command
-	_, cmd := model.applyWorkspaceEdit(edit)
-	// Command may be returned for async processing
-	_ = cmd
+	_ = applyWorkspaceEditAsyncForTest(t, model, edit)
 }
 
 // TestAppPluginKeySequence tests plugin key sequence handling
@@ -608,13 +597,13 @@ func TestAppAgentPanelWidth(t *testing.T) {
 	model.showAgent = true
 	model.width = 120
 	model.height = 40
-	
+
 	width := model.agentPanelWidth()
 	// Should return positive width when agent is shown
 	if width <= 0 {
 		t.Errorf("Agent panel width %d should be positive when agent is shown", width)
 	}
-	
+
 	// Test with agent disabled
 	model.showAgent = false
 	width = model.agentPanelWidth()

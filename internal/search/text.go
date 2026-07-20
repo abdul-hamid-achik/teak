@@ -2,6 +2,7 @@ package search
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,17 @@ const maxSearchLineBytes = 1<<20 + 1
 
 // TextSearch performs a text/regex search across files in rootDir.
 func TextSearch(rootDir, query string) ([]Result, error) {
+	return TextSearchContext(context.Background(), rootDir, query)
+}
+
+// TextSearchContext is the cancellable form of TextSearch.
+func TextSearchContext(ctx context.Context, rootDir, query string) ([]Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
 	if err != nil {
 		return nil, err
@@ -24,6 +36,9 @@ func TextSearch(rootDir, query string) ([]Result, error) {
 	maxResults := 100
 
 	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -60,8 +75,11 @@ func TextSearch(rootDir, query string) ([]Result, error) {
 			return nil
 		}
 
-		fileResults, err := searchFile(path, rootDir, re, maxResults-len(results))
+		fileResults, err := searchFileContext(ctx, path, rootDir, re, maxResults-len(results))
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 			return nil // skip errored files
 		}
 		results = append(results, fileResults...)
@@ -72,6 +90,16 @@ func TextSearch(rootDir, query string) ([]Result, error) {
 }
 
 func searchFile(path, rootDir string, re *regexp.Regexp, limit int) (results []Result, retErr error) {
+	return searchFileContext(context.Background(), path, rootDir, re, limit)
+}
+
+func searchFileContext(ctx context.Context, path, rootDir string, re *regexp.Regexp, limit int) (results []Result, retErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -96,6 +124,9 @@ func searchFile(path, rootDir string, re *regexp.Regexp, limit int) (results []R
 	scanner.Buffer(make([]byte, 64*1024), maxSearchLineBytes)
 	lineNum := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(results) >= limit {
 			break
 		}

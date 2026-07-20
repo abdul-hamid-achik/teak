@@ -93,7 +93,7 @@ func (r *pluginRuntime) syncActiveEditorAfterEdit(prevVersion int, prevCursor te
 	}
 	if ed.Buffer.FilePath != "" {
 		if client := r.model.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
-			r.model.notifyLSPChange(client, ed)
+			r.cmds = append(r.cmds, r.model.notifyLSPChange(client, ed))
 		}
 	}
 	if ed.Highlighter != nil {
@@ -112,22 +112,6 @@ func (r *pluginRuntime) applyModelCmd(result tea.Model, cmd tea.Cmd) {
 	}
 	if cmd != nil {
 		r.cmds = append(r.cmds, cmd)
-	}
-}
-
-func (r *pluginRuntime) dispatchImmediate(msg tea.Msg) error {
-	if msg == nil {
-		return nil
-	}
-	result, cmd := r.model.Update(msg)
-	r.applyModelCmd(result, cmd)
-	switch m := msg.(type) {
-	case FileErrorMsg:
-		return m.Err
-	case FileLoadErrorMsg:
-		return m.Err
-	default:
-		return nil
 	}
 }
 
@@ -166,6 +150,32 @@ func (r *pluginRuntime) SetBufferText(value string) error {
 	end := ed.Buffer.Rope().OffsetToPosition(ed.Buffer.Rope().Len())
 	ed.Buffer.ReplaceRange(text.Position{}, end, []byte(value))
 	ed.Buffer.SetCursor(text.Position{})
+	return r.syncActiveEditorAfterEdit(prevVersion, prevCursor)
+}
+
+// replaceBufferSnapshot commits a document prepared by a background plugin
+// callback without flattening and rebuilding it on the UI goroutine.
+func (r *pluginRuntime) replaceBufferSnapshot(snapshot *text.Rope, cursor text.Position) error {
+	ed, err := r.activeEditor()
+	if err != nil {
+		return err
+	}
+	prevVersion := ed.Buffer.Version()
+	prevCursor := ed.Buffer.Cursor
+	// The cursor comes from the private Buffer that produced this immutable
+	// snapshot, so it is already valid for the same rope.
+	ed.Buffer.ReplaceRopeSnapshot(snapshot, cursor)
+	if ed.Highlighter != nil {
+		// Sparse highlight batches are merged into the existing cache. Clear
+		// all coverage before a new batch can arrive so tokens from the former
+		// rope can never suppress work or reappear after scrolling.
+		ed.Highlighter.Invalidate()
+	}
+	// ReplaceRopeSnapshot is intentionally a full-sync edit (LastChange is
+	// nil), so wrapped visual coordinates must be rebuilt against the new rope
+	// before EnsureCursorVisible consults them below. SetSize keeps this O(1)
+	// with the editor's paginated wrap index.
+	ed.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 	return r.syncActiveEditorAfterEdit(prevVersion, prevCursor)
 }
 
@@ -258,7 +268,14 @@ func (r *pluginRuntime) SaveBuffer() error {
 	if ed.Buffer.FilePath == "" {
 		return fmt.Errorf("active buffer has no file path")
 	}
-	return r.dispatchImmediate(SaveFileCmd(ed.Buffer.Save, ed.Buffer.FilePath, 0)())
+	// Saving may block on disk I/O. Register the normal snapshot-based save
+	// command and let Bubble Tea execute it outside the current plugin callback.
+	// The Lua API reports acceptance; completion and errors still flow through
+	// the model's usual FileSavedMsg/FileErrorMsg path.
+	if cmd := r.model.beginSaveForTab(r.model.activeTab, false, false); cmd != nil {
+		r.cmds = append(r.cmds, cmd)
+	}
+	return nil
 }
 
 func (r *pluginRuntime) BufferFilePath() (string, error) {
@@ -307,11 +324,11 @@ func (r *pluginRuntime) OpenFile(path string) error {
 		return err
 	}
 	result, cmd := r.model.openFilePinned(resolvedPath)
-	r.applyModelCmd(result, nil)
-	if cmd == nil {
-		return nil
-	}
-	return r.dispatchImmediate(cmd())
+	// File reads are deliberately deferred. Running cmd() here used to perform
+	// arbitrary filesystem I/O in Update and made a plugin keybinding capable
+	// of freezing the terminal UI.
+	r.applyModelCmd(result, cmd)
+	return nil
 }
 
 func (r *pluginRuntime) CloseTab(idx int) error {

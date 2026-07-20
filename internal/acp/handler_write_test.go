@@ -3,12 +3,31 @@ package acp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	sdk "github.com/coder/acp-go-sdk"
 )
+
+func TestWriteTextFileRejectsOversizedProposalWithoutEnqueueing(t *testing.T) {
+	msgChan := make(chan tea.Msg, 1)
+	handler := newClientHandler(msgChan)
+
+	_, err := handler.WriteTextFile(context.Background(), sdk.WriteTextFileRequest{
+		Path:    "generated.txt",
+		Content: strings.Repeat("x", maxAgentWriteBytes+1),
+	})
+	if err == nil {
+		t.Fatal("WriteTextFile() error = nil, want oversized proposal error")
+	}
+	select {
+	case msg := <-msgChan:
+		t.Fatalf("oversized proposal enqueued %T", msg)
+	default:
+	}
+}
 
 func TestWriteTextFileCancellationEmitsCorrelatedCancellationMessage(t *testing.T) {
 	msgChan := make(chan tea.Msg, 2)

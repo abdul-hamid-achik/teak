@@ -39,16 +39,16 @@ func URIToPath(uri string) string {
 	if !strings.HasPrefix(uri, "file://") {
 		return uri
 	}
-	
+
 	uri = strings.TrimPrefix(uri, "file://")
-	
+
 	// Decode percent-encoded characters
 	decoded, err := url.PathUnescape(uri)
 	if err != nil {
 		// If decoding fails, use the URI as-is (minus file:// prefix)
 		decoded = uri
 	}
-	
+
 	path := decoded
 	if runtime.GOOS == "windows" && len(path) > 0 && path[0] == '/' {
 		// Handle file:///c:/path format
@@ -59,6 +59,6 @@ func URIToPath(uri string) string {
 			path = strings.ReplaceAll(path, "/", "\\")
 		}
 	}
-	
+
 	return filepath.FromSlash(path)
 }

@@ -1,8 +1,8 @@
 package highlight
 
 import (
-	"github.com/alecthomas/chroma/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 	"teak/internal/ui"
 )
 

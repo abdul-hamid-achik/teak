@@ -101,6 +101,14 @@ func autocmdRegister(L *lua.LState) int {
 	defer pluginAutocommands.mu.Unlock()
 
 	stateEvents := pluginAutocommands.ensureStateLocked(L)
+	total := 0
+	for _, commands := range stateEvents {
+		total += len(commands)
+	}
+	if total >= maxPluginAutocmds {
+		L.RaiseError("autocmd resource limit reached (max %d)", maxPluginAutocmds)
+		return 0
+	}
 	stateEvents[event] = append(stateEvents[event], cmd)
 	return 0
 }
@@ -248,8 +256,16 @@ func triggerAutocommandsForState(L *lua.LState, ctx EventContext) error {
 		if !matchesAutocmdPattern(cmd.Pattern, ctx) {
 			continue
 		}
-		if err := callAutocommand(L, cmd, ctx); err != nil && firstErr == nil {
-			firstErr = err
+		if err := callAutocommand(L, cmd, ctx); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			// A persistent-state or execution budget failure means the state is
+			// about to be quarantined by Manager. Do not run additional callbacks
+			// from that state before its owner can close it.
+			if isPluginRuntimeBudgetExceeded(err) {
+				return err
+			}
 		}
 		if cmd.Once {
 			onceCallbacks = append(onceCallbacks, cmd.Callback)
@@ -264,19 +280,21 @@ func triggerAutocommandsForState(L *lua.LState, ctx EventContext) error {
 }
 
 func callAutocommand(L *lua.LState, cmd Autocommand, ctx EventContext) error {
-	eventTable := L.NewTable()
-	L.SetField(eventTable, "event", lua.LString(ctx.Event))
-	if ctx.FilePath != "" {
-		L.SetField(eventTable, "file", lua.LString(ctx.FilePath))
-	}
-	if ctx.RelativePath != "" {
-		L.SetField(eventTable, "relative_path", lua.LString(ctx.RelativePath))
-	}
-	return L.CallByParam(lua.P{
-		Fn:      cmd.Callback,
-		NRet:    0,
-		Protect: true,
-	}, eventTable)
+	return runLuaWithPersistentStateBudget(L, pluginAutocmdBudget, "autocommand", func() error {
+		eventTable := L.NewTable()
+		L.SetField(eventTable, "event", lua.LString(ctx.Event))
+		if ctx.FilePath != "" {
+			L.SetField(eventTable, "file", lua.LString(ctx.FilePath))
+		}
+		if ctx.RelativePath != "" {
+			L.SetField(eventTable, "relative_path", lua.LString(ctx.RelativePath))
+		}
+		return L.CallByParam(lua.P{
+			Fn:      cmd.Callback,
+			NRet:    0,
+			Protect: true,
+		}, eventTable)
+	})
 }
 
 func removeOnceAutocommands(L *lua.LState, event string, callbacks []*lua.LFunction) {

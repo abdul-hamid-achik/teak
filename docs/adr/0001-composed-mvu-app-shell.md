@@ -9,8 +9,8 @@
 document, tab, sidebar, overlay, diagnostics, protocol, debugger, agent, plugin,
 layout, and rendering concerns in one `Model` and one large `Update` method.
 
-The package also contains managers introduced during an earlier refactor.
-Those managers are not yet canonical owners:
+The package previously contained managers introduced during an earlier
+refactor. They were not canonical owners:
 
 - `Model` and `TabManager` both retain editor and tab state and are manually
   synchronized.
@@ -23,10 +23,10 @@ Promoting these mirrors would move code without establishing clear ownership.
 Keeping `app.go` as one file makes smaller changes hard to review and increases
 the chance of unrelated conflicts.
 
-The current manual TabManager synchronization is transitional and incomplete.
-This decision neither validates nor extends it. Changes to that migration need
-separate lifecycle-invariant coverage for creation, preview replacement, open,
-close, diff, and session-restore paths before they can be integrated.
+The former manager mirrors were retired after repository-wide call-site
+analysis confirmed that production never constructed them. Characterization
+coverage remains on the canonical `Model` paths for creation, preview
+replacement, open, close, diff, and session restore.
 
 Bubble Tea already supplies the architectural constraint Teak needs: state is
 updated by messages, effects run as `tea.Cmd`, and rendering projects state.
@@ -66,8 +66,8 @@ Each field belongs to one domain state. Other domains communicate with its
 owner through typed messages or narrow methods. They must not retain a second
 copy and must not be kept in sync manually.
 
-In particular, a replacement for the current tab migration must choose either
-`DocumentsState` or `TabManager` as canonical; it may not write both.
+In particular, a future `DocumentsState` extraction must replace the current
+`Model` fields atomically; it may not introduce a second writable copy.
 
 ### One authoritative handler per event
 
@@ -161,9 +161,9 @@ Teak's ownership problem.
 4. Split `Update` into same-package routing stages: modal, runtime, intent, and
    focused component.
 5. Remove unused duplicate manager construction after call-site and behavior
-   tests prove it is safe.
-6. Make `DocumentsState` canonical, then remove two-way synchronization and
-   retire `TabManager`.
+   tests prove it is safe. **Completed 2026-07-19.**
+6. Keep the existing document fields on `Model` canonical until a
+   `DocumentsState` extraction can replace them without two-way synchronization.
 7. Introduce the remaining canonical domain states and runtime adapters.
 8. Move domains into child packages only after dependency direction can be
    enforced without import cycles.

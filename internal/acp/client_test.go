@@ -1,9 +1,14 @@
 package acp
 
 import (
+	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	sdk "github.com/coder/acp-go-sdk"
 )
 
@@ -185,6 +190,75 @@ func TestManager_MsgChan(t *testing.T) {
 	}
 }
 
+func TestManagerEmitDoesNotBlockOnUnreadChannel(t *testing.T) {
+	mgr := NewManager(t.TempDir(), "echo", nil)
+	mgr.msgChan = make(chan tea.Msg)
+	done := make(chan struct{})
+	go func() {
+		mgr.emit(AgentStartedMsg{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ACP UI notification blocked on an unread channel")
+	}
+}
+
+func TestManagerStopReturnsBeforeAStuckAgentExits(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestACPShutdownHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "TEAK_ACP_SHUTDOWN_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	mgr := NewManager(t.TempDir(), "echo", nil)
+	mgr.cmd = cmd
+	mgr.done = done
+	mgr.running = true
+	go reapACPProcess(cmd, done, mgr)
+
+	started := time.Now()
+	mgr.Stop()
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("Stop() blocked for %s", elapsed)
+	}
+	if !waitACPDone(done, 3*time.Second) {
+		t.Fatal("agent was not killed and reaped")
+	}
+}
+
+func TestManagerWaitForShutdownReapsStoppedAgent(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestACPShutdownHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "TEAK_ACP_SHUTDOWN_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	mgr := NewManager(t.TempDir(), "echo", nil)
+	mgr.cmd = cmd
+	mgr.done = done
+	mgr.running = true
+	go reapACPProcess(cmd, done, mgr)
+
+	mgr.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if !mgr.WaitForShutdown(ctx) {
+		t.Fatal("WaitForShutdown() returned before the agent was reaped")
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("agent process was not reaped")
+	}
+}
+
+func TestACPShutdownHelperProcess(t *testing.T) {
+	if os.Getenv("TEAK_ACP_SHUTDOWN_HELPER") != "1" {
+		return
+	}
+	select {}
+}
+
 func TestManager_StartWithInvalidCommand(t *testing.T) {
 	mgr := NewManager("/tmp", "nonexistent_command_that_does_not_exist_xyz", nil)
 	err := mgr.Start()
@@ -239,5 +313,83 @@ func TestManager_SetModeBeforeStart(t *testing.T) {
 	cmd := mgr.SetMode("some-mode")
 	if cmd != nil {
 		t.Error("SetMode() should return nil when not running")
+	}
+}
+
+type sessionControllerStub struct {
+	model func(context.Context, sdk.SetSessionModelRequest) (sdk.SetSessionModelResponse, error)
+	mode  func(context.Context, sdk.SetSessionModeRequest) (sdk.SetSessionModeResponse, error)
+}
+
+func (s sessionControllerStub) SetSessionModel(ctx context.Context, req sdk.SetSessionModelRequest) (sdk.SetSessionModelResponse, error) {
+	return s.model(ctx, req)
+}
+
+func (s sessionControllerStub) SetSessionMode(ctx context.Context, req sdk.SetSessionModeRequest) (sdk.SetSessionModeResponse, error) {
+	return s.mode(ctx, req)
+}
+
+func TestManagerSetModelUsesBoundedContextAndCancelsWhenProcessExits(t *testing.T) {
+	done := make(chan struct{})
+	started := make(chan struct{})
+	mgr := NewManager(t.TempDir(), "echo", nil)
+	mgr.running = true
+	mgr.sessionID = "session"
+	mgr.done = done
+	mgr.sessionCtl = sessionControllerStub{
+		model: func(ctx context.Context, req sdk.SetSessionModelRequest) (sdk.SetSessionModelResponse, error) {
+			if req.SessionId != "session" || req.ModelId != "model" {
+				t.Fatalf("unexpected request: %#v", req)
+			}
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("SetModel context has no deadline")
+			}
+			close(started)
+			<-ctx.Done()
+			return sdk.SetSessionModelResponse{}, ctx.Err()
+		},
+		mode: func(context.Context, sdk.SetSessionModeRequest) (sdk.SetSessionModeResponse, error) {
+			return sdk.SetSessionModeResponse{}, nil
+		},
+	}
+
+	result := make(chan tea.Msg, 1)
+	go func() { result <- mgr.SetModel("model")() }()
+	<-started
+	close(done)
+
+	select {
+	case msg := <-result:
+		errMsg, ok := msg.(AgentErrorMsg)
+		if !ok || !errors.Is(errMsg.Err, context.Canceled) {
+			t.Fatalf("SetModel() = %#v, want cancellation error", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SetModel did not cancel after ACP process exit")
+	}
+}
+
+func TestManagerSetModeUsesBoundedContext(t *testing.T) {
+	mgr := NewManager(t.TempDir(), "echo", nil)
+	mgr.running = true
+	mgr.sessionID = "session"
+	mgr.sessionCtl = sessionControllerStub{
+		model: func(context.Context, sdk.SetSessionModelRequest) (sdk.SetSessionModelResponse, error) {
+			return sdk.SetSessionModelResponse{}, nil
+		},
+		mode: func(ctx context.Context, req sdk.SetSessionModeRequest) (sdk.SetSessionModeResponse, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > acpSessionChangeTimeout {
+				t.Fatalf("invalid SetMode deadline: %v, %t", deadline, ok)
+			}
+			if req.SessionId != "session" || req.ModeId != "plan" {
+				t.Fatalf("unexpected request: %#v", req)
+			}
+			return sdk.SetSessionModeResponse{}, nil
+		},
+	}
+
+	if msg, ok := mgr.SetMode("plan")().(AgentModeChangedMsg); !ok || msg.ModeId != "plan" {
+		t.Fatalf("SetMode() = %#v, want AgentModeChangedMsg", msg)
 	}
 }

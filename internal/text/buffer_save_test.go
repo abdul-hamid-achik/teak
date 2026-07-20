@@ -3,6 +3,7 @@ package text
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -60,6 +61,45 @@ func TestSaveAsOverwrite(t *testing.T) {
 	}
 	if string(data) != "new content" {
 		t.Errorf("Content mismatch: got %q, want %q", string(data), "new content")
+	}
+}
+
+func TestSaveAsUsesUniqueTempAndPreservesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission assertion")
+	}
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyTemp := path + ".tmp"
+	if err := os.WriteFile(legacyTemp, []byte("do not reuse"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := NewBufferFromBytes([]byte("new"))
+	if err := buf.SaveAs(path); err != nil {
+		t.Fatalf("SaveAs() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("saved permissions = %o, want %o", got, want)
+	}
+	data, err := os.ReadFile(legacyTemp)
+	if err != nil {
+		t.Fatalf("legacy temp was removed or reused: %v", err)
+	}
+	if got, want := string(data), "do not reuse"; got != want {
+		t.Fatalf("legacy temp content = %q, want %q", got, want)
 	}
 }
 

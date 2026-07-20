@@ -88,17 +88,28 @@ type mouseLayout struct {
 }
 
 func (m Model) mouseLayout() mouseLayout {
-	contentHeight := max(0, m.height-2)
+	if m.width <= 0 || m.height < 2 {
+		return mouseLayout{window: newMouseRect(0, 0, m.width, m.height)}
+	}
+
+	statusHeight := 2
+	compact := m.height < compactTerminalHeight
+	if compact {
+		statusHeight = 1
+	}
+	contentHeight := max(0, m.height-statusHeight)
 	editorStart := 0
 	editorEnd := m.width
 
 	layout := mouseLayout{
-		window:        newMouseRect(0, 0, m.width, m.height),
-		statusDivider: newMouseRect(0, m.height-2, m.width, 1),
-		statusBar:     newMouseRect(0, m.height-1, m.width, 1),
+		window:    newMouseRect(0, 0, m.width, m.height),
+		statusBar: newMouseRect(0, m.height-1, m.width, 1),
+	}
+	if !compact {
+		layout.statusDivider = newMouseRect(0, m.height-2, m.width, 1)
 	}
 
-	if m.showTree {
+	if !compact && m.treeVisible() {
 		treeWidth := m.treeWidth()
 		layout.sidebarTabs = newMouseRect(0, 0, treeWidth, min(1, contentHeight))
 		layout.sidebarBody = newMouseRect(0, 1, treeWidth, contentHeight-1)
@@ -106,7 +117,7 @@ func (m Model) mouseLayout() mouseLayout {
 		editorStart = treeWidth + 1
 	}
 
-	if agentWidth := m.agentPanelWidth(); agentWidth > 0 {
+	if agentWidth := m.agentPanelWidth(); !compact && agentWidth > 0 {
 		agentStart := m.width - agentWidth
 		layout.agentDivider = newMouseRect(agentStart-1, 0, 1, contentHeight)
 		layout.agentBody = newMouseRect(agentStart, 0, agentWidth, contentHeight)
@@ -167,6 +178,9 @@ func (m Model) passiveModalVisible() bool {
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	// Modal priority mirrors View: the topmost visible surface always consumes
 	// the click, even when it has no mouse interaction of its own.
+	if m.editorInputCaptured() {
+		m.cancelActiveEditorDrag()
+	}
 	if m.unsavedConfirm != nil {
 		updated, cmd := m.unsavedConfirm.Update(msg)
 		if updated.IsDismissed() {
@@ -245,16 +259,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 	mouse := msg.Mouse()
 	if m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
-		contextX, contextY := m.activeEditor().ContextMenuPosition()
-		if m.showTree {
-			contextX += m.treeWidth() + 1
-		}
-		contextY++ // tab bar
-		if mouse.Button != tea.MouseLeft || !contextMenuRect(contextX, contextY, m.activeEditor().ContextMenuView()).contains(mouse.X, mouse.Y) {
+		_, contextRect, ok := m.editorContextMenuGeometry()
+		if !ok || mouse.Button != tea.MouseLeft || !contextRect.contains(mouse.X, mouse.Y) {
 			m.activeEditor().HideContextMenu()
 			return m, nil
 		}
-		relY := mouse.Y - contextY - 1
+		relY := mouse.Y - contextRect.y - 1
 		editorModel := m.editors[m.activeTab]
 		result, cmd, action := editorModel.ClickContextMenuItem(relY)
 		m.setEditor(m.activeTab, result)
@@ -262,6 +272,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			return m.handleContextMenuAction(action)
 		}
 		return m, cmd
+	}
+	// LSP popups do not expose a mouse-selection API. Consume clicks on their
+	// visible cells so a completion/hover cannot accidentally reposition or
+	// select text underneath it. Keyboard navigation remains owned by Editor.
+	if popup, ok := m.currentLSPOverlayPlacement(); ok && popup.contains(mouse.X, mouse.Y) {
+		return m, nil
 	}
 
 	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
@@ -271,6 +287,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	if surface == mouseStatus {
 		if zone.Get("status-bar-branch").InBounds(msg) && m.gitPanel.IsGitRepo() {
+			m.cancelActiveEditorDrag()
 			m.showBranchPicker = true
 			m.branchPickerM.SetSize(m.width, m.height)
 			return m, tea.Batch(
@@ -337,7 +354,10 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	case mouseEditorBody:
 		m.focus = FocusEditor
-		return m.forwardToEditor(tea.MouseClickMsg(mouseAt(mouse, local)))
+		updated, cmd := m.forwardToEditor(tea.MouseClickMsg(mouseAt(mouse, local)))
+		result := updated.(Model)
+		result.clampActiveEditorContextMenu()
+		return result, cmd
 
 	default:
 		return m, nil
@@ -352,23 +372,40 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 		m.showHelp ||
 		m.showSettings ||
 		m.passiveModalVisible() {
+		m.cancelActiveEditorDrag()
 		return m, nil
 	}
 	if m.treeContextMenu.Visible ||
 		m.gitContextMenu.Visible ||
 		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible()) {
+		m.cancelActiveEditorDrag()
 		return m, nil
 	}
 
 	mouse := msg.Mouse()
-	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
-	if surface != mouseEditorBody {
+	if popup, ok := m.currentLSPOverlayPlacement(); ok && popup.contains(mouse.X, mouse.Y) {
 		return m, nil
 	}
-	return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, local)))
+	layout := m.mouseLayout()
+	surface, local := layout.hit(mouse.X, mouse.Y)
+	if surface == mouseEditorBody {
+		return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, local)))
+	}
+
+	// Continue a selection drag after the pointer leaves the editor body. The
+	// editor clamps the local coordinates and autoscrolls one row per motion,
+	// so sidebars, tab bars, and tiny terminal layouts cannot produce an
+	// out-of-range buffer position.
+	if editor := m.activeEditor(); editor != nil && editor.IsDragging() && layout.editorBody.width > 0 && layout.editorBody.height > 0 {
+		return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, layout.editorBody.local(mouse.X, mouse.Y))))
+	}
+	return m, nil
 }
 
 func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.editorInputCaptured() {
+		m.cancelActiveEditorDrag()
+	}
 	if m.unsavedConfirm != nil {
 		updated, cmd := m.unsavedConfirm.Update(msg)
 		if updated.IsDismissed() {
@@ -443,8 +480,27 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	}
 
 	mouse := msg.Mouse()
+	if popup, ok := m.currentLSPOverlayPlacement(); ok && popup.contains(mouse.X, mouse.Y) {
+		return m, nil
+	}
 	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
 	switch surface {
+	case mouseEditorTabs:
+		if len(m.tabBar.Tabs) == 0 {
+			return m, nil
+		}
+		next := m.activeTab
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			next = max(0, next-1)
+		case tea.MouseWheelDown:
+			next = min(len(m.tabBar.Tabs)-1, next+1)
+		default:
+			return m, nil
+		}
+		m.activateTab(next)
+		return m, nil
+
 	case mouseAgentBody:
 		adjusted := tea.MouseWheelMsg(mouseAt(mouse, local))
 		var cmd tea.Cmd

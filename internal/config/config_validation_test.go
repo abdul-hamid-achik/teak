@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -361,6 +362,115 @@ func TestConfigSessionValidation(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsUnsafeTimerAndProcessConfiguration(t *testing.T) {
+	validLSP := func(extension string) LSPConfig {
+		return LSPConfig{
+			Extensions: []string{extension},
+			Command:    "test-lsp",
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "auto save interval is bounded before duration conversion",
+			mutate: func(cfg *Config) {
+				cfg.Session.AutoSaveInterval = 24*60*60 + 1
+			},
+			wantErr: "session.auto_save_interval",
+		},
+		{
+			name: "maximum auto save interval remains valid",
+			mutate: func(cfg *Config) {
+				cfg.Session.AutoSaveInterval = 24 * 60 * 60
+			},
+		},
+		{
+			name: "whitespace only agent command",
+			mutate: func(cfg *Config) {
+				cfg.Agent.Command = " \t "
+			},
+			wantErr: "agent.command",
+		},
+		{
+			name: "too many extensions for one language server",
+			mutate: func(cfg *Config) {
+				extensions := make([]string, 65)
+				for i := range extensions {
+					extensions[i] = ".x" + string(rune('a'+i%26))
+				}
+				cfg.LSP = []LSPConfig{{Extensions: extensions, Command: "test-lsp"}}
+			},
+			wantErr: "extensions exceeds",
+		},
+		{
+			name: "duplicate extensions across language servers",
+			mutate: func(cfg *Config) {
+				cfg.LSP = []LSPConfig{validLSP(".go"), validLSP(".go")}
+			},
+			wantErr: "duplicate extension",
+		},
+		{
+			name: "uppercase extension cannot silently fail matching",
+			mutate: func(cfg *Config) {
+				cfg.LSP = []LSPConfig{validLSP(".GO")}
+			},
+			wantErr: "must be lowercase",
+		},
+		{
+			name: "total language server arguments are bounded",
+			mutate: func(cfg *Config) {
+				cfg.LSP = make([]LSPConfig, 9)
+				for i := range cfg.LSP {
+					args := make([]string, 128)
+					for j := range args {
+						args[j] = "--option"
+					}
+					cfg.LSP[i] = LSPConfig{
+						Extensions: []string{".lang" + string(rune('a'+i))},
+						Command:    "test-lsp",
+						Args:       args,
+					}
+				}
+			},
+			wantErr: "total lsp args",
+		},
+		{
+			name: "aggregate string data is bounded before config encoding",
+			mutate: func(cfg *Config) {
+				cfg.Agent.Args = make([]string, 128)
+				for i := range cfg.Agent.Args {
+					cfg.Agent.Args[i] = strings.Repeat("a", 4<<10)
+				}
+			},
+			wantErr: "configuration string data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() succeeded, want an error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() error = %q, want it to contain %q", err, tt.wantErr)
 			}
 		})
 	}

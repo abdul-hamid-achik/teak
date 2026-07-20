@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"sync"
 
@@ -10,24 +11,24 @@ import (
 
 // DAPCoordinator manages DAP debug session lifecycle and event handling.
 type DAPCoordinator struct {
-	mu            sync.RWMutex
-	mgr           *dap.Manager
-	state         dap.DebugState
-	stackFrames   []dap.StackFrame
-	variables     []dap.Variable
-	outputLog     []string
-	currentFrame  int
+	mu             sync.RWMutex
+	mgr            *dap.Manager
+	state          dap.DebugState
+	stackFrames    []dap.StackFrame
+	variables      []dap.Variable
+	outputLog      []string
+	currentFrame   int
 	maxOutputLines int
 }
 
 // NewDAPCoordinator creates a new DAP coordinator.
 func NewDAPCoordinator(mgr *dap.Manager) *DAPCoordinator {
 	return &DAPCoordinator{
-		mgr:           mgr,
-		state:         dap.StateInactive,
-		stackFrames:   make([]dap.StackFrame, 0),
-		variables:     make([]dap.Variable, 0),
-		outputLog:     make([]string, 0),
+		mgr:            mgr,
+		state:          dap.StateInactive,
+		stackFrames:    make([]dap.StackFrame, 0),
+		variables:      make([]dap.Variable, 0),
+		outputLog:      make([]string, 0),
 		maxOutputLines: 200,
 	}
 }
@@ -153,12 +154,12 @@ func (c *DAPCoordinator) SelectFrame(idx int) tea.Cmd {
 		return nil
 	}
 	c.mu.RUnlock()
-	
+
 	c.mu.Lock()
 	c.currentFrame = idx
 	frame := c.stackFrames[idx]
 	c.mu.Unlock()
-	
+
 	if frame.Source.Path == "" {
 		return nil
 	}
@@ -238,7 +239,17 @@ func (c *DAPCoordinator) Shutdown() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.mgr != nil {
-		c.mgr.Stop()
+		c.mgr.Shutdown()
 	}
 	c.state = dap.StateInactive
+}
+
+func (c *DAPCoordinator) WaitForShutdown(ctx context.Context) bool {
+	c.mu.RLock()
+	mgr := c.mgr
+	c.mu.RUnlock()
+	if mgr == nil {
+		return true
+	}
+	return mgr.WaitForShutdown(ctx)
 }

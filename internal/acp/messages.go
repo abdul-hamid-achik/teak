@@ -69,6 +69,8 @@ type FileReadRequestMsg struct {
 	Path     string
 	Line     *int
 	Limit    *int
+	RootDir  string
+	Context  context.Context
 	ResultCh chan FileReadResult
 }
 
@@ -81,6 +83,7 @@ type FileReadResult struct {
 // AgentPromptResponseMsg is sent when a Prompt() call returns.
 type AgentPromptResponseMsg struct {
 	StopReason sdk.StopReason
+	Generation uint64
 	Err        error
 }
 

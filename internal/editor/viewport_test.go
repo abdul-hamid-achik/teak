@@ -1,10 +1,12 @@
 package editor
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -200,6 +202,86 @@ func TestWrapLayoutCountsRowsWithoutSplittingWideRunes(t *testing.T) {
 	}
 }
 
+func TestWrapLayoutWindowsFormerSegmentBudget(t *testing.T) {
+	line := bytes.Repeat([]byte("x"), largeWrapTestSegments+1)
+	wrap := NewWrapLayout(func(int) []byte { return line }, 1, 1)
+	if wrap.Degraded() {
+		t.Fatal("pathological one-column line must stay wrapped")
+	}
+	if got := wrap.LineRows(0); got != len(line) {
+		t.Fatalf("wrapped rows = %d, want %d", got, len(line))
+	}
+	if got := len(wrap.segmentStarts); got != 0 {
+		t.Fatalf("new layout eagerly retained %d segment entries", got)
+	}
+	if _, _, _, ok := wrap.SegmentBounds(0, len(line)-1, len(line)); !ok {
+		t.Fatal("deep segment must remain addressable")
+	}
+	if got := len(wrap.segmentStarts); got > maxWrapSegmentWindow+1 {
+		t.Fatalf("active segment window = %d entries, want at most %d", got, maxWrapSegmentWindow+1)
+	}
+}
+
+func TestWrapLayoutSupportsFormerLineBudget(t *testing.T) {
+	wrap := NewWrapLayout(func(int) []byte { return nil }, largeWrapTestLines+1, 80)
+	if wrap.Degraded() {
+		t.Fatal("large line count must not disable word wrap")
+	}
+	if got, want := wrap.TotalRows(), largeWrapTestLines+1; got != want {
+		t.Fatalf("TotalRows() = %d, want %d", got, want)
+	}
+	if line, segment := wrap.BufferLine(largeWrapTestLines); line != largeWrapTestLines || segment != 0 {
+		t.Fatalf("BufferLine(last) = (%d, %d), want (%d, 0)", line, segment, largeWrapTestLines)
+	}
+}
+
+func TestWrapLayoutCachesDeepSegmentBounds(t *testing.T) {
+	line := strings.Repeat("ab", 8_000) + "\t你" + string([]byte{0xff})
+	buf := text.NewBufferFromBytes([]byte(line))
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 7, 4)
+	segment := wrap.LineRows(0) - 2
+
+	start, end, displayStart, ok := wrap.SegmentBounds(0, segment, len(line))
+	if !ok {
+		t.Fatalf("SegmentBounds(%d) reported no segment", segment)
+	}
+	wantStart, wantEnd, _, wantOK := wrappedLineSegmentWithTabs(line, segment, 7, 4)
+	if !wantOK || start != wantStart || end != wantEnd {
+		t.Fatalf("SegmentBounds(%d) = (%d,%d), want (%d,%d)", segment, start, end, wantStart, wantEnd)
+	}
+	if got := displayColumn([]byte(line), start, 4); displayStart != got {
+		t.Fatalf("segment display start = %d, want %d", displayStart, got)
+	}
+}
+
+func TestWrapLayoutPositionForByteMatchesPackedTabsWideRunesAndInvalidUTF8(t *testing.T) {
+	line := "a\t你b" + string([]byte{0xff}) + "c"
+	buf := text.NewBufferFromBytes([]byte(line))
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 4, 4)
+
+	for _, col := range []int{0, 1, 2, 5, 6, 7, len(line)} {
+		wantRow, wantCol := wrappedPositionWithTabs(line, col, 4, 4)
+		gotRow, gotCol := wrap.PositionForByte(0, col, []byte(line))
+		if gotRow != wantRow || gotCol != wantCol {
+			t.Errorf("PositionForByte(%d) = (%d,%d), want (%d,%d)", col, gotRow, gotCol, wantRow, wantCol)
+		}
+	}
+}
+
+func TestViewportWrapScrollsWithinSingleLongLine(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("abcdefghijklmnopqrstuvwx"))
+	wrap := NewWrapLayout(buf.Line, buf.LineCount(), 4)
+	viewport := Viewport{Width: 12, Height: 2, WrapScrollY: 3}
+
+	rendered := ansi.Strip(viewport.RenderWithWrap(buf, ui.DefaultTheme(), nil, nil, nil, wrap))
+	if !strings.Contains(rendered, "mnop") || strings.Contains(rendered, "abcd") {
+		t.Fatalf("RenderWithWrap() did not start at visual row 3:\n%s", rendered)
+	}
+	if got := viewport.ScreenToBufferPositionWrap(0, 0, buf, 0, wrap); got != (text.Position{Line: 0, Col: 12}) {
+		t.Fatalf("wrapped click after visual scroll = %#v, want byte column 12", got)
+	}
+}
+
 func TestRenderTokenByteRangePreservesTokenStyles(t *testing.T) {
 	bold := lipgloss.NewStyle().Bold(true)
 	italic := lipgloss.NewStyle().Italic(true)
@@ -212,6 +294,35 @@ func TestRenderTokenByteRangePreservesTokenStyles(t *testing.T) {
 	want := bold.Render("bc") + italic.Render("de")
 	if got != want {
 		t.Errorf("renderTokenByteRange() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderTokenByteRangeWithIndexedStartsPreservesDeepStyle(t *testing.T) {
+	line := strings.Repeat("a", 128) + "XY"
+	plain := lipgloss.NewStyle()
+	bold := lipgloss.NewStyle().Bold(true)
+	tokens := []highlight.StyledToken{
+		{Text: strings.Repeat("a", 128), Style: plain},
+		{Text: "XY", Style: bold},
+	}
+	starts := tokenByteStarts(tokens)
+	got, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(line, tokens, starts, 128, len(line), 128, plain, 4)
+	if want := bold.Render("XY"); got != want {
+		t.Fatalf("indexed token rendering = %q, want %q", got, want)
+	}
+}
+
+func TestViewportCachesWrappedTokenStartsByBufferVersion(t *testing.T) {
+	tokens := []highlight.StyledToken{{Text: "alpha"}, {Text: "beta"}}
+	viewport := Viewport{}
+	first := viewport.wrapTokenStarts(0, 1, tokens)
+	second := viewport.wrapTokenStarts(0, 1, tokens)
+	if len(first) == 0 || &first[0] != &second[0] {
+		t.Fatal("wrapped token offsets were rebuilt for an unchanged buffer version")
+	}
+	third := viewport.wrapTokenStarts(0, 2, tokens)
+	if &first[0] == &third[0] {
+		t.Fatal("wrapped token offsets were not invalidated for a new buffer version")
 	}
 }
 

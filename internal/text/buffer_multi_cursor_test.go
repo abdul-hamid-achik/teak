@@ -1,6 +1,8 @@
 package text
 
 import (
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -77,16 +79,48 @@ func TestSelectionsNormalize(t *testing.T) {
 }
 
 func TestSelectionsNormalizeRemovesOverlaps(t *testing.T) {
-	s := NewSelections(Position{0, 0})
-	s.Add(Selection{Anchor: Position{0, 5}, Head: Position{0, 10}})
-	s.Add(Selection{Anchor: Position{0, 8}, Head: Position{0, 12}}) // Overlaps
+	s := &Selections{
+		selections: []Selection{
+			{Anchor: Position{0, 0}, Head: Position{0, 5}},
+			{Anchor: Position{0, 5}, Head: Position{0, 10}}, // Adjacent, not overlapping.
+			{Anchor: Position{0, 8}, Head: Position{0, 12}}, // Overlaps the second selection.
+		},
+		primary: 2,
+		dirty:   true,
+	}
 
 	s.Normalize()
 
-	// Note: Current implementation keeps overlapping selections
-	// This test documents current behavior - may want to enhance normalization
-	if s.Count() < 1 {
-		t.Errorf("Count() = %d, should be at least 1", s.Count())
+	if got, want := s.All(), []Selection{
+		{Anchor: Position{0, 0}, Head: Position{0, 5}},
+		{Anchor: Position{0, 5}, Head: Position{0, 10}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Normalize() = %#v, want %#v", got, want)
+	}
+	// The dropped primary overlaps the adjacent canonical range, so focus is
+	// transferred to that retained range rather than leaving primary invalid.
+	if got, want := s.Primary(), (Selection{Anchor: Position{0, 5}, Head: Position{0, 10}}); got != want {
+		t.Errorf("Primary() = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectionsNormalizeDeduplicatesCollapsedCursors(t *testing.T) {
+	s := &Selections{
+		selections: []Selection{
+			{Anchor: Position{0, 4}, Head: Position{0, 4}},
+			{Anchor: Position{0, 4}, Head: Position{0, 4}},
+		},
+		primary: 1,
+		dirty:   true,
+	}
+
+	s.Normalize()
+
+	if got := s.Count(); got != 1 {
+		t.Fatalf("Count() = %d, want 1", got)
+	}
+	if got, want := s.PrimaryCursor(), (Position{0, 4}); got != want {
+		t.Errorf("PrimaryCursor() = %v, want %v", got, want)
 	}
 }
 
@@ -230,12 +264,18 @@ func TestBufferSelectNextOccurrenceMulti(t *testing.T) {
 	if b.Selections.Count() != 2 {
 		t.Errorf("Count() = %d, want 2", b.Selections.Count())
 	}
+	if got, want := b.Cursor, (Position{0, 11}); got != want {
+		t.Errorf("Cursor after first occurrence = %v, want %v", got, want)
+	}
 
 	// Select another
 	b.SelectNextOccurrence()
 
 	if b.Selections.Count() != 3 {
 		t.Errorf("After second SelectNextOccurrence, Count() = %d, want 3", b.Selections.Count())
+	}
+	if got, want := b.Cursor, (Position{0, 19}); got != want {
+		t.Errorf("Cursor after second occurrence = %v, want %v", got, want)
 	}
 }
 
@@ -250,6 +290,28 @@ func TestBufferSelectAllOccurrences(t *testing.T) {
 
 	if b.Selections.Count() != 3 {
 		t.Errorf("Count() = %d, want 3", b.Selections.Count())
+	}
+	if got, want := b.Cursor, (Position{0, 19}); got != want {
+		t.Errorf("Cursor = %v, want %v", got, want)
+	}
+}
+
+func TestOccurrenceSearchRejectsOversizedDocumentWithoutFlattening(t *testing.T) {
+	b := NewBufferFromBytes([]byte(strings.Repeat("word ", MaxOccurrenceSearchBytes/5+2)))
+	b.SetSelection(Position{}, Position{Col: 4})
+	before := slices.Clone(b.Selections.All())
+
+	if b.SelectNextOccurrence() {
+		t.Fatal("SelectNextOccurrence accepted a document above its interactive scan budget")
+	}
+	if got := b.Selections.All(); !slices.Equal(got, before) {
+		t.Fatalf("oversized occurrence search changed selections: got %+v want %+v", got, before)
+	}
+	if b.SelectAllOccurrences() {
+		t.Fatal("SelectAllOccurrences accepted a document above its interactive scan budget")
+	}
+	if got := b.Selections.All(); !slices.Equal(got, before) {
+		t.Fatalf("oversized select-all changed selections: got %+v want %+v", got, before)
 	}
 }
 
@@ -310,18 +372,123 @@ func TestBufferAddCursorBelowAtBottom(t *testing.T) {
 }
 
 func TestBufferSplitSelectionIntoLines(t *testing.T) {
-	t.Skip("Complex test - needs refinement")
-	// Core multi-selection functionality is tested in other tests
-	// This test can be refined later to test edge cases
+	b := NewBufferFromBytes([]byte("ab\n\ncdef\nxy"))
+	b.SetSelection(Position{0, 1}, Position{3, 1})
+
+	b.SplitSelectionIntoLines()
+
+	want := []Selection{
+		{Anchor: Position{0, 1}, Head: Position{0, 2}},
+		// An empty intermediate line is still a useful cursor target.
+		{Anchor: Position{1, 0}, Head: Position{1, 0}},
+		{Anchor: Position{2, 0}, Head: Position{2, 4}},
+		{Anchor: Position{3, 0}, Head: Position{3, 1}},
+	}
+	if got := b.Selections.All(); len(got) != len(want) {
+		t.Fatalf("selection count = %d, want %d (%#v)", len(got), len(want), got)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("selection %d = %#v, want %#v", i, got[i], want[i])
+			}
+		}
+	}
+	if got, want := b.Selections.Primary(), want[len(want)-1]; got != want {
+		t.Errorf("primary = %#v, want %#v", got, want)
+	}
+	if got, want := b.Cursor, (Position{3, 1}); got != want {
+		t.Errorf("Cursor = %v, want %v", got, want)
+	}
 }
 
 func TestBufferSplitSelectionIntoLinesPartial(t *testing.T) {
-	t.Skip("Complex test - needs refinement")
+	t.Run("reversed selection keeps the head-side selection primary", func(t *testing.T) {
+		b := NewBufferFromBytes([]byte("ab\n\ncdef\nxy"))
+		b.SetSelection(Position{3, 1}, Position{0, 1})
+
+		b.SplitSelectionIntoLines()
+
+		if got, want := b.Selections.Count(), 4; got != want {
+			t.Fatalf("Count() = %d, want %d", got, want)
+		}
+		if got, want := b.Selections.Primary(), (Selection{Anchor: Position{0, 1}, Head: Position{0, 2}}); got != want {
+			t.Errorf("Primary() = %#v, want %#v", got, want)
+		}
+		if got, want := b.Cursor, (Position{0, 2}); got != want {
+			t.Errorf("Cursor = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("end at the next line start does not add a spurious cursor", func(t *testing.T) {
+		b := NewBufferFromBytes([]byte("ab\ncd"))
+		b.SetSelection(Position{0, 1}, Position{1, 0})
+
+		b.SplitSelectionIntoLines()
+
+		if got, want := b.Selections.All(), []Selection{{Anchor: Position{0, 1}, Head: Position{0, 2}}}; len(got) != len(want) || got[0] != want[0] {
+			t.Errorf("Selections = %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestBufferSplitSelectionIntoLinesRespectsMaximum(t *testing.T) {
+	content := strings.Repeat("x\n", MaxSelections+1) + "x"
+	b := NewBufferFromBytes([]byte(content))
+	lastLine := MaxSelections + 1
+	b.SetSelection(Position{0, 0}, Position{lastLine, 1})
+
+	b.SplitSelectionIntoLines()
+
+	if got, want := b.Selections.Count(), MaxSelections; got != want {
+		t.Fatalf("Count() = %d, want %d", got, want)
+	}
+	if got, want := b.Selections.All()[0].Head.Line, 2; got != want {
+		t.Errorf("first retained line = %d, want %d", got, want)
+	}
+	if got, want := b.Selections.PrimaryCursor(), (Position{lastLine, 1}); got != want {
+		t.Errorf("PrimaryCursor() = %v, want %v", got, want)
+	}
 }
 
 func TestBufferMoveCursors(t *testing.T) {
-	t.Skip("Test needs refinement - selection management complex")
-	// Core cursor movement is tested via editor integration tests
+	b := NewBufferFromBytes([]byte("éx\n🙂"))
+	b.SetCursor(Position{0, 2}) // after the two-byte "é"
+	b.Selections.Add(Selection{Anchor: Position{1, 0}, Head: Position{1, 0}})
+
+	b.MoveCursors(DirRight)
+
+	if got, want := b.Selections.All(), []Selection{
+		{Anchor: Position{0, 3}, Head: Position{0, 3}},
+		{Anchor: Position{1, 4}, Head: Position{1, 4}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("MoveCursors(DirRight) = %#v, want %#v", got, want)
+	}
+	if got, want := b.Cursor, (Position{1, 4}); got != want {
+		t.Errorf("Cursor = %v, want %v", got, want)
+	}
+
+	b.MoveCursors(DirLeft)
+	if got, want := b.Selections.All(), []Selection{
+		{Anchor: Position{0, 2}, Head: Position{0, 2}},
+		{Anchor: Position{1, 0}, Head: Position{1, 0}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("MoveCursors(DirLeft) = %#v, want %#v", got, want)
+	}
+}
+
+func TestBufferMoveCursorsDeduplicatesCollisionAndKeepsPrimary(t *testing.T) {
+	b := NewBufferFromBytes([]byte("é"))
+	b.SetCursor(Position{0, 0})
+	b.Selections.Add(Selection{Anchor: Position{0, 2}, Head: Position{0, 2}})
+
+	b.MoveCursors(DirLeft)
+
+	if got, want := b.Selections.Count(), 1; got != want {
+		t.Fatalf("Count() = %d, want %d", got, want)
+	}
+	if got, want := b.Selections.PrimaryCursor(), (Position{0, 0}); got != want {
+		t.Errorf("PrimaryCursor() = %v, want %v", got, want)
+	}
 }
 
 func TestBufferMoveCursorsRespectsLineBounds(t *testing.T) {
@@ -391,12 +558,42 @@ func TestBufferUndoRedoWithMultiSelection(t *testing.T) {
 	if b.Content() != "hello\nworld" {
 		t.Errorf("After undo: got %q, want %q", b.Content(), "hello\nworld")
 	}
+	if got, want := b.Selections.Primary(), (Selection{Anchor: Position{0, 0}, Head: Position{0, 0}}); got != want {
+		t.Errorf("selection after undo = %#v, want %#v", got, want)
+	}
 
 	// Redo
 	b.Redo()
 
 	if b.Content() != "Xhello\nXworld" {
 		t.Errorf("After redo: got %q, want %q", b.Content(), "Xhello\nXworld")
+	}
+	if got, want := b.Selections.Primary(), (Selection{Anchor: Position{1, 1}, Head: Position{1, 1}}); got != want {
+		t.Errorf("selection after redo = %#v, want %#v", got, want)
+	}
+}
+
+func TestBufferInsertAtMultipleSelectedRangesReplacesEachRange(t *testing.T) {
+	b := NewBufferFromBytes([]byte("one two three"))
+	b.SetSelection(Position{0, 0}, Position{0, 3})
+	b.Selections.Add(Selection{Anchor: Position{0, 8}, Head: Position{0, 13}})
+
+	b.InsertAtCursor([]byte("X"))
+
+	if got, want := b.Content(), "X two X"; got != want {
+		t.Fatalf("Content() = %q, want %q", got, want)
+	}
+	if got, want := b.Selections.All(), []Selection{
+		{Anchor: Position{0, 1}, Head: Position{0, 1}},
+		{Anchor: Position{0, 7}, Head: Position{0, 7}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Selections = %#v, want %#v", got, want)
+	}
+	if got, want := b.Cursor, (Position{0, 7}); got != want {
+		t.Errorf("Cursor = %v, want %v", got, want)
+	}
+	if b.LastChange() != nil {
+		t.Errorf("LastChange() = %#v, want nil for multi-selection replacement", b.LastChange())
 	}
 }
 

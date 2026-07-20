@@ -2,7 +2,9 @@ package dap
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,21 +15,47 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	log "github.com/charmbracelet/log"
 )
 
+const (
+	maxDAPMessageSize      = 16 << 20
+	maxDAPHeaderBytes      = 8 << 10
+	maxDAPOutputEventBytes = 64 << 10
+	maxDAPQueuedOutput     = 64
+	maxDAPQueuedCritical   = 64
+	shutdownRequestTimeout = 750 * time.Millisecond
+	shutdownReapTimeout    = 2 * time.Second
+)
+
 // Client manages communication with a DAP debug adapter.
 type Client struct {
-	cmd         *exec.Cmd
-	stdin       io.WriteCloser
-	stdout      io.ReadCloser
-	mu          sync.Mutex
-	pending     map[int]chan callResult
-	running     bool
-	initialized bool
-	msgChan     chan<- any
-	seq         int
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	mu           sync.Mutex
+	pending      map[int]chan callResult
+	running      bool
+	initialized  bool
+	msgChan      chan<- any
+	seq          int
+	writeMu      sync.Mutex
+	shutdownOnce sync.Once
+	processDone  chan struct{}
+	readDone     chan struct{}
+
+	// The adapter's protocol reader must never wait for Bubble Tea to process a
+	// message. Keep bounded, priority-separated queues so noisy output cannot
+	// evict lifecycle transitions while the UI is busy.
+	eventMu        sync.Mutex
+	criticalEvents []any
+	outputEvents   []any
+	eventWake      chan struct{}
+	eventStop      chan struct{}
+	eventDone      chan struct{}
+	eventStopOnce  sync.Once
 }
 
 type callResult struct {
@@ -190,15 +218,19 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 	}
 
 	c := &Client{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		pending: make(map[int]chan callResult),
-		running: true,
-		msgChan: msgChan,
-		seq:     0,
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdout,
+		pending:     make(map[int]chan callResult),
+		running:     true,
+		msgChan:     msgChan,
+		seq:         0,
+		processDone: make(chan struct{}),
+		readDone:    make(chan struct{}),
 	}
+	c.initEventDelivery()
 
+	go c.reapProcess()
 	go c.readLoop()
 
 	return c, nil
@@ -380,26 +412,42 @@ func (c *Client) Variables(variablesReference int) ([]Variable, error) {
 
 // Disconnect stops the debug session.
 func (c *Client) Disconnect() error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownRequestTimeout)
+	defer cancel()
+	return c.disconnectContext(ctx)
+}
+
+func (c *Client) disconnectContext(ctx context.Context) error {
 	args := map[string]bool{
 		"restart":           false,
 		"terminateDebuggee": true,
 	}
-	return c.sendRequest("disconnect", args, nil)
+	return c.sendRequestContext(ctx, "disconnect", args, nil)
 }
 
 // Shutdown gracefully shuts down the debug adapter.
 func (c *Client) Shutdown() {
-	c.mu.Lock()
-	if !c.running {
+	c.shutdownOnce.Do(func() {
+		c.mu.Lock()
+		c.running = false
 		c.mu.Unlock()
-		return
-	}
-	c.running = false
-	c.mu.Unlock()
+		c.stopEventDelivery()
+		go c.shutdownProcess()
+	})
+}
 
-	_ = c.Disconnect()
-	_ = c.stdin.Close()
-	_ = c.cmd.Wait()
+// WaitForShutdown waits until the adapter process has been reaped or ctx is
+// cancelled. It is intended for bounded application teardown outside Update.
+func (c *Client) WaitForShutdown(ctx context.Context) bool {
+	if c.processDone == nil {
+		return true
+	}
+	select {
+	case <-c.processDone:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // IsReady returns whether the client has completed initialization.
@@ -410,6 +458,12 @@ func (c *Client) IsReady() bool {
 }
 
 func (c *Client) sendRequest(command string, args any, result *json.RawMessage) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return c.sendRequestContext(ctx, command, args, result)
+}
+
+func (c *Client) sendRequestContext(ctx context.Context, command string, args any, result *json.RawMessage) error {
 	seq := c.nextSeq()
 	c.mu.Lock()
 	ch := make(chan callResult, 1)
@@ -433,11 +487,11 @@ func (c *Client) sendRequest(command string, args any, result *json.RawMessage) 
 	var res callResult
 	select {
 	case res = <-ch:
-	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, seq)
 		c.mu.Unlock()
-		return fmt.Errorf("DAP request %q timed out after 30s", command)
+		return fmt.Errorf("DAP request %q: %w", command, ctx.Err())
 	}
 	c.mu.Lock()
 	delete(c.pending, seq)
@@ -459,56 +513,146 @@ func (c *Client) send(msg any) error {
 		return err
 	}
 	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := io.WriteString(c.stdin, header); err != nil {
+	stdin := c.stdin
+	c.mu.Unlock()
+	if stdin == nil {
+		return errors.New("DAP client stdin is closed")
+	}
+	if _, err := io.WriteString(stdin, header); err != nil {
 		return err
 	}
-	_, err = c.stdin.Write(data)
+	_, err = stdin.Write(data)
 	return err
 }
 
 func (c *Client) readLoop() {
+	defer func() {
+		if c.readDone != nil {
+			close(c.readDone)
+		}
+	}()
 	reader := bufio.NewReader(c.stdout)
 
 	for {
-		// Read Content-Length header
-		var contentLength int
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					return
-				}
-				log.Error("dap: read error", "err", err)
-				return
-			}
-
-			line = strings.TrimSpace(line)
-			if line == "" {
-				break
-			}
-
-			if strings.HasPrefix(line, "Content-Length:") {
-				lengthStr := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-				contentLength, err = strconv.Atoi(lengthStr)
-				if err != nil {
-					log.Error("dap: invalid content length", "err", err)
-					return
-				}
-			}
-		}
-
-		// Read content
-		content := make([]byte, contentLength)
-		_, err := io.ReadFull(reader, content)
+		content, err := readDAPFrame(reader)
 		if err != nil {
-			log.Error("dap: read content error", "err", err)
+			if !errors.Is(err, io.EOF) {
+				log.Error("dap: read frame error", "err", err)
+			}
 			return
 		}
 
 		c.handleMessage(content)
 	}
+}
+
+func (c *Client) reapProcess() {
+	if c.cmd == nil {
+		return
+	}
+	_ = c.cmd.Wait()
+	if c.processDone != nil {
+		close(c.processDone)
+	}
+}
+
+func (c *Client) shutdownProcess() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownRequestTimeout)
+	gracefulDone := make(chan struct{})
+	go func() {
+		_ = c.disconnectContext(ctx)
+		close(gracefulDone)
+	}()
+	select {
+	case <-gracefulDone:
+	case <-ctx.Done():
+	}
+	cancel()
+
+	c.mu.Lock()
+	stdin, stdout, cmd := c.stdin, c.stdout, c.cmd
+	c.stdin = nil
+	c.stdout = nil
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if stdout != nil {
+		_ = stdout.Close()
+	}
+
+	if waitForDone(c.processDone, shutdownRequestTimeout) {
+		return
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	if !waitForDone(c.processDone, shutdownReapTimeout) {
+		log.Warn("dap: process did not exit after forced shutdown")
+	}
+}
+
+func waitForDone(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func readDAPFrame(reader *bufio.Reader) ([]byte, error) {
+	contentLength := -1
+	headerBytes := 0
+
+	for {
+		line, err := reader.ReadSlice('\n')
+		headerBytes += len(line)
+		if err == bufio.ErrBufferFull || headerBytes > maxDAPHeaderBytes {
+			return nil, fmt.Errorf("DAP header exceeds limit of %d bytes", maxDAPHeaderBytes)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == "" {
+			break
+		}
+
+		name, value, ok := strings.Cut(trimmed, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
+			continue
+		}
+		if contentLength >= 0 {
+			return nil, fmt.Errorf("duplicate Content-Length header")
+		}
+
+		parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
+		if parseErr != nil || parsed <= 0 {
+			return nil, fmt.Errorf("invalid Content-Length %q", strings.TrimSpace(value))
+		}
+		if parsed > maxDAPMessageSize {
+			return nil, fmt.Errorf("Content-Length %d exceeds limit of %d bytes", parsed, maxDAPMessageSize)
+		}
+		contentLength = parsed
+	}
+
+	if contentLength < 0 {
+		return nil, fmt.Errorf("missing Content-Length header")
+	}
+
+	content := make([]byte, contentLength)
+	if _, err := io.ReadFull(reader, content); err != nil {
+		return nil, fmt.Errorf("read DAP content: %w", err)
+	}
+	return content, nil
 }
 
 func (c *Client) handleMessage(data []byte) {
@@ -541,9 +685,17 @@ func (c *Client) handleMessage(data []byte) {
 					}
 				}
 			}
-			ch <- callResult{
+			// A compliant adapter replies once per request, but a duplicate or late
+			// response must not stall the sole protocol reader. The request channel
+			// is deliberately one-slot buffered so the normal response can arrive
+			// just before its caller starts waiting; additional responses are stale.
+			select {
+			case ch <- callResult{
 				Result: resp.Body,
 				Error:  errResp,
+			}:
+			default:
+				log.Warn("dap: dropping duplicate or late response", "request_seq", resp.RequestSeq)
 			}
 		}
 		return
@@ -565,34 +717,34 @@ func (c *Client) handleEvent(event *Event) {
 	switch event.Event {
 	case "stopped":
 		if body, ok := event.Body.(map[string]any); ok {
-			c.msgChan <- StoppedEventMsg{
-				Reason:            getStr(body, "reason"),
-				Description:       getStr(body, "description"),
+			c.emit(StoppedEventMsg{
+				Reason:            boundedDAPText(getStr(body, "reason")),
+				Description:       boundedDAPText(getStr(body, "description")),
 				ThreadId:          getInt(body, "threadId"),
 				AllThreadsStopped: getBool(body, "allThreadsStopped"),
-			}
+			})
 		}
 	case "continued":
 		if body, ok := event.Body.(map[string]any); ok {
-			c.msgChan <- ContinuedEventMsg{
+			c.emit(ContinuedEventMsg{
 				ThreadId:            getInt(body, "threadId"),
 				AllThreadsContinued: getBool(body, "allThreadsContinued"),
-			}
+			})
 		}
 	case "exited":
 		if body, ok := event.Body.(map[string]any); ok {
-			c.msgChan <- ExitedEventMsg{
+			c.emit(ExitedEventMsg{
 				ExitCode: int(getInt(body, "exitCode")),
-			}
+			})
 		}
 	case "terminated":
-		c.msgChan <- TerminatedEventMsg{}
+		c.emit(TerminatedEventMsg{})
 	case "output":
 		if body, ok := event.Body.(map[string]any); ok {
-			c.msgChan <- OutputEventMsg{
-				Category: getStr(body, "category"),
-				Output:   getStr(body, "output"),
-			}
+			c.emit(OutputEventMsg{
+				Category: boundedDAPText(getStr(body, "category")),
+				Output:   boundedDAPText(getStr(body, "output")),
+			})
 		}
 	case "breakpoint":
 		if body, ok := event.Body.(map[string]any); ok {
@@ -605,21 +757,157 @@ func (c *Client) handleEvent(event *Event) {
 			}
 			bp := Breakpoint{
 				Verified: getBool(breakpointBody, "verified"),
-				Message:  getStr(breakpointBody, "message"),
+				Message:  boundedDAPText(getStr(breakpointBody, "message")),
 				Line:     getInt(breakpointBody, "line"),
 			}
 			if src, sok := breakpointBody["source"].(map[string]any); sok {
 				bp.Source = Source{
-					Name: getStr(src, "name"),
-					Path: getStr(src, "path"),
+					Name: boundedDAPText(getStr(src, "name")),
+					Path: boundedDAPText(getStr(src, "path")),
 				}
 			}
-			c.msgChan <- BreakpointEventMsg{
-				Reason:     getStr(body, "reason"),
+			c.emit(BreakpointEventMsg{
+				Reason:     boundedDAPText(getStr(body, "reason")),
 				Breakpoint: bp,
-			}
+			})
 		}
 	}
+}
+
+func boundedDAPText(value string) string {
+	if len(value) <= maxDAPOutputEventBytes {
+		return value
+	}
+	start := len(value) - maxDAPOutputEventBytes
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return value[start:]
+}
+
+// emit never lets an adapter flood or a stopped UI block the protocol reader.
+// Lifecycle events use a separate FIFO queue, so output cannot crowd out a
+// stopped, exited, or terminated notification. The queues and the dispatcher
+// are only initialized for real clients; retaining a direct non-blocking send
+// keeps small, manually constructed clients useful in unit tests.
+func (c *Client) emit(msg any) {
+	if c.msgChan == nil {
+		return
+	}
+	if c.eventWake == nil {
+		select {
+		case c.msgChan <- msg:
+		default:
+			log.Warn("dap: dropping UI event because message queue is full")
+		}
+		return
+	}
+
+	c.eventMu.Lock()
+	if isDAPCriticalEvent(msg) {
+		c.enqueueCriticalEventLocked(msg)
+	} else if len(c.outputEvents) < maxDAPQueuedOutput {
+		c.outputEvents = append(c.outputEvents, msg)
+	}
+	c.eventMu.Unlock()
+	c.signalEventDispatcher()
+}
+
+func (c *Client) initEventDelivery() {
+	if c.msgChan == nil || c.eventWake != nil {
+		return
+	}
+	c.eventWake = make(chan struct{}, 1)
+	c.eventStop = make(chan struct{})
+	c.eventDone = make(chan struct{})
+	go c.eventDeliveryLoop()
+}
+
+func (c *Client) stopEventDelivery() {
+	if c.eventStop == nil {
+		return
+	}
+	c.eventStopOnce.Do(func() {
+		close(c.eventStop)
+	})
+}
+
+func (c *Client) eventDeliveryLoop() {
+	defer close(c.eventDone)
+	for {
+		msg, ok := c.nextQueuedEvent()
+		if !ok {
+			select {
+			case <-c.eventWake:
+				continue
+			case <-c.eventStop:
+				return
+			case <-c.readDone:
+				// The protocol stream ended and there is no queued notification
+				// left to deliver, so retaining a dispatcher would leak a goroutine.
+				return
+			}
+		}
+
+		select {
+		case c.msgChan <- msg:
+		case <-c.eventStop:
+			return
+		}
+	}
+}
+
+func (c *Client) nextQueuedEvent() (any, bool) {
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if len(c.criticalEvents) > 0 {
+		msg := c.criticalEvents[0]
+		c.criticalEvents[0] = nil
+		c.criticalEvents = c.criticalEvents[1:]
+		return msg, true
+	}
+	if len(c.outputEvents) > 0 {
+		msg := c.outputEvents[0]
+		c.outputEvents[0] = nil
+		c.outputEvents = c.outputEvents[1:]
+		return msg, true
+	}
+	return nil, false
+}
+
+func (c *Client) signalEventDispatcher() {
+	select {
+	case c.eventWake <- struct{}{}:
+	default:
+	}
+}
+
+func isDAPCriticalEvent(msg any) bool {
+	switch msg.(type) {
+	case StoppedEventMsg, ContinuedEventMsg, ExitedEventMsg, TerminatedEventMsg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) enqueueCriticalEventLocked(msg any) {
+	if len(c.criticalEvents) < maxDAPQueuedCritical {
+		c.criticalEvents = append(c.criticalEvents, msg)
+		return
+	}
+
+	// An adapter should not flood lifecycle events, but if it does, preserve a
+	// final exit/termination by evicting an older transient state first.
+	for i, queued := range c.criticalEvents {
+		switch queued.(type) {
+		case StoppedEventMsg, ContinuedEventMsg:
+			c.criticalEvents = append(c.criticalEvents[:i], c.criticalEvents[i+1:]...)
+			c.criticalEvents = append(c.criticalEvents, msg)
+			return
+		}
+	}
+	log.Warn("dap: dropping lifecycle event because critical queue is full")
 }
 
 func getStr(m map[string]any, key string) string {

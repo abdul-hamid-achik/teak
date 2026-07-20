@@ -146,12 +146,12 @@ func TestSearchResultsMsgWithError(t *testing.T) {
 	}
 }
 
-// TestDebounceTickMsg tests debounceTickMsg struct
+// TestDebounceTickMsg tests DebounceTickMsg struct.
 func TestDebounceTickMsg(t *testing.T) {
-	msg := debounceTickMsg{generation: 5}
+	msg := DebounceTickMsg{Generation: 5}
 
-	if msg.generation != 5 {
-		t.Errorf("Expected generation 5, got %d", msg.generation)
+	if msg.Generation != 5 {
+		t.Errorf("Expected generation 5, got %d", msg.Generation)
 	}
 }
 
@@ -220,7 +220,7 @@ func TestResultWithEmptyFields(t *testing.T) {
 // TestMessageTypesInstantiation tests all message types can be instantiated
 func TestMessageTypesInstantiation(t *testing.T) {
 	// Test all message types can be instantiated
-	_ = debounceTickMsg{generation: 1}
+	_ = DebounceTickMsg{Generation: 1}
 	_ = OpenResultMsg{FilePath: "/test.go", Line: 10, Col: 5}
 	_ = CloseSearchMsg{}
 	_ = ToggleReplaceMsg{}

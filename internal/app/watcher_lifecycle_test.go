@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"teak/internal/config"
+	"teak/internal/text"
 )
 
 func TestOpenExternalFileCloseTabRemovesWatch(t *testing.T) {
@@ -30,6 +32,7 @@ func TestOpenExternalFileCloseTabRemovesWatch(t *testing.T) {
 	if model.watcher == nil {
 		t.Fatal("expected model watcher to be initialized")
 	}
+	requireFileWatchState(t, model.watcher, rootDir, true)
 	baseWatchCount := model.watcher.watchedCount()
 
 	openedModel, _ := model.openFilePinned(externalFile)
@@ -37,14 +40,12 @@ func TestOpenExternalFileCloseTabRemovesWatch(t *testing.T) {
 
 	loadedModel, _ := model.handleFileLoaded(FileLoadedMsg{
 		Path:     externalFile,
-		Data:     []byte("package main\n"),
+		Snapshot: text.NewFromString("package main\n"),
 		TabIndex: model.activeTab,
 	})
 	model = loadedModel.(Model)
 
-	if !model.watcher.isWatched(externalFile) {
-		t.Fatalf("expected %q to be watched after file load", externalFile)
-	}
+	requireFileWatchState(t, model.watcher, externalFile, true)
 	if got := model.watcher.watchedCount(); got != baseWatchCount+1 {
 		t.Fatalf("watchedCount() after open = %d, want %d", got, baseWatchCount+1)
 	}
@@ -52,9 +53,7 @@ func TestOpenExternalFileCloseTabRemovesWatch(t *testing.T) {
 	closedModel, _ := model.closeTab(model.activeTab)
 	model = closedModel.(Model)
 
-	if model.watcher.isWatched(externalFile) {
-		t.Fatalf("expected %q watch to be removed after close", externalFile)
-	}
+	requireFileWatchState(t, model.watcher, externalFile, false)
 	if got := model.watcher.watchedCount(); got != baseWatchCount {
 		t.Fatalf("watchedCount() after close = %d, want %d", got, baseWatchCount)
 	}
@@ -85,39 +84,52 @@ func TestReplacingPreviewTabRemovesOldExternalWatch(t *testing.T) {
 	if model.watcher == nil {
 		t.Fatal("expected model watcher to be initialized")
 	}
+	requireFileWatchState(t, model.watcher, rootDir, true)
 	baseWatchCount := model.watcher.watchedCount()
 
 	openedModel, _ := model.openFile(firstFile)
 	model = openedModel.(Model)
 	loadedModel, _ := model.handleFileLoaded(FileLoadedMsg{
 		Path:     firstFile,
-		Data:     []byte("package main\n"),
+		Snapshot: text.NewFromString("package main\n"),
 		TabIndex: model.activeTab,
 	})
 	model = loadedModel.(Model)
 
-	if !model.watcher.isWatched(firstFile) {
-		t.Fatalf("expected %q to be watched after first preview load", firstFile)
-	}
+	requireFileWatchState(t, model.watcher, firstFile, true)
 
 	replacedModel, _ := model.openFile(secondFile)
 	model = replacedModel.(Model)
 
-	if model.watcher.isWatched(firstFile) {
-		t.Fatalf("expected %q watch to be removed when preview tab is replaced", firstFile)
-	}
+	requireFileWatchState(t, model.watcher, firstFile, false)
 
 	loadedModel, _ = model.handleFileLoaded(FileLoadedMsg{
 		Path:     secondFile,
-		Data:     []byte("package main\n"),
+		Snapshot: text.NewFromString("package main\n"),
 		TabIndex: model.activeTab,
 	})
 	model = loadedModel.(Model)
 
-	if !model.watcher.isWatched(secondFile) {
-		t.Fatalf("expected %q to be watched after replacement preview load", secondFile)
-	}
+	requireFileWatchState(t, model.watcher, secondFile, true)
 	if got := model.watcher.watchedCount(); got != baseWatchCount+1 {
 		t.Fatalf("watchedCount() after replacement = %d, want %d", got, baseWatchCount+1)
+	}
+}
+
+func requireFileWatchState(t *testing.T, watcher *fileWatcher, path string, want bool) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		if watcher.isWatched(path) == want {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("watch state for %q = %v, want %v", path, watcher.isWatched(path), want)
+		case <-poll.C:
+		}
 	}
 }

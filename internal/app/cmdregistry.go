@@ -82,9 +82,8 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
-			ID:       "toggle_problems",
-			Label:    "Toggle Problems Panel",
-			Shortcut: "F8",
+			ID:    "toggle_problems",
+			Label: "Show Problems Panel",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: toggleProblemsMsg{}}
 			},
@@ -218,8 +217,8 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
-			ID:       "agent_cancel",
-			Label:    "Cancel Agent",
+			ID:    "agent_cancel",
+			Label: "Cancel Agent",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: agentCancelMsg{}}
 			},

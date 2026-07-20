@@ -1,6 +1,7 @@
 package highlight
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -97,7 +98,7 @@ func TestCaptureViewportFarBeyondEOF(t *testing.T) {
 	}
 
 	h := New("test.go", ui.DefaultTheme())
-	lines, complete := h.TokenizeViewportSnapshot(nil, snapshot)
+	lines, complete := h.TokenizeViewportSnapshot(context.Background(), snapshot)
 	if !complete {
 		t.Fatal("expected tokenization to complete")
 	}

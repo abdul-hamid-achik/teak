@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"log"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/acp"
@@ -153,5 +155,53 @@ func (c *Coordinator) Shutdown() {
 	}
 	if c.acp != nil {
 		c.acp.Shutdown()
+	}
+}
+
+type coordinatorShutdownWaiter interface {
+	WaitForShutdown(context.Context) bool
+}
+
+// ShutdownAndWait initiates all subsystem teardowns and waits in parallel for
+// their child processes to be reaped. The caller supplies one global bound.
+func (c *Coordinator) ShutdownAndWait(ctx context.Context) bool {
+	c.Shutdown()
+
+	waiters := make([]coordinatorShutdownWaiter, 0, 3)
+	for _, subsystem := range []any{c.lsp, c.dap, c.acp} {
+		if waiter, ok := subsystem.(coordinatorShutdownWaiter); ok {
+			waiters = append(waiters, waiter)
+		}
+	}
+	if len(waiters) == 0 {
+		return true
+	}
+
+	results := make(chan bool, len(waiters))
+	var wg sync.WaitGroup
+	for _, waiter := range waiters {
+		wg.Add(1)
+		go func(waiter coordinatorShutdownWaiter) {
+			defer wg.Done()
+			results <- waiter.WaitForShutdown(ctx)
+		}(waiter)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		close(results)
+		for result := range results {
+			if !result {
+				return false
+			}
+		}
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

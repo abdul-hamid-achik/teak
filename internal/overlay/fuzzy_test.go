@@ -159,6 +159,24 @@ func TestFuzzyMatchUnicode(t *testing.T) {
 	}
 }
 
+func TestFuzzyMatchUnicodeCaseMappingWithDifferentUTF8Length(t *testing.T) {
+	// U+023A lowercases to U+2C65. Their UTF-8 encodings have different
+	// lengths, so byte-indexing the lowercased string against the original
+	// used to panic.
+	score, matched := FuzzyMatch("Ⱥ", "prefix-Ⱥ.go")
+	if !matched {
+		t.Fatal("expected Unicode case-mapped query to match")
+	}
+	if score <= 0 {
+		t.Fatalf("score = %d, want positive", score)
+	}
+
+	positions := MatchPositions("Ⱥ", "prefix-Ⱥ.go")
+	if len(positions) != 1 || positions[0] != len("prefix-") {
+		t.Fatalf("positions = %v, want [%d]", positions, len("prefix-"))
+	}
+}
+
 func TestFuzzyMatchSeparatorBonus(t *testing.T) {
 	// Characters after separators should score higher
 	scoreSep, _ := FuzzyMatch("ag", "app.go")

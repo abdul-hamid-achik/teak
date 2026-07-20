@@ -69,6 +69,44 @@ func TestEditorWrapWideRuneCursorUsesPackedVisualRow(t *testing.T) {
 	}
 }
 
+func TestEditorWrapEnsureCursorVisibleScrollsWithinLongLine(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("abcdefghijklmnopqrstuvwx"))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+
+	ed := New(buf, ui.DefaultTheme(), cfg)
+	ed.Viewport.Height = 2
+	ed.Wrap = NewWrapLayout(buf.Line, buf.LineCount(), 4)
+	ed.Buffer.SetCursor(text.Position{Line: 0, Col: 20})
+	ed.EnsureCursorVisible()
+
+	if ed.Viewport.WrapScrollY == 0 {
+		t.Fatal("EnsureCursorVisible did not scroll within the wrapped logical line")
+	}
+	_, y := ed.CursorPosition()
+	if y < 0 || y >= ed.Viewport.Height {
+		t.Fatalf("wrapped cursor row = %d, want within viewport height %d", y, ed.Viewport.Height)
+	}
+}
+
+func TestEditorWrapPageDownMovesWithinSingleLongLine(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("abcdefghijklmnopqrstuvwx"))
+	cfg := DefaultConfig()
+	cfg.WordWrap = true
+
+	ed := New(buf, ui.DefaultTheme(), cfg)
+	ed.Viewport.Height = 2
+	ed.Wrap = NewWrapLayout(buf.Line, buf.LineCount(), 4)
+	updated, _ := ed.Update(tea.KeyPressMsg{Text: "pgdown"})
+
+	if updated.Buffer.Cursor.Line != 0 || updated.Buffer.Cursor.Col == 0 {
+		t.Fatalf("pgdown cursor = %#v, want a later visual row of the same line", updated.Buffer.Cursor)
+	}
+	if updated.Viewport.WrapScrollY == 0 {
+		t.Fatal("pgdown did not advance the wrapped viewport")
+	}
+}
+
 func TestScreenToBufferPositionWrapUsesPackedWideRuneRows(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("a你a"))
 	wrap := NewWrapLayout(buf.Line, buf.LineCount(), 2)

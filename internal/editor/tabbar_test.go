@@ -3,8 +3,11 @@ package editor
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"github.com/mattn/go-runewidth"
 	"teak/internal/ui"
 )
 
@@ -205,8 +208,8 @@ func TestTabZoneID(t *testing.T) {
 	}
 
 	id := TabZoneID(tab)
-	if id != "tab-_path_to_main.go" {
-		t.Errorf("expected 'tab-_path_to_main.go', got %q", id)
+	if id != "tab-file-0-L3BhdGgvdG8vbWFpbi5nbw" {
+		t.Errorf("expected encoded file zone ID, got %q", id)
 	}
 }
 
@@ -230,8 +233,8 @@ func TestTabCloseZoneID(t *testing.T) {
 	}
 
 	id := TabCloseZoneID(tab)
-	if id != "tabclose-_path_to_main.go" {
-		t.Errorf("expected 'tabclose-_path_to_main.go', got %q", id)
+	if id != "tabclose-file-0-L3BhdGgvdG8vbWFpbi5nbw" {
+		t.Errorf("expected encoded file close zone ID, got %q", id)
 	}
 }
 
@@ -244,6 +247,75 @@ func TestTabCloseZoneIDUntitled(t *testing.T) {
 	id := TabCloseZoneID(tab)
 	if id != "tabclose-untitled-5" {
 		t.Errorf("expected 'tabclose-untitled-5', got %q", id)
+	}
+}
+
+func TestTabZoneIDsDoNotCollideForDistinctPaths(t *testing.T) {
+	left := Tab{ID: 1, FilePath: "/work/a_b.go"}
+	right := Tab{ID: 2, FilePath: "/work/a/b.go"}
+	if TabZoneID(left) == TabZoneID(right) {
+		t.Fatalf("label zone IDs collide: %q", TabZoneID(left))
+	}
+	if TabCloseZoneID(left) == TabCloseZoneID(right) {
+		t.Fatalf("close zone IDs collide: %q", TabCloseZoneID(left))
+	}
+}
+
+func TestTabBarViewRespectsWidthAndKeepsActiveTabVisible(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("first-file.go", "/first-file.go")
+	tabBar.AddTab("second-file.go", "/second-file.go")
+	tabBar.AddTab("third-file.go", "/third-file.go")
+	tabBar.ActiveIdx = 2
+	tabBar.Width = 12
+
+	view := tabBar.View()
+	if got := lipgloss.Width(view); got > tabBar.Width {
+		t.Fatalf("tab bar width = %d, want <= %d; view %q", got, tabBar.Width, view)
+	}
+	if !strings.Contains(view, "third") {
+		t.Fatalf("active tab is not visible in %q", view)
+	}
+}
+
+func TestTruncateTabLabelUsesTerminalCellWidths(t *testing.T) {
+	got := truncateTabLabel("你好世界", 5)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated label is invalid UTF-8: %q", got)
+	}
+	if width := runewidth.StringWidth(got); width > 5 {
+		t.Fatalf("truncated label width = %d, want <= 5; got %q", width, got)
+	}
+	if got != "你好…" {
+		t.Fatalf("truncated label = %q, want %q", got, "你好…")
+	}
+}
+
+func TestTabBarRemoveBeforeActiveKeepsSameActiveTab(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("a", "/a")
+	tabBar.AddTab("b", "/b")
+	tabBar.AddTab("c", "/c")
+	tabBar.AddTab("d", "/d")
+	tabBar.ActiveIdx = 3
+
+	tabBar.RemoveTab(1)
+	if tabBar.ActiveIdx != 2 || tabBar.Tabs[tabBar.ActiveIdx].Label != "d" {
+		t.Fatalf("active tab after removal = idx %d (%q), want d at idx 2", tabBar.ActiveIdx, tabBar.Tabs[tabBar.ActiveIdx].Label)
+	}
+}
+
+func TestTabBarNewTabAfterRemovalKeepsIndexAndUniqueZoneID(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("a", "/a")
+	tabBar.AddTab("b", "/b")
+	tabBar.RemoveTab(0)
+	idx := tabBar.AddTab("c", "/c")
+	if idx != 1 {
+		t.Fatalf("AddTab index = %d, want 1", idx)
+	}
+	if tabBar.Tabs[0].ID == tabBar.Tabs[1].ID {
+		t.Fatalf("tab IDs collided after removal: %+v", tabBar.Tabs)
 	}
 }
 

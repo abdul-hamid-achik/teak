@@ -81,6 +81,54 @@ func TestBufferUndoRedo(t *testing.T) {
 	}
 }
 
+func TestBufferReplaceRopeSnapshotIsUndoable(t *testing.T) {
+	b := NewBufferFromBytes([]byte("before"))
+	original := b.Rope()
+	next := NewFromString("after\ntext")
+
+	b.ReplaceRopeSnapshot(next, Position{Line: 1, Col: 4})
+	if got := b.Content(); got != "after\ntext" {
+		t.Fatalf("content = %q, want replacement", got)
+	}
+	if got := b.Cursor; got != (Position{Line: 1, Col: 4}) {
+		t.Fatalf("cursor = %#v, want replacement cursor", got)
+	}
+	if !b.Dirty() || b.LastChange() != nil {
+		t.Fatal("snapshot replacement must be dirty and require full LSP sync")
+	}
+
+	b.Undo()
+	if b.Rope() != original || b.Content() != "before" {
+		t.Fatalf("undo = %q, want original rope", b.Content())
+	}
+}
+
+func TestBufferLoadRopeSnapshotSharesPreparedDocumentAndResetsState(t *testing.T) {
+	b := NewBufferFromBytes([]byte("before"))
+	b.InsertAtCursor([]byte("dirty "))
+	b.SetSelection(Position{}, Position{Col: 3})
+	prepared := NewFromString("after\nsnapshot")
+	beforeVersion := b.Version()
+
+	b.LoadRopeSnapshot(prepared)
+
+	if b.Rope() != prepared {
+		t.Fatal("LoadRopeSnapshot materialized the prepared immutable rope")
+	}
+	if b.Dirty() {
+		t.Fatal("LoadRopeSnapshot left a freshly loaded document dirty")
+	}
+	if b.Cursor != (Position{}) || b.Selections.Count() != 1 || !b.Selections.Primary().IsEmpty() {
+		t.Fatalf("selection state was not reset: cursor=%+v selections=%+v", b.Cursor, b.Selections.All())
+	}
+	if got, want := b.Version(), beforeVersion+1; got != want {
+		t.Fatalf("version = %d, want %d", got, want)
+	}
+	if b.LastChange() != nil {
+		t.Fatalf("LastChange() = %#v, want nil full-sync load", b.LastChange())
+	}
+}
+
 func TestBufferSelection(t *testing.T) {
 	b := NewBuffer()
 	b.InsertAtCursor([]byte("hello world"))
@@ -179,6 +227,32 @@ func TestBufferFileSaveLoad(t *testing.T) {
 	}
 	if b2.FilePath != path {
 		t.Errorf("FilePath = %q, want %q", b2.FilePath, path)
+	}
+}
+
+func TestBufferLoadContentPreservesTabBytes(t *testing.T) {
+	b := NewBuffer()
+	data := []byte("a\tb\n\t你\n")
+
+	b.LoadContentWithTabSize(data, 8)
+
+	if got := b.Bytes(); string(got) != string(data) {
+		t.Fatalf("Bytes() = %q, want original tab bytes %q", got, data)
+	}
+	if b.Dirty() {
+		t.Fatal("loaded buffer is dirty")
+	}
+
+	path := filepath.Join(t.TempDir(), "tabs.txt")
+	if err := b.SaveAs(path); err != nil {
+		t.Fatalf("SaveAs() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("saved bytes = %q, want original tab bytes %q", got, data)
 	}
 }
 

@@ -12,10 +12,11 @@ const (
 
 // StatusEntry represents a file with git status.
 type StatusEntry struct {
-	Path        string
-	IndexStatus byte // X column from porcelain (staged state)
-	WorkStatus  byte // Y column from porcelain (working tree state)
-	IsDir       bool // true if this was a directory entry (trailing / in porcelain)
+	Path         string
+	OriginalPath string // source path for rename/copy entries; empty for ordinary entries
+	IndexStatus  byte   // X column from porcelain (staged state)
+	WorkStatus   byte   // Y column from porcelain (working tree state)
+	IsDir        bool   // true if this was a directory entry (trailing / in porcelain)
 }
 
 // IsStagedChange returns true if this entry has a staged change.

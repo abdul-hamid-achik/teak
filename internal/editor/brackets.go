@@ -2,6 +2,13 @@ package editor
 
 import "teak/internal/text"
 
+// MaxBracketScanBytes is the deterministic per-frame budget used by the
+// viewport. Unmatched brackets in generated or minified files must not make a
+// render walk the entire document.
+const MaxBracketScanBytes = 64 << 10
+
+const bracketScanChunkBytes = 4 << 10
+
 // Bracket pairs: open → close
 var bracketPairs = map[byte]byte{
 	'(': ')',
@@ -29,114 +36,121 @@ func IsCloseBracket(b byte) bool {
 }
 
 // MatchingClose returns the closing bracket for an opening bracket, or 0 if not a bracket.
-func MatchingClose(b byte) byte {
-	return bracketPairs[b]
-}
+func MatchingClose(b byte) byte { return bracketPairs[b] }
 
 // AutoClosePair returns the closing bracket to auto-insert for the given character, or 0.
-func AutoClosePair(ch byte) byte {
-	return bracketPairs[ch]
+func AutoClosePair(ch byte) byte { return bracketPairs[ch] }
+
+// FindMatchingBracket finds a matching bracket without a scan limit. It is
+// retained for editing callers and tests; the viewport uses the bounded form.
+func FindMatchingBracket(buf *text.Buffer, pos text.Position) (text.Position, bool) {
+	return findMatchingBracket(buf, pos, -1)
 }
 
-// FindMatchingBracket finds the matching bracket for the bracket at the given position.
-// Returns the position of the matching bracket and true, or zero position and false if not found.
-func FindMatchingBracket(buf *text.Buffer, pos text.Position) (text.Position, bool) {
-	if pos.Line < 0 || pos.Line >= buf.LineCount() {
+// FindMatchingBracketWithinBudget finds a matching bracket while examining at
+// most budget bytes after the bracket itself. It never materializes a whole
+// Rope line or document; a budget miss deliberately degrades to no highlight.
+func FindMatchingBracketWithinBudget(buf *text.Buffer, pos text.Position, budget int) (text.Position, bool) {
+	if budget <= 0 {
 		return text.Position{}, false
 	}
-	line := buf.Line(pos.Line)
-	if pos.Col < 0 || pos.Col >= len(line) {
-		return text.Position{}, false
-	}
-	ch := line[pos.Col]
+	return findMatchingBracket(buf, pos, budget)
+}
 
+func findMatchingBracket(buf *text.Buffer, pos text.Position, budget int) (text.Position, bool) {
+	if buf == nil || buf.Rope() == nil {
+		return text.Position{}, false
+	}
+	rope := buf.Rope()
+	offset, ok := rope.PositionToOffsetUncached(pos)
+	if !ok {
+		return text.Position{}, false
+	}
+	ch, ok := rope.ByteAtSafe(offset)
+	if !ok {
+		return text.Position{}, false
+	}
 	if IsOpenBracket(ch) {
-		return findForward(buf, pos, ch, bracketPairs[ch])
+		return findForward(rope, offset, ch, bracketPairs[ch], budget)
 	}
 	if IsCloseBracket(ch) {
-		return findBackward(buf, pos, closeToBracket[ch], ch)
+		return findBackward(rope, offset, closeToBracket[ch], ch, budget)
 	}
 	return text.Position{}, false
 }
 
-// findForward searches forward for the matching closing bracket, handling nesting.
-func findForward(buf *text.Buffer, pos text.Position, open, close byte) (text.Position, bool) {
+// findForward scans bounded Rope slices to avoid copying a document in a
+// render frame. An unlimited budget is used only by FindMatchingBracket.
+func findForward(rope *text.Rope, offset int, open, close byte, budget int) (text.Position, bool) {
 	depth := 1
-	line := pos.Line
-	col := pos.Col + 1
-	lineCount := buf.LineCount()
-
-	for line < lineCount {
-		content := buf.Line(line)
-		for col < len(content) {
-			ch := content[col]
+	start := offset + 1
+	end := rope.Len()
+	if budget >= 0 {
+		end = min(end, start+budget)
+	}
+	for start < end {
+		chunkEnd := min(end, start+bracketScanChunkBytes)
+		chunk := rope.Slice(start, chunkEnd).Bytes()
+		for i, ch := range chunk {
 			switch ch {
 			case open:
 				depth++
 			case close:
 				depth--
 				if depth == 0 {
-					return text.Position{Line: line, Col: col}, true
+					return rope.OffsetToPosition(start + i), true
 				}
 			}
-			col++
 		}
-		line++
-		col = 0
+		start = chunkEnd
 	}
 	return text.Position{}, false
 }
 
-// findBackward searches backward for the matching opening bracket, handling nesting.
-func findBackward(buf *text.Buffer, pos text.Position, open, close byte) (text.Position, bool) {
+func findBackward(rope *text.Rope, offset int, open, close byte, budget int) (text.Position, bool) {
 	depth := 1
-	line := pos.Line
-	col := pos.Col - 1
-
-	for line >= 0 {
-		content := buf.Line(line)
-		if col < 0 {
-			if line == 0 {
-				break
-			}
-			line--
-			content = buf.Line(line)
-			col = len(content) - 1
-			continue
-		}
-		for col >= 0 {
-			ch := content[col]
-			switch ch {
+	start := 0
+	if budget >= 0 {
+		start = max(0, offset-budget)
+	}
+	end := offset
+	for end > start {
+		chunkStart := max(start, end-bracketScanChunkBytes)
+		chunk := rope.Slice(chunkStart, end).Bytes()
+		for i := len(chunk) - 1; i >= 0; i-- {
+			switch chunk[i] {
 			case close:
 				depth++
 			case open:
 				depth--
 				if depth == 0 {
-					return text.Position{Line: line, Col: col}, true
+					return rope.OffsetToPosition(chunkStart + i), true
 				}
 			}
-			col--
 		}
-		line--
-		if line >= 0 {
-			col = len(buf.Line(line)) - 1
-		}
+		end = chunkStart
 	}
 	return text.Position{}, false
 }
 
 // IsBetweenBrackets checks if cursor is between an empty bracket pair (e.g., "()").
-// Returns true if the character before cursor is an open bracket and the character
-// at cursor is its matching close bracket.
 func IsBetweenBrackets(buf *text.Buffer, cursor text.Position) bool {
-	if cursor.Col == 0 {
+	if buf == nil || cursor.Col == 0 {
 		return false
 	}
-	line := buf.Line(cursor.Line)
-	if cursor.Col >= len(line) {
+	rope := buf.Rope()
+	beforeOffset, ok := rope.PositionToOffsetUncached(text.Position{Line: cursor.Line, Col: cursor.Col - 1})
+	if !ok {
 		return false
 	}
-	before := line[cursor.Col-1]
-	after := line[cursor.Col]
-	return IsOpenBracket(before) && bracketPairs[before] == after
+	afterOffset, ok := rope.PositionToOffsetUncached(cursor)
+	if !ok {
+		return false
+	}
+	before, ok := rope.ByteAtSafe(beforeOffset)
+	if !ok {
+		return false
+	}
+	after, ok := rope.ByteAtSafe(afterOffset)
+	return ok && IsOpenBracket(before) && bracketPairs[before] == after
 }

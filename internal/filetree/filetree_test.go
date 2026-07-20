@@ -1,14 +1,106 @@
 package filetree
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
+
+func TestLoadGitignoreRejectsOversizedAndSymlinkedFiles(t *testing.T) {
+	root := t.TempDir()
+	oversized := strings.Repeat("*.generated\n", maxGitignoreBytes/len("*.generated\n")+1)
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadGitignore(root); len(got) != 0 {
+		t.Fatalf("oversized .gitignore produced %d patterns, want none", len(got))
+	}
+
+	target := filepath.Join(root, "patterns")
+	if err := os.WriteFile(target, []byte("*.tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, ".gitignore")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := loadGitignore(root); len(got) != 0 {
+		t.Fatalf("symlinked .gitignore produced %d patterns, want none", len(got))
+	}
+}
+
+func TestLoadGitignoreContextRejectsOversizedLinesAndHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxGitignoreLineBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := loadGitignoreContext(context.Background(), root); err != nil || len(got) != 0 {
+		t.Fatalf("oversized line = (%d patterns, %v), want no patterns and nil error", len(got), err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := loadGitignoreContext(ctx, root); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled loadGitignoreContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReadDirEntriesContextRejectsOversizedDirectoryWithoutPartialResult(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < maxDirectoryEntries+1; i++ {
+		name := filepath.Join(root, fmt.Sprintf("entry-%05d", i))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatalf("WriteFile(%d): %v", i, err)
+		}
+	}
+
+	got, err := readDirEntriesContext(context.Background(), root, root, 0, nil, &refreshBudget{})
+	if err == nil {
+		t.Fatalf("readDirEntriesContext() entries = %d, want resource-limit error", len(got))
+	}
+	if !errors.Is(err, errDirectoryEntryLimit) {
+		t.Fatalf("readDirEntriesContext() error = %v, want directory entry limit", err)
+	}
+	if got != nil {
+		t.Fatalf("readDirEntriesContext() returned %d partial entries on error", len(got))
+	}
+}
+
+func TestDirExpansionErrorRetainsPreviousChildren(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "generated")
+	previous := []Entry{{Name: "already-visible.go", Path: filepath.Join(path, "already-visible.go")}}
+	entries := []Entry{{
+		Name:     "generated",
+		Path:     path,
+		IsDir:    true,
+		Expanded: true,
+		Loading:  true,
+		Children: previous,
+	}}
+
+	if !setDirectoryLoadResultInSlice(entries, path, nil, errDirectoryEntryLimit) {
+		t.Fatal("expected directory result to be applied")
+	}
+	if entries[0].Loading {
+		t.Fatal("failed load should clear Loading")
+	}
+	if len(entries[0].Children) != 1 || entries[0].Children[0].Name != previous[0].Name {
+		t.Fatalf("failed load children = %#v, want previous children retained", entries[0].Children)
+	}
+}
 
 // TestOpenFileMsg tests OpenFileMsg struct
 func TestOpenFileMsg(t *testing.T) {
@@ -173,6 +265,88 @@ func TestRefreshDirPreservesExpandedState(t *testing.T) {
 	}
 	if model.Entries[0].Children[0].Path != childPath {
 		t.Fatalf("child path = %q, want %q", model.Entries[0].Children[0].Path, childPath)
+	}
+}
+
+func TestRefreshRejectsDirectoryOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	model := New(root, ui.DefaultTheme())
+	if _, err := model.SnapshotForRefresh().Refresh(context.Background(), outside); err == nil {
+		t.Fatal("expected refresh outside the workspace to be rejected")
+	}
+	link := filepath.Join(root, "outside-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := model.SnapshotForRefresh().Refresh(context.Background(), link); err == nil {
+		t.Fatal("expected refresh through an outside symlink to be rejected")
+	}
+}
+
+func TestApplyRefreshPreservesSelectedPath(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(root, ui.DefaultTheme())
+	model.Cursor = 1
+	selected := model.flatEntries()[model.Cursor].Path
+
+	if err := os.WriteFile(filepath.Join(root, "0.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := model.SnapshotForRefresh().Refresh(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.ApplyRefresh(result)
+	flat := model.flatEntries()
+	if got := flat[model.Cursor].Path; got != selected {
+		t.Fatalf("selected path = %q, want %q", got, selected)
+	}
+}
+
+func TestApplyRefreshDoesNotUndoExpansionMadeWhileRefreshRuns(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "child.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := New(root, ui.DefaultTheme())
+	snapshot := model.SnapshotForRefresh()
+
+	expanded, cmd := model.ToggleEntry(dir)
+	if cmd == nil {
+		t.Fatal("expected asynchronous expansion command")
+	}
+	model, _ = expanded.Update(cmd())
+	if !model.Entries[0].Expanded || len(model.Entries[0].Children) != 1 {
+		t.Fatal("setup did not expand nested directory")
+	}
+
+	result, err := snapshot.Refresh(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.ApplyRefresh(result)
+	if !model.Entries[0].Expanded || len(model.Entries[0].Children) != 1 {
+		t.Fatal("applying an old refresh undid a newer directory expansion")
+	}
+}
+
+func TestRefreshHonorsCancelledContext(t *testing.T) {
+	root := t.TempDir()
+	model := New(root, ui.DefaultTheme())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := model.SnapshotForRefresh().Refresh(ctx, root); err != context.Canceled {
+		t.Fatalf("Refresh() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -952,6 +1126,73 @@ func TestHandleMouseWheelBounds(t *testing.T) {
 	}
 }
 
+func TestMouseHitTestingRejectsRowsOutsideViewport(t *testing.T) {
+	theme := ui.DefaultTheme()
+	tmpDir := t.TempDir()
+	model := New(tmpDir, theme)
+	model.Entries = []Entry{
+		{Name: "first.go", Path: filepath.Join(tmpDir, "first.go")},
+		{Name: "second.go", Path: filepath.Join(tmpDir, "second.go")},
+	}
+	model.Height = 1
+
+	updated, cmd := model.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 1}))
+	if cmd != nil {
+		t.Fatal("click below the viewport opened a file")
+	}
+	if updated.Cursor != 0 {
+		t.Errorf("Cursor = %d, want unchanged 0", updated.Cursor)
+	}
+	if entry := updated.EntryAtY(1); entry != nil {
+		t.Fatalf("EntryAtY below viewport = %#v, want nil", entry)
+	}
+}
+
+func TestViewTruncatesUnicodeNamesWithoutSplittingRunes(t *testing.T) {
+	theme := ui.DefaultTheme()
+	tmpDir := t.TempDir()
+	model := New(tmpDir, theme)
+	model.Width = 10
+	model.Height = 1
+	model.Entries = []Entry{{Name: "café🙂.go", Path: filepath.Join(tmpDir, "café🙂.go")}}
+
+	line := model.View()
+	if !utf8.ValidString(line) {
+		t.Fatalf("tree view contains invalid UTF-8: %q", line)
+	}
+	if width := ansi.StringWidth(line); width != model.Width {
+		t.Errorf("tree view width = %d, want %d", width, model.Width)
+	}
+}
+
+func TestViewClipsStructuralColumnsAtTinyWidths(t *testing.T) {
+	theme := ui.DefaultTheme()
+	tmpDir := t.TempDir()
+
+	for _, width := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			model := New(tmpDir, theme)
+			model.Width = width
+			model.Height = 1
+			model.Entries = []Entry{{
+				Name:     "深い🙂.go",
+				Path:     filepath.Join(tmpDir, "deep", "深い🙂.go"),
+				Depth:    3,
+				IsDir:    true,
+				Expanded: true,
+			}}
+
+			line := model.View()
+			if !utf8.ValidString(line) {
+				t.Fatalf("tree view contains invalid UTF-8: %q", line)
+			}
+			if got := ansi.StringWidth(line); got != width {
+				t.Errorf("tree view width = %d, want %d; line=%q", got, width, line)
+			}
+		})
+	}
+}
+
 // TestViewRenders tests View method renders without panic
 func TestViewRenders(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -1138,6 +1379,11 @@ func TestSetSize(t *testing.T) {
 	}
 	if model.Height != 30 {
 		t.Errorf("Expected Height 30, got %d", model.Height)
+	}
+
+	model.SetSize(-1, -2)
+	if model.Width != 0 || model.Height != 0 {
+		t.Errorf("negative SetSize = (%d,%d), want (0,0)", model.Width, model.Height)
 	}
 }
 

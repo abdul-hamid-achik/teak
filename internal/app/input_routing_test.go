@@ -79,6 +79,63 @@ func TestInputRoutingGlobalShortcutDoesNotReachEditor(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteQuitWithDirtyBufferShowsConfirmation(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.activeEditor().Buffer.InsertAtCursor([]byte("unsaved"))
+	model.tabBar.Tabs[model.activeTab].Dirty = true
+
+	updatedAny, cmd := model.Update(commandPaletteMsg{inner: quitMsg{}})
+	updated := updatedAny.(Model)
+
+	if updated.unsavedConfirm == nil {
+		t.Fatal("command palette quit did not show the unsaved changes confirmation")
+	}
+	if cmd != nil {
+		t.Fatal("command palette quit returned a command before the user confirmed")
+	}
+}
+
+func TestGlobalAndPaletteQuitUseSameUnsavedConfirmation(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.activeEditor().Buffer.InsertAtCursor([]byte("unsaved"))
+	model.tabBar.Tabs[model.activeTab].Dirty = true
+
+	globalAny, globalCmd, handled := model.handleGlobalKey(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	global := globalAny.(Model)
+	if !handled {
+		t.Fatal("ctrl+q was not handled")
+	}
+	if globalCmd != nil {
+		t.Fatal("ctrl+q returned a command before the user confirmed")
+	}
+
+	paletteAny, paletteCmd := model.Update(commandPaletteMsg{inner: quitMsg{}})
+	palette := paletteAny.(Model)
+	if paletteCmd != nil {
+		t.Fatal("command palette quit returned a command before the user confirmed")
+	}
+
+	if global.unsavedConfirm == nil || palette.unsavedConfirm == nil {
+		t.Fatal("one quit entry point did not show the unsaved changes confirmation")
+	}
+	if global.unsavedConfirm.Title != palette.unsavedConfirm.Title ||
+		global.unsavedConfirm.Message != palette.unsavedConfirm.Message ||
+		len(global.unsavedConfirm.Items) != len(palette.unsavedConfirm.Items) ||
+		len(global.unsavedConfirm.Buttons) != len(palette.unsavedConfirm.Buttons) {
+		t.Fatal("quit entry points created different unsaved changes confirmations")
+	}
+	for i := range global.unsavedConfirm.Items {
+		if global.unsavedConfirm.Items[i] != palette.unsavedConfirm.Items[i] {
+			t.Fatal("quit entry points listed different dirty files")
+		}
+	}
+	for i := range global.unsavedConfirm.Buttons {
+		if global.unsavedConfirm.Buttons[i].Label != palette.unsavedConfirm.Buttons[i].Label {
+			t.Fatal("quit entry points offered different actions")
+		}
+	}
+}
+
 func TestInputRoutingGlobalHelpActionReturnsFocusCommand(t *testing.T) {
 	model := newInputRoutingTestModel(t)
 
@@ -93,6 +150,52 @@ func TestInputRoutingGlobalHelpActionReturnsFocusCommand(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("f1 did not return the help focus command")
 	}
+}
+
+func TestInputRoutingFoldAllAndUnfoldAllUseActualKeyStrings(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	ed := model.activeEditor()
+	ed.Folds.Regions = []editor.FoldRegion{{StartLine: 0, EndLine: 0}, {StartLine: 1, EndLine: 1}}
+	model.setEditor(model.activeTab, *ed)
+
+	foldedAny, _, handled := model.handleGlobalKey(tea.KeyPressMsg{Code: '0', Mod: tea.ModCtrl | tea.ModShift})
+	if !handled {
+		t.Fatal("Ctrl+Shift+0 was not handled")
+	}
+	folded := foldedAny.(Model)
+	for _, region := range folded.activeEditor().Folds.Regions {
+		if !region.Collapsed {
+			t.Fatal("Ctrl+Shift+0 did not fold every region")
+		}
+	}
+
+	unfoldedAny, _, handled := folded.handleGlobalKey(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl | tea.ModShift})
+	if !handled {
+		t.Fatal("Ctrl+Shift+J was not handled")
+	}
+	unfolded := unfoldedAny.(Model)
+	for _, region := range unfolded.activeEditor().Folds.Regions {
+		if region.Collapsed {
+			t.Fatal("Ctrl+Shift+J did not unfold every region")
+		}
+	}
+}
+
+func TestCommandPaletteDoesNotAdvertiseF8ForProblemsPanel(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	for _, command := range model.commandRegistry() {
+		if command.ID != "toggle_problems" {
+			continue
+		}
+		if command.Shortcut != "" {
+			t.Fatalf("problems command shortcut = %q, want empty: F8 navigates problems", command.Shortcut)
+		}
+		if command.Label != "Show Problems Panel" {
+			t.Fatalf("problems command label = %q, want %q", command.Label, "Show Problems Panel")
+		}
+		return
+	}
+	t.Fatal("problems command is missing from the command palette")
 }
 
 func TestInputRoutingOrdinaryEditorKeyRoutedOnce(t *testing.T) {

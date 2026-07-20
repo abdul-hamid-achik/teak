@@ -25,6 +25,10 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"Ctrl+Q", "Quit"},
 			{"Ctrl+S", "Save file"},
+			{"Ctrl+Shift+S", "Save as"},
+			{"Ctrl+N", "New file"},
+			{"Ctrl+P", "Quick open"},
+			{"Ctrl+Shift+P", "Command palette"},
 			{"F1", "Toggle help"},
 			{"Ctrl+,", "Open settings"},
 		},
@@ -44,10 +48,13 @@ var helpGroups = []bindingGroup{
 		title: "Selection",
 		bindings: []keybinding{
 			{"Shift+Arrows", "Select characters"},
-			{"Ctrl+Shift+L/R", "Select words"},
+			{"Ctrl+Shift+Left/Right", "Select words"},
 			{"Shift+Home/End", "Select to line edge"},
 			{"Ctrl+A", "Select all"},
 			{"Ctrl+D", "Select next occurrence"},
+			{"Ctrl+U", "Select all occurrences"},
+			{"Ctrl+L", "Select current line"},
+			{"Ctrl+Shift+L", "Split selection into lines"},
 			{"Double-click", "Select word"},
 			{"Click+Drag", "Select with mouse"},
 			{"Shift+Click", "Extend selection"},
@@ -69,36 +76,53 @@ var helpGroups = []bindingGroup{
 			{"Ctrl+]", "Indent block"},
 			{"Ctrl+/", "Toggle comment"},
 			{"Alt+Up/Down", "Move line"},
-			{"Alt+Shift+U/D", "Duplicate line"},
+			{"Alt+Shift+Up/Down", "Duplicate line"},
 			{"Ctrl+Shift+K", "Delete line"},
 			{"Ctrl+Bksp/Del", "Delete word"},
 			{"Enter", "New line (auto-indent)"},
 			{"Ctrl+Z", "Undo"},
-			{"Ctrl+Y", "Redo"},
+			{"Ctrl+Y / Ctrl+Shift+Z", "Redo"},
 		},
 	},
 	{
 		title: "Search",
 		bindings: []keybinding{
 			{"Ctrl+F", "Text search"},
+			{"Ctrl+H", "Find and replace"},
 			{"Ctrl+Shift+F", "Semantic search"},
+			{"F3 / Shift+F3", "Next / previous result"},
 		},
 	},
 	{
 		title: "LSP",
 		bindings: []keybinding{
 			{"Ctrl+Space", "Autocomplete"},
+			{"Alt+K", "Show hover"},
+			{"Ctrl+K", "Code actions"},
 			{"F12", "Go to definition"},
+			{"Ctrl+Shift+O", "Document symbols"},
+			{"Ctrl+Alt+F", "Format document"},
+		},
+	},
+	{
+		title: "Code Folding",
+		bindings: []keybinding{
+			{"Ctrl+Shift+[", "Fold current region"},
+			{"Ctrl+Shift+]", "Unfold current region"},
+			{"Ctrl+Shift+0", "Fold all regions"},
+			{"Ctrl+Shift+J", "Unfold all regions"},
 		},
 	},
 	{
 		title: "Panels",
 		bindings: []keybinding{
 			{"Ctrl+B", "Toggle file tree"},
-			{"Ctrl+Shift+G", "Toggle git panel"},
+			{"Ctrl+Shift+G", "Show git panel"},
 			{"Ctrl+Tab", "Next tab"},
 			{"Ctrl+Shift+Tab", "Previous tab"},
-			{"Tab", "Switch sidebar panels"},
+			{"Tab (file tree focus)", "Switch sidebar panels"},
+			{"Ctrl+J", "Toggle agent panel"},
+			{"Ctrl+'", "Focus agent panel"},
 		},
 	},
 	{
@@ -125,8 +149,8 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"F8", "Next problem"},
 			{"Shift+F8", "Previous problem"},
-			{"Up/Down", "Navigate problems"},
-			{"Enter", "Go to problem"},
+			{"Up/Down (Problems focus)", "Navigate problems"},
+			{"Enter (Problems focus)", "Go to problem"},
 		},
 	},
 }
@@ -171,9 +195,9 @@ func (m *HelpModel) Focus() tea.Cmd {
 
 // SetSize sets the overlay dimensions.
 func (m *HelpModel) SetSize(w, h int) {
-	m.width = w
-	m.height = h
-	m.input.SetWidth(min(w-12, 36))
+	m.width = max(1, w)
+	m.height = max(1, h)
+	m.input.SetWidth(max(1, min(m.width-12, 36)))
 }
 
 // Update handles input for the help overlay.
@@ -224,6 +248,11 @@ func (m HelpModel) Update(msg tea.Msg) (HelpModel, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case tea.MouseClickMsg:
+		// The overlay is entirely keyboard navigable, but a click should also
+		// make the filter the active text target rather than becoming a dead
+		// gesture or leaking focus to the editor behind the modal.
+		return m, m.input.Focus()
 	}
 
 	// Forward to text input
@@ -250,6 +279,9 @@ func (m HelpModel) View() string {
 	boxWidth := 48
 	if boxWidth > m.width-4 {
 		boxWidth = m.width - 4
+	}
+	if boxWidth < 1 {
+		boxWidth = 1
 	}
 
 	var sb strings.Builder
@@ -361,8 +393,8 @@ func (m HelpModel) filterLines(query string) []helpLine {
 func (m HelpModel) visibleLines() int {
 	// Account for title (1) + blank (1) + input (1) + blank (1) + scroll hint (1) + border/padding (~4)
 	v := m.height - 10
-	if v < 5 {
-		v = 5
+	if v < 1 {
+		v = 1
 	}
 	return v
 }
@@ -383,8 +415,8 @@ func RenderHelp(theme ui.Theme, width, height int) string {
 }
 
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	if lipgloss.Width(s) >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-lipgloss.Width(s))
 }

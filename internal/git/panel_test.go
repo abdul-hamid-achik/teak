@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -511,6 +512,7 @@ func TestEntryAtYCollapsed(t *testing.T) {
 	}
 	m := testModel(entries)
 	m.stagedCollapsed = true
+	m.rebuildTreeRowCache()
 
 	// With staged collapsed:
 	// y=0: staged header
@@ -1692,4 +1694,122 @@ func TestBodyScroll(t *testing.T) {
 
 		// With textarea, scrolling is internal - just verify no panic
 	})
+}
+
+func TestGitPanelUsesASCIIControlsWhenNerdFontIsDisabled(t *testing.T) {
+	t.Setenv("TEAK_NO_NERD_FONT", "1")
+	zone.NewGlobal()
+
+	m := testModel([]StatusEntry{{Path: "src/main.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.Width = 60
+	m.Height = 20
+	view := m.View()
+	for _, nerdGlyph := range []string{"\uf413", "\uf417", "\uf0ee", "\uf0ed"} {
+		if strings.Contains(view, nerdGlyph) {
+			t.Fatalf("Nerd Font glyph %q present in fallback view: %q", nerdGlyph, view)
+		}
+	}
+	for _, label := range []string{"Commit", "Push", "Pull", "src"} {
+		if !strings.Contains(view, label) {
+			t.Fatalf("ASCII fallback lost label %q in %q", label, view)
+		}
+	}
+
+	m.isGitRepo = false
+	view = m.View()
+	if strings.Contains(view, "\uf417") || !strings.Contains(view, "Initialize Git Repository") {
+		t.Fatalf("non-repository fallback = %q", view)
+	}
+}
+
+func TestTreeRowCacheMatchesFlattenedTreeAndInvalidatesOnVisibilityChanges(t *testing.T) {
+	m := testModel([]StatusEntry{
+		{Path: "staged/root.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "unstaged/root.go", IndexStatus: ' ', WorkStatus: 'M'},
+	})
+
+	assertRows := func(t *testing.T, got []treeRowHit) {
+		t.Helper()
+		want := []treeRowHit{{kind: treeRowStagedHeader}}
+		if !m.stagedCollapsed {
+			for i, node := range flattenTree(m.stagedTree) {
+				want = append(want, treeRowHit{kind: treeRowNode, section: SectionStaged, index: i, node: node})
+			}
+		}
+		want = append(want, treeRowHit{kind: treeRowUnstagedHeader})
+		if !m.unstagedCollapsed {
+			for i, node := range flattenTree(m.unstagedTree) {
+				want = append(want, treeRowHit{kind: treeRowNode, section: SectionUnstaged, index: i, node: node})
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("cached rows = %#v, want %#v", got, want)
+		}
+	}
+
+	initial := m.treeRows()
+	assertRows(t, initial)
+	if len(initial) == 0 {
+		t.Fatal("expected cached rows")
+	}
+
+	// The staged directory is the first node after the staged header. A click
+	// collapses it and must replace the cached visible rows.
+	m, _ = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 1}))
+	assertRows(t, m.treeRows())
+	if got := len(m.activeFlatTree()); got != 1 {
+		t.Fatalf("active flattened cache length = %d, want 1 after directory collapse", got)
+	}
+
+	// Header clicks change only section visibility, but they still invalidate
+	// the rendered/hit-test row cache.
+	m, _ = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 0}))
+	assertRows(t, m.treeRows())
+	if !m.stagedCollapsed {
+		t.Fatal("staged header click did not collapse the section")
+	}
+
+	// Refresh swaps both trees; a new cache must expose the refreshed nodes to
+	// rendering and hit-testing without retaining old pointers.
+	m, _ = m.Update(RefreshMsg{Entries: []StatusEntry{{
+		Path: "fresh.go", IndexStatus: ' ', WorkStatus: 'M',
+	}}})
+	assertRows(t, m.treeRows())
+	if entry, staged := m.EntryAtY(2); entry == nil || staged || entry.Path != "fresh.go" {
+		t.Fatalf("refreshed row = (%#v, staged=%v), want fresh unstaged entry", entry, staged)
+	}
+}
+
+func TestSetSizeSkipsTreeCacheWorkWhenDimensionsAreUnchanged(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/main.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.SetSize(80, 24)
+	rows := m.treeRows()
+	if len(rows) == 0 {
+		t.Fatal("expected tree row cache")
+	}
+	cache := m.treeRowCache
+
+	m.SetSize(80, 24)
+	if m.treeRowCache == nil || m.treeRowCache != cache {
+		t.Fatal("SetSize replaced the tree cache despite unchanged dimensions")
+	}
+}
+
+func BenchmarkPanelTreeRowsCachedThousands(b *testing.B) {
+	entries := make([]StatusEntry, 0, 10_000)
+	for i := range cap(entries) {
+		entries = append(entries, StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: ' ',
+			WorkStatus:  'M',
+		})
+	}
+	m := testModel(entries)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if got := len(m.treeRows()); got != 10_203 {
+			b.Fatalf("row count = %d, want 10203", got)
+		}
+	}
 }

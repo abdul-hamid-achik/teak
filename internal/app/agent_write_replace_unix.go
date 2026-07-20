@@ -27,3 +27,28 @@ func replaceAgentWrite(root *os.Root, parent, tempPath, targetPath string) error
 		filepath.Base(targetPath),
 	)
 }
+
+func renameWorkspacePath(root *os.Root, oldPath, newPath string) error {
+	oldParent, err := root.Open(filepath.Dir(oldPath))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = oldParent.Close()
+	}()
+
+	newParent, err := root.Open(filepath.Dir(newPath))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = newParent.Close()
+	}()
+
+	return unix.Renameat(
+		int(oldParent.Fd()),
+		filepath.Base(oldPath),
+		int(newParent.Fd()),
+		filepath.Base(newPath),
+	)
+}

@@ -7,41 +7,50 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
-	"teak/internal/editor"
 	"teak/internal/ui"
 )
 
+const narrowViewportClipWidth = 40
+
+// compactTerminalHeight is the smallest height that can show the normal
+// tab/editor/divider/status layout without drawing more rows than the PTY.
+const compactTerminalHeight = 4
+
+// editorInputCaptured reports whether a surface above the editor owns user
+// input. The native terminal cursor must never remain behind such a surface:
+// it otherwise looks editable and can blink through small modal overlays.
+func (m Model) editorInputCaptured() bool {
+	return m.unsavedConfirm != nil ||
+		!m.overlayStack.IsEmpty() ||
+		m.showBranchPicker ||
+		m.showSearch ||
+		m.showHelp ||
+		m.showSettings ||
+		m.passiveModalVisible() ||
+		m.treeContextMenu.Visible ||
+		m.gitContextMenu.Visible ||
+		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible())
+}
+
 // View implements tea.Model.
 func (m Model) View() tea.View {
-	if m.width == 0 || m.height == 0 {
+	if m.modelState == nil {
 		return tea.NewView("")
 	}
-
-	// Set debug gutter state on active editor
-	if ed := m.activeEditor(); ed != nil {
-		filePath := ed.Buffer.FilePath
-		bpEntries := m.breakpoints[filePath]
-		if len(bpEntries) > 0 || m.currentExecLine >= 0 {
-			bpMap := make(map[int]editor.BreakpointState, len(bpEntries))
-			for _, bp := range bpEntries {
-				if bp.Enabled {
-					bpMap[bp.Line] = editor.BPActive
-				} else {
-					bpMap[bp.Line] = editor.BPDisabled
-				}
-			}
-			execLine := -1
-			if m.currentExecFile == filePath {
-				execLine = m.currentExecLine
-			}
-			ed.DebugGutter = &editor.GutterOpts{
-				Breakpoints: bpMap,
-				ExecLine:    execLine,
-			}
-		} else {
-			ed.DebugGutter = nil
-		}
+	// The full layout reserves a divider and a status row. Below two terminal
+	// rows there is no renderable editor surface; returning an empty view avoids
+	// negative sidebar heights while the terminal is being resized.
+	if m.width <= 0 || m.height < 2 {
+		return tea.NewView("")
+	}
+	// A zero-value Model is a supported embedding/test boundary. Update lazily
+	// installs enough bookkeeping to accept messages, but it intentionally does
+	// not start BubbleZone or construct a real editor owner. Keep that inert
+	// state renderable without depending on cmd/teak's global zone setup.
+	if len(m.editors) == 0 && m.welcome == nil && len(m.tabBar.Tabs) == 0 {
+		return tea.NewView("")
 	}
 
 	var content string
@@ -49,7 +58,24 @@ func (m Model) View() tea.View {
 
 	welcomeActive := m.welcome != nil && m.welcome.Active
 
-	if m.showTree {
+	if m.height < compactTerminalHeight {
+		// At two rows there is room only for tabs plus a compact status line;
+		// at three rows one editor row also fits. Side panels and their borders
+		// are intentionally hidden until the full vertical chrome fits.
+		content = m.tabBar.View()
+		if m.height == compactTerminalHeight-1 {
+			var editorView string
+			if welcomeActive {
+				editorView = m.welcome.View()
+			} else if m.isActiveDiffTab() {
+				editorView = m.activeDiffView()
+			} else if m.activeEditor() != nil {
+				editorView = m.activeEditor().View()
+			}
+			content += "\n" + editorView
+		}
+		content += "\n" + m.renderCompactStatusBar()
+	} else if m.treeVisible() {
 		content = m.viewWithTree() + "\n" + statusBar
 	} else {
 		tabBarView := m.tabBar.View()
@@ -72,15 +98,20 @@ func (m Model) View() tea.View {
 		content = editorCol + "\n" + statusBar
 	}
 
-	// Overlay context menus (rendered before help/search so they show in normal view)
-	if !m.isActiveDiffTab() && m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible() {
-		cmView := m.activeEditor().ContextMenuView()
-		cmX, cmY := m.activeEditor().ContextMenuPosition()
-		if m.showTree {
-			cmX += m.treeWidth() + 1
+	// LSP popups are editor-local surfaces rather than global modals. Compose
+	// only the highest-priority one inside the editor body before menus and
+	// global overlays take precedence over it.
+	if !m.isActiveDiffTab() {
+		if popup, ok := m.currentLSPOverlayPlacement(); ok {
+			content = ui.PlaceOverlayAt(content, popup.content, popup.x, popup.y, m.width, m.height)
 		}
-		cmY += 1 // +1 for tab bar
-		content = ui.PlaceOverlayAt(content, cmView, cmX, cmY, m.width, m.height)
+	}
+
+	// Overlay context menus (rendered before help/search so they show in normal view)
+	if !m.isActiveDiffTab() {
+		if cmView, cmRect, ok := m.editorContextMenuGeometry(); ok {
+			content = ui.PlaceOverlayAt(content, cmView, cmRect.x, cmRect.y, m.width, m.height)
+		}
 	} else if m.gitContextMenu.Visible {
 		cmView := m.gitContextMenu.View()
 		content = ui.PlaceOverlayAt(content, cmView, m.gitContextMenu.X, m.gitContextMenu.Y, m.width, m.height)
@@ -100,25 +131,12 @@ func (m Model) View() tea.View {
 		helpContent := m.helpM.View()
 		content = ui.RenderOverlay(content, helpContent, m.width, m.height)
 	} else if m.showSettings {
-		// Settings overlay with fixed size and centered position
+		// Settings overlay shares its geometry with mouse hit-testing.
 		settingsView := m.settingsM.View()
-		// Add hint at the bottom
-		hint := m.theme.Gutter.Render("\n\nPress 'r' to reset, '+'/'-' to change, ESC to close")
+		hint := m.theme.Gutter.Render("\n\n↑↓ select  •  click a control to change  •  Ctrl+S save  •  Esc close")
 		settingsView += hint
 
-		// Fixed modal dimensions
-		modalWidth := 72
-		modalHeight := 22
-
-		// Center the modal
-		centerX := (m.width - modalWidth) / 2
-		centerY := (m.height - modalHeight) / 2
-		if centerX < 0 {
-			centerX = 0
-		}
-		if centerY < 0 {
-			centerY = 0
-		}
+		centerX, centerY, modalWidth, _ := m.settingsModalGeometry()
 
 		// Wrap in a box with border
 		settingsBox := lipgloss.NewStyle().
@@ -193,14 +211,24 @@ func (m Model) View() tea.View {
 		content = ui.RenderOverlay(content, m.unsavedConfirm.View(), m.width, m.height)
 	}
 
+	// Several child components have irreducible chrome (line-number gutters,
+	// tab labels and status hints). During a live resize those minimums can be
+	// wider than the whole terminal. Enforce the outer viewport contract before
+	// BubbleZone scans it, so rendered cells and mouse zones are derived from the
+	// same clipped content. Restrict this extra ANSI pass to narrow terminals to
+	// avoid adding work to the normal render hot path.
+	if m.width < narrowViewportClipWidth {
+		content = clipViewLines(content, m.width)
+	}
+	content = clipViewRows(content, m.height)
 	scanned := zone.Scan(content)
 	v := tea.NewView(scanned)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
-	if !m.showHelp && !m.showSearch && !m.renameMode && !welcomeActive && !m.isActiveDiffTab() && m.overlayStack.IsEmpty() && m.unsavedConfirm == nil && m.focus == FocusEditor && m.activeEditor() != nil {
+	if !m.editorInputCaptured() && !welcomeActive && !m.isActiveDiffTab() && m.focus == FocusEditor && m.activeEditor() != nil {
 		cx, cy := m.activeEditor().CursorPosition()
-		if m.showTree {
+		if m.height >= compactTerminalHeight && m.treeVisible() {
 			cx += m.treeWidth() + 1
 		}
 		cy += 1 // +1 for tab bar
@@ -213,6 +241,28 @@ func (m Model) View() tea.View {
 	}
 
 	return v
+}
+
+func clipViewLines(content string, width int) string {
+	if width <= 0 || content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, width, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func clipViewRows(content string, height int) string {
+	if height <= 0 || content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) activeDiffView() string {
@@ -238,11 +288,7 @@ func (m Model) viewWithTree() string {
 	editorColumn := tabBarView + "\n" + editorView
 
 	// Build sidebar: tab bar (1 line) + active panel
-	sidebarHeight := m.height - 2    // minus divider + status bar
-	panelHeight := sidebarHeight - 1 // minus sidebar tab bar
-	if panelHeight < 1 {
-		panelHeight = 1
-	}
+	sidebarHeight := m.height - 2 // minus divider + status bar
 
 	tw := m.treeWidth()
 	tabBar := m.sidebarTabBar()
@@ -250,16 +296,12 @@ func (m Model) viewWithTree() string {
 	var panelView string
 	switch m.sidebarTab {
 	case SidebarGit:
-		m.gitPanel.SetSize(tw, panelHeight)
 		panelView = lipgloss.NewStyle().Width(tw).Render(m.gitPanel.View())
 	case SidebarProblems:
-		m.problemsPanel.SetSize(tw, panelHeight)
 		panelView = lipgloss.NewStyle().Width(tw).Render(m.problemsPanel.View())
 	case SidebarDebugger:
-		m.debuggerPanel.SetSize(tw, panelHeight)
 		panelView = lipgloss.NewStyle().Width(tw).Render(m.debuggerPanel.View())
 	default:
-		m.tree.SetSize(tw, panelHeight)
 		panelView = lipgloss.NewStyle().Width(tw).Render(m.tree.View())
 	}
 
@@ -292,6 +334,12 @@ func (m Model) sidebarTabBar() string {
 	gitIcon := " \ue725 "      // nf-dev-git_branch
 	problemsIcon := " \uea88 " // nf-cod-problems
 	debuggerIcon := " \ueb0c " // nf-cod-debug
+	if !ui.NerdFontEnabled() {
+		fileIcon = " F "
+		gitIcon = " G "
+		problemsIcon = " ! "
+		debuggerIcon = " D "
+	}
 
 	var fileTab, gitTab, problemsTab, debuggerTab string
 	if m.sidebarTab == SidebarFiles {
@@ -320,7 +368,16 @@ func (m Model) sidebarTabBar() string {
 	problemsTab = zone.Mark("sidebar-tab-problems", problemsTab)
 	debuggerTab = zone.Mark("sidebar-tab-debugger", debuggerTab)
 
-	bar := fileTab + gitTab + problemsTab + debuggerTab
+	// Keep the tab chrome inside the sidebar at tiny terminal widths. In
+	// particular, never rely on the renderer to crop zone-marked content: that
+	// can make the visual layout and mouse coordinates disagree.
+	bar := ""
+	for _, tab := range []string{fileTab, gitTab, problemsTab, debuggerTab} {
+		if lipgloss.Width(bar)+lipgloss.Width(tab) > tw {
+			break
+		}
+		bar += tab
+	}
 	// Pad to full sidebar width
 	padWidth := tw - lipgloss.Width(bar)
 	if padWidth > 0 {
@@ -359,14 +416,32 @@ func (m Model) renderStatusBar() string {
 	center := m.status
 
 	// Calculate padding
-	usedWidth := lipglossWidth(left) + lipglossWidth(right) + len(center)
+	usedWidth := ansi.StringWidth(left) + ansi.StringWidth(right) + ansi.StringWidth(center)
 	padding := max(0, m.width-usedWidth)
 
 	bar := left + " " + center + strings.Repeat(" ", max(0, padding-1)) + right
+	// Lipgloss Width wraps overlong content. A status bar must remain exactly
+	// one terminal row even when its fixed hints cannot fit.
+	bar = ansi.Truncate(bar, m.width, "")
+	if missing := m.width - ansi.StringWidth(bar); missing > 0 {
+		bar += strings.Repeat(" ", missing)
+	}
 
 	// Divider line above status bar
 	divider := m.theme.TreeBorder.Render(strings.Repeat("─", m.width))
 	return divider + "\n" + m.theme.StatusBar.Width(m.width).Render(bar)
+}
+
+func (m Model) renderCompactStatusBar() string {
+	label := "F1 Help"
+	if m.status != "" {
+		label = m.status
+	}
+	label = ansi.Truncate(label, m.width, "")
+	if missing := m.width - ansi.StringWidth(label); missing > 0 {
+		label += strings.Repeat(" ", missing)
+	}
+	return m.theme.StatusBar.Render(label)
 }
 
 func (m Model) scrollIndicator() string {
@@ -378,6 +453,13 @@ func (m Model) scrollIndicator() string {
 	totalLines := buf.LineCount()
 	viewHeight := ed.Viewport.Height
 	scrollY := ed.Viewport.ScrollY
+	if ed.Config.WordWrap && ed.Wrap != nil {
+		// Word-wrap scrolls through visual rows, not logical source lines. The
+		// layout total is deliberately a safe estimate until pages are visited,
+		// matching the editor scrollbar without eagerly measuring a large file.
+		totalLines = ed.Wrap.TotalRows()
+		scrollY = ed.Viewport.WrapScrollY
+	}
 
 	if totalLines <= viewHeight {
 		return "All"

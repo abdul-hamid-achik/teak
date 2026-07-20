@@ -3,11 +3,21 @@ package text
 import (
 	"bytes"
 	"errors"
-	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 	"unicode/utf8"
+)
+
+// MaxBufferFileBytes bounds the synchronous Buffer constructor as well as the
+// application loader. A Buffer represents an in-memory editable document, not
+// an unbounded stream.
+const MaxBufferFileBytes int64 = 64 << 20
+
+var (
+	ErrBufferFileTooLarge   = errors.New("buffer file exceeds the 64 MiB editor limit")
+	ErrBufferFileNotRegular = errors.New("buffer input is not a regular file")
+	ErrBufferFileChanged    = errors.New("buffer file changed while opening")
 )
 
 // Direction constants for cursor movement.
@@ -66,13 +76,39 @@ func NewBufferFromBytes(data []byte) *Buffer {
 	}
 }
 
+// NewBufferFromRope creates a buffer sharing an immutable rope snapshot. It
+// avoids materialising large documents when background work needs to prepare a
+// candidate edit without touching the live buffer.
+func NewBufferFromRope(rope *Rope) *Buffer {
+	if rope == nil {
+		return NewBuffer()
+	}
+	return &Buffer{
+		rope:       rope,
+		Selections: NewSelections(Position{}),
+		undo:       NewUndoStack(),
+		savedRope:  rope,
+	}
+}
+
 // NewBufferFromFile loads a buffer from a file path.
 func NewBufferFromFile(path string) (*Buffer, error) {
-	data, err := os.ReadFile(path)
+	file, err := openRegularBufferFile(path)
 	if err != nil {
 		return nil, err
 	}
-	r := New(data)
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(file, MaxBufferFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxBufferFileBytes {
+		return nil, ErrBufferFileTooLarge
+	}
+	// io.ReadAll returned this allocation exclusively for this buffer. Transfer
+	// it into the immutable rope instead of immediately making a second copy.
+	r := NewOwned(data)
 	return &Buffer{
 		rope:       r,
 		Selections: NewSelections(Position{}),
@@ -88,13 +124,25 @@ func (b *Buffer) LoadContent(data []byte) {
 	b.LoadContentWithTabSize(data, 4)
 }
 
-// LoadContentWithTabSize replaces the buffer contents, expanding tabs to spaces.
+// LoadContentWithTabSize replaces the buffer contents without changing bytes.
+//
+// The tabSize argument is retained for compatibility with existing callers. Tab
+// expansion is a presentation concern owned by the editor; changing it here
+// would silently corrupt a document on its next save.
 func (b *Buffer) LoadContentWithTabSize(data []byte, tabSize int) {
-	// Expand tabs to spaces for consistent rendering
-	expanded := expandTabs(data, tabSize)
-	r := New(expanded)
-	b.rope = r
-	b.savedRope = r
+	_ = tabSize
+	b.LoadRopeSnapshot(New(data))
+}
+
+// LoadRopeSnapshot installs a document prepared by a background loader without
+// flattening or copying it on the UI goroutine. A load establishes a new clean
+// save baseline and clears edit, selection, and undo state.
+func (b *Buffer) LoadRopeSnapshot(rope *Rope) {
+	if rope == nil {
+		rope = NewFromString("")
+	}
+	b.rope = rope
+	b.savedRope = rope
 	if b.Selections == nil {
 		b.Selections = NewSelections(Position{})
 	} else {
@@ -109,35 +157,62 @@ func (b *Buffer) LoadContentWithTabSize(data []byte, tabSize int) {
 	b.lastChange = nil
 }
 
-// expandTabs replaces tab characters with spaces aligned to tabSize stops.
-func expandTabs(data []byte, tabSize int) []byte {
-	if !bytes.ContainsRune(data, '\t') {
-		return data
-	}
-	var result []byte
-	col := 0
-	for _, b := range data {
-		switch b {
-		case '\t':
-			spaces := tabSize - (col % tabSize)
-			for range spaces {
-				result = append(result, ' ')
-			}
-			col += spaces
-		case '\n':
-			result = append(result, b)
-			col = 0
-		default:
-			result = append(result, b)
-			col++
-		}
-	}
-	return result
-}
-
 // Rope returns the underlying rope.
 func (b *Buffer) Rope() *Rope {
 	return b.rope
+}
+
+// SavedRope returns the immutable snapshot that the buffer currently believes
+// is persisted at FilePath. Save preparation uses it as an O(1) baseline for a
+// bounded off-UI disk preflight; callers must not mutate Rope values.
+func (b *Buffer) SavedRope() *Rope {
+	return b.savedRope
+}
+
+// ReplaceRopeSnapshot applies a previously prepared immutable document in
+// constant time. It is intentionally a full-sync edit: callers use it for
+// multi-edit/background transformations where a single incremental LSP range
+// would be misleading. The former rope remains an undo point. Cursor must be
+// a valid byte-boundary position produced for the supplied rope; validating an
+// arbitrary cursor here could require scanning a pathological giant line on
+// the Bubble Tea update goroutine.
+func (b *Buffer) ReplaceRopeSnapshot(rope *Rope, cursor Position) {
+	if rope == nil || rope == b.rope {
+		return
+	}
+	b.undo.Save(b.rope, b.Cursor, false)
+	b.rope = rope
+	b.Cursor = cursor
+	b.Selections = NewSelections(cursor)
+	b.dirty = b.rope != b.savedRope
+	b.version++
+	b.lastChange = nil
+}
+
+// RestoreSelections installs a bounded selection snapshot without changing
+// document history or version. It is paired with ReplaceRopeSnapshot by
+// background multi-cursor transformations such as a large paste.
+func (b *Buffer) RestoreSelections(selections []Selection, primary int) {
+	if len(selections) == 0 {
+		b.Selections = NewSelections(b.Cursor)
+		return
+	}
+	if len(selections) > MaxSelections {
+		selections = selections[:MaxSelections]
+		if primary >= len(selections) {
+			primary = 0
+		}
+	}
+	cloned := append([]Selection(nil), selections...)
+	if primary < 0 || primary >= len(cloned) {
+		primary = 0
+	}
+	// Snapshots may come from a canceled background operation. Restore the
+	// same sorted, non-overlapping invariant as interactive cursor commands so
+	// consumers such as the viewport can safely sweep selections by line.
+	b.Selections = &Selections{selections: cloned, primary: primary, dirty: true}
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 }
 
 // Dirty returns true if the buffer has unsaved changes.
@@ -197,50 +272,48 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		return
 	}
 
-	// Multiple selections: insert at each cursor
+	// Multiple selections replace every selected range, or insert at each
+	// collapsed cursor. Normalize first so no two edits compete for the same
+	// span; ranges are half-open and adjacent selections intentionally remain
+	// independent edits.
+	b.Selections.Normalize()
+	type replacement struct {
+		start int
+		end   int
+	}
+	replacements := make([]replacement, len(b.Selections.selections))
+	for i, sel := range b.Selections.selections {
+		start, end := sel.Ordered()
+		replacements[i] = replacement{
+			start: b.rope.PositionToOffset(start),
+			end:   b.rope.PositionToOffset(end),
+		}
+	}
+	primary := b.Selections.primary
+
 	b.undo.Save(b.rope, b.Cursor, false)
 
-	originalSelections := make([]Selection, len(b.Selections.selections))
-	copy(originalSelections, b.Selections.selections)
-	originalOffsets := make([]int, len(originalSelections))
-	for i, sel := range originalSelections {
-		originalOffsets[i] = b.rope.PositionToOffset(sel.Head)
-	}
-
-	// Sort cursor indexes in reverse order so earlier inserts don't disturb later offsets.
-	indexes := make([]int, len(originalSelections))
-	for i := range indexes {
-		indexes[i] = i
-	}
-	sort.Slice(indexes, func(i, j int) bool {
-		oi := originalOffsets[indexes[i]]
-		oj := originalOffsets[indexes[j]]
-		if oi != oj {
-			return oi > oj
+	// Apply from end to beginning so every offset remains relative to the
+	// original rope. A replacement is delete+insert at its start offset.
+	for i := len(replacements) - 1; i >= 0; i-- {
+		replacement := replacements[i]
+		if replacement.end > replacement.start {
+			b.rope = b.rope.Delete(replacement.start, replacement.end-replacement.start)
 		}
-		return indexes[i] > indexes[j]
-	})
-
-	// Apply insertions from end to beginning
-	for _, idx := range indexes {
-		b.rope = b.rope.Insert(originalOffsets[idx], text)
+		b.rope = b.rope.Insert(replacement.start, text)
 	}
 
-	// Rebase each cursor against the original document positions.
-	for i := range b.Selections.selections {
-		newOffset := originalOffsets[i]
-		for _, otherOffset := range originalOffsets {
-			if otherOffset <= originalOffsets[i] {
-				newOffset += len(text)
-			}
-		}
-		newHead := b.rope.OffsetToPosition(newOffset)
-		sel := &b.Selections.selections[i]
-		sel.Anchor = newHead
-		sel.Head = newHead
+	// Rebase each collapsed cursor into the final document. Earlier edits shift
+	// every following replacement by their net byte delta.
+	collapsed := make([]Selection, len(replacements))
+	shift := 0
+	for i, replacement := range replacements {
+		newOffset := replacement.start + shift + len(text)
+		pos := b.rope.OffsetToPosition(newOffset)
+		collapsed[i] = Selection{Anchor: pos, Head: pos}
+		shift += len(text) - (replacement.end - replacement.start)
 	}
-
-	// Update b.Cursor to match primary selection
+	b.Selections = &Selections{selections: collapsed, primary: primary}
 	b.Cursor = b.Selections.PrimaryCursor()
 
 	b.dirty = true
@@ -637,39 +710,11 @@ func (b *Buffer) Save() error {
 // SaveAs writes the buffer to the given path atomically.
 // It writes to a temporary file first, then renames it to the target path.
 func (b *Buffer) SaveAs(path string) error {
-	data := b.rope.Bytes()
-
-	// Create temporary file in same directory for atomic rename
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("write temp file: %w", err)
+	snapshot := b.rope
+	if err := WriteRopeAtomically(path, snapshot); err != nil {
+		return err
 	}
-
-	// Ensure data is flushed to disk (fsync)
-	if f, err := os.Open(tmpPath); err == nil {
-		if err := f.Sync(); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("sync temp file: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("close temp file: %w", err)
-		}
-	}
-
-	// Atomic rename - guarantees file is either old or new, never partial
-	if err := os.Rename(tmpPath, path); err != nil {
-		renameErr := fmt.Errorf("rename temp file: %w", err)
-		if cleanupErr := os.Remove(tmpPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-			return errors.Join(renameErr, fmt.Errorf("remove temp file: %w", cleanupErr))
-		}
-		return renameErr
-	}
-
-	b.FilePath = path
-	b.dirty = false
-	b.savedRope = b.rope
+	b.MarkSavedSnapshot(path, snapshot)
 	return nil
 }
 
@@ -681,9 +726,10 @@ func (b *Buffer) Undo() {
 	}
 	b.rope = rope
 	b.Cursor = cursor
-	if b.Selections != nil {
-		b.Selections.Clear()
-	}
+	// Undo snapshots intentionally contain text and the active cursor, not a
+	// stale set of multicursors. Collapse to the restored cursor so selection
+	// coordinates cannot refer to the document that was just undone.
+	b.Selections = NewSelections(b.Cursor)
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // undo: fall back to full sync
@@ -697,9 +743,8 @@ func (b *Buffer) Redo() {
 	}
 	b.rope = rope
 	b.Cursor = cursor
-	if b.Selections != nil {
-		b.Selections.Clear()
-	}
+	// See Undo: selection snapshots are not part of UndoStack.
+	b.Selections = NewSelections(b.Cursor)
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // redo: fall back to full sync
@@ -938,52 +983,63 @@ func (b *Buffer) SelectWordAtCursor() {
 	)
 }
 
-// SelectNextOccurrence selects the next occurrence of the current selection, or selects word at cursor.
-func (b *Buffer) SelectNextOccurrence() {
+// SelectNextOccurrence selects the next occurrence of the current selection,
+// or selects the word at the cursor. It returns false when the document exceeds
+// the bounded synchronous scan budget.
+func (b *Buffer) SelectNextOccurrence() bool {
 	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
 		b.SelectWordAtCursor()
-		return
+		return true
+	}
+	if b.rope.Len() > MaxOccurrenceSearchBytes {
+		return false
 	}
 	sel := b.SelectedText()
 	if len(sel) == 0 {
-		return
+		return true
 	}
 	content := b.rope.Bytes()
 	_, end := b.Selections.Primary().Ordered()
 	endOff := b.rope.PositionToOffset(end)
 
 	// Search forward from end of selection
-	needle := string(sel)
-	haystack := string(content)
-	idx := strings.Index(haystack[endOff:], needle)
+	idx := bytes.Index(content[endOff:], sel)
 	if idx >= 0 {
 		matchOff := endOff + idx
-		matchEnd := matchOff + len(needle)
+		matchEnd := matchOff + len(sel)
 		newSel := Selection{
 			Anchor: b.rope.OffsetToPosition(matchOff),
 			Head:   b.rope.OffsetToPosition(matchEnd),
 		}
 		b.Selections.Add(newSel)
 		b.Selections.Normalize()
-		return
+		b.Cursor = b.Selections.PrimaryCursor()
+		return true
 	}
 	// Wrap around
-	idx = strings.Index(haystack[:endOff], needle)
+	idx = bytes.Index(content[:endOff], sel)
 	if idx >= 0 {
-		matchEnd := idx + len(needle)
+		matchEnd := idx + len(sel)
 		newSel := Selection{
 			Anchor: b.rope.OffsetToPosition(idx),
 			Head:   b.rope.OffsetToPosition(matchEnd),
 		}
 		b.Selections.Add(newSel)
 		b.Selections.Normalize()
+		b.Cursor = b.Selections.PrimaryCursor()
 	}
+	return true
 }
 
-// SelectAllOccurrences selects all occurrences of the current primary selection.
-func (b *Buffer) SelectAllOccurrences() {
+// SelectAllOccurrences selects all occurrences of the current primary
+// selection. It returns false when the document exceeds the bounded
+// synchronous scan budget.
+func (b *Buffer) SelectAllOccurrences() bool {
 	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
 		b.SelectWordAtCursor()
+	}
+	if b.rope.Len() > MaxOccurrenceSearchBytes {
+		return false
 	}
 
 	primary := b.Selections.Primary()
@@ -993,25 +1049,22 @@ func (b *Buffer) SelectAllOccurrences() {
 	selectedText := b.rope.Slice(startOff, endOff).Bytes()
 
 	if len(selectedText) == 0 {
-		return
+		return true
 	}
 
 	content := b.rope.Bytes()
-	needle := string(selectedText)
-	haystack := string(content)
-
 	// Clear existing selections except primary
 	b.Selections.Clear()
 
 	// Find all occurrences
 	idx := 0
 	for {
-		pos := strings.Index(haystack[idx:], needle)
+		pos := bytes.Index(content[idx:], selectedText)
 		if pos < 0 {
 			break
 		}
 		matchOff := idx + pos
-		matchEnd := matchOff + len(needle)
+		matchEnd := matchOff + len(selectedText)
 		newSel := Selection{
 			Anchor: b.rope.OffsetToPosition(matchOff),
 			Head:   b.rope.OffsetToPosition(matchEnd),
@@ -1021,6 +1074,8 @@ func (b *Buffer) SelectAllOccurrences() {
 	}
 
 	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
+	return true
 }
 
 // AddCursorAbove adds a cursor on the line above each selection.
@@ -1073,36 +1128,72 @@ func (b *Buffer) SplitSelectionIntoLines() {
 	}
 
 	start, end := primary.Ordered()
-	startLine := start.Line
-	endLine := end.Line
+	firstLine := start.Line
+	lastLine := end.Line
+	if lastLine-firstLine+1 > MaxSelections {
+		// Keep the portion nearest the active head. This honours the hard
+		// multicursor limit without silently discarding the user's focused end
+		// of a very large selection.
+		if primary.Head.Line <= firstLine {
+			lastLine = firstLine + MaxSelections - 1
+		} else {
+			firstLine = lastLine - MaxSelections + 1
+		}
+	}
 
-	// Clear existing selections
-	b.Selections.Clear()
+	// Build a new selection set rather than Clear(): Clear intentionally retains
+	// the previous primary selection, which would otherwise leave the original
+	// cross-line selection alongside its split children.
+	selections := make([]Selection, 0, lastLine-firstLine+1)
+	primaryIndex := -1
 
-	// Add one selection per line
-	for line := startLine; line <= endLine; line++ {
+	// Add one selection per line. Empty intermediate lines receive a collapsed
+	// cursor, which lets a subsequent multi-cursor edit affect every covered
+	// line. A terminal line reached only at column zero is outside the half-open
+	// source selection and is deliberately omitted.
+	for line := firstLine; line <= lastLine; line++ {
 		lineLen := b.rope.LineLen(line)
 
 		// Determine column range for this line
 		colStart := 0
 		colEnd := lineLen
 
-		if line == startLine {
+		if line == start.Line {
 			colStart = start.Col
 		}
-		if line == endLine {
+		if line == end.Line {
 			colEnd = end.Col
 		}
 
-		if colStart < colEnd {
-			b.Selections.Add(Selection{
+		include := colStart < colEnd || (line > start.Line && line < end.Line && lineLen == 0)
+		if include {
+			selection := Selection{
 				Anchor: Position{Line: line, Col: colStart},
 				Head:   Position{Line: line, Col: colEnd},
-			})
+			}
+			selections = append(selections, selection)
+
+			// The original head determines the active (primary) child. If the
+			// head lies on an excluded half-open endpoint, use the closest child
+			// below as a sensible visible cursor.
+			if line == primary.Head.Line && primary.Head.Col >= colStart && primary.Head.Col <= colEnd {
+				primaryIndex = len(selections) - 1
+			}
 		}
 	}
 
-	b.Selections.Normalize()
+	if len(selections) == 0 {
+		return
+	}
+	if primaryIndex < 0 {
+		if primary.Head.Line <= firstLine {
+			primaryIndex = 0
+		} else {
+			primaryIndex = len(selections) - 1
+		}
+	}
+	b.Selections = &Selections{selections: selections, primary: primaryIndex}
+	b.Cursor = b.Selections.PrimaryCursor()
 }
 
 // SelectLine selects the current line.

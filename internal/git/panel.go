@@ -2,7 +2,6 @@ package git
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -36,6 +35,15 @@ type treeRowHit struct {
 	section GitSection
 	index   int
 	node    *GitTreeNode
+}
+
+// treeRowCache is a per-Model immutable snapshot of the visible Git trees.
+// Model uses value semantics in Update, so invalidation always replaces this
+// pointer instead of mutating the cache shared by an older model value.
+type treeRowCache struct {
+	stagedFlat   []*GitTreeNode
+	unstagedFlat []*GitTreeNode
+	rows         []treeRowHit
 }
 
 type panelFooterMode int
@@ -176,11 +184,23 @@ func restoreExpandedDirs(nodes []*GitTreeNode, expanded map[string]bool) {
 
 // flattenTree flattens a tree into a list of nodes for rendering.
 func flattenTree(nodes []*GitTreeNode) []*GitTreeNode {
-	var flat []*GitTreeNode
-	for _, n := range nodes {
-		flat = append(flat, n)
-		if n.IsDir && n.Expanded && n.Children != nil {
-			flat = append(flat, flattenTree(n.Children)...)
+	flat := make([]*GitTreeNode, 0, len(nodes))
+	stack := make([]*GitTreeNode, 0, len(nodes))
+	for i := len(nodes) - 1; i >= 0; i-- {
+		stack = append(stack, nodes[i])
+	}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		node := stack[last]
+		stack = stack[:last]
+		flat = append(flat, node)
+		if !node.IsDir || !node.Expanded {
+			continue
+		}
+		// Push children in reverse order so the pop order remains the same
+		// depth-first ordering the panel has always rendered.
+		for i := len(node.Children) - 1; i >= 0; i-- {
+			stack = append(stack, node.Children[i])
 		}
 	}
 	return flat
@@ -215,6 +235,7 @@ type Model struct {
 	// Tree views of changed files
 	stagedTree   []*GitTreeNode
 	unstagedTree []*GitTreeNode
+	treeRowCache *treeRowCache
 
 	// Commit form
 	commitTitle  textinput.Model // single-line title (required)
@@ -249,12 +270,7 @@ func New(rootDir string, theme ui.Theme) Model {
 		commitBody:  ta,
 		spinner:     sp,
 	}
-	// Check if inside a git repo
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = rootDir
-	if err := cmd.Run(); err == nil {
-		m.isGitRepo = true
-	}
+	m.rebuildTreeRowCache()
 	return m
 }
 
@@ -323,21 +339,7 @@ func (m Model) Refresh() tea.Cmd {
 	}
 	rootDir := m.rootDir
 	return func() tea.Msg {
-		branch := ""
-		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-		branchCmd.Dir = rootDir
-		if out, err := branchCmd.Output(); err == nil {
-			branch = strings.TrimSpace(string(out))
-		}
-
-		var entries []StatusEntry
-		statusCmd := exec.Command("git", "status", "--porcelain", "-uall")
-		statusCmd.Dir = rootDir
-		if out, err := statusCmd.Output(); err == nil {
-			entries = ParseStatusLines(strings.TrimRight(string(out), "\n"))
-		}
-
-		return RefreshMsg{Branch: branch, Entries: entries}
+		return refreshAfter(rootDir)
 	}
 }
 
@@ -355,18 +357,56 @@ func (m *Model) deriveGroups() {
 	}
 	m.stagedTree = rebuildTree(m.Staged, true, m.stagedTree)
 	m.unstagedTree = rebuildTree(m.Unstaged, false, m.unstagedTree)
+	m.rebuildTreeRowCache()
 }
 
 // activeFlatTree returns the flattened tree for the active section.
 func (m Model) activeFlatTree() []*GitTreeNode {
+	cache := m.treeRowsSnapshot()
 	switch m.activeSection {
 	case SectionStaged:
-		return flattenTree(m.stagedTree)
+		return cache.stagedFlat
 	case SectionUnstaged:
-		return flattenTree(m.unstagedTree)
+		return cache.unstagedFlat
 	default:
 		return nil
 	}
+}
+
+// treeRowsSnapshot returns the current cached tree representation. A
+// zero-value Model has no cache yet, so it gets a short-lived snapshot for
+// compatibility; normal models eagerly rebuild on every visibility change.
+func (m Model) treeRowsSnapshot() *treeRowCache {
+	if m.treeRowCache != nil {
+		return m.treeRowCache
+	}
+	return buildTreeRowCache(m.stagedTree, m.unstagedTree, m.stagedCollapsed, m.unstagedCollapsed)
+}
+
+func (m *Model) rebuildTreeRowCache() {
+	m.treeRowCache = buildTreeRowCache(m.stagedTree, m.unstagedTree, m.stagedCollapsed, m.unstagedCollapsed)
+}
+
+func buildTreeRowCache(stagedTree, unstagedTree []*GitTreeNode, stagedCollapsed, unstagedCollapsed bool) *treeRowCache {
+	cache := &treeRowCache{
+		stagedFlat:   flattenTree(stagedTree),
+		unstagedFlat: flattenTree(unstagedTree),
+	}
+	rows := make([]treeRowHit, 0, 2+len(cache.stagedFlat)+len(cache.unstagedFlat))
+	rows = append(rows, treeRowHit{kind: treeRowStagedHeader})
+	if !stagedCollapsed {
+		for i, node := range cache.stagedFlat {
+			rows = append(rows, treeRowHit{kind: treeRowNode, section: SectionStaged, index: i, node: node})
+		}
+	}
+	rows = append(rows, treeRowHit{kind: treeRowUnstagedHeader})
+	if !unstagedCollapsed {
+		for i, node := range cache.unstagedFlat {
+			rows = append(rows, treeRowHit{kind: treeRowNode, section: SectionUnstaged, index: i, node: node})
+		}
+	}
+	cache.rows = rows
+	return cache
 }
 
 // Update handles messages for the git panel.
@@ -472,10 +512,12 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	switch hit.kind {
 	case treeRowStagedHeader:
 		m.stagedCollapsed = !m.stagedCollapsed
+		m.rebuildTreeRowCache()
 		m.ensureCursorVisible()
 		return m, nil
 	case treeRowUnstagedHeader:
 		m.unstagedCollapsed = !m.unstagedCollapsed
+		m.rebuildTreeRowCache()
 		m.ensureCursorVisible()
 		return m, nil
 	case treeRowNode:
@@ -487,6 +529,7 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 		}
 		if hit.node.IsDir {
 			hit.node.Expanded = !hit.node.Expanded
+			m.rebuildTreeRowCache()
 			m.ensureCursorVisible()
 			return m, nil
 		}
@@ -560,7 +603,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.Cursor--
 		} else if m.activeSection == SectionUnstaged && len(m.stagedTree) > 0 {
 			m.activeSection = SectionStaged
-			stagedFlat := flattenTree(m.stagedTree)
+			stagedFlat := m.treeRowsSnapshot().stagedFlat
 			m.Cursor = len(stagedFlat) - 1
 		}
 		_ = flat
@@ -582,6 +625,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			node := flat[m.Cursor]
 			if node.IsDir {
 				node.Expanded = !node.Expanded
+				m.rebuildTreeRowCache()
 				m.ensureCursorVisible()
 				return m, nil
 			}
@@ -979,6 +1023,9 @@ func (m *Model) ToggleCollapsed() {
 
 // SetSize sets the panel dimensions.
 func (m *Model) SetSize(w, h int) {
+	if m.Width == w && m.Height == h {
+		return
+	}
 	m.Width = w
 	m.Height = h
 	// Keep the commit title input width in sync so its internal
@@ -988,6 +1035,8 @@ func (m *Model) SetSize(w, h int) {
 		innerWidth = 1
 	}
 	m.commitTitle.SetWidth(innerWidth)
+	// Tree rows are independent from dimensions. Only the scroll bounds need
+	// recomputing after an actual resize.
 	m.ensureCursorVisible()
 }
 
@@ -1006,7 +1055,7 @@ func (m Model) View() string {
 		sb.WriteString("  This directory is not a Git repository.\n")
 		sb.WriteString("\n")
 		initBtn := zone.Mark("git-init-btn",
-			m.theme.GitActionButton.Render("\uf417 Initialize Git Repository"))
+			m.theme.GitActionButton.Render(gitActionLabel("\uf417", "Initialize Git Repository")))
 		sb.WriteString("  " + initBtn)
 		sb.WriteString("\n")
 		// Pad remaining height
@@ -1072,29 +1121,7 @@ func (m Model) layout() panelLayout {
 }
 
 func (m Model) treeRows() []treeRowHit {
-	rows := []treeRowHit{{kind: treeRowStagedHeader}}
-	if !m.stagedCollapsed {
-		for i, node := range flattenTree(m.stagedTree) {
-			rows = append(rows, treeRowHit{
-				kind:    treeRowNode,
-				section: SectionStaged,
-				index:   i,
-				node:    node,
-			})
-		}
-	}
-	rows = append(rows, treeRowHit{kind: treeRowUnstagedHeader})
-	if !m.unstagedCollapsed {
-		for i, node := range flattenTree(m.unstagedTree) {
-			rows = append(rows, treeRowHit{
-				kind:    treeRowNode,
-				section: SectionUnstaged,
-				index:   i,
-				node:    node,
-			})
-		}
-	}
-	return rows
+	return m.treeRowsSnapshot().rows
 }
 
 func (m Model) maxTreeScroll(treeHeight int, rowCount int) int {
@@ -1211,9 +1238,9 @@ func (m Model) renderCompactFooterLine() string {
 	}
 	commitW := availWidth / 2
 	halfW := availWidth / 4
-	commitContent := "\uf417 Commit"
-	pushContent := "\uf0ee Push"
-	pullContent := "\uf0ed Pull"
+	commitContent := gitActionLabel("\uf417", "Commit")
+	pushContent := gitActionLabel("\uf0ee", "Push")
+	pullContent := gitActionLabel("\uf0ed", "Pull")
 	commitPadded := commitContent + strings.Repeat(" ", max(0, commitW-len(commitContent)))
 	pushPadded := pushContent + strings.Repeat(" ", max(0, halfW-len(pushContent)))
 	pullPadded := pullContent + strings.Repeat(" ", max(0, halfW-len(pullContent)))
@@ -1235,8 +1262,8 @@ func (m Model) renderPushPullLine() string {
 	gap := 1
 	btnWidth := (availWidth - gap) / 2
 	btnWidthR := availWidth - gap - btnWidth
-	pushContent := "\uf0ee Push"
-	pullContent := "\uf0ed Pull"
+	pushContent := gitActionLabel("\uf0ee", "Push")
+	pullContent := gitActionLabel("\uf0ed", "Pull")
 	pushPadded := centerText(pushContent, btnWidth, ' ')
 	pullPadded := centerText(pullContent, btnWidthR, ' ')
 	pushBtn := zone.Mark("git-push-btn", m.theme.GitPushPullButton.Render(pushPadded))
@@ -1313,7 +1340,7 @@ func (m Model) renderCommitFormLines(bodyHeight int) []string {
 	if availWidth < 10 {
 		availWidth = 10
 	}
-	commitContent := "\uf417 Commit"
+	commitContent := gitActionLabel("\uf417", "Commit")
 	commitPadded := centerText(commitContent, availWidth, ' ')
 	commitBtn := zone.Mark("git-commit-btn", m.theme.GitCommitButton.Render(commitPadded))
 	lines = append(lines, " "+commitBtn)
@@ -1336,21 +1363,20 @@ func (m Model) renderTreeNode(node *GitTreeNode, idx int, staged bool) string {
 		if !node.Expanded {
 			arrow = "▸"
 		}
-		// Build: " {indent}{arrow}  {name}{padding}"
-		// The folder icon takes 2 display cells but we render it with a styled span.
-		// Avoid relying on lipgloss Width which miscounts icon width.
+		// Build: " {indent}{arrow} {folder} {name}{padding}". Nerd Font
+		// glyphs conventionally consume two cells, while the explicit fallback
+		// is a single ASCII cell.
 		prefix := " " + indent + arrow + " "
-		iconStr := "\uf413"
-		const iconCells = 2 // Nerd Font icon is 2 cells wide in terminal
+		iconStr, iconCells := gitFolderIcon()
 		separator := " "
-		usedCells := len(prefix) + iconCells + len(separator)
+		usedCells := runewidth.StringWidth(prefix) + iconCells + runewidth.StringWidth(separator)
 		nameWidth := m.Width - usedCells
 		if nameWidth < 1 {
 			nameWidth = 1
 		}
 		dirName := truncPath(node.Name, nameWidth)
 		// Pad to fill width
-		padLen := m.Width - usedCells - len(dirName)
+		padLen := m.Width - usedCells - runewidth.StringWidth(dirName)
 		if padLen < 0 {
 			padLen = 0
 		}
@@ -1372,12 +1398,12 @@ func (m Model) renderTreeNode(node *GitTreeNode, idx int, staged bool) string {
 
 	// " {indent}{status} {name}{padding}"
 	prefix := " " + indent + status + " "
-	nameWidth := m.Width - len(prefix)
+	nameWidth := m.Width - runewidth.StringWidth(prefix)
 	if nameWidth < 1 {
 		nameWidth = 1
 	}
 	displayName := truncPath(name, nameWidth)
-	padLen := m.Width - len(prefix) - len(displayName)
+	padLen := m.Width - runewidth.StringWidth(prefix) - runewidth.StringWidth(displayName)
 	if padLen < 0 {
 		padLen = 0
 	}
@@ -1409,10 +1435,13 @@ func (m Model) statusStyleForByte(status string) lipgloss.Style {
 }
 
 func truncPath(path string, maxLen int) string {
-	if maxLen <= 0 || len(path) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(path) <= maxLen {
 		return path
 	}
-	return "..." + path[len(path)-maxLen+3:]
+	return runewidth.TruncateLeft(path, maxLen, "...")
 }
 
 // centerText pads a string with spaces to center it within a given width.
@@ -1420,11 +1449,28 @@ func centerText(s string, width int, pad rune) string {
 	if width <= 0 {
 		return s
 	}
-	sLen := len(s)
+	sLen := runewidth.StringWidth(s)
 	if sLen >= width {
-		return s[:width]
+		return runewidth.Truncate(s, width, "")
 	}
 	left := (width - sLen) / 2
 	right := width - sLen - left
 	return strings.Repeat(string(pad), left) + s + strings.Repeat(string(pad), right)
+}
+
+// gitActionLabel keeps all action names readable when a terminal lacks the
+// private-use glyphs supplied by Nerd Font. The words remain the accessibility
+// cue; the icon is decorative only.
+func gitActionLabel(nerdGlyph, label string) string {
+	if ui.NerdFontEnabled() {
+		return nerdGlyph + " " + label
+	}
+	return label
+}
+
+func gitFolderIcon() (glyph string, cells int) {
+	if ui.NerdFontEnabled() {
+		return "\uf413", 2
+	}
+	return "d", 1
 }

@@ -420,6 +420,9 @@ func BenchmarkRopeLineAccessRandom(b *testing.B) {
 	line := strings.Repeat("x", 79) + "\n"
 	doc := strings.Repeat(line, 10000)
 	r := New([]byte(doc))
+	// Build the lazy line index outside the hot-path measurement. This models
+	// scrolling after a document has opened, not its one-time setup.
+	_ = r.LineStart(1)
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
@@ -435,6 +438,7 @@ func BenchmarkRopeLineAccessSequential(b *testing.B) {
 	line := strings.Repeat("x", 79) + "\n"
 	doc := strings.Repeat(line, 10000)
 	r := New([]byte(doc))
+	_ = r.LineStart(1)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -448,6 +452,7 @@ func BenchmarkRopePositionToOffset(b *testing.B) {
 	line := strings.Repeat("x", 79) + "\n"
 	doc := strings.Repeat(line, 10000)
 	r := New([]byte(doc))
+	_ = r.LineStart(1)
 
 	pos := Position{Line: 5000, Col: 40}
 

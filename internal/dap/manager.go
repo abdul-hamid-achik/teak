@@ -1,6 +1,7 @@
 package dap
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
@@ -17,101 +18,247 @@ type DebugConfig struct {
 
 // Manager manages debug sessions.
 type Manager struct {
-	client  *Client
-	config  DebugConfig
-	rootDir string
-	msgChan chan any
-	mu      sync.Mutex
-	state   DebugState
+	client     *Client
+	config     DebugConfig
+	rootDir    string
+	msgChan    chan any
+	mu         sync.Mutex
+	startMu    sync.Mutex // serializes competing starts without blocking Stop
+	state      DebugState
+	closed     bool
+	generation uint64
+
+	lifecycle        int
+	lifecycleChanged chan struct{}
+	trackedClients   map[*Client]struct{}
 }
 
 // NewManager creates a new debug manager.
 func NewManager(rootDir string) *Manager {
 	return &Manager{
-		rootDir: rootDir,
-		msgChan: make(chan any, 100),
-		state:   StateInactive,
+		rootDir:          rootDir,
+		msgChan:          make(chan any, 100),
+		state:            StateInactive,
+		lifecycleChanged: make(chan struct{}),
+		trackedClients:   make(map[*Client]struct{}),
 	}
 }
 
 // Start begins a debug session with the given config.
 func (m *Manager) Start(config DebugConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return m.start(config)
+}
 
+// StartAndLaunch creates and launches a debug session as one serialized
+// lifecycle operation. Keeping both DAP requests under the same manager lock
+// prevents a concurrent Stop from leaving a half-started adapter behind.
+func (m *Manager) StartAndLaunch(config DebugConfig) error {
+	if err := m.start(config); err != nil {
+		return err
+	}
+	if err := m.launch(); err != nil {
+		m.Stop()
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) start(config DebugConfig) error {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fmt.Errorf("debug manager is shut down")
+	}
 	if m.client != nil && m.running() {
+		m.mu.Unlock()
 		return fmt.Errorf("debug session already active")
 	}
-
 	m.config = config
+	generation := m.generation
+	m.beginLifecycleLocked()
+	m.mu.Unlock()
+	defer m.endLifecycle()
 
 	client, err := NewClient(config.Command, config.Args, m.msgChan)
 	if err != nil {
 		return fmt.Errorf("start debug adapter: %w", err)
 	}
 
+	m.mu.Lock()
+	m.trackClientLocked(client)
+	if m.closed || generation != m.generation {
+		m.mu.Unlock()
+		client.Shutdown()
+		return fmt.Errorf("debug session start was cancelled")
+	}
+	// Publish immediately so Stop can terminate an adapter that hangs during
+	// initialize. Never hold the manager lock while a DAP request is in flight.
 	m.client = client
+	m.state = StateInactive
+	m.mu.Unlock()
 
 	// Initialize the debug adapter
 	if err := client.Initialize(); err != nil {
 		client.Shutdown()
-		m.client = nil
+		m.mu.Lock()
+		if m.client == client {
+			m.client = nil
+		}
+		m.mu.Unlock()
 		return fmt.Errorf("initialize debug adapter: %w", err)
 	}
 
+	m.mu.Lock()
+	if m.client != client {
+		m.mu.Unlock()
+		client.Shutdown()
+		return fmt.Errorf("debug session stopped while initializing")
+	}
 	m.state = StateStopped
+	m.mu.Unlock()
 	return nil
 }
 
 // Launch starts debugging the program.
 func (m *Manager) Launch() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return m.launch()
+}
 
-	if m.client == nil {
+func (m *Manager) launch() error {
+	m.mu.Lock()
+	client := m.client
+	config := m.config
+	m.mu.Unlock()
+	if client == nil {
 		return fmt.Errorf("no debug session")
 	}
-
-	if err := m.client.Launch(m.config.Program); err != nil {
+	if err := client.Launch(config.Program); err != nil {
 		return fmt.Errorf("launch: %w", err)
 	}
-
-	m.state = StateRunning
+	m.mu.Lock()
+	if m.client == client {
+		m.state = StateRunning
+	}
+	m.mu.Unlock()
 	return nil
 }
 
 // Stop stops the debug session.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client != nil {
-		m.client.Shutdown()
-		m.client = nil
-	}
+	m.generation++
+	client := m.client
+	m.client = nil
 	m.state = StateInactive
+	m.trackClientLocked(client)
+	m.mu.Unlock()
+	if client != nil {
+		client.Shutdown()
+	}
+}
+
+// Shutdown permanently closes the manager and initiates adapter teardown.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	m.closed = true
+	m.generation++
+	client := m.client
+	m.client = nil
+	m.state = StateInactive
+	m.trackClientLocked(client)
+	m.mu.Unlock()
+	if client != nil {
+		client.Shutdown()
+	}
+}
+
+// WaitForShutdown waits for in-flight starts to unwind and for every tracked
+// adapter process to be reaped, or until ctx is cancelled.
+func (m *Manager) WaitForShutdown(ctx context.Context) bool {
+	m.Shutdown()
+	for {
+		m.mu.Lock()
+		if m.lifecycle == 0 {
+			m.mu.Unlock()
+			return true
+		}
+		changed := m.lifecycleChanged
+		m.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func (m *Manager) beginLifecycleLocked() {
+	m.lifecycle++
+}
+
+func (m *Manager) signalLifecycleLocked() {
+	close(m.lifecycleChanged)
+	m.lifecycleChanged = make(chan struct{})
+}
+
+func (m *Manager) endLifecycle() {
+	m.mu.Lock()
+	if m.lifecycle > 0 {
+		m.lifecycle--
+	}
+	m.signalLifecycleLocked()
+	m.mu.Unlock()
+}
+
+func (m *Manager) trackClientLocked(client *Client) {
+	if client == nil {
+		return
+	}
+	if _, ok := m.trackedClients[client]; ok {
+		return
+	}
+	m.trackedClients[client] = struct{}{}
+	m.beginLifecycleLocked()
+	go func() {
+		_ = client.WaitForShutdown(context.Background())
+		m.mu.Lock()
+		delete(m.trackedClients, client)
+		if m.lifecycle > 0 {
+			m.lifecycle--
+		}
+		m.signalLifecycleLocked()
+		m.mu.Unlock()
+	}()
 }
 
 // Continue resumes execution.
 func (m *Manager) Continue() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return fmt.Errorf("no debug session")
 	}
 
 	// Get threads first
-	threads, err := m.client.Threads()
+	threads, err := client.Threads()
 	if err != nil {
 		return err
 	}
 
 	if len(threads) > 0 {
-		if err := m.client.Continue(threads[0].Id); err != nil {
+		if err := client.Continue(threads[0].Id); err != nil {
 			return err
 		}
-		m.state = StateRunning
+		m.mu.Lock()
+		if m.client == client {
+			m.state = StateRunning
+		}
+		m.mu.Unlock()
 	}
 	return nil
 }
@@ -119,19 +266,19 @@ func (m *Manager) Continue() error {
 // Next steps over to the next line.
 func (m *Manager) Next() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := m.client.Threads()
+	threads, err := client.Threads()
 	if err != nil {
 		return err
 	}
 
 	if len(threads) > 0 {
-		if err := m.client.Next(threads[0].Id); err != nil {
+		if err := client.Next(threads[0].Id); err != nil {
 			return err
 		}
 	}
@@ -141,19 +288,19 @@ func (m *Manager) Next() error {
 // StepIn steps into a function call.
 func (m *Manager) StepIn() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := m.client.Threads()
+	threads, err := client.Threads()
 	if err != nil {
 		return err
 	}
 
 	if len(threads) > 0 {
-		if err := m.client.StepIn(threads[0].Id); err != nil {
+		if err := client.StepIn(threads[0].Id); err != nil {
 			return err
 		}
 	}
@@ -163,19 +310,19 @@ func (m *Manager) StepIn() error {
 // StepOut steps out of the current function.
 func (m *Manager) StepOut() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := m.client.Threads()
+	threads, err := client.Threads()
 	if err != nil {
 		return err
 	}
 
 	if len(threads) > 0 {
-		if err := m.client.StepOut(threads[0].Id); err != nil {
+		if err := client.StepOut(threads[0].Id); err != nil {
 			return err
 		}
 	}
@@ -185,25 +332,24 @@ func (m *Manager) StepOut() error {
 // SetBreakpoints sets breakpoints in a file.
 func (m *Manager) SetBreakpoints(filePath string, lines []int) ([]Breakpoint, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return nil, fmt.Errorf("no debug session")
 	}
-
-	return m.client.SetBreakpoints(filePath, lines)
+	return client.SetBreakpoints(filePath, lines)
 }
 
 // GetStackTrace returns the stack trace for the current thread.
 func (m *Manager) GetStackTrace() ([]StackFrame, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return nil, fmt.Errorf("no debug session")
 	}
 
-	threads, err := m.client.Threads()
+	threads, err := client.Threads()
 	if err != nil {
 		return nil, err
 	}
@@ -212,31 +358,31 @@ func (m *Manager) GetStackTrace() ([]StackFrame, error) {
 		return nil, nil
 	}
 
-	return m.client.StackTrace(threads[0].Id)
+	return client.StackTrace(threads[0].Id)
 }
 
 // GetVariables returns variables in a scope.
 func (m *Manager) GetVariables(variablesReference int) ([]Variable, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return nil, fmt.Errorf("no debug session")
 	}
 
-	return m.client.Variables(variablesReference)
+	return client.Variables(variablesReference)
 }
 
 // GetScopes returns scopes for a stack frame.
 func (m *Manager) GetScopes(frameId int) ([]Scope, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.client == nil {
+	client := m.client
+	m.mu.Unlock()
+	if client == nil {
 		return nil, fmt.Errorf("no debug session")
 	}
 
-	return m.client.Scopes(frameId)
+	return client.Scopes(frameId)
 }
 
 // State returns the current debug state.

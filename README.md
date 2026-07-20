@@ -2,7 +2,7 @@
 
 A modern terminal code editor built with Go.
 
-![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)
+![Go 1.26+](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 
 Teak brings a familiar, VS Code-like editing experience to the terminal — syntax highlighting, LSP integration, multi-tab editing, a file tree, git status, and mouse support, all running in your shell.
 
@@ -36,9 +36,24 @@ git clone https://github.com/abdul-hamid-achik/teak.git && cd teak
 go build -o bin/teak ./cmd/teak
 ```
 
-Requires **Go 1.24+**.
+Requires **Go 1.26.0+**. The module recommends **Go 1.26.5**; with Go 1.21+
+and the default `GOTOOLCHAIN=auto`, the `go` command selects that patched
+toolchain automatically.
 
 Semantic search is optional and requires [`vecgrep`](https://github.com/veces/vecgrep) to be installed and available on your `PATH`. Without it, regular text search still works and semantic search will report that the dependency is missing.
+
+## Terminal compatibility
+
+Teak uses Bubble Tea's automatic terminal-color detection, so `NO_COLOR=1`
+disables color. It requires interactive stdin and stdout plus a terminal with
+cursor support; `TERM=dumb` and redirected I/O are rejected with a clear
+diagnostic rather than producing a broken screen. A Nerd Font improves the
+file tree, sidebar, editor-gutter, and Git icons; terminals without one can use
+ASCII controls with:
+
+```sh
+TEAK_NO_NERD_FONT=1 teak
+```
 
 ## Usage
 
@@ -107,6 +122,8 @@ Plugin notes:
 - Supported keymap modes are `n`, `a`, `tree`, `git`, `problems`, `debugger`, and `agent`.
 - `editor.feed_keys(keys)` supports plain text, named keys like `<enter>` and `<left>`, and modifiers like `ctrl+s` or `<shift+tab>`.
 - `editor.feed_keys` bypasses plugin key dispatch for the injected keys, so it will not recursively trigger another plugin mapping.
+- Teak bounds plugin source, callback registries, CPU time, and the persistent Lua value graph reachable from globals, the Lua registry, and registered callbacks. A plugin that crosses a budget is disabled and its Lua state is closed.
+- This persistent-state guard is not a hard process heap ceiling: a hostile plugin can still make transient allocations while it runs. Hard heap isolation requires executing plugins in a separate process; Gopher-Lua's `SetMx` is intentionally not used because it terminates the host process on exhaustion.
 
 Supported plugin APIs:
 

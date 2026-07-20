@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -14,6 +13,40 @@ type pluginEventMsg struct {
 	Events []plugin.EventContext
 }
 
+// pluginDispatchResultMsg is produced by a worker tea.Cmd after Lua has run
+// against an isolated runtime snapshot. Update applies only its recorded
+// effects, preserving Bubble Tea's single-writer model.
+type pluginDispatchResultMsg struct {
+	Runtime *pluginAsyncRuntime
+	Err     error
+}
+
+type pluginKeyDispatchResultMsg struct {
+	Runtime *pluginAsyncRuntime
+	Handled bool
+	Pending bool
+	Err     error
+}
+
+// pluginLoadResultMsg transfers ownership of a fully initialized Lua manager
+// back to the Bubble Tea update loop. Loading executes user supplied code and
+// must never happen while NewModel is constructing the first frame.
+type pluginLoadResultMsg struct {
+	Generation uint64
+	Manager    *plugin.Manager
+	Err        error
+}
+
+func pluginLoadCmd(dir string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		mgr, err := plugin.NewManager(dir)
+		if err == nil {
+			err = mgr.LoadAllPlugins()
+		}
+		return pluginLoadResultMsg{Generation: generation, Manager: mgr, Err: err}
+	}
+}
+
 func pluginEventCmd(events ...plugin.EventContext) tea.Cmd {
 	if len(events) == 0 {
 		return nil
@@ -24,29 +57,37 @@ func pluginEventCmd(events ...plugin.EventContext) tea.Cmd {
 	}
 }
 
+func pluginEventDispatchCmd(mgr *plugin.Manager, runtime *pluginAsyncRuntime, events []plugin.EventContext) tea.Cmd {
+	copied := append([]plugin.EventContext(nil), events...)
+	return func() tea.Msg {
+		var firstErr error
+		for _, event := range copied {
+			if event.Event == "" {
+				continue
+			}
+			if err := mgr.DispatchEvent(runtime, event.Event, event); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return pluginDispatchResultMsg{Runtime: runtime, Err: firstErr}
+	}
+}
+
+func pluginKeyDispatchCmd(mgr *plugin.Manager, runtime *pluginAsyncRuntime, mode, keys string) tea.Cmd {
+	return func() tea.Msg {
+		handled, pending, err := mgr.DispatchKey(runtime, mode, keys)
+		return pluginKeyDispatchResultMsg{Runtime: runtime, Handled: handled, Pending: pending, Err: err}
+	}
+}
+
 func (m *Model) triggerPluginEvents(events ...plugin.EventContext) tea.Cmd {
 	if m.pluginMgr == nil || len(events) == 0 {
 		return nil
 	}
-
-	runtime := newPluginRuntime(m)
-	m.pluginMgr.SetRuntime(runtime)
-	defer m.pluginMgr.ClearRuntime()
-
-	var firstErr error
-	for _, event := range events {
-		ctx := m.enrichPluginEventContext(event)
-		if ctx.Event == "" {
-			continue
-		}
-		if err := m.pluginMgr.TriggerEvent(ctx.Event, ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		m.status = fmt.Sprintf("Plugin event error: %v", firstErr)
-	}
-	return runtime.command()
+	// This command only posts an event message. Lua itself runs in the next
+	// worker command, after Update has returned; callbacks never execute in a
+	// rendering or input-routing frame.
+	return pluginEventCmd(events...)
 }
 
 func (m *Model) enrichPluginEventContext(ctx plugin.EventContext) plugin.EventContext {

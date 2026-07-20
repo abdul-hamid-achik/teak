@@ -2,8 +2,10 @@ package overlay
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
@@ -182,6 +184,27 @@ func TestPickerView(t *testing.T) {
 	}
 }
 
+func TestPickerTruncatesUnicodeWithoutBreakingUTF8(t *testing.T) {
+	got := truncStr("archivo-áéí-漢字", 10)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated label is not valid UTF-8: %q", got)
+	}
+	if lipgloss.Width(got) > 10 {
+		t.Fatalf("truncated label width = %d, want <= 10", lipgloss.Width(got))
+	}
+}
+
+func TestPickerTinyTerminalUsesPositiveInputAndContentWidths(t *testing.T) {
+	p := newTestPicker()
+	p.SetSize(4, 3)
+	if p.input.Width() < 1 {
+		t.Fatalf("input width = %d, want at least one cell", p.input.Width())
+	}
+	if view := p.View(); view == "" {
+		t.Fatal("tiny terminal picker view must remain renderable")
+	}
+}
+
 func TestPickerNavigationBounds(t *testing.T) {
 	// Test with 2 items — cursor should clamp at 0 and 1
 	p := NewPicker("Test", []PickerItem{
@@ -203,6 +226,46 @@ func TestPickerNavigationBounds(t *testing.T) {
 	p = o.(*Picker)
 	if p.Cursor() != 1 {
 		t.Errorf("cursor should clamp at 1, got %d", p.Cursor())
+	}
+}
+
+func TestPickerVisibleRangeIsBoundedToRenderedItems(t *testing.T) {
+	items := make([]PickerItem, 20_000)
+	for i := range items {
+		items[i] = PickerItem{Label: "item"}
+	}
+	p := NewPicker("Test", items, ui.DefaultTheme(), "picker-visible")
+	p.SetSize(80, 24)
+	p.scrollY = 15_000
+
+	start, end := p.visibleRange()
+	if start != 15_000 {
+		t.Fatalf("visible start = %d, want 15000", start)
+	}
+	if got, want := end-start, p.visibleCount(); got != want {
+		t.Fatalf("visible range size = %d, want %d", got, want)
+	}
+}
+
+func TestPickerRefilterReusesResultCapacity(t *testing.T) {
+	items := make([]PickerItem, 20_000)
+	for i := range items {
+		items[i] = PickerItem{Label: "package-item"}
+	}
+	p := NewPicker("Test", items, ui.DefaultTheme(), "picker-capacity")
+	p.input.SetValue("pkg")
+	p.refilter()
+	if len(p.filtered) == 0 {
+		t.Fatal("expected matching picker items")
+	}
+	firstBackingItem := &p.filtered[0]
+
+	p.refilter()
+	if len(p.filtered) == 0 {
+		t.Fatal("expected matching picker items after refilter")
+	}
+	if &p.filtered[0] != firstBackingItem {
+		t.Fatal("refilter allocated a new result buffer instead of reusing capacity")
 	}
 }
 

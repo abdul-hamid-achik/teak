@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -13,9 +14,11 @@ import (
 	"teak/internal/ui"
 )
 
-// debounceTickMsg is sent after the debounce delay to trigger a search.
-type debounceTickMsg struct {
-	generation int
+// DebounceTickMsg is sent after the debounce delay to trigger a search. It is
+// exported because the root Bubble Tea model owns delivery of asynchronous
+// messages to the visible overlay.
+type DebounceTickMsg struct {
+	Generation int
 }
 
 // Mode indicates the search type.
@@ -61,32 +64,37 @@ type ReplaceAllMsg struct {
 }
 
 // SearchIndexingMsg is sent when semantic search starts indexing.
-type SearchIndexingMsg struct{}
+type SearchIndexingMsg struct {
+	Generation int
+}
 
 // SearchResultsMsg is sent when results arrive from a search.
 type SearchResultsMsg struct {
-	Results []Result
-	Err     error
+	Results    []Result
+	Err        error
+	Generation int
 }
 
 // Model is the search overlay model.
 type Model struct {
-	input       textinput.Model
-	mode        Mode
-	results     []Result
-	cursor      int
-	scrollY     int // scroll offset for results
-	theme       ui.Theme
-	width       int
-	height      int
-	rootDir     string
-	lastQuery   string
-	searching   bool
-	indexing    bool
-	indexed     bool // true after first successful semantic search
-	spinner     spinner.Model
-	errMsg      string
-	debounceGen int // generation counter for debounce
+	input         textinput.Model
+	mode          Mode
+	results       []Result
+	cursor        int
+	scrollY       int // scroll offset for results
+	theme         ui.Theme
+	width         int
+	height        int
+	rootDir       string
+	lastQuery     string
+	searching     bool
+	indexing      bool
+	indexed       bool // true after first successful semantic search
+	spinner       spinner.Model
+	errMsg        string
+	debounceGen   int // generation counter for debounce
+	searchContext context.Context
+	searchCancel  context.CancelFunc
 
 	replaceInput textinput.Model
 	showReplace  bool
@@ -152,6 +160,22 @@ func (m *Model) SetSize(width, height int) {
 	m.input.SetWidth(50)
 }
 
+// OverlayOrigin returns the top-left terminal cell used by View when it is
+// centered on a canvas of the provided size. App uses this to translate mouse
+// events from terminal coordinates to the overlay's local coordinates.
+func (m Model) OverlayOrigin(canvasWidth, canvasHeight int) (int, int) {
+	view := m.View()
+	x := (canvasWidth - lipgloss.Width(view)) / 2
+	y := (canvasHeight - len(strings.Split(view, "\n"))) / 2
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	return x, y
+}
+
 // headerLines returns the number of lines before results in the search overlay view.
 func (m Model) headerLines() int {
 	// mode toggle + blank + input + blank = 4 lines, plus border padding ~2
@@ -168,6 +192,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
+			m.cancelSearch()
 			return m, func() tea.Msg { return CloseSearchMsg{} }
 		case "enter":
 			if m.showReplace && m.focusedInput == 1 {
@@ -218,6 +243,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			} else {
 				m.mode = ModeText
 			}
+			// Invalidate any pending result for the previous mode before starting
+			// a search in the newly selected one.
+			m.debounceGen++
+			m.replaceSearchContext()
+			m.searching = m.input.Value() != ""
+			m.indexing = false
+			m.errMsg = ""
 			// Only re-search if there's a query
 			m.results = nil
 			m.cursor = 0
@@ -225,6 +257,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.input.Value() != "" {
 				return m, m.dispatchSearch()
 			}
+			m.cancelSearch()
 			return m, nil
 		case "up":
 			if m.showReplace && m.focusedInput == 1 {
@@ -289,6 +322,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case SearchIndexingMsg:
+		if msg.Generation != m.debounceGen {
+			return m, nil
+		}
 		m.indexing = true
 		return m, m.spinner.Tick
 
@@ -301,6 +337,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case SearchResultsMsg:
+		if msg.Generation != m.debounceGen {
+			return m, nil
+		}
+		m.cancelSearch()
 		m.searching = false
 		m.indexing = false
 		if msg.Err != nil {
@@ -317,8 +357,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.scrollY = 0
 		return m, nil
 
-	case debounceTickMsg:
-		if msg.generation == m.debounceGen {
+	case DebounceTickMsg:
+		if msg.Generation == m.debounceGen {
 			return m, m.dispatchSearch()
 		}
 		return m, nil
@@ -337,16 +377,25 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	query := m.input.Value()
 	if query != m.lastQuery {
 		m.lastQuery = query
+		// Each edit invalidates both pending debounce timers and any in-flight
+		// command. Searches are intentionally not allowed to replace results
+		// for newer input when they eventually finish.
+		m.debounceGen++
+		m.cancelSearch()
+		m.searching = query != ""
+		m.indexing = false
+		m.errMsg = ""
 		if query == "" {
 			m.results = nil
 			m.cursor = 0
+			m.scrollY = 0
 			return m, cmd
 		}
-		// Debounce: increment generation and schedule a tick
-		m.debounceGen++
+		m.replaceSearchContext()
+		// Debounce the current generation.
 		gen := m.debounceGen
 		debounceCmd := tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
-			return debounceTickMsg{generation: gen}
+			return DebounceTickMsg{Generation: gen}
 		})
 		return m, tea.Batch(cmd, debounceCmd)
 	}
@@ -369,15 +418,20 @@ func (m Model) doSearch() tea.Cmd {
 	}
 	mode := m.mode
 	rootDir := m.rootDir
+	generation := m.debounceGen
+	ctx := m.searchContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return func() tea.Msg {
 		var results []Result
 		var err error
 		if mode == ModeSemantic {
-			results, err = SemanticSearch(rootDir, query)
+			results, err = SemanticSearchContext(ctx, rootDir, query)
 		} else {
-			results, err = TextSearch(rootDir, query)
+			results, err = TextSearchContext(ctx, rootDir, query)
 		}
-		return SearchResultsMsg{Results: results, Err: err}
+		return SearchResultsMsg{Results: results, Err: err, Generation: generation}
 	}
 }
 
@@ -388,19 +442,37 @@ func (m Model) doSearchSemantic() tea.Cmd {
 		return nil
 	}
 	rootDir := m.rootDir
+	generation := m.debounceGen
+	ctx := m.searchContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !m.indexed {
 		return tea.Sequence(
-			func() tea.Msg { return SearchIndexingMsg{} },
+			func() tea.Msg { return SearchIndexingMsg{Generation: generation} },
 			func() tea.Msg {
-				results, err := SemanticSearch(rootDir, query)
-				return SearchResultsMsg{Results: results, Err: err}
+				results, err := SemanticSearchContext(ctx, rootDir, query)
+				return SearchResultsMsg{Results: results, Err: err, Generation: generation}
 			},
 		)
 	}
 	return func() tea.Msg {
-		results, err := SemanticSearch(rootDir, query)
-		return SearchResultsMsg{Results: results, Err: err}
+		results, err := SemanticSearchContext(ctx, rootDir, query)
+		return SearchResultsMsg{Results: results, Err: err, Generation: generation}
 	}
+}
+
+func (m *Model) cancelSearch() {
+	if m.searchCancel != nil {
+		m.searchCancel()
+	}
+	m.searchContext = nil
+	m.searchCancel = nil
+}
+
+func (m *Model) replaceSearchContext() {
+	m.cancelSearch()
+	m.searchContext, m.searchCancel = context.WithCancel(context.Background())
 }
 
 // maxVisibleResults returns the number of result lines visible in the overlay.

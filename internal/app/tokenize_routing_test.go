@@ -45,6 +45,7 @@ func TestRetokenizeTickRoutesToOwningEditorAfterTabSwitch(t *testing.T) {
 	}
 	// Give B the same buffer version as A. Its own tick is deliberately not run.
 	editorB, _ = editorB.Update(tea.PasteMsg{Content: "other "})
+	expectedBCache := editorB.Highlighter.LineCount()
 	model = installTokenizeRoutingEditors(model, editorA, editorB, 1)
 
 	updatedModel, tokenizeCmd := model.Update(tickA())
@@ -58,8 +59,8 @@ func TestRetokenizeTickRoutesToOwningEditorAfterTabSwitch(t *testing.T) {
 	if got := updated.editors[0].Highlighter.LineCount(); got <= 60 {
 		t.Errorf("owner cache has %d lines, want full retokenization", got)
 	}
-	if got := updated.editors[1].Highlighter.LineCount(); got != 60 {
-		t.Errorf("active non-owner cache has %d lines, want preserved 60-line prefix", got)
+	if got := updated.editors[1].Highlighter.LineCount(); got != expectedBCache {
+		t.Errorf("active non-owner cache has %d lines, want preserved %d-line state", got, expectedBCache)
 	}
 }
 

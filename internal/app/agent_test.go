@@ -30,11 +30,11 @@ func TestAgentPanelWidth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := Model{
+			m := testModel(modelState{
 				width:     tt.width,
 				showAgent: tt.showAgent,
 				showTree:  tt.showTree,
-			}
+			})
 			got := m.agentPanelWidth()
 			if got != tt.want {
 				t.Errorf("agentPanelWidth() = %d, want %d (width=%d, showAgent=%v, showTree=%v)",

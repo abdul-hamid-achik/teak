@@ -3,6 +3,7 @@ package editor
 import (
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -130,11 +131,11 @@ func (c ContextMenu) View() string {
 		if item.Label == "" {
 			continue // separator
 		}
-		if len(item.Label) > maxLabelW {
-			maxLabelW = len(item.Label)
+		if width := ansi.StringWidth(item.Label); width > maxLabelW {
+			maxLabelW = width
 		}
-		if len(item.Shortcut) > maxShortcutW {
-			maxShortcutW = len(item.Shortcut)
+		if width := ansi.StringWidth(item.Shortcut); width > maxShortcutW {
+			maxShortcutW = width
 		}
 	}
 
@@ -148,6 +149,15 @@ func (c ContextMenu) View() string {
 	}
 	if totalWidth > 50 {
 		totalWidth = 50
+	}
+	shortcutColumnWidth := 0
+	labelColumnWidth := totalWidth - 4
+	if maxShortcutW > 0 {
+		// Two outer spaces, a two-cell gap, and the shortcut column. Keep
+		// every calculation in terminal cells: len() is wrong for CJK, emoji
+		// and combining characters and made the popup wider than its hit box.
+		shortcutColumnWidth = min(maxShortcutW, max(0, totalWidth-6))
+		labelColumnWidth = max(0, totalWidth-6-shortcutColumnWidth)
 	}
 
 	var sb strings.Builder
@@ -165,24 +175,14 @@ func (c ContextMenu) View() string {
 		}
 
 		// Build line: "  Label          Shortcut  "
-		var line string
-		if maxShortcutW > 0 && item.Shortcut != "" {
-			gap := totalWidth - len(item.Label) - len(item.Shortcut) - 4
-			if gap < 2 {
-				gap = 2
-			}
-			line = "  " + item.Label + strings.Repeat(" ", gap) + item.Shortcut + "  "
-		} else {
-			line = "  " + item.Label
-			if len(line) < totalWidth {
-				line += strings.Repeat(" ", totalWidth-len(line))
-			}
+		label := ansi.Truncate(item.Label, labelColumnWidth, "")
+		labelPadding := max(0, labelColumnWidth-ansi.StringWidth(label))
+		line := "  " + label + strings.Repeat(" ", labelPadding)
+		if maxShortcutW > 0 {
+			shortcut := ansi.Truncate(item.Shortcut, shortcutColumnWidth, "")
+			line += "  " + shortcut + strings.Repeat(" ", max(0, shortcutColumnWidth-ansi.StringWidth(shortcut)))
 		}
-
-		// Pad to width
-		if len(line) < totalWidth {
-			line += strings.Repeat(" ", totalWidth-len(line))
-		}
+		line += "  "
 
 		switch {
 		case i == c.Cursor && !item.Disabled:

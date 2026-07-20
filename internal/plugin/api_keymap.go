@@ -128,7 +128,19 @@ func registerKeybinding(L *lua.LState, mode, keys string, action lua.LValue, opt
 	pluginKeymaps.mu.Lock()
 	defer pluginKeymaps.mu.Unlock()
 
-	modeBindings := pluginKeymaps.ensureStateMode(L, mode)
+	stateBindings := pluginKeymaps.states[L]
+	modeBindings := stateBindings[mode]
+	if _, replacing := modeBindings[keys]; !replacing {
+		total := 0
+		for _, bindings := range stateBindings {
+			total += len(bindings)
+		}
+		if total >= maxPluginKeymaps {
+			return fmt.Errorf("keymap resource limit reached (max %d)", maxPluginKeymaps)
+		}
+	}
+
+	modeBindings = pluginKeymaps.ensureStateMode(L, mode)
 	modeBindings[keys] = keymapBinding{
 		action:      action,
 		description: description,

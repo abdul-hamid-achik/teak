@@ -27,7 +27,7 @@ func TestAgentWriteDecisionHonorsRestrictiveUmaskForNewFiles(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	if _, err := runAgentWriteDecision(t, Model{rootDir: root}, decision); err != nil {
+	if _, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision); err != nil {
 		t.Fatalf("accepted write error = %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestAgentWriteDecisionPreservesExistingFileMode(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	if _, err := runAgentWriteDecision(t, Model{rootDir: root}, decision); err != nil {
+	if _, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision); err != nil {
 		t.Fatalf("accepted write error = %v", err)
 	}
 

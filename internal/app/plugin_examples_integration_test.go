@@ -35,16 +35,24 @@ func installExamplePlugin(t *testing.T, name string) {
 		}
 		to, err := os.Create(filepath.Join(destination, entry.Name()))
 		if err != nil {
-			from.Close()
+			if closeErr := from.Close(); closeErr != nil {
+				t.Fatalf("Close(%q): %v", entry.Name(), closeErr)
+			}
 			t.Fatalf("Create(%q): %v", entry.Name(), err)
 		}
 		if _, err := io.Copy(to, from); err != nil {
-			to.Close()
-			from.Close()
+			if closeErr := to.Close(); closeErr != nil {
+				t.Fatalf("Close(%q): %v", entry.Name(), closeErr)
+			}
+			if closeErr := from.Close(); closeErr != nil {
+				t.Fatalf("Close(%q): %v", entry.Name(), closeErr)
+			}
 			t.Fatalf("Copy(%q): %v", entry.Name(), err)
 		}
 		if err := to.Close(); err != nil {
-			from.Close()
+			if closeErr := from.Close(); closeErr != nil {
+				t.Fatalf("Close(%q): %v", entry.Name(), closeErr)
+			}
 			t.Fatalf("Close(%q): %v", entry.Name(), err)
 		}
 		if err := from.Close(); err != nil {
@@ -69,6 +77,7 @@ func newModelWithExamplePlugins(t *testing.T, names ...string) Model {
 	if err != nil {
 		t.Fatalf("NewModel(): %v", err)
 	}
+	loadPluginsForTest(t, &model)
 	t.Cleanup(model.cleanup)
 	model.focus = FocusEditor
 	return model
@@ -103,12 +112,9 @@ func TestShippedPluginExamplesDriveLiveEditorBehavior(t *testing.T) {
 	t.Run("autopairs mapping and command insert a pair and keep the cursor inside", func(t *testing.T) {
 		model := newModelWithExamplePlugins(t, "autopairs")
 
-		updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
-		model = updated.(Model)
-		updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
-		model = updated.(Model)
-		updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 'p', Text: "p"}))
-		model = updated.(Model)
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'p', Text: "p"}))
 		if got := model.activeEditor().Buffer.Content(); got != "()" {
 			t.Fatalf("content after <leader>ap = %q, want %q", got, "()")
 		}
@@ -128,12 +134,9 @@ func TestShippedPluginExamplesDriveLiveEditorBehavior(t *testing.T) {
 	t.Run("statusline mapping command and cursor autocmd update the live status", func(t *testing.T) {
 		model := newModelWithExamplePlugins(t, "statusline")
 
-		updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
-		model = updated.(Model)
-		updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
-		model = updated.(Model)
-		updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
-		model = updated.(Model)
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 's', Text: "s"}))
 		if got := model.status; !strings.Contains(got, "[No Name] | 1:1") {
 			t.Fatalf("status after <leader>ss = %q", got)
 		}
@@ -143,8 +146,7 @@ func TestShippedPluginExamplesDriveLiveEditorBehavior(t *testing.T) {
 			t.Fatalf("status after command = %q", got)
 		}
 
-		updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
-		model = updated.(Model)
+		model = updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 		if got := model.status; !strings.Contains(got, "[No Name] | 1:2") {
 			t.Fatalf("status after CursorMoved autocmd = %q", got)
 		}

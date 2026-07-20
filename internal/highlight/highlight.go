@@ -30,10 +30,28 @@ type ViewportSnapshot struct {
 	ViewEnd   int
 }
 
+// TokenBatch carries a contiguous tokenized range without padding it to the
+// document's total line count. Viewport work must stay proportional to what is
+// visible: padding a 64-million-line generated file would otherwise allocate
+// well over a gigabyte of empty slice headers.
+type TokenBatch struct {
+	StartLine  int
+	Lines      [][]StyledToken
+	TotalLines int
+}
+
+type tokenRange struct {
+	start int
+	end   int
+}
+
 // Highlighter provides syntax highlighting for a file.
 type Highlighter struct {
 	lexer          chroma.Lexer
 	lines          [][]StyledToken
+	sparseLines    map[int][]StyledToken
+	lineCount      int
+	coveredRanges  []tokenRange
 	dirty          bool
 	styleMap       map[chroma.TokenType]lipgloss.Style
 	theme          ui.Theme
@@ -62,6 +80,9 @@ func New(filename string, theme ui.Theme) *Highlighter {
 // Tokenize processes the full buffer content and caches per-line tokens.
 func (h *Highlighter) Tokenize(content []byte) {
 	h.lines = h.tokenizeContent(content, -1, -1)
+	h.sparseLines = nil
+	h.lineCount = len(h.lines)
+	h.coveredRanges = []tokenRange{{start: 0, end: len(h.lines)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(h.lines)
 	h.dirty = false
@@ -168,30 +189,63 @@ func CaptureViewport(rope *text.Rope, viewStart, viewEnd int) ViewportSnapshot {
 	}
 }
 
-// TokenizeViewportSnapshot tokenizes a snapshot captured by CaptureViewport.
-// It never reads a Buffer or Rope, so it is safe to run in a tea.Cmd.
-func (h *Highlighter) TokenizeViewportSnapshot(ctx context.Context, snapshot ViewportSnapshot) ([][]StyledToken, bool) {
+// TokenizeViewportSnapshotBatch tokenizes a snapshot captured by
+// CaptureViewport. It never reads a Buffer or Rope, so it is safe to run in a
+// tea.Cmd, and returns only the captured range rather than padding to every
+// source line.
+func (h *Highlighter) TokenizeViewportSnapshotBatch(ctx context.Context, snapshot ViewportSnapshot) (TokenBatch, bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, false
+		return TokenBatch{}, false
 	}
 	if snapshot.LineCount == 0 {
-		return nil, true
+		return TokenBatch{}, true
 	}
 
 	// Tokenize the extracted content.
 	tokens, complete := h.tokenizeContentContext(ctx, snapshot.Content, snapshot.ViewStart-snapshot.StartLine, snapshot.ViewEnd-snapshot.StartLine)
 	if !complete {
-		return nil, false
+		return TokenBatch{}, false
 	}
 
-	// Pad result to match buffer line count
-	result := make([][]StyledToken, snapshot.LineCount)
-	for i := range tokens {
-		if snapshot.StartLine+i < snapshot.LineCount {
-			result[snapshot.StartLine+i] = tokens[i]
+	// streamTokenizeContext starts at the beginning of the snapshot so the
+	// lexer can establish state for multiline constructs. Its output therefore
+	// contains nil placeholders before the actual viewport context. They are
+	// not tokenized lines and must not become cache coverage: doing so makes a
+	// later scroll through that gap incorrectly skip a required retokenization.
+	const tokenizeMargin = 50
+	viewStart := snapshot.ViewStart - snapshot.StartLine
+	viewEnd := snapshot.ViewEnd - snapshot.StartLine
+	rangeStart := max(0, viewStart-tokenizeMargin)
+	rangeEnd := max(rangeStart, viewEnd+tokenizeMargin)
+	if rangeStart > len(tokens) {
+		rangeStart = len(tokens)
+	}
+	if rangeEnd > len(tokens) {
+		rangeEnd = len(tokens)
+	}
+
+	return TokenBatch{
+		StartLine:  snapshot.StartLine + rangeStart,
+		Lines:      tokens[rangeStart:rangeEnd],
+		TotalLines: snapshot.LineCount,
+	}, true
+}
+
+// TokenizeViewportSnapshot preserves the older padded return shape for callers
+// that need it. Editor commands use TokenizeViewportSnapshotBatch so opening a
+// very large file never allocates a document-sized sparse slice.
+func (h *Highlighter) TokenizeViewportSnapshot(ctx context.Context, snapshot ViewportSnapshot) ([][]StyledToken, bool) {
+	batch, complete := h.TokenizeViewportSnapshotBatch(ctx, snapshot)
+	if !complete {
+		return nil, false
+	}
+	result := make([][]StyledToken, batch.TotalLines)
+	for i, line := range batch.Lines {
+		if at := batch.StartLine + i; at >= 0 && at < len(result) {
+			result[at] = line
 		}
 	}
 
@@ -201,6 +255,9 @@ func (h *Highlighter) TokenizeViewportSnapshot(ctx context.Context, snapshot Vie
 // SetLines sets cached lines from a full tokenization result, replacing the cache entirely.
 func (h *Highlighter) SetLines(lines [][]StyledToken) {
 	h.lines = lines
+	h.sparseLines = nil
+	h.lineCount = len(lines)
+	h.coveredRanges = []tokenRange{{start: 0, end: len(lines)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(lines)
 	h.dirty = false
@@ -210,31 +267,35 @@ func (h *Highlighter) SetLines(lines [][]StyledToken) {
 // existing cache. Lines with tokens in the new result overwrite old data;
 // lines that are nil/empty in the new result keep their old cached tokens.
 func (h *Highlighter) MergeLines(lines [][]StyledToken) {
-	if h.lines == nil {
-		h.lines = lines
-		h.tokenizedStart = 0
-		h.tokenizedEnd = len(lines)
-		h.dirty = false
-		return
-	}
+	h.MergeBatch(TokenBatch{Lines: lines, TotalLines: len(lines)})
+}
 
-	// Extend cache if the new result covers more lines
-	if len(lines) > len(h.lines) {
-		extended := make([][]StyledToken, len(lines))
-		copy(extended, h.lines)
-		h.lines = extended
+// MergeBatch merges a viewport result without resizing the cache to source
+// line count. Prefix highlighting may remain in h.lines while distant viewport
+// ranges live in a sparse map until a bounded full pass replaces the cache.
+func (h *Highlighter) MergeBatch(batch TokenBatch) {
+	if batch.TotalLines > h.lineCount {
+		h.lineCount = batch.TotalLines
 	}
+	if h.sparseLines == nil {
+		h.sparseLines = make(map[int][]StyledToken)
+	}
+	h.addCoveredRange(batch.StartLine, batch.StartLine+len(batch.Lines))
 
 	// Track the actual range of tokenized lines
 	mergedStart := -1
 	mergedEnd := -1
-	for i, line := range lines {
+	for i, line := range batch.Lines {
 		if len(line) > 0 {
-			h.lines[i] = line
-			if mergedStart == -1 {
-				mergedStart = i
+			lineNum := batch.StartLine + i
+			if lineNum < 0 || (batch.TotalLines > 0 && lineNum >= batch.TotalLines) {
+				continue
 			}
-			mergedEnd = i + 1
+			h.sparseLines[lineNum] = line
+			if mergedStart == -1 {
+				mergedStart = lineNum
+			}
+			mergedEnd = lineNum + 1
 		}
 	}
 
@@ -248,6 +309,53 @@ func (h *Highlighter) MergeLines(lines [][]StyledToken) {
 		}
 	}
 	h.dirty = false
+}
+
+func (h *Highlighter) addCoveredRange(start, end int) {
+	if end <= start {
+		return
+	}
+	merged := tokenRange{start: start, end: end}
+	ranges := make([]tokenRange, 0, len(h.coveredRanges)+1)
+	inserted := false
+	for _, existing := range h.coveredRanges {
+		if existing.end < merged.start {
+			ranges = append(ranges, existing)
+			continue
+		}
+		if merged.end < existing.start {
+			if !inserted {
+				ranges = append(ranges, merged)
+				inserted = true
+			}
+			ranges = append(ranges, existing)
+			continue
+		}
+		merged.start = min(merged.start, existing.start)
+		merged.end = max(merged.end, existing.end)
+	}
+	if !inserted {
+		ranges = append(ranges, merged)
+	}
+	h.coveredRanges = ranges
+}
+
+// CoversRange reports whether every line in [start, end) has been tokenized.
+// It deliberately tracks disjoint sparse viewport batches rather than treating
+// their min/max as one continuous range with hidden cache gaps.
+func (h *Highlighter) CoversRange(start, end int) bool {
+	if end <= start {
+		return true
+	}
+	for _, covered := range h.coveredRanges {
+		if covered.start > start {
+			return false
+		}
+		if covered.end >= end {
+			return true
+		}
+	}
+	return false
 }
 
 // TokenizedRange returns the range of lines that have been tokenized.
@@ -274,6 +382,9 @@ func (h *Highlighter) TokenizePrefix(content []byte, maxLines int) {
 
 	result, _ := h.streamTokenizeContext(context.Background(), string(content[:end]), -1, -1)
 	h.lines = result
+	h.sparseLines = nil
+	h.lineCount = len(result)
+	h.coveredRanges = []tokenRange{{start: 0, end: len(result)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(result)
 	h.dirty = false
@@ -380,7 +491,13 @@ func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string,
 // Line returns the styled tokens for a given line number (0-based).
 // Returns nil if the line hasn't been tokenized.
 func (h *Highlighter) Line(lineNum int) []StyledToken {
-	if h.lines == nil || lineNum < 0 || lineNum >= len(h.lines) {
+	if lineNum < 0 {
+		return nil
+	}
+	if line, ok := h.sparseLines[lineNum]; ok {
+		return line
+	}
+	if h.lines == nil || lineNum >= len(h.lines) {
 		return nil
 	}
 	return h.lines[lineNum]
@@ -388,14 +505,24 @@ func (h *Highlighter) Line(lineNum int) []StyledToken {
 
 // LineCount returns the number of tokenized lines.
 func (h *Highlighter) LineCount() int {
-	if h.lines == nil {
-		return 0
+	if h.lineCount > 0 {
+		return h.lineCount
 	}
-	return len(h.lines)
+	return 0
 }
 
 // Invalidate marks the cached tokens as stale.
 func (h *Highlighter) Invalidate() {
+	// Do not retain sparse lines or coverage across an edit. Keeping either
+	// makes a later return to the same viewport render old tokens and tells the
+	// editor that a range has already been refreshed. Clearing maps/slices is
+	// constant-time and avoids any allocation proportional to document size.
+	h.lines = nil
+	h.sparseLines = nil
+	h.lineCount = 0
+	h.coveredRanges = nil
+	h.tokenizedStart = -1
+	h.tokenizedEnd = -1
 	h.dirty = true
 }
 

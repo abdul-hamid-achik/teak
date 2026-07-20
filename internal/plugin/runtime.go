@@ -81,6 +81,12 @@ func clearRuntimeForState(L *lua.LState) {
 
 // SetRuntime installs a runtime bridge for all currently loaded plugins.
 func (m *Manager) SetRuntime(runtime Runtime) {
+	m.luaMu.Lock()
+	defer m.luaMu.Unlock()
+	m.setRuntimeLocked(runtime)
+}
+
+func (m *Manager) setRuntimeLocked(runtime Runtime) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, plugin := range m.plugins {
@@ -90,9 +96,35 @@ func (m *Manager) SetRuntime(runtime Runtime) {
 
 // ClearRuntime removes the runtime bridge from all currently loaded plugins.
 func (m *Manager) ClearRuntime() {
+	m.luaMu.Lock()
+	defer m.luaMu.Unlock()
+	m.clearRuntimeLocked()
+}
+
+func (m *Manager) clearRuntimeLocked() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, plugin := range m.plugins {
 		clearRuntimeForState(plugin.State)
 	}
+}
+
+// DispatchKey serializes a key callback with its runtime bridge installed.
+// It is intended for a tea.Cmd: all model-facing work must be recorded by the
+// Runtime implementation and applied later on the Bubble Tea update goroutine.
+func (m *Manager) DispatchKey(runtime Runtime, mode, keys string) (handled bool, pending bool, err error) {
+	m.luaMu.Lock()
+	defer m.luaMu.Unlock()
+	m.setRuntimeLocked(runtime)
+	defer m.clearRuntimeLocked()
+	return m.handleKeyLocked(mode, keys)
+}
+
+// DispatchEvent serializes an event callback with its runtime bridge installed.
+func (m *Manager) DispatchEvent(runtime Runtime, event string, ctx EventContext) error {
+	m.luaMu.Lock()
+	defer m.luaMu.Unlock()
+	m.setRuntimeLocked(runtime)
+	defer m.clearRuntimeLocked()
+	return m.triggerEventLocked(event, ctx)
 }

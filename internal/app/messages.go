@@ -1,9 +1,45 @@
 package app
 
 import (
+	"teak/internal/config"
 	"teak/internal/dap"
+	"teak/internal/filetree"
 	"teak/internal/lsp"
 )
+
+// treeLoadedMsg transfers the initial directory listing to the model after
+// startup. NewModel intentionally creates only an empty, render-safe tree.
+type treeLoadedMsg struct {
+	Tree       filetree.Model
+	Generation uint64
+}
+
+// treeRefreshDebounceMsg and treeRefreshResultMsg keep filesystem rescans out
+// of Bubble Tea's Update loop. Generation makes a late read from a burst of
+// watcher events harmless.
+type treeRefreshDebounceMsg struct {
+	Generation uint64
+}
+
+type treeRefreshResultMsg struct {
+	Generation uint64
+	Refresh    filetree.RefreshResult
+	Err        error
+}
+
+// settingsSaveResultMsg returns Settings persistence to the root model. Values
+// are applied only after the write succeeds.
+type settingsSaveResultMsg struct {
+	Config config.Config
+	Err    error
+}
+
+// settingsDiscardMsg is emitted only after the user confirms that edits made
+// in the Settings overlay should be abandoned.
+type settingsDiscardMsg struct{}
+
+// settingsKeepEditingMsg keeps Settings open after its discard confirmation.
+type settingsKeepEditingMsg struct{}
 
 // ============================================================================
 // LSP Messages
@@ -24,6 +60,24 @@ type lspSymbolPickerMsg struct {
 	Symbol lsp.DocumentSymbol
 }
 
+// lspCodeActionPickerMsg preserves the request identity until the user makes a
+// selection. The document is revalidated at selection time so a delayed picker
+// cannot apply edits computed for an older buffer version.
+type lspCodeActionPickerMsg struct {
+	Action   lsp.CodeAction
+	Metadata lsp.DocumentRequestMetadata
+}
+
+// lspCodeActionCommandResultMsg returns a user-selected server command to the
+// Bubble Tea loop. Generation plus document metadata make late responses
+// harmless after another action, edit, or tab change supersedes it.
+type lspCodeActionCommandResultMsg struct {
+	Generation uint64
+	Metadata   lsp.DocumentRequestMetadata
+	Title      string
+	Err        error
+}
+
 // ============================================================================
 // DAP (Debug Adapter Protocol) Messages
 // ============================================================================
@@ -35,8 +89,28 @@ type dapMsg struct {
 
 // debugStateMsg carries fetched debug state back to Update.
 type debugStateMsg struct {
-	Frames    []dap.StackFrame
-	Variables []dap.Variable
+	Generation uint64
+	Frames     []dap.StackFrame
+	Variables  []dap.Variable
+}
+
+// debugStartResultMsg and debugStopResultMsg return blocking DAP lifecycle
+// operations to the Bubble Tea event loop.
+type debugStartResultMsg struct {
+	Generation uint64
+	Err        error
+}
+
+type debugStopResultMsg struct {
+	Generation uint64
+	Status     string
+}
+
+// debugActionResultMsg returns a Continue/Step request to the event loop.
+type debugActionResultMsg struct {
+	Generation uint64
+	Action     debugAction
+	Err        error
 }
 
 // ============================================================================
@@ -81,6 +155,7 @@ type agentWriteErrorMsg struct {
 type FileListMsg struct {
 	Files      []string
 	Generation int
+	Err        error
 }
 
 // ============================================================================

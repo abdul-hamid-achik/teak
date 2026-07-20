@@ -6,14 +6,11 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"teak/internal/agent"
-	"teak/internal/dap"
 	"teak/internal/editor"
 	"teak/internal/overlay"
 	"teak/internal/search"
 	"teak/internal/text"
-	"teak/internal/ui"
 )
 
 // Input routing is intentionally kept in the app package: Model remains the
@@ -28,6 +25,10 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 		updated, cmd := m.unsavedConfirm.Update(msg)
 		if updated.IsDismissed() {
 			m.unsavedConfirm = nil
+			switch msg.String() {
+			case "esc", "escape":
+				m.cancelSaveAsDestinationPrompt(m.saveAsDestinationPromptID)
+			}
 		} else {
 			m.unsavedConfirm = updated.(*overlay.Confirm)
 		}
@@ -154,37 +155,15 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "ctrl+q":
-		var dirtyNames []string
-		for i, ed := range m.editors {
-			if ed.Buffer.Dirty() {
-				name := filepath.Base(ed.Buffer.FilePath)
-				if name == "." || ed.Buffer.FilePath == "" {
-					name = m.tabBar.Tabs[i].Label
-				}
-				dirtyNames = append(dirtyNames, name)
-			}
-		}
-		if len(dirtyNames) > 0 {
-			message := fmt.Sprintf("You have %d unsaved file(s):", len(dirtyNames))
-			m.unsavedConfirm = overlay.NewConfirm(
-				"Unsaved Changes", message, dirtyNames,
-				[]overlay.Button{
-					{Label: "Save All & Quit", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAllAndQuitMsg{}},
-					{Label: "Quit Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: QuitWithoutSavingMsg{}},
-					{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
-				}, m.theme,
-			)
-			return m, nil, true
-		}
-		m.lspMgr.ShutdownAll()
-		m.cleanup()
-		return m, tea.Quit, true
+		updated, cmd := m.requestQuit()
+		return updated, cmd, true
 	case "ctrl+s":
 		if m.activeEditor() == nil {
 			return m, nil, true
 		}
 		buf := m.activeEditor().Buffer
 		if buf.FilePath == "" {
+			m.cancelActiveEditorDrag()
 			m.saveAsMode = true
 			m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
 			return m, nil, true
@@ -194,6 +173,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		if m.activeEditor() == nil {
 			return m, nil, true
 		}
+		m.cancelActiveEditorDrag()
 		m.saveAsMode = true
 		if m.activeEditor().Buffer.FilePath != "" {
 			m.saveAsInput = m.activeEditor().Buffer.FilePath
@@ -202,6 +182,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case "f1":
+		m.cancelActiveEditorDrag()
 		m.showHelp = true
 		m.helpM = editor.NewHelpModel(m.theme)
 		m.helpM.SetSize(m.width, m.height-2)
@@ -235,11 +216,13 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "ctrl+k":
 		if m.focus == FocusEditor {
-			return m, m.requestCodeActions(), true
+			model, cmd := m.requestCodeActions()
+			return model, cmd, true
 		}
 		return m, nil, true
 	case "f12":
-		return m, m.requestDefinition(), true
+		model, cmd := m.requestDefinition()
+		return model, cmd, true
 	case "ctrl+shift+[":
 		if ed := m.activeEditor(); ed != nil {
 			ed.Folds.Fold(ed.Buffer.Cursor.Line)
@@ -252,14 +235,14 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.setEditor(m.activeTab, *ed)
 		}
 		return m, nil, true
-	case "ctrl+shift+[0]":
+	case "ctrl+shift+0":
 		if ed := m.activeEditor(); ed != nil {
 			ed.Folds.FoldAll()
 			m.setEditor(m.activeTab, *ed)
 			m.status = "All regions folded"
 		}
 		return m, nil, true
-	case "ctrl+shift+[j]":
+	case "ctrl+shift+j":
 		if ed := m.activeEditor(); ed != nil {
 			ed.Folds.UnfoldAll()
 			m.setEditor(m.activeTab, *ed)
@@ -277,44 +260,16 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "ctrl+shift+o":
 		if m.focus == FocusEditor {
-			return m, m.requestDocumentSymbols(), true
+			model, cmd := m.requestDocumentSymbols()
+			return model, cmd, true
 		}
 		return m, nil, true
 	case "f5":
-		if m.activeEditor() != nil && m.activeEditor().Buffer.FilePath != "" {
-			program := m.activeEditor().Buffer.FilePath
-			debugConfig := dap.ConfigForProgram(program)
-			if debugConfig.Command == "" {
-				m.status = "No debugger configured for this file type"
-				return m, nil, true
-			}
-			if err := m.debugMgr.Start(debugConfig); err != nil {
-				m.status = fmt.Sprintf("Debug error: %v", err)
-				return m, nil, true
-			}
-			if err := m.debugMgr.Launch(); err != nil {
-				m.debugMgr.Stop()
-				m.status = fmt.Sprintf("Launch error: %v", err)
-				return m, nil, true
-			}
-			m.debuggerPanel.SetState(dap.StateRunning)
-			m.showTree = true
-			m.sidebarTab = SidebarDebugger
-			m.focus = FocusDebugger
-			m.status = "Debugging started"
-			m.relayout()
-			return m, m.syncAllBreakpointsToDAP(), true
-		}
-		return m, nil, true
+		model, cmd := m.handleDebugStart()
+		return model, cmd, true
 	case "shift+f5":
-		if m.debugMgr.IsRunning() {
-			m.debugMgr.Stop()
-			m.debuggerPanel.SetState(dap.StateInactive)
-			m.currentExecFile = ""
-			m.currentExecLine = -1
-			m.status = "Debugging stopped"
-		}
-		return m, nil, true
+		model, cmd := m.handleDebugStop("Debugging stopped")
+		return model, cmd, true
 	case "f9":
 		if ed := m.activeEditor(); ed != nil && ed.Buffer.FilePath != "" {
 			return m, m.toggleBreakpoint(ed.Buffer.FilePath, ed.Buffer.Cursor.Line), true
@@ -341,6 +296,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		model, cmd := m.newUntitledTab()
 		return model, cmd, true
 	case "ctrl+g":
+		m.cancelActiveEditorDrag()
 		m.goToLineMode = true
 		m.goToLineInput = ""
 		return m, nil, true
@@ -360,14 +316,12 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return model, cmd, true
 	case "ctrl+tab":
 		if len(m.editors) > 1 {
-			m.activeTab = (m.activeTab + 1) % len(m.editors)
-			m.tabBar.ActiveIdx = m.activeTab
+			m.activateTab((m.activeTab + 1) % len(m.editors))
 		}
 		return m, nil, true
 	case "ctrl+shift+tab":
 		if len(m.editors) > 1 {
-			m.activeTab = (m.activeTab - 1 + len(m.editors)) % len(m.editors)
-			m.tabBar.ActiveIdx = m.activeTab
+			m.activateTab((m.activeTab - 1 + len(m.editors)) % len(m.editors))
 		}
 		return m, nil, true
 	case "ctrl+j":
@@ -384,15 +338,14 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case "ctrl+,":
-		m.showSettings = true
-		m.settingsM.SetSize(m.width, m.height-4)
+		m.openSettingsOverlay()
 		return m, nil, true
 	case "f8":
 		if m.problemsPanel.ProblemCount() > 0 {
 			m.problemsPanel.SelectNext()
 			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
 				pos := text.Position{Line: prob.Line, Col: prob.Col}
-				m.pendingCursor = &pos
+				m.setPendingCursor(prob.FilePath, pos)
 				model, cmd := m.openFile(prob.FilePath)
 				updated := model.(Model)
 				updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
@@ -405,7 +358,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.problemsPanel.SelectPrev()
 			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
 				pos := text.Position{Line: prob.Line, Col: prob.Col}
-				m.pendingCursor = &pos
+				m.setPendingCursor(prob.FilePath, pos)
 				model, cmd := m.openFile(prob.FilePath)
 				updated := model.(Model)
 				updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
@@ -534,17 +487,5 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 	ed, cmd = ed.Update(msg)
 	m.setEditor(m.activeTab, ed)
 
-	if m.activeTab < len(m.tabBar.Tabs) {
-		m.tabBar.Tabs[m.activeTab].Dirty = ed.Buffer.Dirty()
-		if ed.Buffer.Dirty() && m.tabBar.Tabs[m.activeTab].Preview {
-			m.tabBar.Tabs[m.activeTab].Preview = false
-		}
-	}
-
-	if ed.Buffer.Version() != prevVersion && ed.Buffer.FilePath != "" {
-		if client := m.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
-			m.notifyLSPChange(client, &ed)
-		}
-	}
-	return m, tea.Batch(cmd, m.triggerEditorAutocmds(ed.Buffer.FilePath, prevVersion, ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor)), true
+	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)), true
 }

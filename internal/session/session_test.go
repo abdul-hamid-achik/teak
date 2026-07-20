@@ -1,12 +1,26 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestLoadFromPathContextHonorsCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := saveToPath(State{Version: 1}, path); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := loadFromPathContext(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("loadFromPathContext() error = %v, want context.Canceled", err)
+	}
+}
 
 // TestTabState tests TabState struct
 func TestTabState(t *testing.T) {
@@ -332,12 +346,12 @@ func TestSaveToPath_PreservesExistingFileOnTempWriteFailure(t *testing.T) {
 		t.Fatalf("initial save failed: %v", err)
 	}
 
-	oldWriteFile := writeFile
-	writeFile = func(string, []byte, os.FileMode) error {
+	oldWriteSessionData := writeSessionData
+	writeSessionData = func(*os.File, []byte) error {
 		return errors.New("write failed")
 	}
 	defer func() {
-		writeFile = oldWriteFile
+		writeSessionData = oldWriteSessionData
 	}()
 
 	updated := State{
@@ -765,10 +779,80 @@ func TestSavePermission(t *testing.T) {
 		t.Fatalf("Stat failed: %v", err)
 	}
 
-	// Check file permissions (should be 0o644)
-	expectedPerm := os.FileMode(0o644)
-	if info.Mode().Perm()&expectedPerm != expectedPerm {
-		t.Errorf("Expected permissions %o, got %o", expectedPerm, info.Mode().Perm()&0o777)
+	// Session data contains private paths and must not be group/world-readable.
+	expectedPerm := os.FileMode(0o600)
+	if info.Mode().Perm() != expectedPerm {
+		t.Errorf("Expected permissions %o, got %o", expectedPerm, info.Mode().Perm())
+	}
+}
+
+func TestSaveCreatesPrivateSessionDirectory(t *testing.T) {
+	testPath := filepath.Join(t.TempDir(), "private", "session.json")
+	if err := saveToPath(State{Version: 1}, testPath); err != nil {
+		t.Fatalf("saveToPath() error = %v", err)
+	}
+	info, err := os.Stat(filepath.Dir(testPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("session directory permissions = %o, want 700", got)
+	}
+}
+
+func TestSessionRejectsSymlinkDestinationAndInput(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(target, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := saveToPath(State{Version: 1}, link); err == nil {
+		t.Fatal("saveToPath() accepted a symlink destination")
+	}
+	if _, err := loadFromPath(link); err == nil {
+		t.Fatal("loadFromPath() accepted a symlink input")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != `{"version":1}` {
+		t.Errorf("symlink target changed: %q", got)
+	}
+}
+
+func TestStateValidateRejectsUnboundedOrInvalidPositions(t *testing.T) {
+	tests := []struct {
+		name  string
+		state State
+	}{
+		{"too many tabs", State{Tabs: make([]TabState, maxSessionTabs+1)}},
+		{"invalid active tab", State{ActiveTab: 1}},
+		{"negative cursor", State{Tabs: []TabState{{FilePath: "/a", CursorLine: -1}}}},
+		{"nul path", State{Tabs: []TabState{{FilePath: "/a\x00b"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.state.Validate(); err == nil {
+				t.Fatal("Validate() succeeded for invalid state")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsOversizedSession(t *testing.T) {
+	testPath := filepath.Join(t.TempDir(), "session.json")
+	oversized := `{"version":1,"root_dir":"` + strings.Repeat("x", maxSessionBytes) + `"}`
+	if err := os.WriteFile(testPath, []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadFromPath(testPath)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("loadFromPath() error = %v, want size-limit error", err)
 	}
 }
 

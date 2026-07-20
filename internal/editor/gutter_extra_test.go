@@ -35,6 +35,23 @@ func TestRenderGutterWithBreakpoints(t *testing.T) {
 	}
 }
 
+func TestGutterUsesASCIIControlsWhenNerdFontIsDisabled(t *testing.T) {
+	t.Setenv("TEAK_NO_NERD_FONT", "1")
+	theme := ui.DefaultTheme()
+	opts := &GutterOpts{Breakpoints: map[int]BreakpointState{0: BPActive}}
+
+	result, _ := RenderGutter(theme, 1, 0, 1, 0, nil, opts)
+	if !strings.Contains(result, "*") {
+		t.Fatalf("ASCII breakpoint marker missing from %q", result)
+	}
+	if strings.Contains(result, "\U000f0765") {
+		t.Fatalf("Nerd Font breakpoint marker present in %q", result)
+	}
+	if got := foldGlyph(">"); got != ">" {
+		t.Fatalf("foldGlyph(>) = %q, want ASCII arrow", got)
+	}
+}
+
 func TestRenderGutterWithExecLine(t *testing.T) {
 	theme := ui.DefaultTheme()
 	opts := &GutterOpts{

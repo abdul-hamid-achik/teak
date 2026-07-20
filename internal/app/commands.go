@@ -1,19 +1,23 @@
 package app
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/diff"
+	"teak/internal/git"
+	"teak/internal/text"
 )
 
 // FileSavedMsg is sent when a file has been saved successfully.
 type FileSavedMsg struct {
-	Path      string
-	RequestID int
+	Path             string
+	RequestID        int
+	WatcherWatermark uint64
 }
 
 // FileErrorMsg is sent when a file operation fails.
@@ -33,6 +37,18 @@ func SaveFileCmd(saveFn func() error, path string, requestID int) tea.Cmd {
 	}
 }
 
+// SaveSnapshotCmd writes an immutable rope snapshot. It deliberately never
+// touches a Buffer: save completion is reconciled on the Bubble Tea UI
+// goroutine, where later edits can remain dirty.
+func SaveSnapshotCmd(snapshot *text.Rope, path string, requestID int) tea.Cmd {
+	return func() tea.Msg {
+		if err := text.WriteRopeAtomically(path, snapshot); err != nil {
+			return FileErrorMsg{Path: path, RequestID: requestID, Err: err}
+		}
+		return FileSavedMsg{Path: path, RequestID: requestID}
+	}
+}
+
 // SwitchTabMsg requests switching to a specific tab.
 type SwitchTabMsg struct {
 	Index int
@@ -45,26 +61,102 @@ type CloseTabMsg struct {
 
 // FileLoadedMsg is sent when an async file read completes.
 type FileLoadedMsg struct {
-	Path     string
-	Data     []byte
-	TabIndex int  // which tab to populate
-	ForceNew bool // skip replaceable tab logic
+	Path      string
+	Data      []byte
+	Snapshot  *text.Rope // production loads prepare this off the UI goroutine; Data is legacy/test fallback
+	EditorID  uint64     // stable target identity; never an editor slice index
+	RequestID uint64     // monotonically increasing request identity
+	TabIndex  int        // legacy test-only fallback, ignored for identified requests
+	ForceNew  bool       // skip replaceable tab logic
 }
 
 // FileLoadErrorMsg is sent when an async file read fails.
 type FileLoadErrorMsg struct {
-	Path string
-	Err  error
+	Path      string
+	EditorID  uint64
+	RequestID uint64
+	Err       error
+}
+
+const maxEditorFileBytes int64 = 64 << 20
+
+var errEditorFileTooLarge = fmt.Errorf("file exceeds Teak's %d MiB editor limit", maxEditorFileBytes>>20)
+
+// errEditorFileNotRegular prevents an open request from blocking on a FIFO or
+// device. Editor buffers model finite files; directories and stream-like paths
+// have no safe bounded read contract here.
+var errEditorFileNotRegular = fmt.Errorf("editor input is not a regular file")
+
+// readEditorFile bounds memory before allocation. Stat catches sparse files
+// cheaply; the limited stream protects against a concurrently growing file.
+func readEditorFile(ctx context.Context, path string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := openEditorInput(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, _, err := readOpenedEditorFile(ctx, file, path, maxEditorFileBytes)
+	return data, err
+}
+
+// readOpenedEditorFile reads an already-opened input while preserving the
+// editor's regular-file and memory limits. The caller owns file and must close
+// it. Keeping this separate lets session restoration read through a pinned
+// os.Root instead of reopening a path that may have changed since validation.
+func readOpenedEditorFile(ctx context.Context, file *os.File, path string, limit int64) ([]byte, os.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if limit <= 0 {
+		return nil, nil, errEditorFileTooLarge
+	}
+	if info, err := file.Stat(); err != nil {
+		return nil, nil, err
+	} else {
+		if !info.Mode().IsRegular() {
+			return nil, info, fmt.Errorf("%w: %s", errEditorFileNotRegular, path)
+		}
+		if info.Size() > limit {
+			return nil, info, errEditorFileTooLarge
+		}
+		data, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, reader: file}, limit+1))
+		if err != nil {
+			return nil, info, err
+		}
+		if int64(len(data)) > limit {
+			return nil, info, errEditorFileTooLarge
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, info, err
+		}
+		return data, info, nil
+	}
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 // loadFileCmd returns a command that reads a file asynchronously.
-func loadFileCmd(path string, tabIndex int, forceNew bool) tea.Cmd {
+func loadFileCmd(ctx context.Context, path string, editorID, requestID uint64, forceNew bool) tea.Cmd {
 	return func() tea.Msg {
-		data, err := os.ReadFile(path)
+		data, err := readEditorFile(ctx, path)
 		if err != nil {
-			return FileLoadErrorMsg{Path: path, Err: err}
+			return FileLoadErrorMsg{Path: path, EditorID: editorID, RequestID: requestID, Err: err}
 		}
-		return FileLoadedMsg{Path: path, Data: data, TabIndex: tabIndex, ForceNew: forceNew}
+		// readEditorFile returned a fresh allocation owned by this command.
+		return FileLoadedMsg{Path: path, Snapshot: text.NewOwned(data), EditorID: editorID, RequestID: requestID, ForceNew: forceNew}
 	}
 }
 
@@ -76,10 +168,12 @@ type LspReadyMsg struct {
 
 // DiffLoadedMsg is sent when a diff has been computed.
 type DiffLoadedMsg struct {
-	Path     string
-	Lines    []diff.DiffLine
-	TabIndex int
-	Err      error
+	Path      string
+	Lines     []diff.DiffLine
+	EditorID  uint64
+	RequestID uint64
+	TabIndex  int // legacy test-only fallback
+	Err       error
 }
 
 // SaveAllAndQuitMsg is sent when the user confirms saving all dirty buffers before quitting.
@@ -105,40 +199,37 @@ type FindNextMsg struct{}
 type FindPrevMsg struct{}
 
 // loadDiffCmd runs git diff and parses the result.
-func loadDiffCmd(rootDir, relPath, status string, tabIndex int) tea.Cmd {
+func loadDiffCmd(ctx context.Context, rootDir, relPath, status string, editorID, requestID uint64) tea.Cmd {
 	return func() tea.Msg {
+		result := func(lines []diff.DiffLine, err error) tea.Msg {
+			return DiffLoadedMsg{Path: relPath, Lines: lines, EditorID: editorID, RequestID: requestID, Err: err}
+		}
 		absPath := filepath.Join(rootDir, relPath)
 
 		// Check if path is a directory — skip diff
 		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
-			return DiffLoadedMsg{Path: relPath, Err: fmt.Errorf("%s is a directory", relPath), TabIndex: tabIndex}
+			return result(nil, fmt.Errorf("%s is a directory", relPath))
 		}
 
 		// Untracked files: read file content directly, generate all-added lines
 		if status == "??" || status == "U" {
-			data, err := os.ReadFile(absPath)
+			data, err := readEditorFile(ctx, absPath)
 			if err != nil {
-				return DiffLoadedMsg{Path: relPath, Err: err, TabIndex: tabIndex}
+				return result(nil, err)
 			}
 			lines := diff.AllAddedLines(string(data))
-			return DiffLoadedMsg{Path: relPath, Lines: lines, TabIndex: tabIndex}
+			return result(lines, nil)
 		}
 
-		// Run git diff HEAD -- <file>
-		cmd := exec.Command("git", "diff", "HEAD", "--", relPath)
-		cmd.Dir = rootDir
-		out, err := cmd.Output()
+		out, err := git.DiffOutput(ctx, rootDir, relPath)
 		if err != nil {
-			// Try without HEAD for staged-only changes
-			cmd2 := exec.Command("git", "diff", "--", relPath)
-			cmd2.Dir = rootDir
-			out, err = cmd2.Output()
-			if err != nil {
-				return DiffLoadedMsg{Path: relPath, Err: err, TabIndex: tabIndex}
-			}
+			return result(nil, err)
+		}
+		if int64(len(out)) > maxEditorFileBytes {
+			return result(nil, fmt.Errorf("diff exceeds %d-byte limit", maxEditorFileBytes))
 		}
 
 		lines := diff.ParseUnifiedDiff(string(out))
-		return DiffLoadedMsg{Path: relPath, Lines: lines, TabIndex: tabIndex}
+		return result(lines, nil)
 	}
 }

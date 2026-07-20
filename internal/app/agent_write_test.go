@@ -43,6 +43,13 @@ func runAgentWriteDecision(t *testing.T, model Model, decision agent.WriteDecisi
 	}
 }
 
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
 func TestAgentWriteDecisionAcceptsWorkspaceFile(t *testing.T) {
 	root := t.TempDir()
 	responseCh := make(chan error, 1)
@@ -55,7 +62,7 @@ func TestAgentWriteDecisionAcceptsWorkspaceFile(t *testing.T) {
 		},
 	}
 
-	model, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	model, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if err != nil {
 		t.Fatalf("accepted write error = %v", err)
 	}
@@ -83,7 +90,7 @@ func TestAgentWriteDecisionAcceptsNewNestedWorkspaceFile(t *testing.T) {
 		},
 	}
 
-	_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if err != nil {
 		t.Fatalf("nested accepted write error = %v", err)
 	}
@@ -116,7 +123,7 @@ func TestAgentWriteDecisionsExecuteInDecisionOrder(t *testing.T) {
 		},
 	}
 
-	firstModelAny, firstCmd := Model{rootDir: root}.Update(first)
+	firstModelAny, firstCmd := testModel(modelState{rootDir: root}).Update(first)
 	firstModel := firstModelAny.(Model)
 	if firstCmd == nil {
 		t.Fatal("first write command = nil")
@@ -238,7 +245,7 @@ func TestAgentWriteDecisionDoesNotApplyCancelledProposal(t *testing.T) {
 		},
 	}
 
-	_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled write error = %v, want context.Canceled", err)
 	}
@@ -265,9 +272,7 @@ func TestAgentWriteAtomicRemainsConfinedAfterParentSwap(t *testing.T) {
 	if err := os.Rename(filepath.Join(root, "safe"), filepath.Join(root, "safe-old")); err != nil {
 		t.Fatalf("Rename(safe) error = %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "safe")); err != nil {
-		t.Fatalf("Symlink(outside) error = %v", err)
-	}
+	symlinkOrSkip(t, outside, filepath.Join(root, "safe"))
 
 	err = writeAgentFileAtomic(root, relativePath, []byte("escaped"))
 	if err == nil {
@@ -300,9 +305,7 @@ func TestAgentWriteUsesPinnedWorkspaceRootAfterRootPathSwap(t *testing.T) {
 	if err := os.Rename(rootPath, anchoredPath); err != nil {
 		t.Fatalf("Rename(workspace) error = %v", err)
 	}
-	if err := os.Symlink(outside, rootPath); err != nil {
-		t.Fatalf("Symlink(outside) error = %v", err)
-	}
+	symlinkOrSkip(t, outside, rootPath)
 
 	decision := agent.WriteDecisionMsg{
 		Accepted: true,
@@ -312,10 +315,10 @@ func TestAgentWriteUsesPinnedWorkspaceRootAfterRootPathSwap(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	_, err = runAgentWriteDecision(t, Model{
+	_, err = runAgentWriteDecision(t, testModel(modelState{
 		rootDir:        rootPath,
 		agentWriteRoot: pinnedRoot,
-	}, decision)
+	}), decision)
 	if err != nil {
 		t.Fatalf("pinned-root write error = %v", err)
 	}
@@ -347,7 +350,7 @@ func TestAgentWriteDecisionRejectsWithoutChangingFile(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if err == nil {
 		t.Fatal("rejected write error = nil")
 	}
@@ -378,9 +381,7 @@ func TestAgentWriteDecisionRejectsWorkspaceEscapes(t *testing.T) {
 	}
 
 	symlinkPath := filepath.Join(root, "outside-link")
-	if err := os.Symlink(outside, symlinkPath); err != nil {
-		t.Fatalf("Symlink(outside) error = %v", err)
-	}
+	symlinkOrSkip(t, outside, symlinkPath)
 
 	tests := []struct {
 		name string
@@ -402,7 +403,7 @@ func TestAgentWriteDecisionRejectsWorkspaceEscapes(t *testing.T) {
 					ResponseCh: make(chan error, 1),
 				},
 			}
-			_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+			_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 			if err == nil {
 				t.Fatalf("escaped write %q error = nil", tt.path)
 			}
@@ -428,9 +429,7 @@ func TestAgentWriteDecisionDoesNotCreateNestedPathThroughSymlink(t *testing.T) {
 	if err := os.MkdirAll(outside, 0o755); err != nil {
 		t.Fatalf("MkdirAll(outside) error = %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
-		t.Fatalf("Symlink(outside) error = %v", err)
-	}
+	symlinkOrSkip(t, outside, filepath.Join(root, "outside-link"))
 
 	decision := agent.WriteDecisionMsg{
 		Accepted: true,
@@ -440,7 +439,7 @@ func TestAgentWriteDecisionDoesNotCreateNestedPathThroughSymlink(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if err == nil {
 		t.Fatal("nested write through symlink error = nil")
 	}
@@ -455,9 +454,7 @@ func TestAgentWriteDecisionDoesNotFollowPredictableTempSymlink(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("sentinel"), 0o644); err != nil {
 		t.Fatalf("WriteFile(outside) error = %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "accepted.txt.tmp")); err != nil {
-		t.Fatalf("Symlink(temp path) error = %v", err)
-	}
+	symlinkOrSkip(t, outside, filepath.Join(root, "accepted.txt.tmp"))
 
 	decision := agent.WriteDecisionMsg{
 		Accepted: true,
@@ -467,7 +464,7 @@ func TestAgentWriteDecisionDoesNotFollowPredictableTempSymlink(t *testing.T) {
 			ResponseCh: make(chan error, 1),
 		},
 	}
-	_, err := runAgentWriteDecision(t, Model{rootDir: root}, decision)
+	_, err := runAgentWriteDecision(t, testModel(modelState{rootDir: root}), decision)
 	if err != nil {
 		t.Fatalf("accepted write error = %v", err)
 	}

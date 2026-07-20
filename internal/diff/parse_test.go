@@ -165,9 +165,9 @@ func TestAllAddedLines(t *testing.T) {
 
 func TestParseHunkHeader(t *testing.T) {
 	tests := []struct {
-		input     string
-		wantOld   int
-		wantNew   int
+		input   string
+		wantOld int
+		wantNew int
 	}{
 		{"@@ -1,3 +1,3 @@", 1, 1},
 		{"@@ -10,5 +20,7 @@ func foo()", 10, 20},

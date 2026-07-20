@@ -20,7 +20,7 @@ func (m *mockOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	}
 	return m, nil
 }
-func (m *mockOverlay) View() string       { return m.viewText }
+func (m *mockOverlay) View() string        { return m.viewText }
 func (m *mockOverlay) IsDismissed() bool   { return m.dismissed }
 func (m *mockOverlay) CapturesInput() bool { return m.captures }
 

@@ -250,6 +250,18 @@ func TestConfirmSetWidth(t *testing.T) {
 	}
 }
 
+func TestConfirmTinyWidthStillRendersForKeyboardUsers(t *testing.T) {
+	c := newTestConfirm()
+	c.SetWidth(1)
+	if view := c.View(); view == "" {
+		t.Fatal("tiny confirmation view must remain renderable")
+	}
+	o, _ := c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if got := o.(*Confirm).cursor; got != 1 {
+		t.Fatalf("keyboard navigation at tiny width selected %d, want 1", got)
+	}
+}
+
 func TestConfirmUnhandledMessage(t *testing.T) {
 	c := newTestConfirm()
 	o, cmd := c.Update(tea.FocusMsg{})

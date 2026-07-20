@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"teak/internal/acp"
 	"teak/internal/agent"
 	"teak/internal/overlay"
+	"teak/internal/text"
 	"teak/internal/ui"
 )
 
@@ -65,6 +67,9 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			m.relayout()
 		}
 	case acp.AgentPromptResponseMsg:
+		if m.acpMgr != nil && !m.acpMgr.IsCurrentPromptGeneration(inner.Generation) {
+			return m, m.listenACP()
+		}
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentSessionInfoMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
@@ -91,29 +96,93 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 	return m, m.listenACP()
 }
 
-// handleFileReadRequest reads file content from an open buffer or disk,
-// responding on the request channel. This runs in the Bubbletea loop
-// for goroutine safety (no racing with editor buffer mutations).
+// handleFileReadRequest captures only immutable editor state in Update. Path
+// resolution, Rope materialization, filtering, and disk I/O all run in the
+// returned command. Returning an empty acpMsg restarts the serial ACP listener
+// after the response has been delivered, bounding concurrent read work.
 func (m Model) handleFileReadRequest(req acp.FileReadRequestMsg) (tea.Model, tea.Cmd) {
-	// Check open buffers synchronously (safe: runs in Bubbletea loop)
+	ctx := req.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rootDir := req.RootDir
+	if rootDir == "" {
+		rootDir = m.rootDir
+	}
+
+	type openBufferSnapshot struct {
+		path string
+		rope *text.Rope
+	}
+	openBuffers := make([]openBufferSnapshot, 0, len(m.editors))
 	for i := range m.editors {
 		buf := m.editors[i].Buffer
-		if buf.FilePath == req.Path {
-			content := buf.Content()
-			if req.Line != nil || req.Limit != nil {
-				content = filterLines(content, req.Line, req.Limit)
-			}
-			req.ResultCh <- acp.FileReadResult{Content: content}
-			return m, m.listenACP()
+		if buf != nil && buf.FilePath != "" {
+			openBuffers = append(openBuffers, openBufferSnapshot{path: buf.FilePath, rope: buf.Rope()})
 		}
 	}
-	// Disk fallback in goroutine (no shared state accessed)
-	go func() {
-		content, err := acp.ReadFileFromDisk(req.Path, req.Line, req.Limit)
-		req.ResultCh <- acp.FileReadResult{Content: content, Err: err}
-	}()
 
-	return m, m.listenACP()
+	return m, func() tea.Msg {
+		requestedPath, pathErr := lexicalACPWorkspacePath(rootDir, req.Path)
+		if pathErr != nil {
+			respondFileRead(ctx, req.ResultCh, acp.FileReadResult{Err: pathErr})
+			return acpMsg{}
+		}
+		// Buffer lookup is purely lexical and uses immutable Rope snapshots. A
+		// symlink spelling deliberately falls through to the pinned disk
+		// reader, which performs authoritative confined validation below.
+		for _, buffer := range openBuffers {
+			bufferPath, err := filepath.Abs(buffer.path)
+			if err != nil || filepath.Clean(bufferPath) != requestedPath {
+				continue
+			}
+			content, filterErr := acp.FilterReadContent(buffer.rope.String(), req.Line, req.Limit)
+			respondFileRead(ctx, req.ResultCh, acp.FileReadResult{Content: content, Err: filterErr})
+			return acpMsg{}
+		}
+		content, err := acp.ReadFileFromDisk(ctx, rootDir, req.Path, req.Line, req.Limit)
+		respondFileRead(ctx, req.ResultCh, acp.FileReadResult{Content: content, Err: err})
+		return acpMsg{}
+	}
+}
+
+func lexicalACPWorkspacePath(rootDir, path string) (string, error) {
+	if rootDir == "" || strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("workspace path is unavailable")
+	}
+	rootPath, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	candidate := path
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(rootPath, candidate)
+	}
+	absolutePath, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	relativePath, err := filepath.Rel(rootPath, absolutePath)
+	if err != nil {
+		return "", fmt.Errorf("relativize workspace path: %w", err)
+	}
+	relativePath = filepath.Clean(relativePath)
+	if relativePath == "." || relativePath == ".." ||
+		strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(relativePath) {
+		return "", fmt.Errorf("path %q is outside workspace %q", path, rootPath)
+	}
+	return filepath.Join(rootPath, relativePath), nil
+}
+
+func respondFileRead(ctx context.Context, resultCh chan acp.FileReadResult, result acp.FileReadResult) {
+	if resultCh == nil {
+		return
+	}
+	select {
+	case resultCh <- result:
+	case <-ctx.Done():
+	}
 }
 
 // filterLines applies line/limit filtering to content.
@@ -167,7 +236,7 @@ func (m Model) agentPanelWidth() int {
 	}
 
 	available := m.width
-	if m.showTree {
+	if m.treeVisible() {
 		available -= m.treeWidth() + 1
 	}
 	available -= 1 // right border
@@ -340,7 +409,7 @@ func (m Model) openAgentFilePicker() tea.Cmd {
 	// For now, show empty picker — it will populate when files arrive
 	picker := overlay.NewPicker("Attach File (loading...)", nil, m.theme, "agent-file-picker")
 	m.overlayStack.Push(picker)
-	return quickOpenCmd(m.rootDir, m.fileListGeneration)
+	return quickOpenCmd(context.Background(), m.rootDir, m.fileListGeneration)
 }
 
 // filesToAgentPickerItems converts file paths to picker items with agent-specific Value.

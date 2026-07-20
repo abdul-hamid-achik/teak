@@ -32,7 +32,7 @@ func (s *SearchOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	return s, cmd
 }
 
-func (s *SearchOverlay) View() string       { return s.Model.View() }
+func (s *SearchOverlay) View() string        { return s.Model.View() }
 func (s *SearchOverlay) IsDismissed() bool   { return s.dismissed }
 func (s *SearchOverlay) CapturesInput() bool { return true }
 
@@ -59,7 +59,7 @@ func (h *HelpOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	return h, cmd
 }
 
-func (h *HelpOverlay) View() string       { return h.Model.View() }
+func (h *HelpOverlay) View() string        { return h.Model.View() }
 func (h *HelpOverlay) IsDismissed() bool   { return h.dismissed }
 func (h *HelpOverlay) CapturesInput() bool { return true }
 
@@ -86,6 +86,6 @@ func (b *BranchPickerOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	return b, cmd
 }
 
-func (b *BranchPickerOverlay) View() string       { return b.Model.View() }
+func (b *BranchPickerOverlay) View() string        { return b.Model.View() }
 func (b *BranchPickerOverlay) IsDismissed() bool   { return b.dismissed }
 func (b *BranchPickerOverlay) CapturesInput() bool { return true }

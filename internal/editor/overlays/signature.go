@@ -3,6 +3,7 @@ package overlays
 import (
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -62,7 +63,8 @@ func (s SignatureHelp) View() string {
 		return ""
 	}
 
-	activeSig := s.Help.Signatures[s.Help.ActiveSignature]
+	activeIdx := min(max(0, s.Help.ActiveSignature), len(s.Help.Signatures)-1)
+	activeSig := s.Help.Signatures[activeIdx]
 	label := activeSig.Label
 
 	// Highlight active parameter
@@ -74,7 +76,7 @@ func (s SignatureHelp) View() string {
 
 	// Build content
 	var lines []string
-	lines = append(lines, label)
+	lines = append(lines, truncateCells(label, s.maxWidth))
 
 	// Add documentation if available
 	if activeSig.Documentation != "" {
@@ -83,10 +85,7 @@ func (s SignatureHelp) View() string {
 			docLines = docLines[:2]
 		}
 		for _, line := range docLines {
-			if len(line) > s.maxWidth {
-				line = line[:s.maxWidth-3] + "..."
-			}
-			lines = append(lines, line)
+			lines = append(lines, truncateCells(line, s.maxWidth))
 		}
 	}
 
@@ -97,6 +96,16 @@ func (s SignatureHelp) View() string {
 
 	content := strings.Join(lines, "\n")
 	return s.theme.HoverBox.Render(content)
+}
+
+func truncateCells(value string, width int) string {
+	if ansi.StringWidth(value) <= width {
+		return value
+	}
+	if width <= 3 {
+		return ansi.Truncate(value, max(0, width), "")
+	}
+	return ansi.Truncate(value, width-3, "") + "..."
 }
 
 // UpdateActiveParameter updates the active parameter index.

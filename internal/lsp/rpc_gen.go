@@ -13,6 +13,7 @@ package lsp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -20,10 +21,14 @@ import (
 func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return nil, fmt.Errorf("completion position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/completion", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 	})
 	if err != nil {
 		return nil, err
@@ -80,10 +85,14 @@ func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, 
 func (c *Client) Hover(uri string, line, character int) (*HoverResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return nil, fmt.Errorf("hover position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/hover", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 	})
 	if err != nil {
 		return nil, err
@@ -112,10 +121,14 @@ func (c *Client) Hover(uri string, line, character int) (*HoverResult, error) {
 func (c *Client) Definition(uri string, line, character int) ([]Location, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return nil, fmt.Errorf("definition position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/definition", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 	})
 	if err != nil {
 		return nil, err
@@ -149,7 +162,7 @@ func (c *Client) Definition(uri string, line, character int) ([]Location, error)
 				EndCol:    loc.Range.End.Character,
 			})
 		}
-		return locations, nil
+		return c.locationsFromProtocol(locations)
 	}
 	var single struct {
 		URI   string `json:"uri"`
@@ -173,17 +186,21 @@ func (c *Client) Definition(uri string, line, character int) ([]Location, error)
 			EndCol:    single.Range.End.Character,
 		})
 	}
-	return locations, nil
+	return c.locationsFromProtocol(locations)
 }
 
 // References requests find-references at the given position.
 func (c *Client) References(uri string, line, character int) ([]Location, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return nil, fmt.Errorf("references position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 		"context":      map[string]any{"includeDeclaration": true},
 	})
 	if err != nil {
@@ -219,17 +236,21 @@ func (c *Client) References(uri string, line, character int) ([]Location, error)
 			})
 		}
 	}
-	return locations, nil
+	return c.locationsFromProtocol(locations)
 }
 
 // Rename requests rename at the given position.
 func (c *Client) Rename(uri string, line, character int, newName string) (WorkspaceEdit, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return WorkspaceEdit{}, fmt.Errorf("rename position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/rename", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 		"newName":      newName,
 	})
 	if err != nil {
@@ -244,17 +265,25 @@ func (c *Client) Rename(uri string, line, character int, newName string) (Worksp
 	if err := json.Unmarshal(result, &edit); err != nil {
 		return WorkspaceEdit{}, err
 	}
-	return edit, nil
+	converted, err := c.workspaceEditFromProtocol(edit)
+	if err != nil {
+		return WorkspaceEdit{}, err
+	}
+	return converted, nil
 }
 
 // SignatureHelp requests signature help at the given position.
 func (c *Client) SignatureHelp(uri string, line, character int) (*SignatureHelp, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	position, err := c.internalPositionToProtocol(uri, Position{Line: line, Character: character})
+	if err != nil {
+		return nil, fmt.Errorf("signature help position: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/signatureHelp", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": line, "character": character},
+		"position":     map[string]any{"line": position.Line, "character": position.Character},
 	})
 	if err != nil {
 		return nil, err
@@ -315,7 +344,11 @@ func (c *Client) Formatting(uri string, options FormattingOptions) ([]TextEdit, 
 			NewText:   edit.NewText,
 		})
 	}
-	return textEdits, nil
+	converted, err := c.textEditsFromProtocol(uri, textEdits)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }
 
 // FoldingRange requests folding ranges for a document.
@@ -338,21 +371,36 @@ func (c *Client) FoldingRange(uri string) ([]FoldingRange, error) {
 	if err := json.Unmarshal(result, &ranges); err != nil {
 		return nil, err
 	}
-	return ranges, nil
+	converted, err := c.foldingRangesFromProtocol(uri, ranges)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }
 
 // CodeAction requests code actions for the given range.
 func (c *Client) CodeAction(uri string, startLine, startCol, endLine, endCol int, diagnostics []Diagnostic) ([]CodeAction, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	rangeValue, err := c.internalRangeToProtocol(uri, Range{
+		Start: Position{Line: startLine, Character: startCol},
+		End:   Position{Line: endLine, Character: endCol},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("code action range: %w", err)
+	}
+	protocolDiagnostics, err := c.diagnosticsToProtocol(uri, diagnostics)
+	if err != nil {
+		return nil, fmt.Errorf("code action diagnostics: %w", err)
+	}
 
 	result, err := c.call(ctx, "textDocument/codeAction", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
 		"range": map[string]any{
-			"start": map[string]any{"line": startLine, "character": startCol},
-			"end":   map[string]any{"line": endLine, "character": endCol},
+			"start": map[string]any{"line": rangeValue.Start.Line, "character": rangeValue.Start.Character},
+			"end":   map[string]any{"line": rangeValue.End.Line, "character": rangeValue.End.Character},
 		},
-		"context": map[string]any{"diagnostics": diagnostics},
+		"context": map[string]any{"diagnostics": protocolDiagnostics},
 	})
 	if err != nil {
 		return nil, err
@@ -366,7 +414,11 @@ func (c *Client) CodeAction(uri string, startLine, startCol, endLine, endCol int
 	if err := json.Unmarshal(result, &actions); err != nil {
 		return nil, err
 	}
-	return actions, nil
+	converted, err := c.codeActionsFromProtocol(uri, actions)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }
 
 // DocumentSymbol requests document symbols for a document.
@@ -389,5 +441,9 @@ func (c *Client) DocumentSymbol(uri string) ([]DocumentSymbol, error) {
 	if err := json.Unmarshal(result, &symbols); err != nil {
 		return nil, err
 	}
-	return symbols, nil
+	converted, err := c.documentSymbolsFromProtocol(uri, symbols)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }

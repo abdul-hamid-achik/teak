@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Teak is a terminal code editor written in Go 1.24+ using the Bubbletea v2 TUI framework. It follows the Elm architecture (Model-View-Update) with message passing for all state changes.
+Teak is a terminal code editor written in Go 1.26+ using the Bubbletea v2 TUI framework. It follows the Elm architecture (Model-View-Update) with message passing for all state changes.
 
 ## Build & Test
 
@@ -10,6 +10,12 @@ Teak is a terminal code editor written in Go 1.24+ using the Bubbletea v2 TUI fr
 go build -o bin/teak ./cmd/teak   # or: task build
 go test ./...                      # or: task test
 ```
+
+`go.mod` declares `go 1.26.0` (the minimum supported language and standard
+library version) and `toolchain go1.26.5` (the preferred patched toolchain).
+Keep those roles distinct: raise the `go` line only when source or a
+dependency requires a newer language baseline, and update the `toolchain`
+line when adopting a newer supported patch release.
 
 **All code must:**
 - ✅ Compile without errors
@@ -21,7 +27,7 @@ go test ./...                      # or: task test
 
 ### Core Principles
 
-- **Go 1.24+** — use standard library where possible
+- **Go 1.26+** — use standard library where possible
 - **0-based indexing** for lines and columns throughout the entire codebase
 - **Immutable rope** — `Insert` and `Delete` on `*Rope` return a new `*Rope`, never mutate in place
 - **Return errors, don't panic** — no `panic()`, `log.Fatal()`, or `log.Panic()` in library code
@@ -492,12 +498,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
+          go-version: '1.26.5'
       
       - name: Run unit tests
         run: go test ./... -v

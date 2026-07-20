@@ -18,18 +18,28 @@ import (
 // Performance Note: When Partial is true (viewport tokenization), only the
 // visible region and a margin around it are tokenized. This provides 145x
 // speedup for large files (1.8ms vs 264ms for 10K lines).
-//
-// Memory Note: The Lines slice is sized to match the full buffer line count
-// for compatibility with existing rendering code. Lines outside the viewport
-// will have nil entries, wasting ~8 bytes per line (acceptable for files
-// under 500K lines, ~4MB waste).
 type TokenizeCompleteMsg struct {
 	EditorID   uint64
 	Version    int
 	Generation uint64
 	Lines      [][]highlight.StyledToken
+	Batch      highlight.TokenBatch
 	Partial    bool // true when result is from viewport-only tokenization
 }
+
+const (
+	initialHighlightPrefixBytes = 64 << 10
+	maxFullHighlightBytes       = 8 << 20
+	maxFullHighlightLines       = 250_000
+	// asyncPasteThresholdBytes keeps terminal bracketed pastes and OS clipboard
+	// results large enough to affect a frame out of Update. The hard 16 MiB
+	// limit remains owned by clipboard.MaxClipboardBytes.
+	asyncPasteThresholdBytes = 64 << 10
+	// MaxSynchronousMultilineEditLines bounds line-by-line comment/indent
+	// operations. On Apple M5, the worst-case indent benchmark is ~0.5ms at
+	// this budget; 10,000 lines took ~305ms and allocated ~1.5GiB.
+	MaxSynchronousMultilineEditLines = 128
+)
 
 // RequestCompletionCmd is a command that triggers completion from the app layer.
 type RequestCompletionCmd struct{}
@@ -46,6 +56,21 @@ type Diagnostic struct {
 
 // BreakpointClickMsg is emitted when the user clicks the line number gutter.
 type BreakpointClickMsg struct{ Line int }
+
+// OccurrenceSearchLimitMsg lets the app explain why a synchronous
+// multi-cursor shortcut was rejected on an exceptionally large document.
+type OccurrenceSearchLimitMsg struct {
+	EditorID uint64
+	MaxBytes int
+}
+
+// MultilineEditLimitMsg lets the app explain a rejected line-by-line editor
+// command without performing an unbounded synchronous structural transform.
+type MultilineEditLimitMsg struct {
+	EditorID  uint64
+	Operation string
+	MaxLines  int
+}
 
 // RetokenizeMsg triggers syntax re-tokenization after edits or scrolls.
 //
@@ -68,27 +93,34 @@ type RetokenizeMsg struct {
 
 // Editor is a sub-model managing text editing with mouse and keyboard.
 type Editor struct {
-	id                uint64
-	Buffer            *text.Buffer
-	Viewport          Viewport
-	Config            Config
-	theme             ui.Theme
-	dragging          bool
-	Highlighter       *highlight.Highlighter
-	Diagnostics       []Diagnostic
-	autocomplete      overlays.Autocomplete
-	hover             overlays.Hover
-	signatureHelp     overlays.SignatureHelp
-	contextMenu       ContextMenu
-	HasLSP            bool
-	TriggerCharacters []string    // from LSP server capabilities
-	DebugGutter       *GutterOpts // set by app when debugging
-	Folds             FoldState   // code folding state
-	Wrap              *WrapLayout // word wrap layout (nil when disabled)
-	lastVersion       int
-	tokenizer         *tokenizeScheduler
-	lastClickTime     time.Time
-	lastClickPos      text.Position
+	id                      uint64
+	Buffer                  *text.Buffer
+	Viewport                Viewport
+	Config                  Config
+	theme                   ui.Theme
+	dragging                bool
+	Highlighter             *highlight.Highlighter
+	Diagnostics             []Diagnostic
+	autocomplete            overlays.Autocomplete
+	hover                   overlays.Hover
+	signatureHelp           overlays.SignatureHelp
+	contextMenu             ContextMenu
+	HasLSP                  bool
+	TriggerCharacters       []string    // from LSP server capabilities
+	DebugGutter             *GutterOpts // set by app when debugging
+	Folds                   FoldState   // code folding state
+	Wrap                    *WrapLayout // word wrap layout (nil when disabled)
+	lastVersion             int
+	tokenizer               *tokenizeScheduler
+	lastClickTime           time.Time
+	lastClickPos            text.Position
+	clickCount              int
+	clipboardGeneration     uint64
+	clipboardCopyGeneration uint64
+	pasteGeneration         uint64
+	wrapDegraded            bool
+	wrapLayoutVersion       int
+	wrapLayoutTabSize       int
 }
 
 // tokenizeScheduler is shared by value-copied Editor models. Bubble Tea runs
@@ -116,12 +148,15 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		hl = highlight.New(buf.FilePath, theme)
 		// Synchronously tokenize first screenful (~60 lines) so the first
 		// frame renders with syntax highlighting, avoiding the unstyled flash.
-		hl.TokenizePrefix(buf.Bytes(), 60)
+		// The prefix is bounded so a single gigantic first line cannot freeze
+		// the UI or duplicate an entire file during construction.
+		hl.TokenizePrefix(buf.Rope().PrefixLines(60, initialHighlightPrefixBytes), 60)
 	}
 
 	return Editor{
 		id:            nextEditorID.Add(1),
 		Buffer:        buf,
+		Viewport:      Viewport{TabSize: cfg.TabSize},
 		Config:        cfg,
 		theme:         theme,
 		Highlighter:   hl,
@@ -134,27 +169,52 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 	}
 }
 
-// ScheduleInitialTokenize returns a command that runs full async tokenization.
-// The prefix was already tokenized synchronously in New(), so this fills in
-// the rest of the file. Goes directly to async Cmd, skipping RetokenizeMsg roundtrip.
+// ScheduleInitialTokenize returns a command that runs full async tokenization
+// for bounded documents, or a sparse viewport pass for exceptionally large
+// ones. The prefix was already tokenized synchronously in New().
 func (e *Editor) ScheduleInitialTokenize() tea.Cmd {
 	if e.Highlighter == nil || e.Buffer == nil {
 		return nil
 	}
 	hl := e.Highlighter
-	// Capture an immutable rope snapshot on the UI goroutine. The command owns
-	// only this byte slice, never the mutable Buffer.
-	content := e.Buffer.Rope().Bytes()
+	rope := e.Buffer.Rope()
 	editorID := e.id
 	version := e.Buffer.Version()
 	e.lastVersion = version
+	if shouldUseSparseHighlight(rope) {
+		ctx, generation := e.beginViewportTokenize()
+		viewStart, viewEnd := e.visibleTokenRange()
+		snapshot := highlight.CaptureViewport(rope, viewStart, viewEnd)
+		return tokenizeViewportCmd(ctx, hl, snapshot, editorID, version, generation)
+	}
 	ctx, generation := e.beginFullTokenize()
 	return func() tea.Msg {
+		content, err := rope.BytesContext(ctx)
+		if err != nil {
+			return nil
+		}
 		lines, complete := hl.TokenizeToLinesContext(ctx, content)
 		if !complete {
 			return nil
 		}
 		return TokenizeCompleteMsg{EditorID: editorID, Version: version, Generation: generation, Lines: lines}
+	}
+}
+
+func shouldUseSparseHighlight(rope *text.Rope) bool {
+	return rope != nil && (rope.Len() > maxFullHighlightBytes || rope.LineCount() > maxFullHighlightLines)
+}
+
+func tokenizeViewportCmd(ctx context.Context, hl *highlight.Highlighter, snapshot highlight.ViewportSnapshot, editorID uint64, version int, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		batch, complete := hl.TokenizeViewportSnapshotBatch(ctx, snapshot)
+		if !complete {
+			return nil
+		}
+		return TokenizeCompleteMsg{
+			EditorID: editorID, Version: version, Generation: generation,
+			Lines: batch.Lines, Batch: batch, Partial: true,
+		}
 	}
 }
 
@@ -197,31 +257,122 @@ func (e *Editor) invalidateTokenizeLane(lane *tokenizeLane) {
 
 // SetSize sets the available editor dimensions.
 func (e *Editor) SetSize(width, height int) {
+	unchangedSize := e.Viewport.Width == width && e.Viewport.Height == height
 	e.Viewport.Width = width
 	e.Viewport.Height = height
-	if e.Config.WordWrap && e.Buffer != nil {
+	if !e.Config.WordWrap || e.Buffer == nil {
+		e.Wrap = nil
+		e.wrapDegraded = false
+		e.Viewport.WrapScrollY = 0
+		return
+	}
+
+	if unchangedSize && e.Wrap != nil && !e.wrapDegraded &&
+		e.wrapLayoutVersion == e.Buffer.Version() && e.wrapLayoutTabSize == e.Config.TabSize {
+		return
+	}
+
+	if e.Config.WordWrap {
 		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, false)
 		baseTextWidth := metrics.textWidth(width)
+		reserveScrollbar := e.wrapLikelyNeedsScrollbar(baseTextWidth, height)
 		wrapWidth := baseTextWidth
-		for {
-			if e.Wrap == nil {
-				e.Wrap = NewWrapLayout(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
-			} else {
-				e.Wrap.Rebuild(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
-			}
-			nextWrapWidth := baseTextWidth
-			if e.Wrap.TotalRows() > height {
-				nextWrapWidth--
-				if nextWrapWidth < 1 {
-					nextWrapWidth = 1
-				}
-			}
-			if nextWrapWidth == wrapWidth {
-				break
-			}
-			wrapWidth = nextWrapWidth
+		if reserveScrollbar {
+			wrapWidth = max(1, wrapWidth-1)
+		}
+		if e.Wrap == nil {
+			e.Wrap = NewWrapLayoutWithTabSize(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth, e.Config.TabSize)
+		} else {
+			e.Wrap.Rebuild(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
+		}
+		if e.Wrap.Degraded() {
+			e.disableWordWrapLayout()
+			return
+		}
+		// The heuristic covers large buffers without reading their lines. For a
+		// compact document whose wrapping alone needs a scrollbar, measure only
+		// the short prefix needed to prove it, then rebuild sparse descriptors.
+		if !reserveScrollbar && e.Wrap.HasMoreRowsThan(max(1, height)) {
+			wrapWidth = max(1, baseTextWidth-1)
+			e.Wrap.Rebuild(e.Buffer.Line, e.Buffer.LineCount(), wrapWidth)
+		}
+		e.wrapDegraded = false
+		e.wrapLayoutVersion = e.Buffer.Version()
+		e.wrapLayoutTabSize = e.Config.TabSize
+		e.Viewport.wrapScrollY(e.Wrap)
+	}
+}
+
+// wrapLikelyNeedsScrollbar reaches a decision for large documents from cheap
+// rope metadata. It deliberately avoids Buffer.Line: the sparse layout will
+// refine the rare compact/ambiguous case with HasMoreRowsThan.
+func (e Editor) wrapLikelyNeedsScrollbar(textWidth, height int) bool {
+	if e.Buffer == nil {
+		return false
+	}
+	height = max(1, height)
+	if e.Buffer.LineCount() > height {
+		return true
+	}
+	return e.Buffer.Rope().Len() > max(1, textWidth)*height
+}
+
+func (e *Editor) disableWordWrapLayout() {
+	e.Wrap = nil
+	e.wrapDegraded = true
+	e.wrapLayoutVersion = -1
+	e.wrapLayoutTabSize = 0
+	e.Viewport.WrapScrollY = 0
+}
+
+// WordWrapDegraded reports that word wrap is enabled in configuration but the
+// current document exceeds the synchronous layout budget. The editor remains
+// usable with ordinary horizontal scrolling.
+func (e Editor) WordWrapDegraded() bool {
+	return e.Config.WordWrap && e.wrapDegraded
+}
+
+// WordWrapStatus returns a short, user-facing explanation for the active
+// fallback. It is intentionally empty while full word wrap is available.
+func (e Editor) WordWrapStatus() string {
+	if e.WordWrapDegraded() {
+		return "Word wrap disabled for this large document"
+	}
+	return ""
+}
+
+// refreshWordWrapAfterBufferChange applies a known buffer edit without
+// rebuilding visual rows for the entire document. Common typing, deletion and
+// paste paths carry an EditChange, so only changed logical lines are scanned;
+// the exact visual-row prefix is then updated using integers. Complex edits
+// (for example multi-cursor mutations and undo) deliberately fall back to a
+// full rebuild to preserve correct deep scrolling.
+func (e *Editor) refreshWordWrapAfterBufferChange() {
+	if e.Buffer == nil || !e.Config.WordWrap || e.Wrap == nil || e.wrapLayoutVersion == e.Buffer.Version() {
+		return
+	}
+
+	change := e.Buffer.LastChange()
+	if e.wrapLayoutVersion >= 0 && e.Buffer.Version() == e.wrapLayoutVersion+1 && change != nil &&
+		e.Wrap.ApplyEdit(e.Buffer.Line, e.Buffer.LineCount(), change.StartLine, change.EndLine, change.Text) {
+		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, false)
+		expectedWidth := metrics.textWidth(e.Viewport.Width)
+		if e.wrapLikelyNeedsScrollbar(expectedWidth, e.Viewport.Height) || e.Wrap.HasMoreRowsThan(max(1, e.Viewport.Height)) {
+			expectedWidth = max(1, expectedWidth-1)
+		}
+		if e.Wrap.Width() == expectedWidth {
+			e.wrapDegraded = false
+			e.wrapLayoutVersion = e.Buffer.Version()
+			e.wrapLayoutTabSize = e.Config.TabSize
+			e.Viewport.wrapScrollY(e.Wrap)
+			return
 		}
 	}
+
+	// Unknown/multi-location edits and a gutter-width transition are rare. A
+	// sparse descriptor rebuild is safer than retaining stale visual offsets;
+	// it does not synchronously enumerate the document's lines.
+	e.SetSize(e.Viewport.Width, e.Viewport.Height)
 }
 
 // Update handles input messages, returns updated editor and optional command.
@@ -266,6 +417,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			case "enter", "tab":
 				if item := e.autocomplete.Selected(); item != nil {
 					e.Buffer.InsertAtCursor([]byte(item.InsertText))
+					e.refreshWordWrapAfterBufferChange()
 					e.EnsureCursorVisible()
 				}
 				e.autocomplete.Hide()
@@ -286,9 +438,32 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		return e.handleMouseWheel(msg)
 	case tea.PasteMsg:
-		e.Buffer.InsertAtCursor([]byte(msg.Content))
+		return e.handlePastePayload(msg.Content, nil)
+	case ClipboardPasteResultMsg:
+		if !e.acceptsClipboardPaste(msg) || msg.Content == "" {
+			return e, nil
+		}
+		return e.handlePastePayload(msg.Content, msg.Err)
+	case PastePreparedMsg:
+		if msg.EditorID != e.id || msg.Generation != e.pasteGeneration || msg.Version != e.Buffer.Version() || msg.Err != nil || msg.Rope == nil {
+			return e, nil
+		}
+		e.Buffer.ReplaceRopeSnapshot(msg.Rope, msg.Cursor)
+		e.Buffer.RestoreSelections(msg.Selections, msg.Primary)
+		e.refreshWordWrapAfterBufferChange()
 		e.EnsureCursorVisible()
+		if e.Highlighter != nil {
+			e.Highlighter.Invalidate()
+		}
 		return e, e.scheduleRetokenize()
+	case ClipboardCopyPreparedMsg:
+		if msg.EditorID != e.id || msg.Generation != e.clipboardCopyGeneration || msg.Version != e.Buffer.Version() {
+			return e, nil
+		}
+		if msg.Err != nil {
+			return e, clipboardCopyRejectedCmd(e.id, msg.Err)
+		}
+		return e.handlePreparedClipboardCopy(msg)
 	case RetokenizeMsg:
 		if e.Highlighter == nil {
 			return e, nil
@@ -312,22 +487,25 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			ctx, generation := e.beginViewportTokenize()
 			// Capture the immutable rope region before the async command. Do not
 			// retain e.Buffer: edits may replace its rope while this is running.
-			viewStart := e.Viewport.ScrollY
-			viewEnd := e.Viewport.ScrollY + e.Viewport.Height
+			viewStart, viewEnd := e.visibleTokenRange()
 			snapshot := highlight.CaptureViewport(e.Buffer.Rope(), viewStart, viewEnd)
-			return e, func() tea.Msg {
-				lines, complete := hl.TokenizeViewportSnapshot(ctx, snapshot)
-				if !complete {
-					return nil
-				}
-				return TokenizeCompleteMsg{EditorID: editorID, Version: version, Generation: generation, Lines: lines, Partial: true}
-			}
+			return e, tokenizeViewportCmd(ctx, hl, snapshot, editorID, version, generation)
+		}
+		if shouldUseSparseHighlight(e.Buffer.Rope()) {
+			ctx, generation := e.beginViewportTokenize()
+			viewStart, viewEnd := e.visibleTokenRange()
+			snapshot := highlight.CaptureViewport(e.Buffer.Rope(), viewStart, viewEnd)
+			return e, tokenizeViewportCmd(ctx, hl, snapshot, editorID, version, generation)
 		}
 		// Edit-triggered: tokenize the full file
 		e.lastVersion = msg.Version
 		ctx, generation := e.beginFullTokenize()
-		content := e.Buffer.Rope().Bytes()
+		rope := e.Buffer.Rope()
 		return e, func() tea.Msg {
+			content, err := rope.BytesContext(ctx)
+			if err != nil {
+				return nil
+			}
 			lines, complete := hl.TokenizeToLinesContext(ctx, content)
 			if !complete {
 				return nil
@@ -343,7 +521,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		}
 		if e.acceptsTokenizeComplete(msg) {
 			if msg.Partial {
-				e.Highlighter.MergeLines(msg.Lines)
+				e.Highlighter.MergeBatch(msg.Batch)
 			} else {
 				e.Highlighter.SetLines(msg.Lines)
 			}
@@ -364,7 +542,123 @@ func (e Editor) acceptsTokenizeComplete(msg TokenizeCompleteMsg) bool {
 	return msg.Generation == lane.generation
 }
 
+const maxAsyncPasteResultBytes = clipboard.MaxClipboardBytes
+
+func (e Editor) handlePastePayload(content string, sourceErr error) (Editor, tea.Cmd) {
+	if content == "" {
+		return e, nil
+	}
+	selectionCount := 1
+	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 {
+		selectionCount = e.Buffer.Selections.Count()
+	}
+	if len(content) > maxAsyncPasteResultBytes/selectionCount {
+		return e, clipboardOperationLimitCmd(e.id, "Paste")
+	}
+	if len(content) >= asyncPasteThresholdBytes || len(content)*selectionCount >= asyncPasteThresholdBytes {
+		return e, e.queueAsyncPaste(content, sourceErr)
+	}
+	if err := clipboard.Validate(content); err != nil {
+		return e, nil
+	}
+	e.Buffer.InsertAtCursor([]byte(content))
+	e.refreshWordWrapAfterBufferChange()
+	e.EnsureCursorVisible()
+	if e.Highlighter != nil {
+		e.Highlighter.Invalidate()
+	}
+	return e, e.scheduleRetokenize()
+}
+
+func (e *Editor) queueAsyncPaste(content string, sourceErr error) tea.Cmd {
+	e.pasteGeneration++
+	selections := []text.Selection(nil)
+	var primary text.Selection
+	if e.Buffer.Selections != nil {
+		selections = append(selections, e.Buffer.Selections.All()...)
+		primary = e.Buffer.Selections.Primary()
+	}
+	return preparePasteCmd(e.id, e.pasteGeneration, e.Buffer.Version(), e.Buffer.Rope(), e.Buffer.Cursor, selections, primary, content, sourceErr)
+}
+
+func (e Editor) selectionClipboardCopy(cut bool) (Editor, tea.Cmd, bool) {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
+		return e, nil, false
+	}
+	selection := e.Buffer.Selections.Primary()
+	if selection.IsEmpty() {
+		return e, nil, false
+	}
+	start, end := selection.Ordered()
+	snapshot := e.Buffer.Rope()
+	// Do not initialize Rope's whole-document line index just to copy a
+	// selection. The uncached conversion walks tree metadata without flattening
+	// the document, including for a selection that ends at line end.
+	startOffset, startOK := snapshot.PositionToOffsetUncached(start)
+	endOffset, endOK := snapshot.PositionToOffsetUncached(end)
+	if !startOK || !endOK {
+		return e, nil, false
+	}
+	if endOffset <= startOffset {
+		return e, nil, false
+	}
+	if endOffset-startOffset > clipboard.MaxClipboardBytes {
+		operation := "Copy"
+		if cut {
+			operation = "Cut"
+		}
+		return e, clipboardOperationLimitCmd(e.id, operation), true
+	}
+	e.clipboardCopyGeneration++
+	return e, prepareClipboardCopyCmd(e.id, e.clipboardCopyGeneration, e.Buffer.Version(), snapshot, start, end, startOffset, endOffset, cut), true
+}
+
+func (e Editor) handlePreparedClipboardCopy(msg ClipboardCopyPreparedMsg) (Editor, tea.Cmd) {
+	copyCmd := copyToClipboardCmd(e.id, msg.Content)
+	if !msg.Cut || !e.matchesPrimarySelection(msg.Start, msg.End) {
+		return e, copyCmd
+	}
+	e.Buffer.SetSelection(msg.Start, msg.End)
+	e.Buffer.DeleteSelection()
+	e.refreshWordWrapAfterBufferChange()
+	e.EnsureCursorVisible()
+	if e.Highlighter != nil {
+		e.Highlighter.Invalidate()
+	}
+	return e, tea.Batch(copyCmd, e.scheduleRetokenize())
+}
+
+func (e Editor) matchesPrimarySelection(start, end text.Position) bool {
+	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
+		return false
+	}
+	gotStart, gotEnd := e.Buffer.Selections.Primary().Ordered()
+	return gotStart == start && gotEnd == end
+}
+
+func (e Editor) selectedLineSpan() int {
+	startLine, endLine := e.Buffer.Cursor.Line, e.Buffer.Cursor.Line
+	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty() {
+		start, end := e.Buffer.Selections.Primary().Ordered()
+		startLine, endLine = start.Line, end.Line
+		if end.Col == 0 && endLine > startLine {
+			endLine--
+		}
+	}
+	return endLine - startLine + 1
+}
+
+func (e Editor) multilineEditWithinBudget(operation string) (tea.Cmd, bool) {
+	if e.selectedLineSpan() <= MaxSynchronousMultilineEditLines {
+		return nil, true
+	}
+	return func() tea.Msg {
+		return MultilineEditLimitMsg{EditorID: e.id, Operation: operation, MaxLines: MaxSynchronousMultilineEditLines}
+	}, false
+}
+
 func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
+	versionBefore := e.Buffer.Version()
 	edited := false
 	switch msg.String() {
 	// --- Navigation ---
@@ -399,22 +693,34 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.CursorToDocEnd()
 		e.Buffer.ClearSelection()
 	case "pgup":
-		target := max(0, e.Buffer.Cursor.Line-e.Viewport.Height)
-		e.Buffer.Cursor.Line = target
-		e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		if e.Wrap != nil && e.Config.WordWrap {
+			e.moveCursorByWrappedRows(-e.Viewport.Height)
+		} else {
+			target := max(0, e.Buffer.Cursor.Line-e.Viewport.Height)
+			e.Buffer.Cursor.Line = target
+			e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		}
 		e.Buffer.ClearSelection()
-		e.Viewport.ScrollUp(e.Viewport.Height)
+		if e.Wrap == nil || !e.Config.WordWrap {
+			e.Viewport.ScrollUp(e.Viewport.Height)
+		}
 		// Trigger viewport tokenization if scrolled outside tokenized range
 		if e.needsRetokenize() {
 			return e, e.scheduleRetokenizeImmediate()
 		}
 	case "pgdown":
-		maxLine := e.Buffer.LineCount() - 1
-		target := min(maxLine, e.Buffer.Cursor.Line+e.Viewport.Height)
-		e.Buffer.Cursor.Line = target
-		e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		if e.Wrap != nil && e.Config.WordWrap {
+			e.moveCursorByWrappedRows(e.Viewport.Height)
+		} else {
+			maxLine := e.Buffer.LineCount() - 1
+			target := min(maxLine, e.Buffer.Cursor.Line+e.Viewport.Height)
+			e.Buffer.Cursor.Line = target
+			e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+		}
 		e.Buffer.ClearSelection()
-		e.Viewport.ScrollDown(e.Viewport.Height, maxLine)
+		if e.Wrap == nil || !e.Config.WordWrap {
+			e.Viewport.ScrollDown(e.Viewport.Height, e.Buffer.LineCount()-1)
+		}
 		// Trigger viewport tokenization if scrolled outside tokenized range
 		if e.needsRetokenize() {
 			return e, e.scheduleRetokenizeImmediate()
@@ -446,20 +752,15 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	// --- Clipboard ---
 	case "ctrl+c":
-		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			_ = clipboard.Copy(string(sel))
+		if updated, cmd, handled := e.selectionClipboardCopy(false); handled {
+			return updated, cmd
 		}
 	case "ctrl+x":
-		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			_ = clipboard.Copy(string(sel))
-			e.Buffer.DeleteSelection()
-			edited = true
+		if updated, cmd, handled := e.selectionClipboardCopy(true); handled {
+			return updated, cmd
 		}
 	case "ctrl+v":
-		if content, _ := clipboard.Paste(); content != "" {
-			e.Buffer.InsertAtCursor([]byte(content))
-			edited = true
-		}
+		return e, e.requestClipboardPaste()
 
 	// --- Editing ---
 	case "backspace":
@@ -494,7 +795,14 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.InsertAtCursor(text.IndentString(e.Config.TabSize))
 		edited = true
 	case "shift+tab":
-		e.Buffer.DedentLine(e.Config.TabSize)
+		if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty() {
+			if cmd, allowed := e.multilineEditWithinBudget("Dedent"); !allowed {
+				return e, cmd
+			}
+			e.Buffer.DedentLines(e.Config.TabSize)
+		} else {
+			e.Buffer.DedentLine(e.Config.TabSize)
+		}
 		edited = true
 	case "ctrl+z":
 		e.Buffer.Undo()
@@ -505,6 +813,9 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	// --- New shortcuts ---
 	case "ctrl+/":
+		if cmd, allowed := e.multilineEditWithinBudget("Toggle comment"); !allowed {
+			return e, cmd
+		}
 		e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
 		edited = true
 	case "alt+up":
@@ -523,11 +834,19 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.DeleteLine()
 		edited = true
 	case "ctrl+d":
-		e.Buffer.SelectNextOccurrence()
-		edited = true
+		if !e.Buffer.SelectNextOccurrence() {
+			editorID := e.id
+			return e, func() tea.Msg {
+				return OccurrenceSearchLimitMsg{EditorID: editorID, MaxBytes: text.MaxOccurrenceSearchBytes}
+			}
+		}
 	case "ctrl+u":
-		e.Buffer.SelectAllOccurrences()
-		edited = true
+		if !e.Buffer.SelectAllOccurrences() {
+			editorID := e.id
+			return e, func() tea.Msg {
+				return OccurrenceSearchLimitMsg{EditorID: editorID, MaxBytes: text.MaxOccurrenceSearchBytes}
+			}
+		}
 	case "ctrl+alt+up":
 		e.Buffer.AddCursorAbove()
 		edited = true
@@ -540,6 +859,9 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	case "ctrl+l":
 		e.Buffer.SelectLine()
 	case "ctrl+]":
+		if cmd, allowed := e.multilineEditWithinBudget("Indent"); !allowed {
+			return e, cmd
+		}
 		e.Buffer.IndentLines(e.Config.TabSize)
 		edited = true
 
@@ -567,6 +889,9 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			}
 			edited = true
 		}
+	}
+	if edited && e.Buffer.Version() != versionBefore {
+		e.refreshWordWrapAfterBufferChange()
 	}
 	e.EnsureCursorVisible()
 	if edited {
@@ -636,6 +961,10 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 
 	// Right-click opens context menu
 	if m.Button == tea.MouseRight {
+		// A context menu takes ownership of pointer input. Do not retain a
+		// left-button selection drag behind it: terminals can report a delayed
+		// motion event after the menu has appeared.
+		e.dragging = false
 		pos := e.screenToBuffer(m.X, m.Y)
 		// Only move cursor if no selection (preserve selection for cut/copy)
 		if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 || e.Buffer.Selections.Primary().IsEmpty() {
@@ -672,43 +1001,137 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			e.Buffer.SetSelection(anchor, pos)
 		} else {
 			now := time.Now()
-			// Double-click detection: same position within 400ms
 			if pos == e.lastClickPos && now.Sub(e.lastClickTime) < 400*time.Millisecond {
-				e.Buffer.SetCursor(pos)
-				e.Buffer.SelectWordAtCursor()
-				e.lastClickTime = time.Time{} // reset to prevent triple-click
-				return e, nil
+				e.clickCount++
+			} else {
+				e.clickCount = 1
 			}
 			e.lastClickTime = now
 			e.lastClickPos = pos
 			e.Buffer.SetCursor(pos)
-			e.dragging = true
+
+			switch e.clickCount {
+			case 2:
+				e.Buffer.SelectWordAtCursor()
+				e.dragging = false
+			case 3:
+				e.Buffer.SelectLine()
+				// A fourth click starts a fresh click sequence. This avoids
+				// repeatedly selecting the line while the user starts a drag.
+				e.clickCount = 0
+				e.lastClickTime = time.Time{}
+				e.dragging = false
+			default:
+				e.dragging = true
+			}
 		}
 	}
 	return e, nil
 }
 
 func (e Editor) handleMouseMotion(msg tea.MouseMotionMsg) (Editor, tea.Cmd) {
-	if !e.dragging {
+	if !e.dragging || e.Buffer == nil || e.Buffer.LineCount() == 0 {
 		return e, nil
 	}
 	m := msg.Mouse()
-	pos := e.screenToBuffer(m.X, m.Y)
+	if e.Viewport.Height <= 0 || e.Viewport.Width <= 0 {
+		return e, nil
+	}
+
+	// Terminals report motion coordinates outside the widget while a button is
+	// held. Scroll one visual row per event, then map the selection to the
+	// nearest visible row. Limiting each event to one row keeps a fast pointer
+	// from skipping large sections of a document.
+	y := min(max(m.Y, 0), e.Viewport.Height-1)
+	scrolled := false
+	if m.Y < 0 {
+		scrolled = e.scrollForDrag(-1)
+	} else if m.Y >= e.Viewport.Height {
+		scrolled = e.scrollForDrag(1)
+	}
+	x := min(max(m.X, 0), e.Viewport.Width-1)
+	pos := e.screenToBuffer(x, y)
 	anchor := e.Buffer.Cursor
 	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 {
 		anchor = e.Buffer.Selections.Primary().Anchor
 	}
 	e.Buffer.SetSelection(anchor, pos)
+	if scrolled && e.needsRetokenize() {
+		return e, e.scheduleRetokenizeImmediate()
+	}
 	return e, nil
+}
+
+// IsDragging reports whether this editor owns an active left-button selection
+// drag. The app uses it to keep routing motion after the pointer crosses an
+// adjacent pane or the editor's top/bottom edge.
+func (e Editor) IsDragging() bool {
+	return e.dragging
+}
+
+// CancelDrag stops an in-progress selection drag when another surface takes
+// mouse or keyboard ownership (for example a modal or context menu).
+func (e *Editor) CancelDrag() {
+	if e != nil {
+		e.dragging = false
+	}
+}
+
+// SetContextMenuPosition changes the menu's editor-local anchor. The app
+// computes this from its body rectangle so rendering and hit-testing use the
+// same clamped terminal cells.
+func (e *Editor) SetContextMenuPosition(x, y int) {
+	if e == nil {
+		return
+	}
+	e.contextMenu.X = max(0, x)
+	e.contextMenu.Y = max(0, y)
+}
+
+// scrollForDrag moves the viewport by one visual row and reports whether it
+// changed. Word wrap and collapsed folds use visual rows; normal files use
+// logical lines. Callers must clamp their hit-test row after this operation.
+func (e *Editor) scrollForDrag(direction int) bool {
+	if direction == 0 || e.Buffer == nil || e.Viewport.Height <= 0 {
+		return false
+	}
+	if e.Wrap != nil && e.Config.WordWrap {
+		before := e.Viewport.WrapScrollY
+		if direction < 0 {
+			e.Viewport.ScrollWrapUp(1)
+		} else {
+			e.Viewport.ScrollWrapDown(1, e.Wrap)
+		}
+		return e.Viewport.WrapScrollY != before
+	}
+
+	before := e.Viewport.ScrollY
+	if len(e.Folds.Regions) > 0 {
+		maxScroll := max(0, e.Folds.TotalVisibleLines(e.Buffer.LineCount())-e.Viewport.Height)
+		e.Viewport.ScrollY = min(maxScroll, max(0, e.Viewport.ScrollY+direction))
+	} else if direction < 0 {
+		e.Viewport.ScrollUp(1)
+	} else {
+		e.Viewport.ScrollDown(1, e.Buffer.LineCount()-1)
+	}
+	return e.Viewport.ScrollY != before
 }
 
 func (e Editor) handleMouseWheel(msg tea.MouseWheelMsg) (Editor, tea.Cmd) {
 	m := msg.Mouse()
 	switch m.Button {
 	case tea.MouseWheelUp:
-		e.Viewport.ScrollUp(3)
+		if e.Wrap != nil && e.Config.WordWrap {
+			e.Viewport.ScrollWrapUp(3)
+		} else {
+			e.Viewport.ScrollUp(3)
+		}
 	case tea.MouseWheelDown:
-		e.Viewport.ScrollDown(3, e.Buffer.LineCount()-1)
+		if e.Wrap != nil && e.Config.WordWrap {
+			e.Viewport.ScrollWrapDown(3, e.Wrap)
+		} else {
+			e.Viewport.ScrollDown(3, e.Buffer.LineCount()-1)
+		}
 	}
 	if e.needsRetokenize() {
 		return e, e.scheduleRetokenizeImmediate()
@@ -745,17 +1168,44 @@ func (e Editor) needsRetokenize() bool {
 	if e.Highlighter == nil {
 		return false
 	}
-	start, end := e.Highlighter.TokenizedRange()
-	if start < 0 {
-		return false // no viewport-scoped tokenization done yet
+	viewStart, viewEnd := e.visibleTokenRange()
+	return !e.Highlighter.CoversRange(viewStart, viewEnd)
+}
+
+func (e Editor) visibleTokenRange() (int, int) {
+	if e.Wrap != nil && e.Config.WordWrap {
+		return e.Wrap.VisibleBufferRange(e.Viewport.wrapScrollY(e.Wrap), e.Viewport.Height)
 	}
-	viewStart := e.Viewport.ScrollY
-	viewEnd := e.Viewport.ScrollY + e.Viewport.Height
-	return viewStart < start || viewEnd > end
+	return e.Viewport.ScrollY, e.Viewport.ScrollY + e.Viewport.Height
+}
+
+func (e *Editor) moveCursorByWrappedRows(delta int) {
+	if e.Wrap == nil || e.Buffer == nil || e.Buffer.LineCount() == 0 {
+		return
+	}
+	line := e.Buffer.Line(e.Buffer.Cursor.Line)
+	currentOffset, currentCol := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
+	currentVisual := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + currentOffset
+	targetVisual := max(0, currentVisual+delta)
+	if e.Wrap.TotalRowsKnown() {
+		targetVisual = min(targetVisual, max(0, e.Wrap.TotalRows()-1))
+	}
+	targetLine, targetOffset := e.Wrap.BufferLine(targetVisual)
+	targetContent := e.Buffer.Line(targetLine)
+	start, end, displayStart, ok := e.Wrap.SegmentBoundsForLine(targetLine, targetOffset, targetContent)
+	if !ok {
+		return
+	}
+	endDisplay := advanceDisplayColumn(targetContent, start, end, displayStart, e.Viewport.tabSize())
+	targetDisplay := min(displayStart+currentCol, endDisplay)
+	e.Buffer.SetCursor(text.Position{
+		Line: targetLine,
+		Col:  byteColumnAtDisplayFrom(targetContent, start, displayStart, targetDisplay, e.Viewport.tabSize()),
+	})
 }
 
 // View renders the editor content.
-func (e Editor) View() string {
+func (e *Editor) View() string {
 	if e.Wrap != nil && e.Config.WordWrap {
 		return e.Viewport.RenderWithWrap(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap)
 	}
@@ -804,17 +1254,13 @@ func (e Editor) CursorPosition() (int, int) {
 	if col > len(lineContent) {
 		col = len(lineContent)
 	}
-	displayCol := displayWidth(string(lineContent[:col]))
+	displayCol := displayColumn(lineContent, col, e.Viewport.tabSize())
 
 	// Word wrap mode: cursor position accounts for wrapped visual rows
 	if e.Wrap != nil && e.Config.WordWrap {
-		textWidth := e.Wrap.Width()
-		if textWidth < 1 {
-			textWidth = 1
-		}
-		wrapRow, wrapCol := wrappedPosition(string(lineContent), col, textWidth)
+		wrapRow, wrapCol := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, col, lineContent)
 		x := wrapCol + gw
-		visualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow - e.Wrap.VisualRow(e.Viewport.ScrollY)
+		visualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow - e.Viewport.wrapScrollY(e.Wrap)
 		return x, visualRow
 	}
 
@@ -841,10 +1287,18 @@ func (e *Editor) EnsureCursorVisible() {
 
 	textWidth := e.currentGutterMetrics().textWidth(e.Viewport.Width)
 	if e.Wrap != nil && e.Config.WordWrap {
-		if e.Wrap.Width() > 0 {
-			textWidth = e.Wrap.Width()
-		}
 		e.Viewport.ScrollX = 0
+		line := e.Buffer.Line(e.Buffer.Cursor.Line)
+		wrapRow, _ := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
+		cursorVisualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow
+		if cursorVisualRow < e.Viewport.WrapScrollY {
+			e.Viewport.WrapScrollY = cursorVisualRow
+		}
+		if cursorVisualRow >= e.Viewport.WrapScrollY+max(1, e.Viewport.Height) {
+			e.Viewport.WrapScrollY = cursorVisualRow - max(1, e.Viewport.Height) + 1
+		}
+		e.Viewport.wrapScrollY(e.Wrap)
+		return
 	}
 
 	e.Viewport.ensureCursorVisible(e.Buffer, e.Buffer.Cursor, textWidth)
@@ -892,6 +1346,22 @@ func (e Editor) AutocompleteView() string {
 
 // HoverView returns the hover popup rendering if visible.
 func (e Editor) HoverView() string {
+	return e.hover.View()
+}
+
+// LSPOverlayView returns the one LSP popup that may occupy editor cells.
+//
+// Completion owns keyboard navigation and insertion, so it intentionally wins
+// over the informational popups. Signature help is more immediately relevant
+// than hover while entering a call. Keeping this decision in the editor makes
+// the app renderer and input routing agree without exposing overlay state.
+func (e Editor) LSPOverlayView() string {
+	if view := e.autocomplete.View(); view != "" {
+		return view
+	}
+	if view := e.signatureHelp.View(); view != "" {
+		return view
+	}
 	return e.hover.View()
 }
 
@@ -974,36 +1444,23 @@ func (e Editor) buildEditorMenuItems() []ContextMenuItem {
 func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 	switch action {
 	case "cut":
-		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			_ = clipboard.Copy(string(sel))
-			e.Buffer.DeleteSelection()
-			e.EnsureCursorVisible()
-			if e.Highlighter != nil {
-				e.Highlighter.Invalidate()
-			}
-			return e, e.scheduleRetokenize()
+		if updated, cmd, handled := e.selectionClipboardCopy(true); handled {
+			return updated, cmd
 		}
 		return e, nil
 	case "copy":
-		if sel := e.Buffer.SelectedText(); len(sel) > 0 {
-			_ = clipboard.Copy(string(sel))
+		if updated, cmd, handled := e.selectionClipboardCopy(false); handled {
+			return updated, cmd
 		}
 		return e, nil
 	case "paste":
-		if content, _ := clipboard.Paste(); content != "" {
-			e.Buffer.InsertAtCursor([]byte(content))
-			e.EnsureCursorVisible()
-			if e.Highlighter != nil {
-				e.Highlighter.Invalidate()
-			}
-			return e, e.scheduleRetokenize()
-		}
-		return e, nil
+		return e, e.requestClipboardPaste()
 	case "select_all":
 		e.Buffer.SelectAll()
 		return e, nil
 	case "undo":
 		e.Buffer.Undo()
+		e.refreshWordWrapAfterBufferChange()
 		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
@@ -1011,13 +1468,18 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 		return e, e.scheduleRetokenize()
 	case "redo":
 		e.Buffer.Redo()
+		e.refreshWordWrapAfterBufferChange()
 		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
 		}
 		return e, e.scheduleRetokenize()
 	case "toggle_comment":
+		if cmd, allowed := e.multilineEditWithinBudget("Toggle comment"); !allowed {
+			return e, cmd
+		}
 		e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
+		e.refreshWordWrapAfterBufferChange()
 		e.EnsureCursorVisible()
 		if e.Highlighter != nil {
 			e.Highlighter.Invalidate()
