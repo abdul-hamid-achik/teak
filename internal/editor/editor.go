@@ -105,6 +105,7 @@ type Editor struct {
 	hover                   overlays.Hover
 	signatureHelp           overlays.SignatureHelp
 	contextMenu             ContextMenu
+	find                    FindModel
 	HasLSP                  bool
 	TriggerCharacters       []string    // from LSP server capabilities
 	DebugGutter             *GutterOpts // set by app when debugging
@@ -164,6 +165,7 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		hover:         overlays.NewHover(theme),
 		signatureHelp: overlays.NewSignatureHelp(theme),
 		contextMenu:   NewContextMenu(theme),
+		find:          NewFindModel(theme),
 		lastVersion:   -1,
 		tokenizer:     &tokenizeScheduler{},
 	}
@@ -401,6 +403,27 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 				return e, nil
 			default:
 				e.contextMenu.Hide()
+				return e, nil
+			}
+		}
+
+		// Find widget intercepts keys when visible
+		if e.find.Visible() {
+			switch msg.String() {
+			case "esc", "escape":
+				e.find.Hide()
+				return e, nil
+			case "enter", "f3":
+				e.UpdateFind(msg)
+				return e, nil
+			case "shift+f3", "shift+enter":
+				e.UpdateFind(msg)
+				return e, nil
+			case "ctrl+r":
+				e.UpdateFind(msg)
+				return e, nil
+			default:
+				e.UpdateFind(msg)
 				return e, nil
 			}
 		}
@@ -1206,13 +1229,18 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 
 // View renders the editor content.
 func (e *Editor) View() string {
+	var view string
 	if e.Wrap != nil && e.Config.WordWrap {
-		return e.Viewport.RenderWithWrap(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap)
+		view = e.Viewport.RenderWithWrap(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap)
+	} else if len(e.Folds.Regions) > 0 {
+		view = e.Viewport.RenderWithFolds(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds)
+	} else {
+		view = e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter)
 	}
-	if len(e.Folds.Regions) > 0 {
-		return e.Viewport.RenderWithFolds(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds)
+	if fv := e.find.View(); fv != "" {
+		view = fv + "\n" + view
 	}
-	return e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter)
+	return view
 }
 
 // effectiveGutterWidth computes the total gutter width matching what Render produces.
@@ -1368,6 +1396,61 @@ func (e Editor) LSPOverlayView() string {
 // IsAutocompleteVisible returns whether autocomplete popup is showing.
 func (e Editor) IsAutocompleteVisible() bool {
 	return e.autocomplete.Visible
+}
+
+// AutocompleteSelectAt selects and inserts the completion at the given index.
+// Returns true if a completion was inserted.
+func (e *Editor) AutocompleteSelectAt(idx int) bool {
+	if item := e.autocomplete.SelectAt(idx); item != nil {
+		e.Buffer.InsertAtCursor([]byte(item.InsertText))
+		e.refreshWordWrapAfterBufferChange()
+		e.EnsureCursorVisible()
+		e.autocomplete.Hide()
+		return true
+	}
+	return false
+}
+
+// ShowFind opens the in-buffer find widget.
+func (e *Editor) ShowFind() {
+	e.find.Show()
+}
+
+// HideFind closes the in-buffer find widget.
+func (e *Editor) HideFind() {
+	e.find.Hide()
+}
+
+// IsFindVisible returns whether the in-buffer find widget is open.
+func (e Editor) IsFindVisible() bool {
+	return e.find.Visible()
+}
+
+// UpdateFind handles input for the find widget. Returns a command if the
+// cursor should move to a match.
+func (e *Editor) UpdateFind(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	e.find, cmd = e.find.Update(msg, e.Buffer)
+	if m := e.find.CurrentMatchPosition(); m != nil {
+		e.Buffer.Cursor = m.Start
+		e.EnsureCursorVisible()
+	}
+	return cmd
+}
+
+// FindView renders the find widget.
+func (e Editor) FindView() string {
+	return e.find.View()
+}
+
+// FindMatchRangesForLine returns find match highlight ranges for a line.
+func (e Editor) FindMatchRangesForLine(line int) []selectionByteRange {
+	return e.find.FindMatchRangesForLine(line)
+}
+
+// CurrentFindMatchRangesForLine returns the current match highlight for a line.
+func (e Editor) CurrentFindMatchRangesForLine(line int) []selectionByteRange {
+	return e.find.CurrentMatchRangesForLine(line)
 }
 
 // ContextMenuView returns the context menu popup rendering if visible.

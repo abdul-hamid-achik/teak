@@ -197,13 +197,15 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		m.relayout()
 		return m, nil, true
 	case "ctrl+f":
-		model, cmd := m.openSearch(search.ModeText)
-		return model, cmd, true
+		if ed := m.activeEditor(); ed != nil {
+			ed.ShowFind()
+		}
+		return m, nil, true
 	case "ctrl+h":
 		model, cmd := m.openSearchReplace()
 		return model, cmd, true
 	case "ctrl+shift+f":
-		model, cmd := m.openSearch(search.ModeSemantic)
+		model, cmd := m.openSearch(search.ModeText)
 		return model, cmd, true
 	case "ctrl+space":
 		model, cmd := m.requestCompletion()
@@ -287,9 +289,17 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case "f3":
+		if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+			ed.UpdateFind(msg)
+			return m, nil, true
+		}
 		model, cmd := m.findNext()
 		return model, cmd, true
 	case "shift+f3":
+		if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+			ed.UpdateFind(msg)
+			return m, nil, true
+		}
 		model, cmd := m.findPrev()
 		return model, cmd, true
 	case "ctrl+n":

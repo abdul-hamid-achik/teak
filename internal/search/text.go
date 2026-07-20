@@ -16,18 +16,18 @@ const maxSearchLineBytes = 1<<20 + 1
 
 // TextSearch performs a text/regex search across files in rootDir.
 func TextSearch(rootDir, query string) ([]Result, error) {
-	return TextSearchContext(context.Background(), rootDir, query)
+	return TextSearchContext(context.Background(), rootDir, query, SearchOpts{})
 }
 
 // TextSearchContext is the cancellable form of TextSearch.
-func TextSearchContext(ctx context.Context, rootDir, query string) ([]Result, error) {
+func TextSearchContext(ctx context.Context, rootDir, query string, opts SearchOpts) ([]Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+	re, err := CompilePattern(query, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	sdk "github.com/coder/acp-go-sdk"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/acp"
 	"teak/internal/ui"
 )
@@ -800,6 +801,31 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		if mouse.Button == tea.MouseLeft {
+			if m.permission != nil {
+				if zone.Get("agent-perm-allow").InBounds(msg) {
+					return m.handlePermissionKey("y")
+				}
+				if zone.Get("agent-perm-deny").InBounds(msg) {
+					return m.handlePermissionKey("n")
+				}
+				if zone.Get("agent-perm-always").InBounds(msg) {
+					return m.handlePermissionKey("a")
+				}
+			}
+			if m.pendingWrite != nil {
+				if zone.Get("agent-write-accept").InBounds(msg) {
+					return m, m.AcceptWrite()
+				}
+				if zone.Get("agent-write-reject").InBounds(msg) {
+					return m, m.RejectWrite()
+				}
+			}
+		}
+		return m, m.input.Focus()
+
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -1410,11 +1436,11 @@ func (m Model) renderPermission(width int) []string {
 	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.Nord6).Bold(true).Render(title))
 
 	optLine := "  "
-	optLine += lipgloss.NewStyle().Foreground(ui.Nord14).Render("[y] Allow")
+	optLine += zone.Mark("agent-perm-allow", lipgloss.NewStyle().Foreground(ui.Nord14).Render("[y] Allow"))
 	optLine += "  "
-	optLine += lipgloss.NewStyle().Foreground(ui.Nord11).Render("[n] Deny")
+	optLine += zone.Mark("agent-perm-deny", lipgloss.NewStyle().Foreground(ui.Nord11).Render("[n] Deny"))
 	optLine += "  "
-	optLine += lipgloss.NewStyle().Foreground(ui.Nord13).Render("[a] Always")
+	optLine += zone.Mark("agent-perm-always", lipgloss.NewStyle().Foreground(ui.Nord13).Render("[a] Always"))
 	lines = append(lines, optLine)
 
 	return lines
@@ -1433,7 +1459,7 @@ func (m Model) renderWriteProposal(width int) []string {
 
 	lineCount := strings.Count(pw.Content, "\n") + 1
 	lines = append(lines, fmt.Sprintf("  %d lines", lineCount))
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.Nord14).Render("[Enter] Accept")+"  "+lipgloss.NewStyle().Foreground(ui.Nord11).Render("[Esc] Reject"))
+	lines = append(lines, "  "+zone.Mark("agent-write-accept", lipgloss.NewStyle().Foreground(ui.Nord14).Render("[Enter] Accept"))+"  "+zone.Mark("agent-write-reject", lipgloss.NewStyle().Foreground(ui.Nord11).Render("[Esc] Reject")))
 
 	return lines
 }

@@ -462,3 +462,9 @@ type LspProgressMsg struct {
 	Token any
 	Value any
 }
+
+// ServerExitedMsg is sent when an LSP server process exits unexpectedly.
+type ServerExitedMsg struct {
+	Command string
+	Err     error
+}

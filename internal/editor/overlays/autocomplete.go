@@ -63,6 +63,16 @@ func (a *Autocomplete) Selected() *AutocompleteItem {
 	return &a.Items[a.Cursor]
 }
 
+// SelectAt selects the item at the given index (relative to popup top).
+// Returns the selected item if valid, or nil.
+func (a *Autocomplete) SelectAt(idx int) *AutocompleteItem {
+	if !a.Visible || idx < 0 || idx >= len(a.Items) || idx >= 10 {
+		return nil
+	}
+	a.Cursor = idx
+	return &a.Items[idx]
+}
+
 // View renders the autocomplete popup as a string.
 func (a Autocomplete) View() string {
 	if !a.Visible || len(a.Items) == 0 {

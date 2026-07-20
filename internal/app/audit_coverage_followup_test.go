@@ -367,10 +367,10 @@ func TestAuditGlobalRoutingAndSearchNavigationState(t *testing.T) {
 				},
 			},
 			{
-				name: "semantic search", key: tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl | tea.ModShift},
+				name: "project text search", key: tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl | tea.ModShift},
 				check: func(t *testing.T, m Model, cmd tea.Cmd) {
-					if !m.showSearch || m.searchMode != search.ModeSemantic || cmd == nil {
-						t.Fatalf("semantic overlay state show=%v mode=%v cmd=%v", m.showSearch, m.searchMode, cmd != nil)
+					if !m.showSearch || m.searchMode != search.ModeText || cmd == nil {
+						t.Fatalf("text search overlay state show=%v mode=%v cmd=%v", m.showSearch, m.searchMode, cmd != nil)
 					}
 				},
 			},

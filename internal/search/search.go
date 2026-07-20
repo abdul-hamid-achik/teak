@@ -99,6 +99,7 @@ type Model struct {
 	replaceInput textinput.Model
 	showReplace  bool
 	focusedInput int // 0=search, 1=replace
+	regex        bool
 }
 
 // New creates a new search model.
@@ -258,6 +259,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, m.dispatchSearch()
 			}
 			m.cancelSearch()
+			return m, nil
+		case "ctrl+r":
+			if m.mode == ModeText {
+				m.regex = !m.regex
+				// Re-search with updated regex mode
+				if m.input.Value() != "" {
+					m.debounceGen++
+					m.replaceSearchContext()
+					m.results = nil
+					m.cursor = 0
+					m.scrollY = 0
+					m.errMsg = ""
+					return m, m.dispatchSearch()
+				}
+			}
 			return m, nil
 		case "up":
 			if m.showReplace && m.focusedInput == 1 {
@@ -429,7 +445,7 @@ func (m Model) doSearch() tea.Cmd {
 		if mode == ModeSemantic {
 			results, err = SemanticSearchContext(ctx, rootDir, query)
 		} else {
-			results, err = TextSearchContext(ctx, rootDir, query)
+			results, err = TextSearchContext(ctx, rootDir, query, SearchOpts{Regex: m.regex})
 		}
 		return SearchResultsMsg{Results: results, Err: err, Generation: generation}
 	}
@@ -517,6 +533,14 @@ func (m Model) View() string {
 		semLabel = activeMode.Render("Semantic")
 	}
 	sb.WriteString(m.theme.HelpTitle.Render("Search") + "  " + textLabel + modeStyle.Render("  |  ") + semLabel + modeStyle.Render("  (Tab)"))
+	if m.mode == ModeText {
+		if m.regex {
+			sb.WriteString("  " + lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(".*"))
+		} else {
+			sb.WriteString("  " + modeStyle.Render(".*"))
+		}
+		sb.WriteString(modeStyle.Render(" (Ctrl+R)"))
+	}
 	sb.WriteByte('\n')
 	sb.WriteByte('\n')
 

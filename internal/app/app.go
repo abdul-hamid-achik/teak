@@ -1835,6 +1835,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// For now, just log it
 		return m, nil
 
+	case lsp.ServerExitedMsg:
+		m.status = fmt.Sprintf("Language server %q exited unexpectedly", msg.Command)
+		log.Error("lsp server exited", "command", msg.Command, "err", msg.Err)
+		return m, nil
+
 	case lspMsg:
 		// Route through LSP coordinator
 		if m.coordinator != nil {
@@ -2966,7 +2971,13 @@ func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
 			clickIdx := m.problemsPanel.ScrollY() + mouse.Y
-			m.problemsPanel.SelectAt(clickIdx)
+			if m.problemsPanel.SelectAt(clickIdx) {
+				if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+					pos := text.Position{Line: prob.Line, Col: prob.Col}
+					m.setPendingCursor(prob.FilePath, pos)
+					return m.openFilePinned(prob.FilePath)
+				}
+			}
 			return m, nil
 		}
 	}

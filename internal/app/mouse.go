@@ -273,10 +273,13 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
-	// LSP popups do not expose a mouse-selection API. Consume clicks on their
-	// visible cells so a completion/hover cannot accidentally reposition or
-	// select text underneath it. Keyboard navigation remains owned by Editor.
+	// LSP popups: autocomplete supports mouse selection; other popups consume
+	// clicks so they cannot reposition or select text underneath.
 	if popup, ok := m.currentLSPOverlayPlacement(); ok && popup.contains(mouse.X, mouse.Y) {
+		if ed := m.activeEditor(); ed != nil && ed.IsAutocompleteVisible() && mouse.Button == tea.MouseLeft {
+			relY := mouse.Y - popup.y - 1 // -1 for box border
+			ed.AutocompleteSelectAt(relY)
+		}
 		return m, nil
 	}
 

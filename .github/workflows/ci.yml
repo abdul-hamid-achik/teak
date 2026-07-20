@@ -56,3 +56,33 @@ jobs:
 
       - name: Build binary
         run: go build -o bin/teak ./cmd/teak
+
+  glyphrun:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Build Teak
+        run: go build -o ./bin/teak ./cmd/teak
+
+      - name: Install Glyphrun
+        run: go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@latest
+
+      - name: Run Glyphrun specs
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          glyph run specs/tui_*.yml
+
+      - name: Upload glyphrun artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: glyphrun-artifacts
+          path: .glyphrun/runs/
+          retention-days: 7

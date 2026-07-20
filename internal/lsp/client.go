@@ -1542,9 +1542,22 @@ func (c *Client) reapProcess() {
 	if c.cmd == nil {
 		return
 	}
-	_ = c.cmd.Wait()
+	err := c.cmd.Wait()
 	if c.processDone != nil {
 		close(c.processDone)
+	}
+	c.mu.RLock()
+	expected := c.shuttingDown
+	command := ""
+	if c.cmd != nil && len(c.cmd.Args) > 0 {
+		command = c.cmd.Args[0]
+	}
+	c.mu.RUnlock()
+	if !expected && c.msgChan != nil {
+		select {
+		case c.msgChan <- ServerExitedMsg{Command: command, Err: err}:
+		default:
+		}
 	}
 }
 

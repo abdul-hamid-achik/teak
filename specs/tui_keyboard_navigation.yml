@@ -1,0 +1,73 @@
+version: 1
+name: teak_keyboard_navigation
+coversSymbol: app.Model.Update
+metadata:
+    feature: keyboard-navigation
+    owner: core-ui
+    priority: high
+    tags:
+        - smoke
+        - keyboard
+intent: |
+    a user can open a file via Quick Open (Ctrl+P), type to filter,
+    and open it with Enter — all via keyboard.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/run-teak.sh
+        - keyboard-nav
+        - testdata/glyphrun/config/default.toml
+        - testdata/glyphrun/workspace/alpha.txt
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "alpha one"
+        timeoutMs: 5000
+    # Open Quick Open with Ctrl+P
+    - press: "ctrl+p"
+    - wait:
+        screen:
+            contains: "beta.txt"
+        timeoutMs: 3000
+    - snapshot: quick_open_visible
+    # Type to filter
+    - press: "b"
+    - wait:
+        screen:
+            contains: "beta.txt"
+        timeoutMs: 2000
+    # Select and open with Enter
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "beta one"
+        timeoutMs: 3000
+    - snapshot: beta_opened_via_keyboard
+    # Quit
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: quick_open_and_open
+      description: Ctrl+P opens Quick Open, typing filters, Enter opens the file
+      verify:
+        screen:
+            contains: "beta one"
+    - id: clean_exit
+      description: the editor exits cleanly after keyboard navigation
+      verify:
+        process:
+            exitCode: 0

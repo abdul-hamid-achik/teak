@@ -13,7 +13,7 @@ func TestTextSearchContextHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := TextSearchContext(ctx, t.TempDir(), "needle")
+	_, err := TextSearchContext(ctx, t.TempDir(), "needle", SearchOpts{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("TextSearchContext() error = %v, want context.Canceled", err)
 	}

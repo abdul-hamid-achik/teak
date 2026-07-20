@@ -332,8 +332,8 @@ func TestContextMenuItemCount(t *testing.T) {
 	menu.Show(items, 10, 20)
 
 	count := menu.ItemCount()
-	if count != 12 {
-		t.Errorf("expected count 12 (capped), got %d", count)
+	if count != 15 {
+		t.Errorf("expected count 15 (all items), got %d", count)
 	}
 }
 
@@ -532,7 +532,7 @@ func TestContextMenuViewManyItems(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
-	// Should only show max 12 items
+	// All items should be rendered (no cap)
 }
 
 func TestContextMenuViewWithShortcut(t *testing.T) {

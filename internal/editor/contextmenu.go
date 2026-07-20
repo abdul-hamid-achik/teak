@@ -84,9 +84,9 @@ func (c *ContextMenu) Selected() *ContextMenuItem {
 	return item
 }
 
-// ItemCount returns the number of visible items (capped at 12).
+// ItemCount returns the number of visible items.
 func (c *ContextMenu) ItemCount() int {
-	return min(12, len(c.Items))
+	return len(c.Items)
 }
 
 // SelectAt selects the item at the given index (relative to menu top).
@@ -121,7 +121,7 @@ func (c ContextMenu) View() string {
 		return ""
 	}
 
-	maxItems := min(12, len(c.Items))
+	maxItems := len(c.Items)
 
 	// Calculate widths
 	maxLabelW := 0
