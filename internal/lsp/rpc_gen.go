@@ -34,51 +34,80 @@ func (c *Client) Completion(uri string, line, character int) ([]CompletionItem, 
 		return nil, err
 	}
 
-	var items []CompletionItem
 	var list struct {
-		Items []struct {
-			Label      string `json:"label"`
-			Detail     string `json:"detail"`
-			InsertText string `json:"insertText"`
-			Kind       int    `json:"kind"`
-		} `json:"items"`
+		Items []rawCompletionItem `json:"items"`
 	}
 	if err := json.Unmarshal(result, &list); err == nil && len(list.Items) > 0 {
-		for _, item := range list.Items {
-			insertText := item.InsertText
-			if insertText == "" {
-				insertText = item.Label
-			}
-			items = append(items, CompletionItem{
-				Label:      item.Label,
-				Detail:     item.Detail,
-				InsertText: insertText,
-				Kind:       item.Kind,
-			})
-		}
-		return items, nil
+		return c.completionItems(uri, list.Items), nil
 	}
-	var plainItems []struct {
-		Label      string `json:"label"`
-		Detail     string `json:"detail"`
-		InsertText string `json:"insertText"`
-		Kind       int    `json:"kind"`
-	}
+	var plainItems []rawCompletionItem
 	if err := json.Unmarshal(result, &plainItems); err == nil {
-		for _, item := range plainItems {
-			insertText := item.InsertText
-			if insertText == "" {
-				insertText = item.Label
-			}
-			items = append(items, CompletionItem{
-				Label:      item.Label,
-				Detail:     item.Detail,
-				InsertText: insertText,
-				Kind:       item.Kind,
-			})
-		}
+		return c.completionItems(uri, plainItems), nil
 	}
-	return items, nil
+	return nil, nil
+}
+
+// rawCompletionItem mirrors the wire shape of a completion item. Servers may
+// describe the insertion as plain text, as a textEdit with an explicit range,
+// or as an insertReplaceEdit carrying both an insert and a replace range.
+type rawCompletionItem struct {
+	Label      string `json:"label"`
+	Detail     string `json:"detail"`
+	InsertText string `json:"insertText"`
+	Kind       int    `json:"kind"`
+	TextEdit   *struct {
+		Range   *Range `json:"range"`
+		Insert  *Range `json:"insert"`
+		Replace *Range `json:"replace"`
+		NewText string `json:"newText"`
+	} `json:"textEdit"`
+}
+
+func (c *Client) completionItems(uri string, raw []rawCompletionItem) []CompletionItem {
+	items := make([]CompletionItem, 0, len(raw))
+	for _, item := range raw {
+		converted := CompletionItem{
+			Label:  item.Label,
+			Detail: item.Detail,
+			Kind:   item.Kind,
+		}
+
+		// insertText is the fallback text, and label the fallback for that, but
+		// a textEdit always takes precedence because only it knows how much of
+		// what the user typed the replacement is meant to cover.
+		converted.InsertText = item.InsertText
+		if converted.InsertText == "" {
+			converted.InsertText = item.Label
+		}
+
+		if edit := item.TextEdit; edit != nil {
+			// Prefer replace over insert: accepting a completion should
+			// overwrite the identifier being typed rather than splice into it.
+			protocolRange := edit.Range
+			if protocolRange == nil {
+				protocolRange = edit.Replace
+			}
+			if protocolRange == nil {
+				protocolRange = edit.Insert
+			}
+			if protocolRange != nil {
+				if internal, err := c.protocolRangeToInternal(uri, *protocolRange); err == nil {
+					converted.Edit = CompletionEdit{
+						StartLine: internal.Start.Line,
+						StartCol:  internal.Start.Character,
+						EndLine:   internal.End.Line,
+						EndCol:    internal.End.Character,
+						NewText:   edit.NewText,
+					}
+					converted.HasEdit = true
+					converted.InsertText = edit.NewText
+				}
+			}
+		}
+
+		items = append(items, converted)
+	}
+	return items
 }
 
 // Hover requests hover info at the given position.

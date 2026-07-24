@@ -63,6 +63,24 @@ type CompletionItem struct {
 	Detail     string
 	InsertText string
 	Kind       int
+
+	// Edit is the server-supplied replacement range, when it sent one. Servers
+	// commonly return a textEdit whose range covers the prefix already typed
+	// and omit insertText entirely; inserting at the cursor in that case
+	// duplicates the prefix ("fm" + "fmt" = "fmfmt"). HasEdit distinguishes an
+	// absent edit from one that legitimately replaces an empty range.
+	Edit    CompletionEdit
+	HasEdit bool
+}
+
+// CompletionEdit is a textEdit range in buffer coordinates (0-based line and
+// UTF-8 byte column, matching the rest of the codebase).
+type CompletionEdit struct {
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	NewText   string
 }
 
 // HoverResult represents hover information.

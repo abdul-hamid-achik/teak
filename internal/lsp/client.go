@@ -17,6 +17,8 @@ import (
 
 	log "github.com/charmbracelet/log"
 	"teak/internal/lsp/capabilities"
+
+	"teak/internal/toolpath"
 )
 
 // Client manages communication with a single LSP server process.
@@ -609,12 +611,16 @@ const jsonrpcMethodNotFound = -32601
 
 // NewClient creates a new LSP client and starts the server process.
 func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, error) {
-	_, err := exec.LookPath(cfg.Command)
+	// Resolve through toolpath rather than exec.LookPath so servers installed
+	// via asdf/mise shims, Homebrew or ~/go/bin are found even when Teak
+	// inherited a PATH that predates them (a tmux server outliving a profile
+	// change is the common case).
+	resolved, err := toolpath.Resolve(cfg.Command)
 	if err != nil {
 		return nil, fmt.Errorf("language server %q not found: %w", cfg.Command, err)
 	}
 
-	cmd := exec.Command(cfg.Command, cfg.Args...)
+	cmd := exec.Command(resolved, cfg.Args...)
 	cmd.Dir = rootDir
 	if len(cfg.Env) > 0 {
 		cmd.Env = os.Environ()

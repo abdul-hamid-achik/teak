@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	log "github.com/charmbracelet/log"
+
+	"teak/internal/toolpath"
 )
 
 // Manager manages multiple LSP clients, one per language server.
@@ -17,6 +20,8 @@ type Manager struct {
 	msgChan         chan any
 	mu              sync.RWMutex
 	retries         map[string]int
+	disabledUntil   map[string]time.Time
+	now             func() time.Time         // injectable for tests
 	starting        map[string]chan struct{} // guards against concurrent starts
 	startingClients map[string]*Client
 	closed          bool
@@ -35,6 +40,15 @@ type Manager struct {
 
 const (
 	maxRetries = 3
+
+	// retryCooldown is how long a server stays disabled after exhausting
+	// maxRetries. Without it the first three failures disabled a server for the
+	// entire session, so installing a missing server — or fixing a PATH that
+	// omitted it — could not take effect without restarting Teak.
+	retryCooldown = 60 * time.Second
+)
+
+const (
 
 	// A Client can retain a 128 MiB document-snapshot cache, a 72 MiB
 	// outbound queue, one 65 MiB frame being written, and up to 10 MiB of
@@ -105,6 +119,29 @@ func (b *clientBudget) inUse() int {
 // bypass the resource policy by constructing additional managers.
 var globalClientBudget = newClientBudget(maxLiveLSPClients)
 
+// clock returns the manager's time source, defaulting to time.Now.
+func (m *Manager) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// noteFailureLocked records a startup failure and returns the new attempt
+// count. On reaching maxRetries it stamps a cooldown so the server is retried
+// later instead of being disabled for the rest of the session. Callers must
+// hold m.mu.
+func (m *Manager) noteFailureLocked(command string) int {
+	m.retries[command]++
+	if m.retries[command] >= maxRetries {
+		if m.disabledUntil == nil {
+			m.disabledUntil = make(map[string]time.Time)
+		}
+		m.disabledUntil[command] = m.clock().Add(retryCooldown)
+	}
+	return m.retries[command]
+}
+
 // NewManager creates a new LSP manager. If userConfigs is non-empty, they are
 // merged with the built-in defaults (user entries override by extension match).
 func NewManager(rootDir string, userConfigs []ServerConfig) *Manager {
@@ -115,6 +152,7 @@ func NewManager(rootDir string, userConfigs []ServerConfig) *Manager {
 		rootDir:             rootDir,
 		msgChan:             make(chan any, 100),
 		retries:             make(map[string]int),
+		disabledUntil:       make(map[string]time.Time),
 		starting:            make(map[string]chan struct{}),
 		startingClients:     make(map[string]*Client),
 		lifecycleChanged:    make(chan struct{}),
@@ -172,25 +210,33 @@ func (m *Manager) lifecycleCurrent(filePath string, generation uint64) (*Client,
 // OpenDocument sends didOpen only if the reservation still names the current
 // tab lifecycle. The client repeats the generation check around its local
 // state mutation, closing the check/use gap with CloseDocument.
-func (m *Manager) OpenDocument(filePath string, generation uint64, languageID string, version int, content string) {
+// OpenDocument notifies the language server that a document is open. It returns
+// the error from starting the server, if any, so callers can surface it: a
+// silent failure here previously left the editor reporting "LSP ready" while no
+// server existed, which is indistinguishable from a broken language server.
+func (m *Manager) OpenDocument(filePath string, generation uint64, languageID string, version int, content string) error {
 	uri := FileURI(filePath)
 	m.mu.Lock()
 	current := !m.closed && m.documentGenerations[uri] == generation
 	m.mu.Unlock()
 	if !current {
-		return
+		return nil
 	}
 	client, err := m.EnsureClient(filePath)
-	if err != nil || client == nil {
-		return
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		return nil
 	}
 	if current, ok := m.lifecycleCurrent(filePath, generation); !ok || current != client {
-		return
+		return nil
 	}
 	if !client.bindDocumentGeneration(uri, generation) {
-		return
+		return nil
 	}
 	client.didOpen(uri, languageID, version, content, generation)
+	return nil
 }
 
 func (m *Manager) ChangeDocument(filePath string, generation uint64, version int, content string) {
@@ -266,10 +312,22 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 			return client, nil
 		}
 
-		// Check if disabled due to too many retries
+		// Disabled after too many failures, but only until the cooldown lapses.
+		// On expiry the retry budget is reset and the binary is looked up again
+		// from scratch, so a server installed mid-session becomes usable.
 		if m.retries[cfg.Command] >= maxRetries {
+			if until, ok := m.disabledUntil[cfg.Command]; ok && m.clock().Before(until) {
+				m.mu.Unlock()
+				return nil, fmt.Errorf("language server %s disabled after %d failures; retrying in %s",
+					cfg.Command, maxRetries, time.Until(until).Round(time.Second))
+			}
+			m.retries[cfg.Command] = 0
+			delete(m.disabledUntil, cfg.Command)
 			m.mu.Unlock()
-			return nil, fmt.Errorf("language server %s disabled after %d failures", cfg.Command, maxRetries)
+			toolpath.Invalidate(cfg.Command)
+			// Re-enter the loop so the shutdown and already-running checks are
+			// re-evaluated against state that may have changed while unlocked.
+			continue
 		}
 
 		if waitCh, ok := m.starting[cfg.Command]; ok {
@@ -297,11 +355,11 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 			}
 			budget.release()
 			m.mu.Lock()
-			m.retries[cfg.Command]++
+			attempt := m.noteFailureLocked(cfg.Command)
 			close(waitCh)
 			delete(m.starting, cfg.Command)
 			m.mu.Unlock()
-			log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
+			log.Error("lsp: failed to start server", "command", cfg.Command, "attempt", attempt, "max", maxRetries, "err", err)
 			return nil, err
 		}
 
@@ -323,12 +381,12 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 		// This prevents race conditions where ClientForFile gets an uninitialized client
 		if err := m.initClient(client); err != nil {
 			m.mu.Lock()
-			m.retries[cfg.Command]++
+			attempt := m.noteFailureLocked(cfg.Command)
 			close(waitCh)
 			delete(m.starting, cfg.Command)
 			delete(m.startingClients, cfg.Command)
 			m.mu.Unlock()
-			log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", m.retries[cfg.Command], "max", maxRetries, "err", err)
+			log.Error("lsp: failed to initialize server", "command", cfg.Command, "attempt", attempt, "max", maxRetries, "err", err)
 			client.Shutdown()
 			return nil, err
 		}
