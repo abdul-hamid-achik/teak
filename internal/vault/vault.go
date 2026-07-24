@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -14,10 +16,9 @@ const (
 	maxOutputBytes = 4 << 20
 )
 
-// Available returns true if the fcheap binary is on PATH.
+// Available returns true if the fcheap binary can be resolved.
 func Available() bool {
-	_, err := exec.LookPath("fcheap")
-	return err == nil
+	return toolpath.Available("fcheap")
 }
 
 // StashResult is the JSON output of `fcheap save --json`.
@@ -92,7 +93,10 @@ func RestoreStash(ctx context.Context, id string) (string, error) {
 }
 
 func runFcheap(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "fcheap", args...)
+	cmd, err := toolpath.Command(ctx, "fcheap", args...)
+	if err != nil {
+		return nil, err
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

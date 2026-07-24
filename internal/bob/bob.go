@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -14,10 +16,9 @@ const (
 	maxOutputBytes = 4 << 20
 )
 
-// Available returns true if the bob binary is on PATH.
+// Available returns true if the bob binary can be resolved.
 func Available() bool {
-	_, err := exec.LookPath("bob")
-	return err == nil
+	return toolpath.Available("bob")
 }
 
 // PlanAction represents a single file action in a bob plan.
@@ -35,8 +36,8 @@ type PlanResult struct {
 
 // CheckResult is the output of `bob check --json`.
 type CheckResult struct {
-	OK       bool     `json:"ok"`
-	Drifted  []string `json:"drifted"`
+	OK        bool     `json:"ok"`
+	Drifted   []string `json:"drifted"`
 	Conflicts []string `json:"conflicts"`
 }
 
@@ -86,7 +87,10 @@ func run(ctx context.Context, rootDir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bob", args...)
+	cmd, err := toolpath.Command(ctx, "bob", args...)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Dir = rootDir
 	out, err := cmd.Output()
 	if err != nil {

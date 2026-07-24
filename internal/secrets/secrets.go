@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -36,8 +37,7 @@ func (r *Resolver) Available() bool {
 	if r.agentSocketAvailable() {
 		return true
 	}
-	_, err := exec.LookPath("tvault")
-	return err == nil
+	return toolpath.Available("tvault")
 }
 
 // Get retrieves a single secret value.
@@ -145,7 +145,11 @@ func (r *Resolver) cliGet(ctx context.Context, project, key string) (string, err
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tvault", "get", project, key, "--format", "plain").Output()
+	cmd, err := toolpath.Command(ctx, "tvault", "get", project, key, "--format", "plain")
+	if err != nil {
+		return "", err
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("tvault get: %w", err)
 	}
@@ -156,7 +160,11 @@ func (r *Resolver) cliGetAll(ctx context.Context, project string) (map[string]st
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tvault", "env", project, "--format", "json").Output()
+	cmd, err := toolpath.Command(ctx, "tvault", "env", project, "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tvault env: %w", err)
 	}

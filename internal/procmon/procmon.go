@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
+
+	"teak/internal/toolpath"
 )
 
 const pollTimeout = 3 * time.Second
@@ -40,22 +41,22 @@ type Monitor struct {
 	mu        sync.RWMutex
 	processes map[int]string // pid → label (e.g., "gopls", "dlv")
 	latest    map[int]ProcessInfo
-	available bool
 }
 
-// New creates a process monitor. It checks if the monitor binary is available.
+// New creates a process monitor.
 func New() *Monitor {
-	_, err := exec.LookPath("monitor")
 	return &Monitor{
 		processes: make(map[int]string),
 		latest:    make(map[int]ProcessInfo),
-		available: err == nil,
 	}
 }
 
-// Available returns whether the monitor binary is on PATH.
+// Available reports whether the monitor binary can be resolved. Availability is
+// queried on each call rather than latched at construction so that installing
+// the binary while Teak is running takes effect without a restart; toolpath
+// caches the lookup, so calling this from a render path stays cheap.
 func (m *Monitor) Available() bool {
-	return m.available
+	return toolpath.Available("monitor")
 }
 
 // Register adds a process to monitor.
@@ -75,7 +76,7 @@ func (m *Monitor) Unregister(pid int) {
 
 // Poll refreshes resource info for all registered processes.
 func (m *Monitor) Poll(ctx context.Context) {
-	if !m.available {
+	if !m.Available() {
 		return
 	}
 	m.mu.RLock()
@@ -135,7 +136,11 @@ func pollProcess(ctx context.Context, pid int) (ProcessInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "monitor", "process", strconv.Itoa(pid), "--json").Output()
+	cmd, err := toolpath.Command(ctx, "monitor", "process", strconv.Itoa(pid), "--json")
+	if err != nil {
+		return ProcessInfo{}, err
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return ProcessInfo{}, err
 	}

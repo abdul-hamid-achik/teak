@@ -12,6 +12,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -32,7 +34,13 @@ var ErrOutputLimit = errors.New("git command output exceeds limit")
 // pager, or editor prompt behind the user's terminal.
 func newGitCommand(ctx context.Context, rootDir string, args ...string) *exec.Cmd {
 	commandArgs := append([]string{"-c", "credential.interactive=never"}, args...)
-	cmd := exec.CommandContext(ctx, "git", commandArgs...)
+	// Resolving keeps Git working when Teak inherited a PATH without it; on
+	// failure fall back to the bare name so the exec error still names git.
+	gitPath, err := toolpath.Resolve("git")
+	if err != nil {
+		gitPath = "git"
+	}
+	cmd := exec.CommandContext(ctx, gitPath, commandArgs...)
 	cmd.Dir = rootDir
 	cmd.WaitDelay = time.Second
 	cmd.Env = gitEnvironment(os.Environ())

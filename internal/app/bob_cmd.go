@@ -10,10 +10,10 @@ import (
 
 // bobResultMsg carries the result of a bob operation.
 type bobResultMsg struct {
-	kind    string
-	plan    *bob.PlanResult
-	check   *bob.CheckResult
-	err     error
+	kind  string
+	plan  *bob.PlanResult
+	check *bob.CheckResult
+	err   error
 }
 
 func (m Model) runBobPlan() tea.Cmd {

@@ -86,8 +86,16 @@ func TestCommitCmdAcceptsOptionLikeCommitMessage(t *testing.T) {
 
 func TestNewGitCommandIsNonInteractiveAndPreservesArgumentBoundary(t *testing.T) {
 	cmd := newGitCommand(context.Background(), t.TempDir(), "switch", "--", "-not-an-option")
-	if got, want := cmd.Args, []string{"git", "-c", "credential.interactive=never", "switch", "--", "-not-an-option"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %#v, want %#v", got, want)
+	// argv[0] is the resolved git path, so compare its basename; the argument
+	// boundary after it is what this test actually guards.
+	if len(cmd.Args) == 0 {
+		t.Fatal("newGitCommand produced no args")
+	}
+	if base := filepath.Base(cmd.Args[0]); base != "git" && base != "git.exe" {
+		t.Errorf("args[0] basename = %q, want git", base)
+	}
+	if got, want := cmd.Args[1:], []string{"-c", "credential.interactive=never", "switch", "--", "-not-an-option"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args[1:] = %#v, want %#v", got, want)
 	}
 
 	env := strings.Join(cmd.Env, "\n")

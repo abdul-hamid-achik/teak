@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -18,6 +17,8 @@ import (
 	"unicode/utf8"
 
 	log "github.com/charmbracelet/log"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -63,34 +64,16 @@ type callResult struct {
 	Error  *ErrorResponse
 }
 
-// resolveCommand tries to find a command in PATH, then in common Go binary locations.
+// resolveCommand finds a debug adapter binary. The PATH plus well-known
+// install directories (including the GOBIN/GOPATH/~/go/bin locations this
+// previously searched by hand) are handled by toolpath, so every Teak
+// subsystem resolves tools the same way.
 func resolveCommand(command string) string {
-	if p, err := exec.LookPath(command); err == nil {
-		return p
+	path, err := toolpath.Resolve(command)
+	if err != nil {
+		return ""
 	}
-	// Check GOBIN and GOPATH/bin
-	if gobin := os.Getenv("GOBIN"); gobin != "" {
-		if p := filepath.Join(gobin, command); fileExists(p) {
-			return p
-		}
-	}
-	if gopath := os.Getenv("GOPATH"); gopath != "" {
-		if p := filepath.Join(gopath, "bin", command); fileExists(p) {
-			return p
-		}
-	}
-	// Check ~/go/bin as fallback
-	if home, err := os.UserHomeDir(); err == nil {
-		if p := filepath.Join(home, "go", "bin", command); fileExists(p) {
-			return p
-		}
-	}
-	return ""
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	return path
 }
 
 func isDelveDAP(command string, args []string) bool {
@@ -487,6 +470,14 @@ func (c *Client) sendRequestContext(ctx context.Context, command string, args an
 	var res callResult
 	select {
 	case res = <-ch:
+	case <-c.processDone:
+		// Without this branch a request outlived the adapter it was sent to and
+		// blocked for its full timeout (30s for most calls), so stepping after a
+		// crashed adapter appeared to hang instead of reporting the failure.
+		c.mu.Lock()
+		delete(c.pending, seq)
+		c.mu.Unlock()
+		return fmt.Errorf("DAP request %q: debug adapter exited", command)
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, seq)
