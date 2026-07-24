@@ -13,7 +13,7 @@ Teak brings a familiar, VS Code-like editing experience to the terminal — synt
 - **LSP support** — autocomplete, hover, go-to-definition, diagnostics, rename
 - **File tree** sidebar with lazy-loaded directories, diagnostic indicators, and context menus
 - **Git panel** showing branch name and changed files with color-coded status
-- **Text search** built in, plus **semantic search** when `vecgrep` is installed
+- **Project search** powered by [ripgrep](https://github.com/BurntSushi/ripgrep) when available, with a built-in fallback; plus **semantic search** when `vecgrep` is installed
 - **Lua plugins** with commands, keymaps, autocmds, and live editor/runtime access
 - **Live file watching** — external changes are detected and reloaded automatically
 - **Undo/redo** backed by a persistent, immutable rope data structure
@@ -40,7 +40,21 @@ Requires **Go 1.26.0+**. The module recommends **Go 1.26.5**; with Go 1.21+
 and the default `GOTOOLCHAIN=auto`, the `go` command selects that patched
 toolchain automatically.
 
-Semantic search is optional and requires [`vecgrep`](https://github.com/veces/vecgrep) to be installed and available on your `PATH`. Without it, regular text search still works and semantic search will report that the dependency is missing.
+### Optional tools
+
+Teak works without any of these, and tells you what is missing and how to install it when you use a feature that needs one.
+
+| Tool | Enables | Without it |
+|------|---------|------------|
+| [`rg`](https://github.com/BurntSushi/ripgrep) | Fast project-wide search that respects `.gitignore` | A slower built-in walker is used |
+| Language servers (`gopls`, `typescript-language-server`, …) | Autocomplete, hover, go-to-definition, diagnostics, rename | Editing works; language features are unavailable |
+| [`vecgrep`](https://github.com/veces/vecgrep) | Semantic search | Text search still works |
+| [`dlv`](https://github.com/go-delve/delve) | Go debugging | The debugger panel reports the missing adapter |
+
+Teak resolves these from your `PATH` **plus** the usual install locations that a
+non-login shell often misses — Homebrew, `asdf`/`mise` shims, `~/go/bin`,
+`~/.cargo/bin`, `~/.local/bin`. Availability is re-checked periodically, so a
+tool installed while Teak is running becomes usable without a restart.
 
 ## Terminal compatibility
 
@@ -277,13 +291,26 @@ internal/
   filetree/         File explorer sidebar with icons and context menus
   highlight/        Syntax highlighting via Chroma with viewport optimization
   lsp/              LSP client, multi-server manager, language configs
-  search/           Text (grep) and semantic (vecgrep) search
+  search/           Project search (ripgrep with a pure-Go fallback) and semantic search
+  toolpath/         Resolution of external binaries with install hints
   git/              Git panel showing branch and file status
   clipboard/        Cross-platform clipboard (pbcopy/xclip)
   ui/               Nord theme and styles
 ```
 
-The text buffer uses an **immutable rope** — insert and delete operations return a new tree, enabling efficient undo/redo without copying. Syntax highlighting is **viewport-optimized**, only materializing styles for visible lines. LSP servers are started **lazily** per language and communicate over stdin/stdout with JSON-RPC 2.0.
+The text buffer uses an **immutable rope** — insert and delete operations return a
+new tree, enabling efficient undo/redo without copying. Line lookups descend the
+tree using per-node newline counts, so no per-edit index has to be rebuilt.
+
+Syntax highlighting is **viewport-optimized**, only materializing styles for
+visible lines, and tokens are retained across an edit so typing never flashes the
+buffer to plain text. Rendering emits precomputed escape sequences rather than
+re-running the styling pipeline per token.
+
+Anything proportional to file size — searching, tokenizing, file I/O, LSP
+traffic — runs off the UI goroutine and is tagged with a generation counter, so a
+superseded result can never overwrite a newer one. LSP servers start **lazily**
+per language and communicate over stdin/stdout with JSON-RPC 2.0.
 
 ## Dependencies
 
@@ -308,7 +335,13 @@ task clean        # Remove build artifacts
 # Using Go directly
 go build -o bin/teak ./cmd/teak
 go test ./...
+go test ./... -race           # race detector
+go test ./... -bench . -benchmem
 ```
+
+Contributions should keep `go build ./...`, `go vet ./...` and `go test ./...`
+green. See [AGENTS.md](AGENTS.md) for architecture invariants and testing
+conventions.
 
 ## License
 

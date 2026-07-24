@@ -23,23 +23,28 @@ Teak is a terminal code editor using the Bubbletea v2 Elm architecture (Model-Vi
 ### Message Flow
 
 The root model in `internal/app/app.go` receives all messages and routes them:
-- `tea.KeyPressMsg` → routed by focus state and overlay priority (search > help > go-to-line > rename > new-item > delete-confirm > context-menu > tree/editor)
+- `tea.KeyPressMsg` → routed by `handleKeyPressPrecedence` in `internal/app/input_routing.go`. The order is: unsaved-changes confirm > `overlayStack` > branch picker > search > go-to-line > rename > save-as > new-item > delete-confirm > tree context menu > git context menu > help > settings > plugin keys > focused panel. Read the function rather than trusting this list — it is the only authority.
 - `tea.MouseClickMsg` / `tea.MouseWheelMsg` → routed by overlay state, then by X coordinate (tree vs editor)
 - Sub-model messages (e.g. `filetree.OpenFileMsg`, `search.OpenResultMsg`, `lsp.DiagnosticsMsg`) → handled directly in the root Update switch
 
 ### Focus System
 
-`FocusArea` enum controls keyboard routing: `FocusEditor`, `FocusTree`, `FocusGitPanel`. The active focus area determines which sub-model receives unhandled key events.
+`FocusArea` controls keyboard routing: `FocusEditor`, `FocusTree`, `FocusGitPanel`, `FocusProblems`, `FocusDebugger`, `FocusAgent`. The active area receives unhandled key events.
+
+**Always change focus through `Model.setFocus`, never by assigning `m.focus`.** It releases what the previous area held — blurring the agent input, unfocusing the git commit form. Direct assignment was the source of a phantom caret in the agent panel and a commit box that silently swallowed navigation keys.
+
+Global shortcuts that collide with `bubbles` text-input bindings (`ctrl+w/f/b/h/k`) must be guarded with `Model.textInputFocused()`; the global handler runs before focused-panel routing.
 
 ### Key Packages
 
 - **`internal/text/`** — Persistent immutable rope (512-byte leaves, Fibonacci balancing). `Insert`/`Delete` return new `*Rope`, never mutate. Buffer wraps rope with cursor, selection, undo/redo stack.
-- **`internal/app/`** — Root model coordinating all components. `app.go` is the central hub (~1600 lines). `watcher.go` uses fsnotify for external file change detection.
+- **`internal/app/`** — Root model coordinating all components. `app.go` is the central hub (~5100 lines). `watcher.go` uses fsnotify for external file change detection.
 - **`internal/editor/`** — Editor viewport, gutter, tab bar, autocomplete, hover, context menu, help overlay, welcome screen. Each is a separate sub-model.
-- **`internal/highlight/`** — Chroma v2 highlighter with two modes: `TokenizeToLines()` for full file (edit-triggered), `TokenizeViewportToLines()` for visible lines only (scroll-triggered). `SetLines()` merges partial results into cache, never replaces.
+- **`internal/highlight/`** — Chroma v2 highlighter with two modes: `TokenizeToLines()` for full file (edit-triggered), `TokenizeViewportToLines()` for visible lines only (scroll-triggered). `SetLines()` **replaces** the cache wholesale; `MergeLines()`/`MergeBatch()` are the merging variants. `InvalidateEdited()` keeps tokens on screen across an edit while clearing coverage, so typing does not flash the buffer to plain text; `Invalidate()` drops everything.
+- **`internal/toolpath/`** — Resolves every external binary (`rg`, `git`, language servers, `codemap`, `vecgrep`, …). Never call `exec.LookPath` or hand a bare name to `os/exec` directly.
 - **`internal/lsp/`** — JSON-RPC 2.0 client over stdin/stdout. Manager lazily starts per-language servers. Configs in `config.go`.
 - **`internal/filetree/`** — Lazy-loaded tree with async directory expansion. Nerd Font v3 icons in `icons.go`.
-- **`internal/search/`** — Text (grep) and semantic (vecgrep) search with debounced input.
+- **`internal/search/`** — Project-wide text search backed by ripgrep when `rg` resolves, falling back to a pure-Go walker otherwise; semantic search via `vecgrep`. Input is debounced and results are generation-tagged so a superseded query cannot overwrite newer ones.
 - **`internal/git/`** — Sidebar panel using `git status --porcelain`.
 - **`internal/ui/`** — Nord color palette (`Nord0`–`Nord15` as `color.Color` vars) and `Theme` struct with 30+ lipgloss styles.
 
@@ -47,8 +52,9 @@ The root model in `internal/app/app.go` receives all messages and routes them:
 
 - **Go 1.26+**, use standard library where possible
 - **0-based line and column indexing** throughout the entire codebase
-- **Rope is immutable**: `Insert`/`Delete` return new `*Rope`
+- **Rope is immutable**: `Insert`/`Delete` return new `*Rope`. It carries **no line-offset table** — `LineStart` descends the tree using per-node newline counts. A per-root table was rebuilt from a full document copy after every keystroke (2.2 ms and 6.9 MB on a 100k-line file); do not reintroduce one.
 - **Return errors, don't panic**
+- **Nothing proportional to document size may run inside `Update()`** — no full-buffer scans, no rope materialization, no `exec`. Use a `tea.Cmd` with a generation counter so stale results are discarded.
 - **Table-driven tests** in `_test.go` files alongside source
 
 ## Lipgloss v2 Pitfall

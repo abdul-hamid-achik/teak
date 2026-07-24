@@ -169,7 +169,8 @@ internal/
     uri.go              File path ↔ URI conversion
   search/               Search functionality
     search.go           Search overlay model — text input, results, mode toggle
-    text.go             Grep-based text search (recursive, regex)
+    text.go             Pure-Go fallback walker (recursive, regex)
+    ripgrep.go          Ripgrep-backed engine, used when `rg` resolves
     semantic.go         Vecgrep-based semantic search with indexing
   git/                  Git integration
     panel.go            Sidebar panel showing branch + changed files via `git status --porcelain`
@@ -233,6 +234,10 @@ All state changes flow through `Update(msg tea.Msg) (tea.Model, tea.Cmd)`. Compo
 - `GoToLineMsg` — open go-to-line dialog
 
 ### Focus Management
+
+**Change focus only through `Model.setFocus`.** It releases whatever the area being left was holding — blurring the agent input, unfocusing the git commit form. More than fifty sites used to assign `m.focus` directly and only a handful remembered to do that, which left a phantom caret in the agent panel and a commit box that silently ate navigation keys.
+
+Global shortcuts colliding with `bubbles` text-input bindings (`ctrl+w`, `ctrl+f`, `ctrl+b`, `ctrl+h`, `ctrl+k`) must be guarded with `Model.textInputFocused()`, because the global handler runs before focused-panel routing.
 
 The app tracks which panel has focus via `FocusArea`:
 - `FocusEditor` — keyboard input goes to the active editor
@@ -599,7 +604,7 @@ The rope in `internal/text/rope.go` is **persistent and immutable**:
 - `rope.Delete(start, end)` returns a new `*Rope`
 - Leaf nodes hold up to 512 bytes
 - Auto-rebalances using Fibonacci depth thresholds
-- Line indexing is cached and invalidated on structural changes
+- **No line-offset table.** `LineStart` descends the tree using each node's newline count. A cached per-root table was rebuilt from a full document copy on the first read after every keystroke — 2.2 ms and 6.9 MB of garbage on a 100k-line file, versus ~4 µs and no allocation for the descent — and each undo snapshot pinned its own copy. Do not reintroduce one.
 
 **Thread-safe for concurrent reads** (immutable design).
 
@@ -608,7 +613,9 @@ The rope in `internal/text/rope.go` is **persistent and immutable**:
 The highlighter in `internal/highlight/` uses Chroma v2:
 - `TokenizeToLines()` tokenizes the full file
 - `TokenizeViewportToLines()` tokenizes only visible lines (for scroll performance)
-- `SetLines()` merges partial viewport results into the full cache (never replaces)
+- `SetLines()` **replaces** the cache wholesale. `MergeLines()` and `MergeBatch()` are the merging variants — do not confuse them
+- `InvalidateEdited(startLine, endLine, lineDelta)` is what the typing path uses: it shifts retained tokens to follow the edit and clears coverage, so the viewport keeps its colours while a real tokenization is still scheduled. `Invalidate()` drops everything and is reserved for paste, undo, redo and comment toggling
+- `StyledToken.Render()` uses precomputed escape sequences derived from lipgloss and verified against it; text containing a tab falls back to `Style.Render` because lipgloss expands tabs
 - Edit-triggered retokenization does full file; scroll-triggered does viewport only
 
 ### LSP Integration
@@ -666,7 +673,16 @@ if err := cfg.Validate(); err != nil {
 1. Add the keybinding to `internal/editor/help.go` in the `helpGroups` variable
 2. Handle the key in `internal/app/app.go` in the `tea.KeyPressMsg` switch (or appropriate coordinator)
 3. If it's editor-specific, handle it in `internal/editor/editor.go` instead
-4. **Add a test** for the new shortcut behavior
+4. If the chord is also a `bubbles` text-input binding, guard it with `Model.textInputFocused()`
+5. **Add a test** for the new shortcut behavior
+
+### Shelling out to an external tool
+
+1. Resolve it through `internal/toolpath` — `toolpath.Command(ctx, name, args...)` returns an `*exec.Cmd` with an absolute path, or a `*toolpath.MissingToolError`
+2. Never call `exec.LookPath` or pass a bare name to `os/exec`: Teak inherits whatever PATH its parent had, which routinely omits Homebrew, asdf shims and `~/go/bin`
+3. Add an install hint to `installHints` in `internal/toolpath/toolpath.go` so the UI can tell the user how to get it
+4. Never cache "unavailable" for the process lifetime — `toolpath` already caches with a TTL so a tool installed mid-session starts working
+5. Surface the failure. A silently swallowed "not found" is indistinguishable from a broken feature
 
 ### Adding a new LSP language
 
@@ -774,8 +790,13 @@ func TestAsyncOperation(t *testing.T) {
 
 ## Architecture Documentation
 
-For detailed architecture and refactoring plans, see:
-- `REFACTOR_PLAN.md` — Coordinator pattern refactoring plan
+- [`README.md`](README.md) — user-facing overview, install, keybindings
+- [`CLAUDE.md`](CLAUDE.md) — condensed guidance for Claude Code
+- [`CHANGELOG.md`](CHANGELOG.md) — release history
+
+This file is the detailed reference; the sections above on package layout,
+architectural patterns and invariants are the authority. Where a document and
+the code disagree, the code wins — fix the document.
 
 ## Performance Guidelines
 
@@ -801,3 +822,31 @@ func BenchmarkOperation(b *testing.B) {
 ```
 
 Run with: `go test ./... -bench=. -benchmem`
+
+
+## Invariants that are easy to break
+
+These were each the cause of a real defect. They are not style preferences.
+
+**Nothing proportional to document size may run inside `Update()`.** No full-buffer scan, no rope materialization, no `exec`, no regex compile over the whole file. Move it into a `tea.Cmd`, tag the result with a generation counter, and discard results whose generation no longer matches. In-buffer find blocked the event loop for 13 ms per keystroke on a 50k-line file before this was applied.
+
+**A caller that reports success must have succeeded.** `lsp.Manager.OpenDocument` used to swallow its startup error while the app still emitted `LspReadyMsg`, so a missing language server was indistinguishable from a working one. Propagate the error and surface it.
+
+**Never disable a capability for the whole session.** Retry budgets need a cooldown, not a permanent blacklist, or installing the missing tool cannot take effect without restarting Teak.
+
+**Every buffer mutation must go through `syncEditorStateAfterUpdate`.** It reconciles the dirty indicator, preview-tab pinning, LSP `didChange` and plugin autocmds. The mouse-driven completion and context-menu paths bypassed it and silently desynchronized the language server's copy of the document.
+
+**Clamp the cursor after any edit that rewrites the document.** Formatting, rename and code actions can shorten the buffer under the cursor; `Buffer.ClampCursor()` confines the cursor *and* every selection.
+
+**`Buffer.LastChange` is derived from `sel.Head`, not from `Buffer.Cursor`.** Moving the cursor without keeping `Selections` in sync produces a change record pointing at the wrong line, which corrupts both highlight invalidation and LSP incremental sync. Prefer `Buffer.SetCursor`, which updates both. *This invariant is currently unverified by any test — auditing the paths that touch `Cursor` directly is outstanding work.*
+
+## Writing benchmarks that measure something
+
+Several checked-in benchmarks were found to measure a degenerate path while appearing to measure the real one. Before trusting a benchmark, confirm it reaches the branch its name implies.
+
+- **Populate lazily-built state.** `highlight.New(...)` without `Tokenize(...)` leaves the token cache nil, so `Viewport.Render` takes its plain-text branch and never measures token rendering. `TokenizeViewport` only *returns* tokens — `SetLines`/`MergeLines`/`MergeBatch` install them.
+- **Reset every cache the code consults.** Clearing `cachedFlat` but not `sharedFlatCache` made a file-tree benchmark report 29 ns/op for work that actually costs ~1.3 µs.
+- **Hoist construction out of the timed loop.** `editor.New()` inside the loop accounted for ~85% of a paste benchmark's reported cost.
+- **Use inputs that reach the code.** A cursor-movement benchmark on an empty buffer measures a no-op.
+
+A fix that does not change the numbers means the original concern was wrong; say so rather than committing a no-op change.
