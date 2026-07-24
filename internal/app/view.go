@@ -109,15 +109,23 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Overlay context menus (rendered before help/search so they show in normal view)
+	// Overlay context menus (rendered before help/search so they show in normal view).
+	//
+	// These are three independent surfaces, not alternatives: the sidebar menus
+	// belong to the tree and git panels, which are visible alongside any tab.
+	// Chaining them behind the editor menu's diff-tab check made both sidebar
+	// menus unreachable on a normal tab — right-clicking the sidebar entered the
+	// menu's input-capturing state while drawing nothing.
 	if !m.isActiveDiffTab() {
 		if cmView, cmRect, ok := m.editorContextMenuGeometry(); ok {
 			content = ui.PlaceOverlayAt(content, cmView, cmRect.x, cmRect.y, m.width, m.height)
 		}
-	} else if m.gitContextMenu.Visible {
+	}
+	if m.gitContextMenu.Visible {
 		cmView := m.gitContextMenu.View()
 		content = ui.PlaceOverlayAt(content, cmView, m.gitContextMenu.X, m.gitContextMenu.Y, m.width, m.height)
-	} else if m.treeContextMenu.Visible {
+	}
+	if m.treeContextMenu.Visible {
 		cmView := m.treeContextMenu.View()
 		content = ui.PlaceOverlayAt(content, cmView, m.treeContextMenu.X, m.treeContextMenu.Y, m.width, m.height)
 	}
@@ -270,9 +278,12 @@ func (m Model) renderSplitPanes() string {
 		paneH = 1
 	}
 
+	// Each pane renders the tab it owns. Rendering pane A from activeEditor()
+	// meant that focusing pane B — which moves activeTab — made both panes show
+	// the same buffer.
 	paneAView := ""
-	if m.activeEditor() != nil {
-		paneAView = m.activeEditor().View()
+	if tab := m.split.firstTab; tab >= 0 && tab < len(m.editors) {
+		paneAView = m.editors[tab].View()
 	}
 	paneAView = clipViewRows(paneAView, paneH)
 	paneAView = clipViewLines(paneAView, paneAW)

@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"time"
+
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -15,15 +17,47 @@ type FindMatch struct {
 	End   text.Position
 }
 
+// findDebounce is how long typing must pause before the buffer is scanned.
+// Matching the search panel's cadence keeps the two find experiences aligned.
+const findDebounce = 120 * time.Millisecond
+
+// maxFindMatches bounds how many matches are retained.
+const maxFindMatches = 10000
+
+// maxFindScanBytes bounds how much of the document a single scan reads. A query
+// with no matches used to walk the whole buffer regardless of the match cap, so
+// the cost was unbounded on large files even when nothing was found.
+const maxFindScanBytes = 8 << 20
+
+// FindDebounceMsg fires after typing pauses and asks for a scan.
+type FindDebounceMsg struct {
+	EditorID   uint64
+	Generation int
+}
+
+// FindResultsMsg carries the outcome of an asynchronous buffer scan.
+type FindResultsMsg struct {
+	EditorID   uint64
+	Generation int
+	Matches    []FindMatch
+	Current    int
+}
+
 // FindModel manages in-buffer find state.
 type FindModel struct {
-	input     textinput.Model
-	visible   bool
-	matches   []FindMatch
-	current   int
-	regex     bool
-	theme     ui.Theme
-	query     string
+	input   textinput.Model
+	visible bool
+	matches []FindMatch
+	current int
+	regex   bool
+	theme   ui.Theme
+	query   string
+
+	// generation increments on every query change so results from a superseded
+	// scan can be discarded rather than overwriting newer ones.
+	generation int
+	// editorID lets a scan's result find its way back to the right editor.
+	editorID uint64
 }
 
 // NewFindModel creates a new in-buffer find widget.
@@ -95,8 +129,7 @@ func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 			return f, nil
 		case "ctrl+r":
 			f.regex = !f.regex
-			f.updateMatches(buf)
-			return f, nil
+			return f, f.scheduleScan()
 		}
 	}
 
@@ -105,54 +138,121 @@ func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 	newQuery := f.input.Value()
 	if newQuery != f.query {
 		f.query = newQuery
-		f.updateMatches(buf)
+		// Scanning here used to run synchronously inside Update, recompiling the
+		// pattern and walking every line of the document on each keystroke —
+		// 64ms of blocked event loop per character on a 50k-line file.
+		return f, tea.Batch(cmd, f.scheduleScan())
 	}
 	return f, cmd
 }
 
-// updateMatches recomputes matches from the buffer content.
-func (f *FindModel) updateMatches(buf *text.Buffer) {
-	f.matches = nil
-	f.current = 0
+// scheduleScan invalidates any in-flight scan and asks for a fresh one after a
+// short pause. Results carry the generation so a slow scan that lands after the
+// query moved on is dropped instead of overwriting newer matches.
+func (f *FindModel) scheduleScan() tea.Cmd {
+	f.generation++
+	generation := f.generation
+	editorID := f.editorID
+	if f.input.Value() == "" {
+		// An empty query has no matches; clear immediately rather than making
+		// the user wait for a scan that would find nothing.
+		f.matches = nil
+		f.current = 0
+		return nil
+	}
+	return tea.Tick(findDebounce, func(time.Time) tea.Msg {
+		return FindDebounceMsg{EditorID: editorID, Generation: generation}
+	})
+}
+
+// ScanCmd returns a command that scans rope off the UI goroutine. The rope is
+// immutable, so the command can safely outlive the edit that produced it.
+func (f FindModel) ScanCmd(rope *text.Rope, cursor text.Position) tea.Cmd {
 	query := f.input.Value()
-	if query == "" || buf == nil {
-		return
+	regex := f.regex
+	generation := f.generation
+	editorID := f.editorID
+	if query == "" || rope == nil {
+		return nil
 	}
+	return func() tea.Msg {
+		matches, current := findMatches(rope, query, regex, cursor)
+		return FindResultsMsg{
+			EditorID:   editorID,
+			Generation: generation,
+			Matches:    matches,
+			Current:    current,
+		}
+	}
+}
 
-	re, err := search.CompilePattern(query, search.SearchOpts{Regex: f.regex})
+// ApplyResults installs a scan result, ignoring one that has been superseded.
+func (f *FindModel) ApplyResults(msg FindResultsMsg) bool {
+	if msg.Generation != f.generation {
+		return false
+	}
+	f.matches = msg.Matches
+	f.current = msg.Current
+	return true
+}
+
+// Generation returns the current query generation.
+func (f FindModel) Generation() int { return f.generation }
+
+// SetEditorID binds this widget to its owning editor so results can be routed.
+func (f *FindModel) SetEditorID(id uint64) { f.editorID = id }
+
+// findMatches scans rope for query. It is a pure function so it can run on a
+// background goroutine.
+func findMatches(rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int) {
+	re, err := search.CompilePattern(query, search.SearchOpts{Regex: regex})
 	if err != nil {
-		return
+		return nil, 0
 	}
 
-	rope := buf.Rope()
+	var matches []FindMatch
 	lineCount := rope.LineCount()
-	const maxMatches = 10000
+	scanned := 0
 
-	for line := 0; line < lineCount && len(f.matches) < maxMatches; line++ {
+	for line := 0; line < lineCount && len(matches) < maxFindMatches; line++ {
 		lineBytes := rope.Line(line)
+		scanned += len(lineBytes) + 1
+		if scanned > maxFindScanBytes {
+			break
+		}
 		lineStr := string(lineBytes)
-		locs := re.FindAllStringIndex(lineStr, -1)
-		for _, loc := range locs {
-			if len(f.matches) >= maxMatches {
+		for _, loc := range re.FindAllStringIndex(lineStr, -1) {
+			if len(matches) >= maxFindMatches {
 				break
 			}
-			f.matches = append(f.matches, FindMatch{
+			matches = append(matches, FindMatch{
 				Start: text.Position{Line: line, Col: loc[0]},
 				End:   text.Position{Line: line, Col: loc[1]},
 			})
 		}
 	}
 
-	// Position current match near the cursor
-	if len(f.matches) > 0 {
-		cursor := buf.Cursor
-		for i, m := range f.matches {
-			if m.Start.Line > cursor.Line || (m.Start.Line == cursor.Line && m.Start.Col >= cursor.Col) {
-				f.current = i
-				break
-			}
+	// Position the current match near the cursor.
+	current := 0
+	for i, m := range matches {
+		if m.Start.Line > cursor.Line || (m.Start.Line == cursor.Line && m.Start.Col >= cursor.Col) {
+			current = i
+			break
 		}
 	}
+	return matches, current
+}
+
+// updateMatches scans immediately. Reserved for callers that must have
+// matches before returning (opening the widget over a selection); typing goes
+// through the debounced path instead.
+func (f *FindModel) updateMatches(buf *text.Buffer) {
+	if buf == nil || f.input.Value() == "" {
+		f.matches = nil
+		f.current = 0
+		return
+	}
+	f.matches, f.current = findMatches(buf.Rope(), f.input.Value(), f.regex, buf.Cursor)
 }
 
 // CurrentMatchPosition returns the position of the current match, or nil.

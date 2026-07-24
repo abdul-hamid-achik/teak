@@ -12,6 +12,20 @@ type AutocompleteItem struct {
 	Label      string
 	Detail     string
 	InsertText string
+
+	// Edit, when HasEdit is set, is the buffer range the server wants replaced
+	// (0-based line, UTF-8 byte column). Without it the typed prefix is left in
+	// place and the completion is appended to it.
+	Edit    AutocompleteEdit
+	HasEdit bool
+}
+
+// AutocompleteEdit is a completion's replacement range in buffer coordinates.
+type AutocompleteEdit struct {
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
 }
 
 // Autocomplete manages the autocomplete popup state.

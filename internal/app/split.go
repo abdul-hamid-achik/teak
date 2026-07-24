@@ -5,13 +5,23 @@ type splitLayout struct {
 	enabled   bool
 	vertical  bool // false = side-by-side (|), true = stacked (-)
 	ratio     float64
+	firstTab  int // editors[] index shown in pane A; -1 = none
 	secondTab int // editors[] index shown in pane B; -1 = none
-	focused   int // 0 = pane A (activeTab), 1 = pane B
+	focused   int // 0 = pane A, 1 = pane B
+}
+
+// paneTab returns the editor index displayed in the given pane, or -1.
+func (s splitLayout) paneTab(pane int) int {
+	if pane == 1 {
+		return s.secondTab
+	}
+	return s.firstTab
 }
 
 func defaultSplitLayout() splitLayout {
 	return splitLayout{
 		ratio:     0.5,
+		firstTab:  -1,
 		secondTab: -1,
 	}
 }
@@ -102,11 +112,33 @@ func (m *Model) toggleSplit() {
 	}
 	m.split.enabled = true
 	m.split.focused = 0
-	// Pane B shows the next tab
-	next := (m.activeTab + 1) % len(m.editors)
-	m.split.secondTab = next
+	// Pane A keeps the current tab and pane B shows the next one. Pane A's tab
+	// is recorded explicitly: deriving it from activeTab made both panes render
+	// the same buffer as soon as focus moved to pane B.
+	m.split.firstTab = m.activeTab
+	m.split.secondTab = (m.activeTab + 1) % len(m.editors)
 	m.relayout()
 	m.status = "Split view (F6 to switch panes, Ctrl+Shift+\\ to close)"
+}
+
+// focusSplitPaneAt moves split focus to whichever pane contains the point. It
+// is a no-op when the split is off or the point is not over a pane.
+func (m *Model) focusSplitPaneAt(x, y int) {
+	if !m.split.enabled {
+		return
+	}
+	pane := 0
+	if m.mouseLayout().inPaneB(x, y) {
+		pane = 1
+	}
+	if pane == m.split.focused {
+		return
+	}
+	m.split.focused = pane
+	if tab := m.split.paneTab(pane); tab >= 0 && tab < len(m.editors) {
+		m.activeTab = tab
+		m.tabBar.SetActive(m.activeTab)
+	}
 }
 
 // unsplit disables the split view.
@@ -115,6 +147,7 @@ func (m *Model) unsplit() {
 		return
 	}
 	m.split.enabled = false
+	m.split.firstTab = -1
 	m.split.secondTab = -1
 	m.split.focused = 0
 	m.relayout()
@@ -125,13 +158,15 @@ func (m *Model) cycleSplitFocus() {
 	if !m.split.enabled {
 		return
 	}
+	// activeTab follows the focused pane in both directions. Only moving it
+	// towards pane B left pane A pointing at pane B's tab on the way back.
 	if m.split.focused == 0 {
 		m.split.focused = 1
-		if m.split.secondTab >= 0 && m.split.secondTab < len(m.editors) {
-			m.activeTab = m.split.secondTab
-		}
 	} else {
 		m.split.focused = 0
+	}
+	if tab := m.split.paneTab(m.split.focused); tab >= 0 && tab < len(m.editors) {
+		m.activeTab = tab
 	}
 	m.tabBar.SetActive(m.activeTab)
 }

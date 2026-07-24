@@ -55,7 +55,7 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			m.showAgent = true
 			m.relayout()
 		}
-		m.focus = FocusAgent
+		m.setFocus(FocusAgent)
 		_ = m.agentPanel.Focus()
 	case acp.AgentWriteCancelledMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
@@ -217,11 +217,11 @@ func (m *Model) toggleAgentPanel() tea.Cmd {
 	if m.showAgent {
 		m.showAgent = false
 		if m.focus == FocusAgent {
-			m.focus = FocusEditor
+			m.setFocus(FocusEditor)
 		}
 	} else {
 		m.showAgent = true
-		m.focus = FocusAgent
+		m.setFocus(FocusAgent)
 		m.relayout()
 		return m.agentPanel.Focus()
 	}

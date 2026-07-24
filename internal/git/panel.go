@@ -559,6 +559,14 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// UnfocusCommit releases the commit form's inputs. The app calls this when
+// focus leaves the git panel by any route: a mouse click on another sidebar tab
+// bypasses this model's Update entirely, and a commit box left focused silently
+// swallows navigation keys afterwards.
+func (m *Model) UnfocusCommit() {
+	m.unfocusCommit()
+}
+
 func (m *Model) unfocusCommit() {
 	m.titleFocused = false
 	m.bodyFocused = false

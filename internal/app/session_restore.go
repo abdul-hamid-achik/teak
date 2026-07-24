@@ -381,7 +381,7 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 			m.activeTab = 0
 		}
 		m.activateTab(m.activeTab)
-		m.focus = FocusEditor
+		m.setFocus(FocusEditor)
 	}
 	return tea.Batch(cmds...)
 }

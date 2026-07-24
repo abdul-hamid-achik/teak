@@ -244,6 +244,19 @@ func (fs *FoldState) VisibleLines(startLine, count, totalLines int) []int {
 	return lines
 }
 
+// HasCollapsedRegions reports whether any region is currently folded, and so
+// whether visual rows and buffer lines can diverge. Callers that only need to
+// know "does folding affect coordinates right now" should use this rather than
+// scanning Regions.
+func (fs *FoldState) HasCollapsedRegions() bool {
+	if fs == nil {
+		return false
+	}
+	// ensureIndex returns nil when there are no regions at all.
+	index := fs.ensureIndex()
+	return index != nil && len(index.hidden) > 0
+}
+
 // TotalVisibleLines returns the total count of visible lines accounting for folds.
 func (fs *FoldState) TotalVisibleLines(totalLines int) int {
 	if totalLines <= 0 {

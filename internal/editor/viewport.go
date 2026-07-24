@@ -589,13 +589,20 @@ func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []h
 			displayPos = nextDisplay
 		}
 		if overlapStart < overlapEnd {
-			style := token.Style
-			if _, noBackground := baseStyle.GetBackground().(lipgloss.NoColor); !noBackground {
-				style = style.Background(baseStyle.GetBackground())
+			if _, noBackground := baseStyle.GetBackground().(lipgloss.NoColor); noBackground {
+				// No background override, so the token's precomputed escape
+				// sequences describe this render exactly.
+				expanded, nextDisplay := expandTabsAtDisplayColumnWithEnd(
+					lineContent[max(0, min(overlapStart, len(lineContent))):max(0, min(overlapEnd, len(lineContent)))],
+					displayPos, tabSize)
+				sb.WriteString(token.Render(expanded))
+				displayPos = nextDisplay
+			} else {
+				style := token.Style.Background(baseStyle.GetBackground())
+				rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, overlapStart, overlapEnd, displayPos, style, tabSize)
+				sb.WriteString(rendered)
+				displayPos = nextDisplay
 			}
-			rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, overlapStart, overlapEnd, displayPos, style, tabSize)
-			sb.WriteString(rendered)
-			displayPos = nextDisplay
 			pos = overlapEnd
 		}
 		tokenStart = tokenEnd
@@ -781,11 +788,14 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 			textW = widthLeft
 		}
 
-		style := tok.Style
 		if isCursorLine {
-			style = style.Background(ui.Nord1)
+			// The cursor line overrides the background, producing a style the
+			// token's precomputed sequences do not describe. It is one row per
+			// frame, so the slower path here costs little.
+			sb.WriteString(tok.Style.Background(ui.Nord1).Render(text))
+		} else {
+			sb.WriteString(tok.Render(text))
 		}
-		sb.WriteString(style.Render(text))
 		widthLeft -= textW
 	}
 

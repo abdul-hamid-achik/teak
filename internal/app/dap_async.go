@@ -155,7 +155,7 @@ func (m Model) handleDebugStartResult(msg debugStartResultMsg) (tea.Model, tea.C
 	m.debuggerPanel.SetState(dap.StateRunning)
 	m.showTree = true
 	m.sidebarTab = SidebarDebugger
-	m.focus = FocusDebugger
+	m.setFocus(FocusDebugger)
 	m.status = "Debugging started"
 	m.relayout()
 	return m, m.syncAllBreakpointsToDAP()

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"strings"
 	"teak/internal/clipboard"
 	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
@@ -439,9 +440,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 				return e, nil
 			case "enter", "tab":
 				if item := e.autocomplete.Selected(); item != nil {
-					e.Buffer.InsertAtCursor([]byte(item.InsertText))
-					e.refreshWordWrapAfterBufferChange()
-					e.EnsureCursorVisible()
+					e.applyCompletion(*item)
 				}
 				e.autocomplete.Hide()
 				return e, e.scheduleRetokenize()
@@ -487,6 +486,26 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			return e, clipboardCopyRejectedCmd(e.id, msg.Err)
 		}
 		return e.handlePreparedClipboardCopy(msg)
+	case FindDebounceMsg:
+		// Only the newest generation gets to start a scan; earlier ticks are
+		// superseded keystrokes.
+		if msg.EditorID != e.id || msg.Generation != e.find.Generation() {
+			return e, nil
+		}
+		return e, e.find.ScanCmd(e.Buffer.Rope(), e.Buffer.Cursor)
+
+	case FindResultsMsg:
+		if msg.EditorID != e.id {
+			return e, nil
+		}
+		if e.find.ApplyResults(msg) {
+			if match := e.find.CurrentMatchPosition(); match != nil {
+				e.Buffer.SetCursor(match.Start)
+				e.EnsureCursorVisible()
+			}
+		}
+		return e, nil
+
 	case RetokenizeMsg:
 		if e.Highlighter == nil {
 			return e, nil
@@ -921,11 +940,27 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.hover.Hide()
 		e.signatureHelp.Hide()
 		if e.Highlighter != nil {
-			e.Highlighter.Invalidate()
+			e.invalidateHighlightForLastChange()
 		}
 		return e, tea.Batch(e.scheduleRetokenize(), e.TriggerCompletion())
 	}
 	return e, nil
+}
+
+// invalidateHighlightForLastChange marks the highlight cache stale for the edit
+// the buffer just applied, keeping the surrounding tokens on screen until the
+// asynchronous tokenization lands. It falls back to a full invalidation when the
+// buffer did not report what changed.
+func (e *Editor) invalidateHighlightForLastChange() {
+	change := e.Buffer.LastChange()
+	if change == nil {
+		e.Highlighter.Invalidate()
+		return
+	}
+	// An edit replaces [StartLine, EndLine] with Text, so the document gains the
+	// newlines in Text and loses the lines the replaced span covered.
+	lineDelta := strings.Count(change.Text, "\n") - (change.EndLine - change.StartLine)
+	e.Highlighter.InvalidateEdited(change.StartLine, change.EndLine, lineDelta)
 }
 
 // TriggerCompletion returns a command that triggers completion if appropriate.
@@ -1329,7 +1364,13 @@ func (e *Editor) EnsureCursorVisible() {
 		return
 	}
 
-	e.Viewport.ensureCursorVisible(e.Buffer, e.Buffer.Cursor, textWidth)
+	// Folds hide lines, so scrolling must be computed in visual rows whenever
+	// any region is collapsed.
+	var folds *FoldState
+	if e.Folds.HasCollapsedRegions() {
+		folds = &e.Folds
+	}
+	e.Viewport.ensureCursorVisibleWithFolds(e.Buffer, e.Buffer.Cursor, textWidth, folds)
 }
 
 // ShowAutocomplete displays completion items.
@@ -1399,20 +1440,74 @@ func (e Editor) IsAutocompleteVisible() bool {
 }
 
 // AutocompleteSelectAt selects and inserts the completion at the given index.
-// Returns true if a completion was inserted.
-func (e *Editor) AutocompleteSelectAt(idx int) bool {
+// It returns the retokenize command the caller must run, and whether a
+// completion was inserted. The command matters: accepting a completion with the
+// mouse changes the buffer exactly as the keyboard path does, so it must
+// refresh syntax highlighting the same way instead of leaving stale colours.
+func (e *Editor) AutocompleteSelectAt(idx int) (tea.Cmd, bool) {
 	if item := e.autocomplete.SelectAt(idx); item != nil {
-		e.Buffer.InsertAtCursor([]byte(item.InsertText))
-		e.refreshWordWrapAfterBufferChange()
-		e.EnsureCursorVisible()
+		e.applyCompletion(*item)
 		e.autocomplete.Hide()
-		return true
+		return e.scheduleRetokenize(), true
 	}
-	return false
+	return nil, false
+}
+
+// applyCompletion inserts a completion, honouring the server's replacement
+// range when it supplied one. Servers routinely return a textEdit covering the
+// identifier already typed together with the full replacement text; inserting
+// that at the cursor instead of replacing the range leaves the prefix behind
+// (typing "fm" and accepting "fmt" produced "fmfmt").
+func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
+	if item.HasEdit && e.completionEditIsApplicable(item.Edit) {
+		start := text.Position{Line: item.Edit.StartLine, Col: item.Edit.StartCol}
+		end := text.Position{Line: item.Edit.EndLine, Col: item.Edit.EndCol}
+		e.Buffer.ReplaceRange(start, end, []byte(item.InsertText))
+	} else {
+		e.Buffer.InsertAtCursor([]byte(item.InsertText))
+	}
+	e.refreshWordWrapAfterBufferChange()
+	e.EnsureCursorVisible()
+}
+
+// completionEditIsApplicable rejects ranges that no longer describe the buffer.
+// A completion request is asynchronous, so by the time the user accepts it the
+// text may have moved; applying a stale range would corrupt unrelated content.
+func (e *Editor) completionEditIsApplicable(edit overlays.AutocompleteEdit) bool {
+	if edit.StartLine < 0 || edit.StartCol < 0 || edit.EndCol < 0 {
+		return false
+	}
+	if edit.EndLine < edit.StartLine {
+		return false
+	}
+	if edit.EndLine == edit.StartLine && edit.EndCol < edit.StartCol {
+		return false
+	}
+	lineCount := e.Buffer.LineCount()
+	if edit.StartLine >= lineCount || edit.EndLine >= lineCount {
+		return false
+	}
+	if edit.StartCol > e.Buffer.Rope().LineLen(edit.StartLine) || edit.EndCol > e.Buffer.Rope().LineLen(edit.EndLine) {
+		return false
+	}
+	// The edit must cover the cursor: that is what makes it the replacement for
+	// what the user is currently typing rather than an edit elsewhere.
+	cursor := e.Buffer.Cursor
+	if cursor.Line < edit.StartLine || cursor.Line > edit.EndLine {
+		return false
+	}
+	if cursor.Line == edit.StartLine && cursor.Col < edit.StartCol {
+		return false
+	}
+	if cursor.Line == edit.EndLine && cursor.Col > edit.EndCol {
+		return false
+	}
+	return true
 }
 
 // ShowFind opens the in-buffer find widget.
 func (e *Editor) ShowFind() {
+	e.find.SetEditorID(e.id)
 	e.find.Show()
 }
 

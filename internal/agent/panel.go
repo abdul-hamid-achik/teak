@@ -276,6 +276,13 @@ func (m *Model) Blur() {
 	m.input.Blur()
 }
 
+// IsInputFocused reports whether the text input currently has focus. The app
+// uses this to decide whether a control chord belongs to the input's own
+// editing bindings rather than to a global shortcut.
+func (m Model) IsInputFocused() bool {
+	return m.input.Focused()
+}
+
 // TaggedFiles returns the currently tagged files.
 func (m Model) TaggedFiles() []TaggedFile {
 	return m.taggedFiles

@@ -32,13 +32,14 @@ import (
 	"teak/internal/overlay"
 	"teak/internal/plugin"
 	"teak/internal/problems"
+	"teak/internal/procmon"
 	"teak/internal/search"
 	"teak/internal/session"
 	"teak/internal/settings"
 	"teak/internal/text"
+	"teak/internal/toolpath"
 	"teak/internal/ui"
 	"teak/internal/vault"
-	"teak/internal/procmon"
 )
 
 // FocusArea indicates which panel has focus.
@@ -52,6 +53,91 @@ const (
 	FocusDebugger
 	FocusAgent
 )
+
+// setFocus moves keyboard focus to area, releasing whatever the area being left
+// was holding.
+//
+// Focus used to be assigned by writing m.focus directly from more than fifty
+// places, only a handful of which remembered to release the previous area. That
+// left the agent panel showing a phantom caret after focus moved elsewhere, and
+// left the git commit box internally focused so it silently ate navigation keys
+// once the user came back to it. Routing every transition through here keeps
+// that bookkeeping in one place.
+//
+// Entering an area is deliberately not handled here: the sites that focus the
+// agent panel need its tea.Cmd, and returning one from this method would force
+// every caller to thread a command it does not otherwise need.
+func (m *Model) setFocus(area FocusArea) {
+	if m.focus == area {
+		return
+	}
+	switch m.focus {
+	case FocusAgent:
+		m.agentPanel.Blur()
+	case FocusGitPanel:
+		m.gitPanel.UnfocusCommit()
+	}
+	m.focus = area
+}
+
+// sizeEditors gives each editor the dimensions of the area it is rendered into.
+//
+// Every editor used to be sized to the full editor width even while split, and
+// the panes were merely clipped at render time. The editors therefore laid out
+// and scrolled against a width wider than the user could see, so the cursor
+// could sit in a clipped-away column.
+func (m *Model) sizeEditors(editorWidth, editorHeight int) {
+	for i := range m.editors {
+		width, height := editorWidth, editorHeight
+		if m.split.enabled {
+			switch i {
+			case m.split.firstTab:
+				width = m.split.paneAWidth(editorWidth)
+				height = m.split.paneAHeight(editorHeight)
+			case m.split.secondTab:
+				width = m.split.paneBWidth(editorWidth)
+				height = m.split.paneBHeight(editorHeight)
+			}
+		}
+		m.editors[i].SetSize(width, height)
+	}
+}
+
+// textInputFocused reports whether a text field currently owns typing.
+//
+// bubbles' textinput and textarea bind the emacs-style chords ctrl+w (delete
+// word back), ctrl+f / ctrl+b (character forward/back), ctrl+h (backspace) and
+// ctrl+k (kill to end of line). Those chords are also global shortcuts here, and
+// the global handler runs first, so pressing ctrl+w while typing a commit
+// message or a search query closed the current tab instead of deleting a word.
+func (m *Model) textInputFocused() bool {
+	if m.agentPanel.IsInputFocused() {
+		return true
+	}
+	if m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused() {
+		return true
+	}
+	if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+		return true
+	}
+	return false
+}
+
+// sidebarFocus returns the focus area that owns keyboard input for the sidebar
+// tab currently on screen. Focus and the visible tab must agree, otherwise keys
+// drive a panel the user cannot see.
+func (m *Model) sidebarFocus() FocusArea {
+	switch m.sidebarTab {
+	case SidebarGit:
+		return FocusGitPanel
+	case SidebarProblems:
+		return FocusProblems
+	case SidebarDebugger:
+		return FocusDebugger
+	default:
+		return FocusTree
+	}
+}
 
 // SidebarTab indicates which tab is active in the sidebar.
 type SidebarTab int
@@ -303,6 +389,10 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 		TimeFormat: "15:04:05",
 	})
 	log.SetDefault(logger)
+	// Force the logger's lazy colour-profile detection to run once, here,
+	// before newFileWatcher or any manager below can start a goroutine that
+	// might log. See warmUpStyledLogger for why this prevents a data race.
+	warmUpStyledLogger(logger, logFile)
 
 	theme := ui.ThemeByName(appCfg.UI.Theme)
 	cfg := editor.Config{
@@ -417,7 +507,7 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 		w := editor.NewWelcome(theme)
 		m.welcome = &w
 		m.showTree = true
-		m.focus = FocusTree
+		m.setFocus(FocusTree)
 		if appCfg.Session.Enabled && rootDir != "" {
 			m.sessionRestoreCtx, m.sessionRestoreCancel = context.WithCancel(context.Background())
 			m.sessionRestoreGeneration = 1
@@ -446,7 +536,7 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 		}
 	}
 	m.activeTab = 0
-	m.focus = FocusEditor
+	m.setFocus(FocusEditor)
 
 	// Still restore the workspace session so other tabs come back; the CLI file
 	// stays active and its line:col overrides the saved cursor for that path.
@@ -1002,6 +1092,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editor.RetokenizeMsg:
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
+			return m, nil
+		}
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
+		return m, cmd
+
+	case editor.FindDebounceMsg:
+		// The find widget scans off the UI goroutine; both its debounce tick and
+		// its result are addressed to a specific editor, which validates the
+		// generation before applying anything.
+		idx := m.editorIndexForAsyncMessage(msg.EditorID)
+		if idx < 0 {
+			return m, nil
+		}
+		updated, cmd := m.editors[idx].Update(msg)
+		m.setEditor(idx, updated)
+		return m, cmd
+
+	case editor.FindResultsMsg:
 		idx := m.editorIndexForAsyncMessage(msg.EditorID)
 		if idx < 0 {
 			return m, nil
@@ -1585,6 +1696,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Label:      item.Label,
 				Detail:     item.Detail,
 				InsertText: item.InsertText,
+				HasEdit:    item.HasEdit,
+				Edit: overlays.AutocompleteEdit{
+					StartLine: item.Edit.StartLine,
+					StartCol:  item.Edit.StartCol,
+					EndLine:   item.Edit.EndLine,
+					EndCol:    item.Edit.EndCol,
+				},
 			}
 		}
 		if m.activeEditor() != nil {
@@ -2031,10 +2149,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case focusAgentMsg:
 		if m.showAgent {
 			if m.focus == FocusAgent {
-				m.focus = FocusEditor
+				m.setFocus(FocusEditor)
 				m.agentPanel.Blur()
 			} else {
-				m.focus = FocusAgent
+				m.setFocus(FocusAgent)
 				return m, m.agentPanel.Focus()
 			}
 		}
@@ -2379,7 +2497,7 @@ func (m *Model) relayout() {
 		aw = 0
 	}
 	if m.width > 0 && m.height > 0 && m.showAgent && aw == 0 && m.focus == FocusAgent {
-		m.focus = FocusEditor
+		m.setFocus(FocusEditor)
 		m.agentPanel.Blur()
 	}
 	agentExtra := 0
@@ -2416,9 +2534,7 @@ func (m *Model) relayout() {
 		m.problemsPanel.SetSize(tw, panelHeight)
 		m.debuggerPanel.SetSize(tw, panelHeight)
 		m.tabBar.Width = editorWidth
-		for i := range m.editors {
-			m.editors[i].SetSize(editorWidth, editorHeight)
-		}
+		m.sizeEditors(editorWidth, editorHeight)
 		for k, dv := range m.diffViews {
 			dv.SetSize(editorWidth, editorHeight)
 			m.diffViews[k] = dv
@@ -2436,9 +2552,7 @@ func (m *Model) relayout() {
 			editorHeight = 1
 		}
 		m.tabBar.Width = editorWidth
-		for i := range m.editors {
-			m.editors[i].SetSize(editorWidth, editorHeight)
-		}
+		m.sizeEditors(editorWidth, editorHeight)
 		for k, dv := range m.diffViews {
 			dv.SetSize(editorWidth, editorHeight)
 			m.diffViews[k] = dv
@@ -2507,7 +2621,7 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 	idx := m.tabBar.FindTab(path)
 	if idx >= 0 {
 		m.activateTab(idx)
-		m.focus = FocusEditor
+		m.setFocus(FocusEditor)
 		// Double-open pins the tab
 		if !preview {
 			m.tabBar.PinTab(idx)
@@ -2569,7 +2683,7 @@ func (m Model) openFileAs(path string, preview bool) (tea.Model, tea.Cmd) {
 		m.activateTab(tabIdx)
 	}
 
-	m.focus = FocusEditor
+	m.setFocus(FocusEditor)
 	m.relayout()
 
 	// Read file content asynchronously
@@ -2969,7 +3083,7 @@ func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
 	m.tabBar.AddTab(label, "")
 	m.tabBar.PinTab(idx)
 	m.activateTab(idx)
-	m.focus = FocusEditor
+	m.setFocus(FocusEditor)
 	m.relayout()
 	return m, nil
 }
@@ -3074,7 +3188,7 @@ func (m Model) updateProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "esc", "escape":
 			// Switch back to editor focus
-			m.focus = FocusEditor
+			m.setFocus(FocusEditor)
 			return m, nil
 		}
 	case tea.MouseWheelMsg:
@@ -3109,7 +3223,7 @@ func (m Model) updateDebugger(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
-			m.focus = FocusEditor
+			m.setFocus(FocusEditor)
 			return m, nil
 		case "c":
 			return m.handleDebugAction(debugActionContinue)
@@ -3630,6 +3744,23 @@ func (m Model) fetchDebugStateForGeneration(generation uint64) tea.Cmd {
 	}
 }
 
+// lspStartupMessage turns a server startup failure into something a user can
+// act on. A missing binary gets its install command; hitting the concurrent
+// client cap is called out explicitly so it is not mistaken for a missing tool.
+func lspStartupMessage(command string, err error) string {
+	switch {
+	case errors.Is(err, lsp.ErrClientCapacity):
+		return fmt.Sprintf("%s not started: too many language servers running", command)
+	case toolpath.IsMissing(err):
+		if hint := toolpath.Hint(command); hint != "" {
+			return fmt.Sprintf("%s not found. Install with: %s", command, hint)
+		}
+		return fmt.Sprintf("%s not found in PATH", command)
+	default:
+		return err.Error()
+	}
+}
+
 func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
 	if buf.FilePath == "" || m.lspMgr == nil {
 		return nil
@@ -3658,14 +3789,26 @@ func (m Model) lspDidOpen(buf *text.Buffer) tea.Cmd {
 		if cfg != nil {
 			langID = cfg.LanguageID
 		}
-		mgr.OpenDocument(filePath, generation, langID, version, content)
+		if err := mgr.OpenDocument(filePath, generation, langID, version, content); err != nil {
+			// Reporting readiness here would claim language features are
+			// available when no server ever started, leaving a missing or
+			// unresolvable server indistinguishable from a silently broken one.
+			command := ""
+			if cfg != nil {
+				command = cfg.Command
+			}
+			return lsp.LspErrorMsg{
+				Method:  "textDocument/didOpen",
+				Message: lspStartupMessage(command, err),
+			}
+		}
 		return LspReadyMsg{FilePath: filePath, OpenVersion: version}
 	}
 }
 
 func (m Model) requestDefinition() (Model, tea.Cmd) {
 	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
+	if ed == nil || ed.Buffer.FilePath == "" {
 		return m, nil
 	}
 	mgr := m.lspMgr
@@ -3713,7 +3856,7 @@ func (m Model) requestFoldingRanges(filePath string) (Model, tea.Cmd) {
 
 func (m Model) requestCodeActions() (Model, tea.Cmd) {
 	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
+	if ed == nil || ed.Buffer.FilePath == "" {
 		return m, nil
 	}
 	mgr := m.lspMgr
@@ -3830,7 +3973,7 @@ func (m Model) executeSelectedCodeActionForFile(action lsp.CodeAction, filePath 
 
 func (m Model) requestDocumentSymbols() (Model, tea.Cmd) {
 	ed := m.activeEditor()
-	if ed.Buffer.FilePath == "" {
+	if ed == nil || ed.Buffer.FilePath == "" {
 		return m, nil
 	}
 	mgr := m.lspMgr
@@ -3871,6 +4014,9 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Convert 1-based to 0-based
 		lineNum--
 		ed := m.activeEditor()
+		if ed == nil {
+			return m, nil
+		}
 		maxLine := ed.Buffer.LineCount() - 1
 		if lineNum < 0 {
 			lineNum = 0
@@ -4314,7 +4460,7 @@ func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
 	if idx := m.tabBar.FindTab(path); idx >= 0 {
 		m.activateTab(idx)
 		m.tabBar.PinTab(idx)
-		m.focus = FocusEditor
+		m.setFocus(FocusEditor)
 		return m, nil
 	}
 	// Create a placeholder tab with an empty buffer, then load file async
@@ -4330,7 +4476,7 @@ func (m Model) openFileForceNewTab(path string) (tea.Model, tea.Cmd) {
 	m.editors = append(m.editors, ed)
 	idx := m.tabBar.AddTab(filepath.Base(path), path)
 	m.activateTab(idx)
-	m.focus = FocusEditor
+	m.setFocus(FocusEditor)
 	m.relayout()
 
 	return m, m.startFileLoad(path, ed, true, nil)
@@ -4350,7 +4496,7 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 	if idx >= 0 {
 		m.activateTab(idx)
 		m.tabBar.PinTab(idx)
-		m.focus = FocusEditor
+		m.setFocus(FocusEditor)
 		return m, nil
 	}
 
@@ -4381,7 +4527,7 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 		m.activateTab(tabIdx)
 	}
 
-	m.focus = FocusEditor
+	m.setFocus(FocusEditor)
 	m.relayout()
 
 	return m, m.startDiffLoad(relPath, status, ed)
@@ -4864,6 +5010,12 @@ func applyTextEditsToBuffer(buf *text.Buffer, edits []lsp.TextEdit) int {
 		buf.ReplaceRange(start, end, []byte(te.NewText))
 		applied++
 	}
+	if applied > 0 {
+		// These edits can shorten the document arbitrarily (a formatter
+		// collapsing blank lines, a code action deleting a block), leaving the
+		// cursor past the new end of the buffer.
+		buf.ClampCursor()
+	}
 	return applied
 }
 
@@ -4895,9 +5047,9 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toggleTreeMsg:
 		m.showTree = !m.showTree
 		if m.showTree {
-			m.focus = FocusTree
+			m.setFocus(FocusTree)
 		} else {
-			m.focus = FocusEditor
+			m.setFocus(FocusEditor)
 		}
 		m.relayout()
 		return m, nil
@@ -4905,14 +5057,14 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.gitPanel.IsGitRepo() {
 			m.showTree = true
 			m.sidebarTab = SidebarGit
-			m.focus = FocusGitPanel
+			m.setFocus(FocusGitPanel)
 			m.relayout()
 		}
 		return m, nil
 	case toggleProblemsMsg:
 		m.showTree = true
 		m.sidebarTab = SidebarProblems
-		m.focus = FocusProblems
+		m.setFocus(FocusProblems)
 		m.relayout()
 		return m, nil
 	case openSearchMsg:

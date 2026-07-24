@@ -153,6 +153,15 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 // routing have declined the key. It deliberately reports false for an unknown
 // key so the focused child receives it exactly once.
 func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	// These chords are also bubbles textinput/textarea editing bindings. When a
+	// text field owns typing, they belong to it, not to the global shortcut.
+	switch msg.String() {
+	case "ctrl+w", "ctrl+f", "ctrl+b", "ctrl+h", "ctrl+k":
+		if m.textInputFocused() {
+			return m, nil, false
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+q":
 		updated, cmd := m.requestQuit()
@@ -190,9 +199,14 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+b":
 		m.showTree = !m.showTree
 		if m.showTree && !m.showHelp {
-			m.focus = FocusTree
+			// Focus must follow whichever sidebar tab is showing. Always
+			// restoring FocusTree meant that hiding and re-showing the sidebar
+			// while the Git tab was active pointed the arrow keys at an
+			// invisible file-tree cursor, and Enter opened whatever file it
+			// happened to be sitting on.
+			m.setFocus(m.sidebarFocus())
 		} else {
-			m.focus = FocusEditor
+			m.setFocus(FocusEditor)
 		}
 		m.relayout()
 		return m, nil, true
@@ -323,7 +337,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		if m.gitPanel.IsGitRepo() {
 			m.showTree = true
 			m.sidebarTab = SidebarGit
-			m.focus = FocusGitPanel
+			m.setFocus(FocusGitPanel)
 			m.relayout()
 		}
 		return m, nil, true
@@ -348,10 +362,10 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+'":
 		if m.showAgent {
 			if m.focus == FocusAgent {
-				m.focus = FocusEditor
+				m.setFocus(FocusEditor)
 				m.agentPanel.Blur()
 			} else {
-				m.focus = FocusAgent
+				m.setFocus(FocusAgent)
 				return m, m.agentPanel.Focus(), true
 			}
 		}
@@ -412,7 +426,7 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 			switch kp.String() {
 			case "esc", "escape":
-				m.focus = FocusEditor
+				m.setFocus(FocusEditor)
 				m.agentPanel.Blur()
 				return m, nil, true
 			case "enter":
@@ -451,16 +465,16 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 			switch m.sidebarTab {
 			case SidebarFiles:
 				m.sidebarTab = SidebarGit
-				m.focus = FocusGitPanel
+				m.setFocus(FocusGitPanel)
 			case SidebarGit:
 				m.sidebarTab = SidebarProblems
-				m.focus = FocusProblems
+				m.setFocus(FocusProblems)
 			case SidebarProblems:
 				m.sidebarTab = SidebarDebugger
-				m.focus = FocusDebugger
+				m.setFocus(FocusDebugger)
 			default:
 				m.sidebarTab = SidebarFiles
-				m.focus = FocusTree
+				m.setFocus(FocusTree)
 			}
 			return m, nil, true
 		}

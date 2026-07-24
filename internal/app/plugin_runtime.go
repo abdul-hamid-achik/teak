@@ -408,30 +408,30 @@ func (r *pluginRuntime) ShowPanel(name string) error {
 	case "tree":
 		r.model.showTree = true
 		r.model.sidebarTab = SidebarFiles
-		r.model.focus = FocusTree
+		r.model.setFocus(FocusTree)
 		r.model.relayout()
 		return nil
 	case "git":
 		r.model.showTree = true
 		r.model.sidebarTab = SidebarGit
-		r.model.focus = FocusGitPanel
+		r.model.setFocus(FocusGitPanel)
 		r.model.relayout()
 		return nil
 	case "problems":
 		r.model.showTree = true
 		r.model.sidebarTab = SidebarProblems
-		r.model.focus = FocusProblems
+		r.model.setFocus(FocusProblems)
 		r.model.relayout()
 		return nil
 	case "debugger":
 		r.model.showTree = true
 		r.model.sidebarTab = SidebarDebugger
-		r.model.focus = FocusDebugger
+		r.model.setFocus(FocusDebugger)
 		r.model.relayout()
 		return nil
 	case "agent":
 		r.model.showAgent = true
-		r.model.focus = FocusAgent
+		r.model.setFocus(FocusAgent)
 		r.model.relayout()
 		return nil
 	default:
@@ -444,7 +444,7 @@ func (r *pluginRuntime) HidePanel(name string) error {
 	case "tree":
 		r.model.showTree = false
 		if r.model.focus == FocusTree || r.model.focus == FocusGitPanel || r.model.focus == FocusProblems || r.model.focus == FocusDebugger {
-			r.model.focus = FocusEditor
+			r.model.setFocus(FocusEditor)
 		}
 		r.model.relayout()
 		return nil
@@ -452,7 +452,7 @@ func (r *pluginRuntime) HidePanel(name string) error {
 		if r.model.sidebarTab == SidebarGit {
 			r.model.sidebarTab = SidebarFiles
 			if r.model.showTree {
-				r.model.focus = FocusTree
+				r.model.setFocus(FocusTree)
 			}
 		}
 		r.model.relayout()
@@ -461,7 +461,7 @@ func (r *pluginRuntime) HidePanel(name string) error {
 		if r.model.sidebarTab == SidebarProblems {
 			r.model.sidebarTab = SidebarFiles
 			if r.model.showTree {
-				r.model.focus = FocusTree
+				r.model.setFocus(FocusTree)
 			}
 		}
 		r.model.relayout()
@@ -470,7 +470,7 @@ func (r *pluginRuntime) HidePanel(name string) error {
 		if r.model.sidebarTab == SidebarDebugger {
 			r.model.sidebarTab = SidebarFiles
 			if r.model.showTree {
-				r.model.focus = FocusTree
+				r.model.setFocus(FocusTree)
 			}
 		}
 		r.model.relayout()
@@ -478,7 +478,7 @@ func (r *pluginRuntime) HidePanel(name string) error {
 	case "agent":
 		r.model.showAgent = false
 		if r.model.focus == FocusAgent {
-			r.model.focus = FocusEditor
+			r.model.setFocus(FocusEditor)
 		}
 		r.model.relayout()
 		return nil
