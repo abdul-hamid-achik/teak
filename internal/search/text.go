@@ -8,19 +8,67 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
 
 const maxSearchLineBytes = 1<<20 + 1
 
+// maxTextSearchResults caps the number of results returned by either search
+// engine, so callers see identical bounds regardless of which one ran.
+const maxTextSearchResults = 100
+
+// commonSkipDirs are non-text directories both search engines skip
+// unconditionally, regardless of .gitignore contents. ripgrep respects
+// .gitignore on its own (a feature over the plain walker below, which has no
+// such support), but that alone would NOT skip these directories in a repo
+// that doesn't happen to ignore them -- so ripgrepArgs (in ripgrep.go) also
+// excludes this same list explicitly, keeping the guarantee identical
+// between engines.
+var commonSkipDirs = []string{"node_modules", "vendor", "__pycache__", "target", "build", "dist", "bin"}
+
 // TextSearch performs a text/regex search across files in rootDir.
 func TextSearch(rootDir, query string) ([]Result, error) {
 	return TextSearchContext(context.Background(), rootDir, query, SearchOpts{})
 }
 
-// TextSearchContext is the cancellable form of TextSearch.
+// TextSearchContext is the cancellable form of TextSearch. It prefers the
+// ripgrep-backed engine (see ripgrep.go) when the rg binary resolves, and
+// falls back to the pure-Go walker below otherwise -- including when rg is
+// present but fails for this particular query (rejected pattern, timeout,
+// unparsable output, etc). The pure-Go walker is therefore always kept fully
+// working; it is never removed, only used conditionally.
 func TextSearchContext(ctx context.Context, rootDir, query string, opts SearchOpts) ([]Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if ripgrepAvailableFn() {
+		results, err := ripgrepSearchContext(ctx, rootDir, query, opts, maxTextSearchResults)
+		if err == nil {
+			return results, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		// rg failed for this query alone (e.g. it rejected the pattern with
+		// exit code 2, an internal timeout fired, or the output was
+		// unparsable). Silently fall back to the Go walker rather than
+		// surfacing an error to the user -- see requirement in the package
+		// doc comment on ripgrep.go.
+	}
+
+	return textSearchGoWalker(ctx, rootDir, query, opts)
+}
+
+// textSearchGoWalker is the original pure-Go search engine: single-threaded,
+// filepath.Walk based, with a hardcoded directory blocklist and no .gitignore
+// support. It is the fallback used when ripgrep is unavailable or fails.
+func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchOpts) ([]Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -33,7 +81,7 @@ func TextSearchContext(ctx context.Context, rootDir, query string, opts SearchOp
 	}
 
 	var results []Result
-	maxResults := 100
+	maxResults := maxTextSearchResults
 
 	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
@@ -58,8 +106,7 @@ func TextSearchContext(ctx context.Context, rootDir, query string, opts SearchOp
 
 		// Skip common non-text directories
 		if info.IsDir() {
-			switch name {
-			case "node_modules", "vendor", "__pycache__", "target", "build", "dist", "bin":
+			if slices.Contains(commonSkipDirs, name) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -132,7 +179,9 @@ func searchFileContext(ctx context.Context, path, rootDir string, re *regexp.Reg
 		}
 		line := scanner.Text()
 		if !utf8.ValidString(line) {
-			return nil, nil // binary file
+			// Treat the rest of the file as binary/undecodable, but keep the
+			// matches already found in it rather than discarding them.
+			break
 		}
 		loc := re.FindStringIndex(line)
 		if loc != nil {

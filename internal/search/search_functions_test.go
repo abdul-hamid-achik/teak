@@ -416,6 +416,36 @@ func TestSearchFileWithBinaryContent(t *testing.T) {
 	}
 }
 
+// TestSearchFileUTF8PartialResultsPreserved verifies the fix for the bug
+// where hitting an invalid-UTF-8 line discarded every match already found
+// earlier in the same file. It must now stop scanning at that line but keep
+// what was collected before it.
+func TestSearchFileUTF8PartialResultsPreserved(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var content []byte
+	content = append(content, []byte("first match line\n")...)
+	content = append(content, []byte{0xFF, 0xFE}...) // invalid UTF-8, no trailing newline needed
+	content = append(content, []byte("\nsecond match line\n")...)
+	path := filepath.Join(tmpDir, "mixed.txt")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	re := regexp.MustCompile("match")
+	results, err := searchFile(path, tmpDir, re, 10)
+	if err != nil {
+		t.Fatalf("searchFile failed: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result collected before the invalid UTF-8 line, got %d: %+v", len(results), results)
+	}
+	if results[0].Line != 0 {
+		t.Errorf("expected the surviving match to be on line 0, got %d", results[0].Line)
+	}
+}
+
 func TestSearchFileWithLongLine(t *testing.T) {
 	tmpDir := t.TempDir()
 

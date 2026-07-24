@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -107,8 +108,7 @@ func SemanticSearchContext(ctx context.Context, rootDir, query string) ([]Result
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	_, err := exec.LookPath("vecgrep")
-	if err != nil {
+	if _, err := toolpath.Resolve("vecgrep"); err != nil {
 		return nil, fmt.Errorf("vecgrep not found: install it for semantic search")
 	}
 
@@ -162,7 +162,10 @@ func setupVecgrepContext(ctx context.Context, rootDir string) error {
 
 	if err != nil || !isIndexed(string(out)) {
 		// Initialize the project
-		initCmd := exec.CommandContext(ctx, "vecgrep", "init", rootDir)
+		initCmd, cmdErr := toolpath.Command(ctx, "vecgrep", "init", rootDir)
+		if cmdErr != nil {
+			return cmdErr
+		}
 		initCmd.Dir = rootDir
 		if initErr := initCmd.Run(); initErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -172,7 +175,10 @@ func setupVecgrepContext(ctx context.Context, rootDir string) error {
 		}
 
 		// Index the project
-		indexCmd := exec.CommandContext(ctx, "vecgrep", "index")
+		indexCmd, cmdErr := toolpath.Command(ctx, "vecgrep", "index")
+		if cmdErr != nil {
+			return cmdErr
+		}
 		indexCmd.Dir = rootDir
 		if indexErr := indexCmd.Run(); indexErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -212,7 +218,10 @@ func runVecgrep(ctx context.Context, rootDir string, args ...string) ([]byte, er
 	}
 	stdout := &boundedCommandBuffer{limit: maxSemanticOutputBytes}
 	stderr := &boundedCommandBuffer{limit: maxSemanticErrorBytes}
-	cmd := exec.CommandContext(ctx, "vecgrep", args...)
+	cmd, cmdErr := toolpath.Command(ctx, "vecgrep", args...)
+	if cmdErr != nil {
+		return nil, cmdErr
+	}
 	cmd.Dir = rootDir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
