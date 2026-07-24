@@ -231,6 +231,18 @@ func (b *Buffer) Line(line int) []byte {
 }
 
 // InsertAtCursor inserts text at the current cursor position.
+// isTypedRune reports whether text is a single character that should merge into
+// the current undo group. A newline ends the group: Enter is a natural boundary
+// a user expects Ctrl+Z to stop at, and treating it as ordinary typing would let
+// one undo swallow several lines.
+func isTypedRune(text []byte) bool {
+	if len(text) == 0 || bytes.ContainsRune(text, '\n') {
+		return false
+	}
+	r, size := utf8.DecodeRune(text)
+	return r != utf8.RuneError && size == len(text)
+}
+
 func (b *Buffer) InsertAtCursor(text []byte) {
 	if len(text) == 0 {
 		return
@@ -257,7 +269,12 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 			return
 		}
 
-		b.undo.Save(b.rope, b.Cursor, false)
+		// A plain single-character insert at a collapsed cursor is ordinary
+		// typing, so it joins the previous keystroke's undo group. Every call
+		// site used to pass false, making the grouping in UndoStack.Save dead
+		// code: Ctrl+Z then undid one character at a time and the undo stack
+		// filled with one snapshot per keystroke.
+		b.undo.Save(b.rope, b.Cursor, isTypedRune(text))
 		offset := b.rope.PositionToOffset(b.Cursor)
 		b.rope = b.rope.Insert(offset, text)
 		b.dirty = true
@@ -522,6 +539,44 @@ func (b *Buffer) SetCursor(pos Position) {
 	b.Cursor = pos
 	if b.Selections != nil {
 		b.Selections.selections[b.Selections.primary] = Selection{Anchor: pos, Head: pos}
+	}
+}
+
+// ClampPosition returns pos confined to the current content: a line inside the
+// document and a column inside that line.
+func (b *Buffer) ClampPosition(pos Position) Position {
+	if pos.Line < 0 {
+		pos.Line = 0
+	}
+	if last := b.LineCount() - 1; pos.Line > last {
+		pos.Line = max(last, 0)
+	}
+	if pos.Col < 0 {
+		pos.Col = 0
+	}
+	if lineLen := b.rope.LineLen(pos.Line); pos.Col > lineLen {
+		pos.Col = lineLen
+	}
+	return pos
+}
+
+// ClampCursor confines the cursor and every selection to the current content.
+//
+// Edits that rewrite the document wholesale — formatting, a rename, an applied
+// code action — can leave the cursor addressing a line or column that no longer
+// exists. The status bar then reports an impossible position and the next
+// keystroke resolves the stale offset, teleporting the cursor. Call this after
+// any such rewrite.
+func (b *Buffer) ClampCursor() {
+	b.Cursor = b.ClampPosition(b.Cursor)
+	if b.Selections == nil {
+		return
+	}
+	for i, sel := range b.Selections.selections {
+		b.Selections.selections[i] = Selection{
+			Anchor: b.ClampPosition(sel.Anchor),
+			Head:   b.ClampPosition(sel.Head),
+		}
 	}
 }
 

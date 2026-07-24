@@ -236,13 +236,17 @@ func TestPositionToOffsetUncachedAllowsLineEnd(t *testing.T) {
 	}
 }
 
-func TestPositionToOffsetUncachedDoesNotBuildWholeDocumentIndex(t *testing.T) {
+func TestPositionToOffsetUncachedDoesNotScanWholeDocument(t *testing.T) {
 	r := NewFromString(strings.Repeat("x", 2<<20))
 	if got, ok := r.PositionToOffsetUncached(Position{Line: 0, Col: r.Len()}); !ok || got != r.Len() {
 		t.Fatalf("PositionToOffsetUncached(line end) = (%d, %v)", got, ok)
 	}
-	if r.lineIndex != nil {
-		t.Fatal("uncached conversion initialized the whole-document line index")
+	// Converting a position must stay proportional to tree depth, not to
+	// document size; a whole-document scan or offset table would allocate.
+	if allocs := testing.AllocsPerRun(50, func() {
+		r.PositionToOffsetUncached(Position{Line: 0, Col: r.Len()})
+	}); allocs != 0 {
+		t.Errorf("PositionToOffsetUncached allocated %v times per call, want 0", allocs)
 	}
 }
 

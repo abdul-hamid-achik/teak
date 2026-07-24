@@ -5,28 +5,19 @@ import (
 	"context"
 	"errors"
 	"io"
-	"sync"
 )
 
 const maxLeaf = 512
 
-// A line index makes small and medium documents very fast to navigate, but
-// costs one machine word per line. Keep it bounded so opening a generated
-// file with tens of millions of empty lines cannot reserve gigabytes just to
-// paint a viewport.
-const maxCachedLineIndexEntries = 250_000
-
 // Rope is a persistent (immutable) rope data structure for efficient text manipulation.
 // Each mutation returns a new Rope; the original is unchanged.
 type Rope struct {
-	left      *Rope
-	right     *Rope
-	value     []byte // only set for leaf nodes
-	len       int
-	newlines  int
-	depth     int
-	lineIndex []int     // lazy cache of byte offsets for each line start
-	initOnce  sync.Once // ensures lineIndex is built only once
+	left     *Rope
+	right    *Rope
+	value    []byte // only set for leaf nodes
+	len      int
+	newlines int
+	depth    int
 }
 
 // fibonacci numbers for rebalancing threshold
@@ -506,42 +497,23 @@ func (r *Rope) Delete(offset, n int) *Rope {
 	return join(left, right)
 }
 
-// buildLineIndex walks the full rope content and populates the lineIndex cache.
-// This is safe for concurrent access via sync.Once.
-func (r *Rope) buildLineIndex() {
-	idx := make([]int, 0, r.newlines+1)
-	idx = append(idx, 0)
-	data := r.Bytes()
-	for i, b := range data {
-		if b == '\n' {
-			idx = append(idx, i+1)
-		}
-	}
-	r.lineIndex = idx
-}
-
-// ensureLineIndex ensures the lineIndex cache is initialized.
-// Safe for concurrent access.
-func (r *Rope) ensureLineIndex() {
-	r.initOnce.Do(r.buildLineIndex)
-}
-
 // LineStart returns the byte offset of the start of the given line (0-based).
+//
+// It descends the tree using each node's newline count rather than consulting a
+// precomputed offset table. Because the rope is persistent, every edit produces
+// a new root, so a per-root table was rebuilt from a full document copy on the
+// first read after each keystroke: 2.2 ms and 6.9 MB of garbage per keystroke on
+// a 100k-line file, versus 4 us and no allocation for this descent. A table only
+// pays off across many reads of an unmutated rope, which editing never provides,
+// and retaining one per undo snapshot cost hundreds of MB.
 func (r *Rope) LineStart(line int) ByteOffset {
 	if line <= 0 {
 		return 0
 	}
-	if r.newlines+1 <= maxCachedLineIndexEntries {
-		r.ensureLineIndex()
-		if line < len(r.lineIndex) {
-			return r.lineIndex[line]
-		}
-		return r.len
-	}
-	return r.lineStartWithoutIndex(line)
+	return r.lineStartByDescent(line)
 }
 
-func (r *Rope) lineStartWithoutIndex(line int) ByteOffset {
+func (r *Rope) lineStartByDescent(line int) ByteOffset {
 	if line <= 0 || r == nil {
 		return 0
 	}
@@ -558,9 +530,9 @@ func (r *Rope) lineStartWithoutIndex(line int) ByteOffset {
 		return r.len
 	}
 	if line <= r.left.newlines {
-		return r.left.lineStartWithoutIndex(line)
+		return r.left.lineStartByDescent(line)
 	}
-	return r.left.len + r.right.lineStartWithoutIndex(line-r.left.newlines)
+	return r.left.len + r.right.lineStartByDescent(line-r.left.newlines)
 }
 
 // Line returns the content of the given line (0-based), without trailing newline.
@@ -604,10 +576,10 @@ func (r *Rope) PositionToOffsetUncached(pos Position) (ByteOffset, bool) {
 	if r == nil || pos.Line < 0 || pos.Line >= r.LineCount() || pos.Col < 0 {
 		return 0, false
 	}
-	start := r.lineStartWithoutIndex(pos.Line)
+	start := r.lineStartByDescent(pos.Line)
 	end := ByteOffset(r.len)
 	if pos.Line < r.newlines {
-		end = r.lineStartWithoutIndex(pos.Line+1) - 1 // omit the newline
+		end = r.lineStartByDescent(pos.Line+1) - 1 // omit the newline
 	}
 	// A position at the end of a line is valid (and is how selections include
 	// the final byte), even though it is not a valid character probe.

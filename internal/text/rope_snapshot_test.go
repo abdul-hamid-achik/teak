@@ -7,23 +7,26 @@ import (
 	"testing"
 )
 
-func TestRopePrefixLinesIsBoundedWithoutBuildingLargeLineIndex(t *testing.T) {
-	const lineCount = maxCachedLineIndexEntries + 1
+func TestRopePrefixLinesAndLineStartDoNotAllocatePerDocument(t *testing.T) {
+	const lineCount = 250_001
 	r := NewFromString(strings.Repeat("x\n", lineCount))
 
 	got := string(r.PrefixLines(3, 16))
 	if want := "x\nx\nx\n"; got != want {
 		t.Fatalf("PrefixLines() = %q, want %q", got, want)
 	}
-	if r.lineIndex != nil {
-		t.Fatal("bounded prefix unexpectedly built a full-file line index")
-	}
 
 	if got := r.LineStart(lineCount - 1); got <= 0 {
 		t.Fatalf("LineStart() = %d, want a valid offset", got)
 	}
-	if r.lineIndex != nil {
-		t.Fatal("large Rope.LineStart unexpectedly built a full-file line index")
+
+	// LineStart descends the tree instead of materializing a whole-document
+	// offset table, so its cost must not scale with the document. Allocating
+	// here at all would mean the table is back.
+	if allocs := testing.AllocsPerRun(50, func() {
+		r.LineStart(lineCount / 2)
+	}); allocs != 0 {
+		t.Errorf("LineStart allocated %v times per call, want 0", allocs)
 	}
 }
 

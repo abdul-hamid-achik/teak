@@ -16,6 +16,34 @@ import (
 type StyledToken struct {
 	Text  string
 	Style lipgloss.Style
+
+	// Prefix and Suffix are the escape sequences Style.Render would wrap Text
+	// in. Rendering a token by concatenating them is equivalent to calling
+	// Render but skips lipgloss's generic per-call pipeline (border, margin,
+	// padding, width and alignment checks), which dominated frame time: a full
+	// viewport spent ~3.5ms and 17k allocations in Style.Render alone.
+	//
+	// FastSGR reports whether that equivalence was verified for this style.
+	// Styles whose output depends on the text (width, alignment) do not qualify
+	// and must go through Render.
+	Prefix  string
+	Suffix  string
+	FastSGR bool
+}
+
+// Render writes the token's styled text. It uses the precomputed escape
+// sequences when they are known to be equivalent, and falls back to lipgloss
+// otherwise.
+//
+// Text containing a tab always takes the slow path: lipgloss expands tabs to
+// spaces as part of rendering, so concatenating the escape sequences around a
+// raw tab would emit different bytes. Callers normally expand tabs themselves
+// before reaching here, making this a rare fallback rather than a hot path.
+func (t StyledToken) Render(text string) string {
+	if t.FastSGR && !strings.ContainsRune(text, '\t') {
+		return t.Prefix + text + t.Suffix
+	}
+	return t.Style.Render(text)
 }
 
 // ViewportSnapshot is an immutable slice of a rope captured by the UI goroutine
@@ -54,6 +82,8 @@ type Highlighter struct {
 	coveredRanges  []tokenRange
 	dirty          bool
 	styleMap       map[chroma.TokenType]lipgloss.Style
+	sgrMap         map[chroma.TokenType]sgrPair
+	editorSGR      sgrPair
 	theme          ui.Theme
 	tokenizedStart int
 	tokenizedEnd   int
@@ -67,10 +97,13 @@ func New(filename string, theme ui.Theme) *Highlighter {
 	}
 	lexer = chroma.Coalesce(lexer)
 
+	styleMap := buildStyleMap(theme)
 	return &Highlighter{
 		lexer:          lexer,
 		dirty:          true,
-		styleMap:       buildStyleMap(theme),
+		styleMap:       styleMap,
+		sgrMap:         buildSGRMap(styleMap),
+		editorSGR:      deriveSGR(theme.Editor),
 		theme:          theme,
 		tokenizedStart: -1,
 		tokenizedEnd:   -1,
@@ -440,6 +473,7 @@ func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string,
 
 		val := tok.Value
 		style := lipgloss.Style{}
+		var sgr sgrPair
 		styleResolved := false
 
 		for {
@@ -454,10 +488,10 @@ func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string,
 			part := val[:nlIdx]
 			if len(part) > 0 && inRange() {
 				if !styleResolved {
-					style = h.styleForToken(tok.Type)
+					style, sgr = h.resolveToken(tok.Type)
 					styleResolved = true
 				}
-				currentLine = append(currentLine, StyledToken{Text: part, Style: style})
+				currentLine = append(currentLine, newStyledToken(part, style, sgr))
 			}
 			lines = append(lines, currentLine)
 			currentLine = nil
@@ -472,10 +506,10 @@ func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string,
 		// Remaining text (no newline)
 		if len(val) > 0 && inRange() {
 			if !styleResolved {
-				style = h.styleForToken(tok.Type)
+				style, sgr = h.resolveToken(tok.Type)
 				styleResolved = true
 			}
-			currentLine = append(currentLine, StyledToken{Text: val, Style: style})
+			currentLine = append(currentLine, newStyledToken(val, style, sgr))
 		}
 	}
 
@@ -511,6 +545,93 @@ func (h *Highlighter) LineCount() int {
 	return 0
 }
 
+// InvalidateEdited marks the cache stale after an edit spanning buffer lines
+// [startLine, endLine] that changed the document's line count by lineDelta.
+//
+// Unlike Invalidate it keeps the existing tokens for painting, having first
+// moved them to follow the edit: lines above it are untouched, the edited lines
+// themselves are dropped because their tokens are certainly wrong, and lines
+// below it shift by lineDelta. Coverage is still cleared, so the editor knows
+// the range is not refreshed and schedules a real tokenization — the concern
+// that motivated clearing everything is preserved, while the viewport keeps
+// rendering plausible colours in the meantime instead of flashing to plain text
+// on every keystroke.
+//
+// The tokens on screen may be briefly imprecise, which for the ~150ms until the
+// async pass lands is far less jarring than losing all syntax colour.
+func (h *Highlighter) InvalidateEdited(startLine, endLine, lineDelta int) {
+	if h.lines == nil && h.sparseLines == nil {
+		h.Invalidate()
+		return
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
+	if endLine < startLine {
+		endLine = startLine
+	}
+
+	h.shiftLines(startLine, endLine, lineDelta)
+	h.shiftSparseLines(startLine, endLine, lineDelta)
+
+	if h.lineCount > 0 {
+		h.lineCount = max(h.lineCount+lineDelta, 0)
+	}
+	// Coverage must not survive: it is what tells the editor a range is already
+	// tokenized, and none of it is trustworthy after an edit.
+	h.coveredRanges = nil
+	h.tokenizedStart = -1
+	h.tokenizedEnd = -1
+	h.dirty = true
+}
+
+// shiftLines moves the dense token cache to follow an edit.
+func (h *Highlighter) shiftLines(startLine, endLine, lineDelta int) {
+	if h.lines == nil {
+		return
+	}
+	// Typing a character neither adds nor removes lines, which is the common
+	// case: only the edited lines need dropping, with no reallocation.
+	if lineDelta == 0 {
+		for line := startLine; line <= endLine && line < len(h.lines); line++ {
+			h.lines[line] = nil
+		}
+		return
+	}
+
+	newLen := max(len(h.lines)+lineDelta, 0)
+	shifted := make([][]StyledToken, newLen)
+	copy(shifted, h.lines[:min(startLine, len(h.lines), newLen)])
+	for line := endLine + 1; line < len(h.lines); line++ {
+		target := line + lineDelta
+		if target >= 0 && target < newLen {
+			shifted[target] = h.lines[line]
+		}
+	}
+	h.lines = shifted
+}
+
+// shiftSparseLines moves the sparse token cache to follow an edit.
+func (h *Highlighter) shiftSparseLines(startLine, endLine, lineDelta int) {
+	if h.sparseLines == nil {
+		return
+	}
+	shifted := make(map[int][]StyledToken, len(h.sparseLines))
+	for line, tokens := range h.sparseLines {
+		if line >= startLine && line <= endLine {
+			continue // certainly wrong now
+		}
+		target := line
+		if line > endLine {
+			target = line + lineDelta
+		}
+		if target >= 0 {
+			shifted[target] = tokens
+		}
+	}
+	h.sparseLines = shifted
+}
+
 // Invalidate marks the cached tokens as stale.
 func (h *Highlighter) Invalidate() {
 	// Do not retain sparse lines or coverage across an edit. Keeping either
@@ -532,11 +653,17 @@ func (h *Highlighter) IsDirty() bool {
 }
 
 func (h *Highlighter) styleForToken(tt chroma.TokenType) lipgloss.Style {
-	// Walk up the token type hierarchy to find a match
+	style, _ := h.resolveToken(tt)
+	return style
+}
+
+// resolveToken returns the style for a token type along with its precomputed
+// escape sequences, walking up the token hierarchy to find a match.
+func (h *Highlighter) resolveToken(tt chroma.TokenType) (lipgloss.Style, sgrPair) {
 	for t := tt; t > 0; t = t.Parent() {
 		if style, ok := h.styleMap[t]; ok {
-			return style
+			return style, h.sgrMap[t]
 		}
 	}
-	return h.theme.Editor
+	return h.theme.Editor, h.editorSGR
 }
