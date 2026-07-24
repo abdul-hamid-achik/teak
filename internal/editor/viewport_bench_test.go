@@ -24,11 +24,13 @@ func BenchmarkViewportRender24Lines(b *testing.B) {
 	buf := createTestBuffer(100)
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 	diagnostics := []Diagnostic{
 		{StartLine: 5, EndLine: 5, Severity: 1},
 		{StartLine: 15, EndLine: 15, Severity: 2},
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.Render(buf, theme, hl, diagnostics, nil)
@@ -40,11 +42,35 @@ func BenchmarkViewportRender48Lines(b *testing.B) {
 	buf := createTestBuffer(200)
 	v := Viewport{Width: 120, Height: 48, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 	diagnostics := []Diagnostic{
 		{StartLine: 10, EndLine: 10, Severity: 1},
 		{StartLine: 30, EndLine: 30, Severity: 2},
 	}
 
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.Render(buf, theme, hl, diagnostics, nil)
+	}
+}
+
+// BenchmarkViewportRenderPlainText48Lines covers the untokenized branch
+// deliberately: no lexer has run, so Viewport.Render falls back to
+// unstyled text. This is a real state (e.g. the first frame before
+// tokenization completes), kept as its own honestly-named benchmark rather
+// than an accidental default.
+func BenchmarkViewportRenderPlainText48Lines(b *testing.B) {
+	theme := ui.NordTheme()
+	buf := createTestBuffer(200)
+	v := Viewport{Width: 120, Height: 48, ScrollY: 0}
+	hl := highlight.New("test.go", theme)
+	diagnostics := []Diagnostic{
+		{StartLine: 10, EndLine: 10, Severity: 1},
+		{StartLine: 30, EndLine: 30, Severity: 2},
+	}
+
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.Render(buf, theme, hl, diagnostics, nil)
@@ -62,7 +88,9 @@ func BenchmarkViewportRenderWithSelection(b *testing.B) {
 	})
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.Render(buf, theme, hl, nil, nil)
@@ -95,6 +123,7 @@ func BenchmarkViewportRenderWithGutterOpts(b *testing.B) {
 	buf := createTestBuffer(100)
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 	opts := &GutterOpts{
 		Breakpoints: map[int]BreakpointState{
 			3:  BPActive,
@@ -103,6 +132,7 @@ func BenchmarkViewportRenderWithGutterOpts(b *testing.B) {
 		ExecLine: 8,
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.Render(buf, theme, hl, nil, opts)
@@ -114,6 +144,7 @@ func BenchmarkViewportRenderWithFolds(b *testing.B) {
 	buf := createTestBuffer(100)
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 	folds := &FoldState{
 		Regions: []FoldRegion{
 			{StartLine: 5, EndLine: 15, Collapsed: false},
@@ -121,6 +152,7 @@ func BenchmarkViewportRenderWithFolds(b *testing.B) {
 		},
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.RenderWithFolds(buf, theme, hl, nil, nil, folds)
@@ -132,8 +164,10 @@ func BenchmarkViewportRenderWithWrap(b *testing.B) {
 	buf := createTestBuffer(100)
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
 	wrap := NewWrapLayout(func(i int) []byte { return buf.Line(i) }, buf.LineCount(), 70)
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = v.RenderWithWrap(buf, theme, hl, nil, nil, wrap)
@@ -255,13 +289,21 @@ func BenchmarkLargeFile10KScroll(b *testing.B) {
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
 
-	// Pre-tokenize first viewport
-	hl.TokenizeViewport(buf, 0, 24)
+	// Pre-tokenize and install the first viewport. TokenizeViewport only
+	// returns tokens; MergeLines is what actually installs them so hl.Line
+	// has something to return.
+	hl.MergeLines(hl.TokenizeViewport(buf, 0, 24))
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Simulate scrolling
-		v.ScrollY = (i * 10) % (buf.LineCount() - 24)
+		// Simulate scrolling: real scrolling triggers a re-tokenize of the
+		// newly visible range and installs it before the next render, so do
+		// the same here instead of rendering forever against the first
+		// viewport's tokens.
+		start := (i * 10) % (buf.LineCount() - 24)
+		v.ScrollY = start
+		hl.MergeLines(hl.TokenizeViewport(buf, start, start+24))
 		_ = v.Render(buf, theme, hl, nil, nil)
 	}
 }
@@ -284,12 +326,17 @@ func BenchmarkViewportCacheHit(b *testing.B) {
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
 
-	// Pre-tokenize and render once to populate cache
-	_ = v.Render(buf, theme, hl, nil, nil)
+	// Viewport.Render never writes tokens back into the Highlighter, so
+	// there is no viewport-side cache to warm by rendering once. The "cache
+	// hit" this measures is the Highlighter's own token cache: tokenize once
+	// up front, then render the same viewport repeatedly against already
+	// tokenized content, which is the common case while scrolling within a
+	// range that has already been highlighted.
+	hl.Tokenize(buf.Bytes())
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Render same viewport repeatedly (cache hit scenario)
 		_ = v.Render(buf, theme, hl, nil, nil)
 	}
 }

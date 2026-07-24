@@ -128,7 +128,12 @@ func BenchmarkFileTreeFlatEntries(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.cachedFlat = nil // Clear cache to force rebuild
+		// flatEntries checks m.sharedFlatCache before m.cachedFlat, so
+		// clearing only cachedFlat left every iteration after the first
+		// hitting the shared cache instead of rebuilding. Reset both so each
+		// iteration genuinely rebuilds.
+		m.cachedFlat = nil
+		m.sharedFlatCache = &flatEntryCache{}
 		_ = m.flatEntries()
 	}
 }

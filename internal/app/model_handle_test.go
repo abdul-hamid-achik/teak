@@ -2,11 +2,13 @@ package app
 
 import (
 	"runtime/debug"
+	"strings"
 	"testing"
 	"unsafe"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
+	"teak/internal/text"
 )
 
 // The Bubble Tea program stores the root model in a tea.Model interface after
@@ -87,6 +89,24 @@ func BenchmarkModelUpdateCursorInput(b *testing.B) {
 	b.Cleanup(m.cleanup)
 	m.welcome = nil
 	m.focus = FocusEditor
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+
+	// An empty buffer makes MoveCursor(DirRight) a no-op (nothing to the
+	// right of the cursor), so nothing downstream runs. Load real
+	// multi-line content and start the cursor mid-line so the benchmark
+	// exercises an actual cursor move.
+	var content strings.Builder
+	for i := 0; i < 200; i++ {
+		content.WriteString("This is line number ")
+		content.WriteByte(byte('0' + i%10))
+		content.WriteString(" with some content to make it realistic\n")
+	}
+	ed := m.activeEditor()
+	ed.Buffer = text.NewBufferFromBytes([]byte(content.String()))
+	ed.Buffer.Cursor = text.Position{Line: 50, Col: 10}
+
 	msg := tea.KeyPressMsg{Code: tea.KeyRight}
 	b.ReportAllocs()
 	b.ResetTimer()

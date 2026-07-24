@@ -147,8 +147,9 @@ func TestMultiLineCommandsRejectOversizedSelection(t *testing.T) {
 
 func BenchmarkEditorLargePasteUpdate(b *testing.B) {
 	content := strings.Repeat("p", asyncPasteThresholdBytes+1)
+	ed := New(text.NewBufferFromBytes([]byte("base")), ui.DefaultTheme(), DefaultConfig())
+	b.ResetTimer()
 	for b.Loop() {
-		ed := New(text.NewBufferFromBytes([]byte("base")), ui.DefaultTheme(), DefaultConfig())
 		_, _ = ed.Update(tea.PasteMsg{Content: content})
 	}
 }
@@ -165,8 +166,16 @@ func BenchmarkEditorLargeCopyUpdate(b *testing.B) {
 
 func BenchmarkEditorMultilineIndentBudget(b *testing.B) {
 	content := strings.Repeat("line\n", MaxSynchronousMultilineEditLines)
+	// Indent mutates the buffer, so each iteration needs fresh, unindented
+	// content rather than reusing one buffer across b.N runs (which would
+	// keep re-indenting already-indented lines and drift the measured
+	// operation). A fresh *text.Buffer is cheap; editor.New() is not (it
+	// also matches a chroma lexer and wires up a highlighter), so hoist the
+	// Editor construction out of the loop and only rebuild the buffer.
+	ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
+	b.ResetTimer()
 	for b.Loop() {
-		ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
+		ed.Buffer = text.NewBufferFromBytes([]byte(content))
 		ed.Buffer.SelectAll()
 		updated, _ := ed.Update(tea.KeyPressMsg{Text: "ctrl+]"})
 		if !updated.Buffer.Dirty() {
