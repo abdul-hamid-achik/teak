@@ -24,7 +24,7 @@ func TestSessionRestorePinnedRootRejectsWorkspaceReplacement(t *testing.T) {
 	}
 
 	oldLoad, oldRead := loadSessionForRestore, readSessionRestoreFile
-	loadSessionForRestore = func(context.Context) (session.State, error) {
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
 		return session.State{RootDir: root, ActiveTab: 0, Tabs: []session.TabState{{FilePath: path}}}, nil
 	}
 	var read string
@@ -80,7 +80,7 @@ func TestSessionRestorePinnedRootRejectsParentSymlinkSwap(t *testing.T) {
 	}
 
 	oldLoad, oldRead := loadSessionForRestore, readSessionRestoreFile
-	loadSessionForRestore = func(context.Context) (session.State, error) {
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
 		return session.State{RootDir: root, ActiveTab: 0, Tabs: []session.TabState{{FilePath: path}}}, nil
 	}
 	var read string

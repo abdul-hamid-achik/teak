@@ -22,7 +22,8 @@ const (
 )
 
 var (
-	loadSessionForRestore  = session.LoadContext
+	// loadSessionForRestore loads the per-workspace session for rootDir.
+	loadSessionForRestore  = session.LoadContextForRoot
 	readSessionRestoreFile = readSessionRestoreFileFromRoot
 )
 
@@ -71,7 +72,7 @@ func sessionRestoreCmd(ctx context.Context, generation uint64, rootDir string) t
 		if err != nil || !rootInfo.IsDir() {
 			return sessionRestoreResultMsg{Generation: generation, Err: err}
 		}
-		state, err := loadSessionForRestore(ctx)
+		state, err := loadSessionForRestore(ctx, rootDir)
 		if err != nil {
 			return sessionRestoreResultMsg{Generation: generation, Err: err}
 		}
@@ -265,6 +266,11 @@ func (m *Model) applySessionRestore(result sessionRestoreResultMsg) tea.Cmd {
 // verified rope snapshots through the normal FileLoadedMsg path. It preserves the usual
 // highlighter, watcher, LSP, plugin, cursor, and stale-editor safeguards
 // without scheduling a second path-based disk read after validation.
+//
+// When the editor was started with CLI files (startupFiles), those paths are
+// merged into the restored tabs: session tabs come back, missing CLI files are
+// appended, CLI line:col wins via startupCursors, and the first CLI file becomes
+// active.
 func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restoredSessionFile) tea.Cmd {
 	if len(state.Tabs) != len(files) {
 		releaseRestoredSessionFiles(files)
@@ -273,10 +279,12 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 	if m.welcome != nil {
 		m.welcome.Dismiss()
 	}
+	// Drop placeholder CLI tabs; session rebuild recreates the full set.
 	m.editors = nil
 	m.tabBar.Tabs = nil
 	m.activeTab = -1
-	cmds := make([]tea.Cmd, 0, len(files))
+	cmds := make([]tea.Cmd, 0, len(files)+len(m.startupFiles))
+	restoredPaths := make(map[string]struct{}, len(files))
 	for savedIndex, restored := range files {
 		tab := restored.Tab
 		buf := text.NewBuffer()
@@ -296,6 +304,7 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 		if savedIndex == state.ActiveTab {
 			m.activeTab = idx
 		}
+		restoredPaths[filepath.Clean(tab.FilePath)] = struct{}{}
 		m.nextFileLoadID++
 		requestID := m.nextFileLoadID
 		if m.pendingFileLoads == nil {
@@ -322,6 +331,51 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 		})
 	}
 	releaseRestoredSessionFiles(files)
+
+	// Append CLI-opened files that were not part of the saved session.
+	for _, sf := range m.startupFiles {
+		if sf.Path == "" {
+			continue
+		}
+		clean := filepath.Clean(sf.Path)
+		if _, ok := restoredPaths[clean]; ok {
+			continue
+		}
+		if m.tabBar.FindTab(sf.Path) >= 0 || m.tabBar.FindTab(clean) >= 0 {
+			continue
+		}
+		buf := text.NewBuffer()
+		buf.FilePath = sf.Path
+		cfg := editor.DefaultConfig()
+		cfg.TabSize = m.appCfg.Editor.TabSize
+		cfg.InsertTabs = m.appCfg.Editor.InsertTabs
+		cfg.AutoIndent = m.appCfg.Editor.AutoIndent
+		cfg.CommentPrefix = editor.CommentPrefixForFile(sf.Path)
+		ed := editor.New(buf, m.theme, cfg)
+		m.editors = append(m.editors, ed)
+		idx := len(m.editors) - 1
+		m.tabBar.AddTab(filepath.Base(sf.Path), sf.Path)
+		m.tabBar.PinTab(idx)
+		if sf.Line >= 0 {
+			if m.startupCursors == nil {
+				m.startupCursors = make(map[string]text.Position)
+			}
+			m.startupCursors[clean] = text.Position{Line: sf.Line, Col: max(0, sf.Col)}
+		}
+		cmds = append(cmds, m.startFileLoad(sf.Path, ed, false, nil))
+	}
+
+	// Prefer the first CLI file as the active tab when the user launched with paths.
+	if len(m.startupFiles) > 0 && m.startupFiles[0].Path != "" {
+		want := filepath.Clean(m.startupFiles[0].Path)
+		for i, ed := range m.editors {
+			if filepath.Clean(ed.Buffer.FilePath) == want {
+				m.activeTab = i
+				break
+			}
+		}
+	}
+
 	if len(m.editors) > 0 {
 		if m.activeTab < 0 || m.activeTab >= len(m.editors) {
 			m.activeTab = 0

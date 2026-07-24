@@ -110,6 +110,8 @@ type modelState struct {
 	renameMode                bool
 	renameInput               string
 	pendingCursor             *pendingNavigation         // navigation tied to a target path
+	startupCursors            map[string]text.Position   // CLI/startup line:col applied after first load
+	startupFiles              []StartupFile              // CLI files merged with session restore
 	pendingFileLoads          map[uint64]pendingFileLoad // request identity -> target editor
 	nextFileLoadID            uint64
 	pendingDiffLoads          map[uint64]pendingDiffLoad // request identity -> target editor
@@ -260,7 +262,28 @@ const (
 )
 
 // NewModel creates a new app model, optionally loading a file.
+// StartupFile is an initial document requested at editor launch (CLI paths).
+// Line/Col are 0-based. A negative Line means no preferred cursor position.
+type StartupFile struct {
+	Path string
+	Line int
+	Col  int
+}
+
+// NewModel creates the root application model. filePath may be empty (welcome /
+// session restore) or a single absolute file path to open.
 func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, error) {
+	var files []StartupFile
+	if filePath != "" {
+		files = []StartupFile{{Path: filePath, Line: -1}}
+	}
+	return NewModelWithFiles(files, rootDir, appCfg)
+}
+
+// NewModelWithFiles creates the root model with zero or more initial file tabs.
+// The first file is active. An empty slice shows the welcome screen and may
+// restore the previous session for rootDir.
+func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config) (Model, error) {
 	if err := appCfg.Validate(); err != nil {
 		return Model{}, fmt.Errorf("invalid config: %w", err)
 	}
@@ -288,11 +311,19 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		AutoIndent: appCfg.Editor.AutoIndent,
 		WordWrap:   appCfg.Editor.WordWrap,
 	}
-	buf := text.NewBuffer()
-	if filePath != "" {
-		buf.FilePath = filePath
-		cfg.CommentPrefix = editor.CommentPrefixForFile(filePath)
+
+	// Drop blank path entries; keep order for tab layout.
+	cleaned := make([]StartupFile, 0, len(files))
+	for _, f := range files {
+		if f.Path == "" {
+			continue
+		}
+		if f.Line < 0 {
+			f.Line = -1
+		}
+		cleaned = append(cleaned, f)
 	}
+	files = cleaned
 
 	// Build LSP configs: merge user overrides with defaults
 	var lspConfigs []lsp.ServerConfig
@@ -320,6 +351,7 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		logFile:                   logFile,
 		pendingCloseTab:           -1,
 		pendingSaves:              make(map[int]pendingSaveRequest),
+		startupCursors:            make(map[string]text.Position),
 		pendingFileLoads:          make(map[uint64]pendingFileLoad),
 		pendingDiffLoads:          make(map[uint64]pendingDiffLoad),
 		restoredTabs:              make(map[uint64]session.TabState),
@@ -371,23 +403,17 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 		}
 	}
 
-	// Create initial editor + tab
-	ed := editor.New(buf, theme, cfg)
-	m.editors = append(m.editors, ed)
-
-	label := "untitled"
-	if filePath != "" {
-		label = filepath.Base(filePath)
-	}
-	m.tabBar.AddTab(label, filePath)
-	m.activeTab = 0
-
 	// Show tree based on config
 	m.showTree = appCfg.UI.ShowTree
 
-	// Show welcome screen when no file is provided. Session I/O is deferred to
-	// Init so NewModel can always render its first frame without disk latency.
-	if filePath == "" {
+	if len(files) == 0 {
+		// Empty buffer + welcome; session I/O is deferred to Init.
+		buf := text.NewBuffer()
+		ed := editor.New(buf, theme, cfg)
+		m.editors = append(m.editors, ed)
+		m.tabBar.AddTab("untitled", "")
+		m.activeTab = 0
+
 		w := editor.NewWelcome(theme)
 		m.welcome = &w
 		m.showTree = true
@@ -397,6 +423,37 @@ func NewModel(filePath string, rootDir string, appCfg config.Config) (Model, err
 			m.sessionRestoreGeneration = 1
 			m.sessionRestoreEligible = true
 		}
+		return m, nil
+	}
+
+	// One tab per startup file; first is active. Session restore (when enabled)
+	// may later expand this set with previously open tabs for the same root.
+	m.startupFiles = append([]StartupFile(nil), files...)
+	for i, f := range files {
+		fileCfg := cfg
+		fileCfg.CommentPrefix = editor.CommentPrefixForFile(f.Path)
+		buf := text.NewBuffer()
+		buf.FilePath = f.Path
+		ed := editor.New(buf, theme, fileCfg)
+		m.editors = append(m.editors, ed)
+		m.tabBar.AddTab(filepath.Base(f.Path), f.Path)
+		if i > 0 {
+			// Extra startup files are pinned so preview-replace does not drop them.
+			m.tabBar.PinTab(i)
+		}
+		if f.Line >= 0 {
+			m.startupCursors[filepath.Clean(f.Path)] = text.Position{Line: f.Line, Col: max(0, f.Col)}
+		}
+	}
+	m.activeTab = 0
+	m.focus = FocusEditor
+
+	// Still restore the workspace session so other tabs come back; the CLI file
+	// stays active and its line:col overrides the saved cursor for that path.
+	if appCfg.Session.Enabled && rootDir != "" {
+		m.sessionRestoreCtx, m.sessionRestoreCancel = context.WithCancel(context.Background())
+		m.sessionRestoreGeneration = 1
+		m.sessionRestoreEligible = true
 	}
 
 	return m, nil
@@ -2578,14 +2635,34 @@ func (m Model) handleFileLoaded(msg FileLoadedMsg) (tea.Model, tea.Cmd) {
 	m.relayout()
 	m.status = ""
 
+	// CLI/startup line:col is stashed when Init issues requestID-0 loads (value
+	// receiver cannot register pendingFileLoads). Apply it here before session
+	// restore so an explicit launch position wins over a restored cursor.
+	if request.Cursor == nil {
+		if pos, ok := m.startupCursors[filepath.Clean(msg.Path)]; ok {
+			delete(m.startupCursors, msg.Path)
+			delete(m.startupCursors, filepath.Clean(msg.Path))
+			request.Cursor = &pos
+		}
+	}
+
 	// A navigation belongs to this request, not whichever tab happens to be
 	// active when disk I/O completes. Session state gets the same treatment.
 	if request.Cursor != nil {
-		position, err := resolvePendingLSPPositionRope(m.editors[tabIdx].Buffer.Rope(), *request.Cursor, request.CursorEncoding)
-		if err != nil {
-			m.status = fmt.Sprintf("LSP navigation position rejected: %v", err)
+		if request.CursorEncoding != "" {
+			position, err := resolvePendingLSPPositionRope(m.editors[tabIdx].Buffer.Rope(), *request.Cursor, request.CursorEncoding)
+			if err != nil {
+				// Protocol positions that fail conversion must not move the cursor.
+				m.status = fmt.Sprintf("LSP navigation position rejected: %v", err)
+			} else {
+				m.editors[tabIdx].Buffer.Cursor = position
+				m.editors[tabIdx].EnsureCursorVisible()
+			}
 		} else {
-			m.editors[tabIdx].Buffer.Cursor = position
+			// CLI / plain positions: clamp to document bounds after load.
+			line := min(max(0, request.Cursor.Line), max(0, m.editors[tabIdx].Buffer.LineCount()-1))
+			col := min(max(0, request.Cursor.Col), m.editors[tabIdx].Buffer.Rope().LineLen(line))
+			m.editors[tabIdx].Buffer.Cursor = text.Position{Line: line, Col: col}
 			m.editors[tabIdx].EnsureCursorVisible()
 		}
 	}

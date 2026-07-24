@@ -10,25 +10,29 @@ import (
 
 func TestHandleCLI(t *testing.T) {
 	tests := []struct {
-		name         string
-		args         []string
-		wantFilePath string
-		wantHandled  bool
-		wantOutput   string
-		wantErr      bool
+		name        string
+		args        []string
+		wantPaths   []string
+		wantLines   []int // parallel to paths; -1 = unset
+		wantHandled bool
+		wantOutput  string
+		wantErr     bool
+		wantErrPart string
 	}{
 		{
 			name: "no arguments starts editor",
 		},
 		{
-			name:         "file argument starts editor",
-			args:         []string{"notes.md"},
-			wantFilePath: "notes.md",
+			name:      "file argument starts editor",
+			args:      []string{"notes.md"},
+			wantPaths: []string{"notes.md"},
+			wantLines: []int{-1},
 		},
 		{
-			name:         "additional arguments preserve first file behavior",
-			args:         []string{"notes.md", "ignored.md"},
-			wantFilePath: "notes.md",
+			name:      "multiple files open as tabs",
+			args:      []string{"notes.md", "readme.md"},
+			wantPaths: []string{"notes.md", "readme.md"},
+			wantLines: []int{-1, -1},
 		},
 		{
 			name:        "long version flag exits early",
@@ -43,6 +47,18 @@ func TestHandleCLI(t *testing.T) {
 			wantOutput:  "teak 1.2.3-test\n",
 		},
 		{
+			name:        "help flag exits early",
+			args:        []string{"--help"},
+			wantHandled: true,
+			wantOutput:  "Usage:",
+		},
+		{
+			name:        "short help flag exits early",
+			args:        []string{"-h"},
+			wantHandled: true,
+			wantOutput:  "Usage:",
+		},
+		{
 			name:    "unknown long flag is rejected",
 			args:    []string{"--verbose"},
 			wantErr: true,
@@ -52,25 +68,66 @@ func TestHandleCLI(t *testing.T) {
 			args:    []string{"-x"},
 			wantErr: true,
 		},
+		{
+			name:      "plus line before file",
+			args:      []string{"+10", "main.go"},
+			wantPaths: []string{"main.go"},
+			wantLines: []int{9},
+		},
+		{
+			name:      "path colon line",
+			args:      []string{"main.go:42"},
+			wantPaths: []string{"main.go"},
+			wantLines: []int{41},
+		},
+		{
+			name:      "path colon line colon col",
+			args:      []string{"main.go:42:7"},
+			wantPaths: []string{"main.go"},
+			wantLines: []int{41},
+		},
+		{
+			name:        "plus line without file errors",
+			args:        []string{"+5"},
+			wantErr:     true,
+			wantErrPart: "+line",
+		},
+		{
+			name:        "conflicting line specs error",
+			args:        []string{"+5", "main.go:10"},
+			wantErr:     true,
+			wantErrPart: "conflicting",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout bytes.Buffer
 
-			filePath, handled, err := handleCLI(tt.args, &stdout, "1.2.3-test")
+			targets, handled, err := handleCLI(tt.args, &stdout, "1.2.3-test")
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("handleCLI() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if filePath != tt.wantFilePath {
-				t.Errorf("handleCLI() filePath = %q, want %q", filePath, tt.wantFilePath)
+			if tt.wantErrPart != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrPart)) {
+				t.Fatalf("handleCLI() error = %v, want containing %q", err, tt.wantErrPart)
 			}
 			if handled != tt.wantHandled {
 				t.Errorf("handleCLI() handled = %v, want %v", handled, tt.wantHandled)
 			}
-			if got := stdout.String(); got != tt.wantOutput {
-				t.Errorf("handleCLI() output = %q, want %q", got, tt.wantOutput)
+			if tt.wantOutput != "" && !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Errorf("handleCLI() output = %q, want containing %q", stdout.String(), tt.wantOutput)
+			}
+			if len(targets) != len(tt.wantPaths) {
+				t.Fatalf("handleCLI() paths = %v, want %v", targets, tt.wantPaths)
+			}
+			for i := range tt.wantPaths {
+				if targets[i].path != tt.wantPaths[i] {
+					t.Errorf("path[%d] = %q, want %q", i, targets[i].path, tt.wantPaths[i])
+				}
+				if i < len(tt.wantLines) && targets[i].line != tt.wantLines[i] {
+					t.Errorf("line[%d] = %d, want %d", i, targets[i].line, tt.wantLines[i])
+				}
 			}
 		})
 	}
@@ -293,6 +350,84 @@ func TestResolveWorkspacePathsEmptyUsesCWD(t *testing.T) {
 	}
 	if root != cwd {
 		t.Fatalf("root = %q, want cwd %q", root, cwd)
+	}
+}
+
+func TestResolveCLIWorkspaceMissingDirectoryErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dir") + string(filepath.Separator)
+	_, _, err := resolveCLIWorkspace([]cliTarget{{path: missing, line: -1}})
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error = %v, want missing directory", err)
+	}
+}
+
+func TestResolveCLIWorkspaceMultipleFiles(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatalf("go.mod: %v", err)
+	}
+	a := filepath.Join(repo, "a.go")
+	b := filepath.Join(repo, "b.go")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("package main\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	files, root, err := resolveCLIWorkspace([]cliTarget{
+		{path: a, line: 0, col: 0},
+		{path: b, line: -1},
+	})
+	if err != nil {
+		t.Fatalf("resolveCLIWorkspace: %v", err)
+	}
+	if root != repo {
+		t.Fatalf("root = %q, want %q", root, repo)
+	}
+	if len(files) != 2 || files[0].Path != a || files[1].Path != b {
+		t.Fatalf("files = %+v", files)
+	}
+	if files[0].Line != 0 {
+		t.Fatalf("first line = %d, want 0", files[0].Line)
+	}
+}
+
+func TestResolveCLIWorkspaceRejectsDirectoryWithFiles(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(file, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, _, err := resolveCLIWorkspace([]cliTarget{
+		{path: dir, line: -1},
+		{path: file, line: -1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "together with other paths") {
+		t.Fatalf("error = %v, want mix rejection", err)
+	}
+}
+
+func TestParseFileLocation(t *testing.T) {
+	dir := t.TempDir()
+	// File whose name contains a colon should not be split when it exists.
+	weird := filepath.Join(dir, "weird:name.go")
+	if err := os.WriteFile(weird, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	path, line, col := parseFileLocation(weird)
+	if path != weird || line != -1 {
+		t.Fatalf("existing colon name: path=%q line=%d, want intact", path, line)
+	}
+
+	path, line, col = parseFileLocation("main.go:12:3")
+	if path != "main.go" || line != 11 || col != 2 {
+		t.Fatalf("got path=%q line=%d col=%d", path, line, col)
+	}
+
+	path, line, col = parseFileLocation("main.go:12")
+	if path != "main.go" || line != 11 || col != 0 {
+		t.Fatalf("got path=%q line=%d col=%d", path, line, col)
 	}
 }
 

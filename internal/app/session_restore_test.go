@@ -50,7 +50,7 @@ func TestSessionRestoreCommandFiltersTabsAndRemapsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLoad := loadSessionForRestore
-	loadSessionForRestore = func(context.Context) (session.State, error) {
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
 		return session.State{RootDir: root, ActiveTab: 1, Tabs: []session.TabState{
 			{FilePath: filepath.Join(root, "missing.go")},
 			{FilePath: kept, CursorLine: 2, CursorCol: 1, ScrollY: 3, WrapScrollY: 4, Pinned: true},
@@ -97,7 +97,7 @@ func TestSessionRestoreMapsSavedWorkspaceAliasToCurrentRootSpelling(t *testing.T
 	}
 
 	oldLoad := loadSessionForRestore
-	loadSessionForRestore = func(context.Context) (session.State, error) {
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
 		return session.State{RootDir: physicalRoot, ActiveTab: 0, Tabs: []session.TabState{{FilePath: physicalPath}}}, nil
 	}
 	defer func() { loadSessionForRestore = oldLoad }()
@@ -170,7 +170,7 @@ func TestNewModelDoesNotSynchronouslyLoadSession(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	oldLoad := loadSessionForRestore
-	loadSessionForRestore = func(ctx context.Context) (session.State, error) {
+	loadSessionForRestore = func(ctx context.Context, _ string) (session.State, error) {
 		close(entered)
 		select {
 		case <-release:
@@ -211,7 +211,7 @@ func TestSessionRestoreCommandStopsAfterSlowPinnedReadIsCanceled(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldLoad, oldRead := loadSessionForRestore, readSessionRestoreFile
-	loadSessionForRestore = func(context.Context) (session.State, error) {
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
 		return session.State{RootDir: root, ActiveTab: 0, Tabs: []session.TabState{{FilePath: path}}}, nil
 	}
 	entered := make(chan struct{})

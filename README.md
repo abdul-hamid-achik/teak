@@ -58,18 +58,36 @@ TEAK_NO_NERD_FONT=1 teak
 ## Usage
 
 ```sh
-# Open a file
-teak main.go
-
 # Open in the current directory
 teak
+
+# Open a file (workspace roots at the nearest project marker)
+teak main.go
 
 # Open a directory
 teak ~/projects/myapp
 
-# Print the installed version
+# Open multiple files as tabs
+teak a.go b.go
+
+# Jump to a line (1-based), optionally with column
+teak main.go:42
+teak main.go:42:7
+teak +10 internal/app/app.go
+
+# Help / version
+teak --help
 teak --version
 ```
+
+Sessions are stored per workspace under the XDG state directory:
+
+```text
+$XDG_STATE_HOME/teak/sessions/<hash>/session.json
+# default: ~/.local/state/teak/sessions/<hash>/session.json
+```
+
+Opening a file still restores the other tabs from that project's last session when session persistence is enabled.
 
 ## Plugins
 

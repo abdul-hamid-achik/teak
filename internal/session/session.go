@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,35 +47,119 @@ type State struct {
 	Tabs      []TabState `json:"tabs"`
 }
 
-// Path returns the session file path.
-func Path() string {
+// StateHome returns the Teak state directory following the XDG Base Directory
+// Specification:
+//
+//	$XDG_STATE_HOME/teak          when XDG_STATE_HOME is an absolute path
+//	$HOME/.local/state/teak       default on Unix-like systems
+//	$TMPDIR/teak                  last-resort fallback (e.g. CI without a home)
+func StateHome() string {
 	if dir := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(dir) {
-		return filepath.Join(dir, "teak", "session.json")
+		return filepath.Join(dir, "teak")
 	}
-	// In CI or when home dir is not available, use temp directory
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// Fallback to temp directory for CI environments
-		return filepath.Join(os.TempDir(), "teak", "session.json")
+		return filepath.Join(os.TempDir(), "teak")
 	}
-	return filepath.Join(home, ".local", "state", "teak", "session.json")
+	return filepath.Join(home, ".local", "state", "teak")
 }
 
-// Save writes the session state to disk.
+// PathForRoot returns the per-workspace session file path:
+//
+//	$XDG_STATE_HOME/teak/sessions/<sha256(abs root)>/session.json
+//
+// Each workspace keeps its own tabs so switching projects no longer overwrites
+// another project's session.
+func PathForRoot(rootDir string) string {
+	return filepath.Join(StateHome(), "sessions", rootKey(rootDir), "session.json")
+}
+
+// LegacyPath returns the pre-per-workspace session path
+// ($XDG_STATE_HOME/teak/session.json). LoadContextForRoot still reads it once
+// for migration when the per-root file is missing.
+func LegacyPath() string {
+	return filepath.Join(StateHome(), "session.json")
+}
+
+// Path returns LegacyPath for backward compatibility with older callers and
+// tests. Prefer PathForRoot for new code.
+func Path() string {
+	return LegacyPath()
+}
+
+// rootKey returns a stable filesystem-safe key for a workspace root.
+func rootKey(rootDir string) string {
+	abs := rootDir
+	if cleaned, err := filepath.Abs(rootDir); err == nil {
+		abs = cleaned
+	}
+	abs = filepath.Clean(abs)
+	sum := sha256.Sum256([]byte(abs))
+	return hex.EncodeToString(sum[:])
+}
+
+// Save writes the session state to the per-workspace path for state.RootDir.
 func Save(state State) error {
-	return saveToPath(state, Path())
+	path := PathForRoot(state.RootDir)
+	if state.RootDir == "" {
+		// Empty root still needs a stable location; keep the legacy path so
+		// tests and edge cases without a workspace do not scatter files.
+		path = LegacyPath()
+	}
+	return saveToPath(state, path)
 }
 
-// Load reads the session state from disk.
+// Load reads the legacy single-file session. Prefer LoadContextForRoot.
 func Load() (State, error) {
 	return LoadContext(context.Background())
 }
 
-// LoadContext reads the persisted session while checking ctx between file
-// reads. Startup uses this form so a superseded session restore can stop
-// before parsing or filtering additional state.
+// LoadContext reads the legacy single-file session path.
 func LoadContext(ctx context.Context) (State, error) {
-	return loadFromPathContext(ctx, Path())
+	return loadFromPathContext(ctx, LegacyPath())
+}
+
+// LoadContextForRoot loads the session for a workspace root. When the
+// per-workspace file is missing it falls back to the legacy global session
+// only if that file's RootDir refers to the same directory (one-shot
+// migration from older Teak installs).
+func LoadContextForRoot(ctx context.Context, rootDir string) (State, error) {
+	if rootDir == "" {
+		return LoadContext(ctx)
+	}
+	path := PathForRoot(rootDir)
+	state, err := loadFromPathContext(ctx, path)
+	if err == nil {
+		return state, nil
+	}
+	if !os.IsNotExist(err) {
+		return state, err
+	}
+	legacy, legErr := loadFromPathContext(ctx, LegacyPath())
+	if legErr != nil {
+		return State{}, err
+	}
+	if !rootsMatch(legacy.RootDir, rootDir) {
+		return State{}, os.ErrNotExist
+	}
+	return legacy, nil
+}
+
+// rootsMatch reports whether two path spellings refer to the same directory.
+func rootsMatch(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if absA, errA := filepath.Abs(a); errA == nil {
+		if absB, errB := filepath.Abs(b); errB == nil {
+			if filepath.Clean(absA) == filepath.Clean(absB) {
+				return true
+			}
+		}
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && infoA.IsDir() && infoB.IsDir() && os.SameFile(infoA, infoB)
 }
 
 func saveToPath(state State, path string) error {
