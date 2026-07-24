@@ -64,17 +64,89 @@ func main() {
 	}
 }
 
+// projectRootMarkers are files/directories that identify a project workspace.
+// Walking stops at the nearest ancestor that contains any of these so nested
+// packages (e.g. monorepo package.json) win over a parent .git.
+var projectRootMarkers = []string{
+	".git",
+	"go.mod",
+	"package.json",
+	"Cargo.toml",
+	"pyproject.toml",
+	"setup.py",
+	"Pipfile",
+	"composer.json",
+	"Gemfile",
+	"mix.exs",
+	"pom.xml",
+	"build.gradle",
+	"build.gradle.kts",
+	"CMakeLists.txt",
+	"Makefile",
+	".hg",
+	".svn",
+}
+
+// resolveWorkspacePaths normalizes the optional CLI path into an initial file
+// (empty when opening a directory) and the workspace root used by the file tree,
+// LSP, git panel, and session restore.
+//
+// Rules:
+//   - no path: workspace is the current working directory
+//   - directory path: open that directory as the workspace (no initial file tab)
+//   - file path (or not-yet-created path): open the file; workspace is the
+//     nearest project root above the file, or the file's parent if none found
 func resolveWorkspacePaths(filePath string) (string, string) {
-	if filePath != "" {
-		if absolutePath, err := filepath.Abs(filePath); err == nil {
-			return absolutePath, filepath.Dir(absolutePath)
+	if filePath == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			return "", cwd
 		}
-		return filePath, filepath.Dir(filePath)
+		return "", "."
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		return "", cwd
+
+	absolutePath, err := filepath.Abs(filePath)
+	if err != nil {
+		// Fall back to the raw path so callers still get a best-effort root.
+		absolutePath = filePath
 	}
-	return "", "."
+
+	// Directory argument → workspace root is the directory itself, no file tab.
+	// (Without this, teak ./myproject used filepath.Dir and opened the parent.)
+	if info, err := os.Stat(absolutePath); err == nil && info.IsDir() {
+		return "", absolutePath
+	}
+
+	parent := filepath.Dir(absolutePath)
+	if root := findProjectRoot(parent); root != "" {
+		return absolutePath, root
+	}
+	return absolutePath, parent
+}
+
+// findProjectRoot walks up from startDir looking for a project marker.
+// Returns the nearest matching directory, or "" if none is found before the
+// filesystem root.
+func findProjectRoot(startDir string) string {
+	dir := filepath.Clean(startDir)
+	for {
+		if hasProjectMarker(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func hasProjectMarker(dir string) bool {
+	for _, marker := range projectRootMarkers {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func handleCLI(args []string, stdout io.Writer, buildVersion string) (filePath string, handled bool, err error) {
