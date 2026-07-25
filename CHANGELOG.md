@@ -4,31 +4,9 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [v0.9.0] - 2026-07-24
+
 ### Performance Improvements
-
-#### File Tree Rendering
-- **Optimized style allocations** in `internal/filetree/filetree.go`
-- Added cached styles struct to Model to avoid per-frame `lipgloss.NewStyle()` allocations
-- Reduced allocation overhead in hot rendering paths
-- Benchmarks added: `internal/filetree/filetree_bench_test.go`
-
-#### Gutter Rendering  
-- **Pre-cached theme styles** for breakpoints and execution line markers
-- Added 5 new styles to Theme struct:
-  - `BreakpointActive`
-  - `BreakpointDisabled` 
-  - `ExecLineMarker`
-  - `FoldCollapsed`
-  - `FoldExpanded`
-- All theme variants updated: Nord, Dracula, Catppuccin, Solarized Dark, One Dark
-- Replaced inline `lipgloss.NewStyle()` calls with theme style references
-
-#### Viewport Rendering
-- **Critical fix: Eliminated rune-by-rune styling** in `renderWrapSegment()`
-- **Before:** Styled EACH CHARACTER individually → 1000+ allocations per wrapped line
-- **After:** Styles segments by token boundaries → ~10 allocations per wrapped line
-- **Impact:** 90-95% reduction in allocations for wrapped text rendering
-- Added `extractWidthRange()` helper for efficient text extraction by display width
 
 #### Editor Responsiveness on Large Files
 - **Removed the rope's line-index cache**, which was rebuilt from a full document copy on every keystroke, in favor of an incremental tree descent
@@ -41,11 +19,6 @@ All notable changes to the Teak editor project.
 - In-buffer find no longer scans the whole document synchronously on every keystroke (previously ~13 ms and 210k allocations per character on a 50k-line file); searching is now debounced
 
 ### Bug Fixes
-
-#### Git Panel Zone Collision
-- Fixed zone ID collision in commit body rendering
-- Removed redundant `zone.Mark()` calls that were being overwritten
-- Commit body clicks now work correctly via positional hit testing
 
 #### Focus, Split View, Folding and Completions
 - Fixed focus handling across the app so the agent panel, git commit box, and sidebar no longer lose or misdirect keyboard input after switching focus areas or reopening the sidebar
@@ -74,6 +47,43 @@ All notable changes to the Teak editor project.
 
 #### Project Search via ripgrep
 - Project-wide text search now uses `ripgrep` when it's available on `PATH`, for faster results and proper `.gitignore`-aware filtering; falls back automatically to Teak's built-in search when `ripgrep` isn't installed
+
+## [v0.8.0] - 2026-07-24
+
+### Performance Improvements
+
+#### File Tree Rendering
+- **Optimized style allocations** in `internal/filetree/filetree.go`
+- Added cached styles struct to Model to avoid per-frame `lipgloss.NewStyle()` allocations
+- Reduced allocation overhead in hot rendering paths
+- Benchmarks added: `internal/filetree/filetree_bench_test.go`
+
+#### Gutter Rendering  
+- **Pre-cached theme styles** for breakpoints and execution line markers
+- Added 5 new styles to Theme struct:
+  - `BreakpointActive`
+  - `BreakpointDisabled` 
+  - `ExecLineMarker`
+  - `FoldCollapsed`
+  - `FoldExpanded`
+- All theme variants updated: Nord, Dracula, Catppuccin, Solarized Dark, One Dark
+- Replaced inline `lipgloss.NewStyle()` calls with theme style references
+
+#### Viewport Rendering
+- **Critical fix: Eliminated rune-by-rune styling** in `renderWrapSegment()`
+- **Before:** Styled EACH CHARACTER individually → 1000+ allocations per wrapped line
+- **After:** Styles segments by token boundaries → ~10 allocations per wrapped line
+- **Impact:** 90-95% reduction in allocations for wrapped text rendering
+- Added `extractWidthRange()` helper for efficient text extraction by display width
+
+### Bug Fixes
+
+#### Git Panel Zone Collision
+- Fixed zone ID collision in commit body rendering
+- Removed redundant `zone.Mark()` calls that were being overwritten
+- Commit body clicks now work correctly via positional hit testing
+
+### Features
 
 #### Git Commit Body Textarea
 - **Replaced custom `[]string` implementation** with `bubbles/textarea` component
