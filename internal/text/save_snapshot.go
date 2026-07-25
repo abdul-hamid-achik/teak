@@ -2,10 +2,51 @@ package text
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrDestinationReadOnly reports that the destination exists but its owner
+// write bit is clear. It is distinguished from other save failures so callers
+// can offer to override rather than only reporting the error.
+var ErrDestinationReadOnly = errors.New("destination is read-only")
+
+// resolveSaveDestination follows a symbolic link to the file it points at, so a
+// save replaces the target rather than the link.
+//
+// NewBufferFromFile already opens through symlinks — see
+// TestNewBufferFromFileFollowsSymlinkToRegularFile — so rejecting them here
+// meant a symlinked file could be opened and edited but never saved, which is
+// the normal case for dotfiles managed by stow or chezmoi. The link is resolved
+// rather than written through, and the target must itself be a regular file, so
+// a link pointing at a device or a directory is still refused.
+func resolveSaveDestination(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil // a new file; nothing to resolve
+		}
+		return "", fmt.Errorf("inspect destination: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve symbolic link: %w", err)
+	}
+	target, err := os.Lstat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect symbolic link target: %w", err)
+	}
+	if !target.Mode().IsRegular() {
+		return "", fmt.Errorf("symbolic link does not point at a regular file")
+	}
+	return resolved, nil
+}
 
 // WriteRopeAtomically persists an immutable rope without changing any Buffer
 // state. Callers can therefore run it from an async command and reconcile the
@@ -15,14 +56,22 @@ func WriteRopeAtomically(path string, rope *Rope) (retErr error) {
 		return fmt.Errorf("write rope atomically: nil rope")
 	}
 
+	path, err := resolveSaveDestination(path)
+	if err != nil {
+		return err
+	}
+
 	mode := os.FileMode(0o600)
 	destinationExists := false
 	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("destination is a symbolic link")
-		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("destination is not a regular file")
+		}
+		// Replacing a file only needs write permission on its directory, so an
+		// atomic rename happily overwrites a file the user deliberately marked
+		// read-only. Refuse instead, the way vim requires an explicit :w!.
+		if info.Mode().Perm()&0o200 == 0 {
+			return fmt.Errorf("%w: %s", ErrDestinationReadOnly, path)
 		}
 		destinationExists = true
 		mode = info.Mode().Perm()

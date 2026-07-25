@@ -70,6 +70,13 @@ All notable changes to the Teak editor project.
 #### Project Search
 - Fixed project search silently dropping matches already found in a file if it reached a line with invalid UTF-8
 
+#### Saving Files
+- Saving a file marked read-only is now refused with an explanation instead of silently overwriting it — an atomic rename only needs permission on the directory, so the file's own protection was being bypassed
+- Symlinked files can now be saved. Teak already opened them, so a symlinked dotfile (stow, chezmoi) could be edited but never written back; the link is followed to its target and the link itself is preserved
+
+#### Plugins
+- Lua plugins now have the standard `string`, `table`, `math` and base libraries available. They previously ran with none, so `string.format`, `pcall`, `pairs` and `tostring` were all missing and the plugin example in the README failed on its first run. Filesystem, process, module-loading and introspection access remain withheld
+
 ### Features
 
 #### Project Search via ripgrep

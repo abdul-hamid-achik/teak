@@ -1,6 +1,7 @@
 package text
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,7 +104,10 @@ func TestWriteRopeAtomicallyCreatesPrivateFile(t *testing.T) {
 	}
 }
 
-func TestWriteRopeAtomicallyRejectsSymlinkDestination(t *testing.T) {
+// Opening already follows symlinks (see
+// TestNewBufferFromFileFollowsSymlinkToRegularFile), so saving must too;
+// otherwise a symlinked dotfile can be edited but never written back.
+func TestWriteRopeAtomicallyWritesThroughSymlinkToRegularFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink behavior differs on Windows")
 	}
@@ -118,17 +122,81 @@ func TestWriteRopeAtomicallyRejectsSymlinkDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := WriteRopeAtomically(link, NewFromString("replacement")); err == nil {
-		t.Fatal("WriteRopeAtomically() accepted a symlink destination")
+	if err := WriteRopeAtomically(link, NewFromString("replacement")); err != nil {
+		t.Fatalf("WriteRopeAtomically(symlink) error = %v", err)
 	}
+
 	data, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "target"; got != want {
-		t.Fatalf("symlink target content = %q, want %q", got, want)
+	if got, want := string(data), "replacement"; got != want {
+		t.Errorf("target content = %q, want %q", got, want)
 	}
-	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("symlink destination was replaced: info=%v err=%v", info, err)
+	// The link itself must survive: replacing it with a regular file would
+	// silently detach the user's dotfile from whatever manages it.
+	info, err := os.Lstat(link)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink was replaced by a regular file: info=%v err=%v", info, err)
+	}
+}
+
+func TestWriteRopeAtomicallyRejectsSymlinkToNonRegularFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link-to-dir")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Following a link is only safe when it lands on a regular file.
+	if err := WriteRopeAtomically(link, NewFromString("x")); err == nil {
+		t.Error("WriteRopeAtomically() followed a symlink pointing at a directory")
+	}
+}
+
+// An atomic rename only needs write permission on the containing directory, so
+// without an explicit check a file the user deliberately marked read-only is
+// overwritten silently.
+func TestWriteRopeAtomicallyRefusesReadOnlyDestination(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "protected.txt")
+	if err := os.WriteFile(path, []byte("original"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	err := WriteRopeAtomically(path, NewFromString("overwritten"))
+	if err == nil {
+		t.Fatal("WriteRopeAtomically() overwrote a read-only file")
+	}
+	if !errors.Is(err, ErrDestinationReadOnly) {
+		t.Errorf("error = %v, want it to wrap ErrDestinationReadOnly so callers can offer to override", err)
+	}
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(data), "original"; got != want {
+		t.Errorf("content = %q, want %q — the file must be untouched", got, want)
+	}
+}
+
+func TestWriteRopeAtomicallyAcceptsWritableDestination(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "writable.txt")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteRopeAtomically(path, NewFromString("updated")); err != nil {
+		t.Fatalf("WriteRopeAtomically() error = %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if got, want := string(data), "updated"; got != want {
+		t.Errorf("content = %q, want %q", got, want)
 	}
 }

@@ -1741,9 +1741,16 @@ func (m Model) handleFileError(msg FileErrorMsg) (tea.Model, tea.Cmd) {
 	if hadPendingSave && req.QuitAfter {
 		m.cancelQuitAfterSaves()
 	}
-	if msg.Path != "" {
+	switch {
+	case errors.Is(msg.Err, text.ErrDestinationReadOnly):
+		// A bare "permission denied" would be puzzling here, because the save
+		// would have succeeded through the atomic rename. Say what is actually
+		// wrong and what to do about it.
+		m.status = fmt.Sprintf("%s is read-only; change its permissions to save (chmod +w)",
+			filepath.Base(msg.Path))
+	case msg.Path != "":
 		m.status = fmt.Sprintf("Error saving %s: %v", msg.Path, msg.Err)
-	} else {
+	default:
 		m.status = fmt.Sprintf("Error: %v", msg.Err)
 	}
 	return m, nil
