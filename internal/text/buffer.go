@@ -261,6 +261,10 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 			b.dirty = true
 			b.version++
 			b.Cursor = b.rope.OffsetToPosition(offset + len(text))
+			// Replacing a selection collapses it, so the primary selection must
+			// follow the cursor. Leaving it behind made the next keystroke
+			// record its position from a stale selection.
+			b.Selections.selections[b.Selections.primary] = Selection{Anchor: b.Cursor, Head: b.Cursor}
 			b.lastChange = &EditChange{
 				StartLine: start.Line, StartCol: start.Col,
 				EndLine: end.Line, EndCol: end.Col,
@@ -275,6 +279,14 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		// code: Ctrl+Z then undid one character at a time and the undo stack
 		// filled with one snapshot per keystroke.
 		b.undo.Save(b.rope, b.Cursor, isTypedRune(text))
+		// Record where the edit actually lands, which is the cursor. Deriving
+		// this from the primary selection meant that any path moving the cursor
+		// without collapsing the selection — a bracket skip-over, a find jump,
+		// opening a file at a line — produced a change record pointing at a
+		// different position. That record is sent verbatim to the language
+		// server as an incremental edit, so its copy of the document silently
+		// and permanently diverged from the buffer.
+		origin := b.Cursor
 		offset := b.rope.PositionToOffset(b.Cursor)
 		b.rope = b.rope.Insert(offset, text)
 		b.dirty = true
@@ -282,8 +294,8 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		b.Cursor = b.rope.OffsetToPosition(offset + len(text))
 		b.Selections.selections[0] = Selection{Anchor: b.Cursor, Head: b.Cursor}
 		b.lastChange = &EditChange{
-			StartLine: sel.Head.Line, StartCol: sel.Head.Col,
-			EndLine: sel.Head.Line, EndCol: sel.Head.Col,
+			StartLine: origin.Line, StartCol: origin.Col,
+			EndLine: origin.Line, EndCol: origin.Col,
 			Text: string(text),
 		}
 		return
@@ -400,6 +412,10 @@ func (b *Buffer) Backspace() {
 	b.dirty = true
 	b.version++
 	b.Cursor = b.rope.OffsetToPosition(offset - delLen)
+	// Backspace and Delete both branch on whether the primary selection is
+	// empty, so leaving a stale one behind makes a later press delete a range
+	// the user is no longer on.
+	b.syncPrimarySelection()
 	b.lastChange = &EditChange{
 		StartLine: b.Cursor.Line, StartCol: b.Cursor.Col,
 		EndLine: endPos.Line, EndCol: endPos.Col,
@@ -645,6 +661,19 @@ func (b *Buffer) SetSelection(anchor, head Position) {
 		b.Selections.Clear() // Ensure only one selection
 	}
 	b.Cursor = head
+}
+
+// syncPrimarySelection collapses the primary selection onto the cursor. Use it
+// after moving or repositioning the cursor outside SetSelection/SetCursor, so
+// the two can never disagree: Backspace and Delete branch on whether the
+// primary selection is empty, and edit records are derived from the cursor.
+//
+// It is a no-op with multiple cursors, where the selections are managed as a set.
+func (b *Buffer) syncPrimarySelection() {
+	if b.Selections == nil || b.Selections.Count() != 1 {
+		return
+	}
+	b.Selections.selections[b.Selections.primary] = Selection{Anchor: b.Cursor, Head: b.Cursor}
 }
 
 // ClearSelection clears any active selection.
