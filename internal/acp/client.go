@@ -16,6 +16,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -125,8 +127,9 @@ func (m *Manager) Start() error {
 		m.mu.Unlock()
 	}
 
-	// Check if command exists
-	_, err := exec.LookPath(m.command)
+	// Resolve through toolpath so an agent CLI installed under a version
+	// manager or Homebrew is found even when Teak inherited a PATH without it.
+	resolved, err := toolpath.Resolve(m.command)
 	if err != nil {
 		failBeforeProcess()
 		return fmt.Errorf("agent command %q not found: %w", m.command, err)
@@ -136,7 +139,7 @@ func (m *Manager) Start() error {
 	startupCtx, cancelStartup := context.WithTimeout(processCtx, acpStartupTimeout)
 	defer cancelStartup()
 
-	cmd := exec.CommandContext(processCtx, m.command, m.args...)
+	cmd := exec.CommandContext(processCtx, resolved, m.args...)
 	cmd.Dir = m.rootDir
 
 	stdin, err := cmd.StdinPipe()

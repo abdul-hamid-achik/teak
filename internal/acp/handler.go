@@ -15,6 +15,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
+
+	"teak/internal/toolpath"
 )
 
 const msgChanTimeout = 100 * time.Millisecond
@@ -548,7 +550,10 @@ func resolveTerminalCommand(rootDir, cwd, command string) (string, error) {
 		return "", fmt.Errorf("terminal command is empty")
 	}
 	if !strings.ContainsRune(command, filepath.Separator) {
-		resolved, err := exec.LookPath(command)
+		// The agent's terminal inherits Teak's environment, so resolving here
+		// rather than with a bare PATH lookup is what lets it find developer
+		// tools that live outside the inherited PATH.
+		resolved, err := toolpath.Resolve(command)
 		if err != nil {
 			return "", fmt.Errorf("find terminal command %q: %w", command, err)
 		}
