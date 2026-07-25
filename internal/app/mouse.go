@@ -408,19 +408,11 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
-	if m.unsavedConfirm != nil ||
-		!m.overlayStack.IsEmpty() ||
-		m.showBranchPicker ||
-		m.showSearch ||
-		m.showHelp ||
-		m.showSettings ||
-		m.passiveModalVisible() {
-		m.cancelActiveEditorDrag()
-		return m, nil
-	}
-	if m.treeContextMenu.Visible ||
-		m.gitContextMenu.Visible ||
-		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible()) {
+	// A drag cannot continue underneath a surface that owns input. This asked
+	// the same question as editorInputCaptured but spelled the list out again,
+	// so a modal added to one and not the other would silently keep dragging
+	// under it.
+	if m.editorInputCaptured() {
 		m.cancelActiveEditorDrag()
 		return m, nil
 	}

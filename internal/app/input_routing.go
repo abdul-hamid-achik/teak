@@ -17,6 +17,17 @@ import (
 // single owner of the state that decides precedence between overlays, global
 // actions, and focused children.
 
+// isEscapeKey reports whether a key press is Escape. Bubble Tea reports it
+// under two names depending on terminal and key encoding, and both appear
+// throughout this package.
+func isEscapeKey(msg tea.KeyPressMsg) bool {
+	switch msg.String() {
+	case "esc", "escape":
+		return true
+	}
+	return false
+}
+
 // handleKeyPressPrecedence handles the root-level stages that always capture
 // keyboard input. A false handled result intentionally lets ordinary keys
 // continue into the global shortcut stage and then the focused child.
@@ -111,6 +122,17 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 			m.gitContextMenu.Hide()
 			return m, nil, true
 		}
+	}
+
+	// The editor's own context menu belongs in this chain alongside the tree and
+	// git ones. Without it, global shortcuts ran first: pressing F1 with the menu
+	// open left it visible behind the help overlay, and Esc then closed help
+	// while the menu kept capturing input. The editor already handles these keys
+	// correctly — including dismissing on anything unrecognised — so the fix is
+	// to let them reach it.
+	if ed := m.activeEditor(); ed != nil && ed.IsContextMenuVisible() {
+		model, cmd := m.forwardToEditor(msg)
+		return model.(Model), cmd, true
 	}
 
 	if m.showHelp {
@@ -457,6 +479,17 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 			var cmd tea.Cmd
 			m.agentPanel, cmd = m.agentPanel.Update(wm)
 			return m, cmd, true
+		}
+	}
+
+	// Esc returns focus to the editor from every sidebar panel. Problems,
+	// Debugger and Agent already did this; the file tree and git panel did not,
+	// leaving keyboard-only users stuck there with no way out but Ctrl+B.
+	if kp, ok := msg.(tea.KeyPressMsg); ok && isEscapeKey(kp) {
+		switch m.focus {
+		case FocusTree, FocusGitPanel:
+			m.setFocus(FocusEditor)
+			return m, nil, true
 		}
 	}
 
