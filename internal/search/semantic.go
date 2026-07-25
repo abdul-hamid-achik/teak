@@ -34,6 +34,97 @@ var semanticSetupFlights = struct {
 	flights: make(map[string]*semanticSetupFlight),
 }
 
+// indexBuild tracks the subprocess lifetime of one workspace's `vecgrep
+// init`/`vecgrep index` run, independent of any single caller's context.
+type indexBuild struct {
+	cancel context.CancelFunc
+	done   chan struct{} // closed once the build's subprocess(es) have returned
+}
+
+// indexBuilds is the process-wide registry of in-flight index builds, keyed
+// by rootDir. A search's per-query context (recreated on every keystroke,
+// Tab, Ctrl+R, and cancelled on Escape) must never be the context that an
+// index build's exec.CommandContext runs under: doing so kills `vecgrep
+// index` the moment the user who happened to trigger it types again. Instead
+// every build gets its own context here, so it survives query edits and mode
+// switches and is only stopped by CancelIndexing (workspace/app teardown).
+var indexBuilds = struct {
+	mu    sync.Mutex
+	byDir map[string]*indexBuild
+}{byDir: make(map[string]*indexBuild)}
+
+// beginIndexBuild registers a new index build for rootDir, returning a
+// context scoped to the build's own lifetime and a finish function that must
+// be called exactly once, when the build completes (success or failure), to
+// release it from the registry and unblock WaitForIndexingShutdown.
+func beginIndexBuild(rootDir string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	build := &indexBuild{cancel: cancel, done: make(chan struct{})}
+
+	indexBuilds.mu.Lock()
+	indexBuilds.byDir[rootDir] = build
+	indexBuilds.mu.Unlock()
+
+	finish := func() {
+		indexBuilds.mu.Lock()
+		if indexBuilds.byDir[rootDir] == build {
+			delete(indexBuilds.byDir, rootDir)
+		}
+		indexBuilds.mu.Unlock()
+		cancel()
+		close(build.done)
+	}
+	return ctx, finish
+}
+
+// runIndexBuild runs setupVecgrepContext under a context scoped to the index
+// build's own lifetime rather than the caller's. See indexBuilds.
+func runIndexBuild(rootDir string) error {
+	ctx, finish := beginIndexBuild(rootDir)
+	defer finish()
+	return setupVecgrepContext(ctx, rootDir)
+}
+
+// CancelIndexing cancels every in-flight vecgrep index build across all
+// workspaces without waiting for their subprocesses to exit. It is safe to
+// call multiple times and from any goroutine. Application shutdown should
+// call this (mirroring lsp.Client.Shutdown) before the process exits so a
+// long-running `vecgrep index` is not orphaned as an untracked child process.
+func CancelIndexing() {
+	indexBuilds.mu.Lock()
+	builds := make([]*indexBuild, 0, len(indexBuilds.byDir))
+	for _, b := range indexBuilds.byDir {
+		builds = append(builds, b)
+	}
+	indexBuilds.mu.Unlock()
+
+	for _, b := range builds {
+		b.cancel()
+	}
+}
+
+// WaitForIndexingShutdown blocks until every index build that was in flight
+// at the time of the call has released its subprocess, or ctx is done. It
+// mirrors lsp.Client.WaitForShutdown: callers should invoke CancelIndexing
+// first, then bound this with a deadline before the process terminates.
+func WaitForIndexingShutdown(ctx context.Context) bool {
+	indexBuilds.mu.Lock()
+	dones := make([]chan struct{}, 0, len(indexBuilds.byDir))
+	for _, b := range indexBuilds.byDir {
+		dones = append(dones, b.done)
+	}
+	indexBuilds.mu.Unlock()
+
+	for _, done := range dones {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
 // runSemanticSetup ensures that exactly one indexing setup can run per
 // workspace. Concurrent semantic searches wait for the leader and receive the
 // same outcome instead of starting competing vecgrep init/index processes.
@@ -143,24 +234,34 @@ func ensureVecgrepReadyContext(ctx context.Context, rootDir string) error {
 	if _, ok := vecgrepReady.Load(rootDir); ok {
 		return nil
 	}
-	return runSemanticSetupContext(ctx, rootDir, func(ctx context.Context) error {
+	return runSemanticSetupContext(ctx, rootDir, func(context.Context) error {
 		// A concurrent caller may have completed setup before this leader got
 		// scheduled, so recheck the ready cache inside the single-flight path.
 		if _, ok := vecgrepReady.Load(rootDir); ok {
 			return nil
 		}
-		return setupVecgrepContext(ctx, rootDir)
+		// Deliberately ignore the leader's own ctx here: it is a per-query
+		// context that search.go cancels and replaces on every keystroke,
+		// Tab, Ctrl+R toggle, and Escape (see replaceSearchContext /
+		// cancelSearch). If this particular caller happens to become the
+		// single-flight leader for a first-time index build, its own edits
+		// must not kill the `vecgrep index` subprocess out from under every
+		// other caller waiting on the same flight. runIndexBuild gives the
+		// build its own lifetime instead; see indexBuilds.
+		return runIndexBuild(rootDir)
 	})
 }
 
 func setupVecgrepContext(ctx context.Context, rootDir string) error {
-	// Check current status
-	out, err := runVecgrep(ctx, rootDir, "status")
+	// Check current status. --format json is requested so isIndexedFromStatus
+	// can read the structured freshness fields instead of guessing from
+	// prose; see isIndexedFromStatus for why that matters.
+	out, err := runVecgrep(ctx, rootDir, "status", "--format", "json")
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
 
-	if err != nil || !isIndexed(string(out)) {
+	if err != nil || !isIndexedFromStatus(out) {
 		// Initialize the project
 		initCmd, cmdErr := toolpath.Command(ctx, "vecgrep", "init", rootDir)
 		if cmdErr != nil {
@@ -239,16 +340,62 @@ func runVecgrep(ctx context.Context, rootDir string, args ...string) ([]byte, er
 	return stdout.Bytes(), nil
 }
 
-// isIndexed checks vecgrep status output to determine if the project is indexed.
+// vecgrepStatusJSON mirrors the fields of `vecgrep status --format json`
+// that determine whether the on-disk index still reflects the workspace's
+// current files. index_fresh and pending_changes are vecgrep's own drift
+// tracking, computed from file hashes/mtimes it has already checked, so
+// trusting them is both more correct and cheaper than teak recomputing
+// staleness itself.
+type vecgrepStatusJSON struct {
+	IndexFresh bool `json:"index_fresh"`
+	Stats      struct {
+		Files int `json:"files"`
+	} `json:"stats"`
+	PendingChanges struct {
+		TotalPending int `json:"total_pending"`
+	} `json:"pending_changes"`
+}
+
+// isIndexedFromStatus decides whether `vecgrep index` needs to run again,
+// preferring the structured `status --format json` fields and falling back
+// to prose matching (isIndexed) for older vecgrep releases that don't
+// support --format json for status.
+func isIndexedFromStatus(statusOutput []byte) bool {
+	var st vecgrepStatusJSON
+	if err := json.Unmarshal(statusOutput, &st); err == nil {
+		return st.IndexFresh && st.Stats.Files > 0 && st.PendingChanges.TotalPending == 0
+	}
+	return isIndexed(string(statusOutput))
+}
+
+// isIndexed checks vecgrep's default (non-JSON) status output to determine
+// whether the project is indexed. It is a fallback for vecgrep releases
+// whose `status` command doesn't support --format json; prefer
+// isIndexedFromStatus, which reads the structured freshness fields.
+//
+// "stale" is checked first and unconditionally returns false: vecgrep's
+// default-format status output always prints an "Index statistics:" block
+// with a "Files:" line whether or not the index is current, and a project
+// that has drifted (a file changed since the last `vecgrep index`) still
+// says "Reindex status: Freshness: stale (...)" further down. An earlier
+// version of this function checked "files:"/"indexed" first, which matched
+// unconditionally and made InvalidateSemanticIndex (called on every save,
+// external file change, and tree change) a no-op in practice: the status
+// check always reported "already indexed" and the stale index was never
+// rebuilt.
 func isIndexed(statusOutput string) bool {
 	s := strings.ToLower(statusOutput)
-	// If status contains indicators of a healthy index, consider it ready
-	if strings.Contains(s, "indexed") || strings.Contains(s, "files:") || strings.Contains(s, "ready") {
-		return true
+	if strings.Contains(s, "stale") {
+		return false
 	}
 	// If status mentions it's not initialized or has no index, it's not ready
-	if strings.Contains(s, "not initialized") || strings.Contains(s, "no index") || strings.Contains(s, "not found") {
+	if strings.Contains(s, "not initialized") || strings.Contains(s, "no index") ||
+		strings.Contains(s, "not found") || strings.Contains(s, "not in a vecgrep project") {
 		return false
+	}
+	// If status contains indicators of a healthy index, consider it ready
+	if strings.Contains(s, "fresh") || strings.Contains(s, "indexed") || strings.Contains(s, "files:") || strings.Contains(s, "ready") {
+		return true
 	}
 	// If we got valid output, assume it's okay
 	return len(strings.TrimSpace(statusOutput)) > 0
