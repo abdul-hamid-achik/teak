@@ -643,6 +643,11 @@ word_wrap = false
 theme = "nord"
 show_tree = true
 
+[tools]
+# Optional executable overrides; paths are normalized before launch.
+codemap = "/opt/homebrew/bin/codemap"
+vecgrep = "/Users/me/.local/bin/vecgrep"
+
 [[lsp]]
 extensions = [".go"]
 command = "gopls"
@@ -838,7 +843,7 @@ These were each the cause of a real defect. They are not style preferences.
 
 **Clamp the cursor after any edit that rewrites the document.** Formatting, rename and code actions can shorten the buffer under the cursor; `Buffer.ClampCursor()` confines the cursor *and* every selection.
 
-**`Buffer.LastChange` is derived from `sel.Head`, not from `Buffer.Cursor`.** Moving the cursor without keeping `Selections` in sync produces a change record pointing at the wrong line, which corrupts both highlight invalidation and LSP incremental sync. Prefer `Buffer.SetCursor`, which updates both. *This invariant is currently unverified by any test — auditing the paths that touch `Cursor` directly is outstanding work.*
+**`Buffer.LastChange` is derived from `sel.Head`, not from `Buffer.Cursor`.** Moving the cursor without keeping `Selections` in sync produces a change record pointing at the wrong line, which corrupts both highlight invalidation and LSP incremental sync. Prefer `Buffer.SetCursor`, which updates both. `internal/text/lastchange_test.go` verifies the invariant across cursor movement and edit paths; any new direct `Cursor` assignment still requires an accompanying selection update or an explicit test.
 
 ## Writing benchmarks that measure something
 

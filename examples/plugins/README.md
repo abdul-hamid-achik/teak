@@ -22,13 +22,20 @@ cp -R examples/plugins/statusline "$plugins/"
 ```
 
 Each plugin needs a `plugin.toml` and the `init.lua` named by its `main`
-field. Teak calls global `setup()` once while loading and optional global
+field. A plugin may declare `api_version = 1` and `event_version = 2` to make
+its compatibility requirement explicit; manifests that request a newer
+contract are rejected before Lua executes. Teak calls global `setup()` once
+while loading and optional global
 `teardown()` while unloading. `setup()` may register commands, mappings, and
 autocommands, but it cannot call runtime APIs such as `buffer.*`,
 `editor.set_status`, or `ui.notify`; those only work inside a mapping, command,
 or autocommand callback.
 
 The available APIs are `buffer`, `editor`, `keymap`, `autocmd`, and `ui`.
+`keymap.list(mode?)` returns only bounded mapping metadata (`mode`, `keys`, and
+`desc`) in stable order, which is useful for plugin-owned help panels.
+`keymap.which_key(keys, mode?)` resolves a description for a mode and falls
+back to the `a` mapping when a mode is supplied.
 There is no `vim` compatibility object. Mappings support the `n` editor mode,
 the `a` all-context mode, and sidebar focus modes (`tree`, `git`, `problems`,
 `debugger`, and `agent`). Teak does not provide an insert-mode mapping API, so
