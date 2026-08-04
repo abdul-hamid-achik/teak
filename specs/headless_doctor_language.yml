@@ -17,12 +17,12 @@ target:
     - sh
     - -lc
     - >-
-      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); printf '%s\nDOCTOR_GO_LANGUAGE_OK\n' "$JSON"
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); printf '%s' "$JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); langs=[l for l in d.get('languages',[]) if l.get('language_id')=='go']; assert langs, 'no go language detected'; assert langs[0].get('server')=='gopls', langs; assert langs[0].get('state') in ('available','missing','failed','timed_out','unsupported'), langs"; printf 'DOCTOR_GO_LANGUAGE_OK\n'
   cwd: "."
   timeoutMs: 15000
 terminal:
   cols: 120
-  rows: 200
+  rows: 40
   profile: xterm-256color
 steps:
   - wait:
@@ -32,22 +32,7 @@ steps:
   - snapshot: doctor_language
 outcomes:
   - id: go_language_detected
-    description: the report identifies Go files in the requested project
-    verify:
-      screen:
-        contains: '"language_id": "go"'
-  - id: relevant_server_reported
-    description: the report names the language server relevant to the detected files
-    verify:
-      screen:
-        contains: '"server": "gopls"'
-  - id: actionable_state_present
-    description: the language entry exposes a verified, missing, failed, or unsupported state
-    verify:
-      screen:
-        regex: '"state": "(available|missing|failed|timed_out|unsupported)"'
-  - id: doctor_completed
-    description: the doctor run finished and printed its completion marker
+    description: the doctor run detected Go, validated the gopls server and state, and printed its completion marker
     verify:
       screen:
         contains: "DOCTOR_GO_LANGUAGE_OK"

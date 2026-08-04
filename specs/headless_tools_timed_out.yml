@@ -21,13 +21,13 @@ target:
       set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home";
       export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project";
       mkdir -p "$TMP/bin" "$HOME" "$PROJECT";
-      printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then /bin/sleep 5; fi' > "$TMP/bin/hitspec";
+      printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then /bin/sleep 30; fi' > "$TMP/bin/hitspec";
       chmod 755 "$TMP/bin/hitspec";
       JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT");
-      python3 -c "import json,sys; p=json.loads(sys.argv[1]); tools={t.get('name'):t for t in p.get('tools',[])}; h=tools['hitspec']; assert h.get('state') == 'timed_out' and h.get('version_probe') == 'timed_out' and h.get('ready') is False and 'timed out' in h.get('detail','').lower(), h" "$JSON";
-      printf '%s\nTOOLS_TIMED_OUT_JSON_OK\n' "$JSON"
+      printf '%s' "$JSON" | python3 -c "import json,sys; p=json.load(sys.stdin); tools={t.get('name'):t for t in p.get('tools',[])}; h=tools['hitspec']; assert h.get('state') == 'timed_out' and h.get('version_probe') == 'timed_out' and h.get('ready') is False and 'timed out' in h.get('detail','').lower(), h";
+      printf 'TOOLS_TIMED_OUT_JSON_OK\n'
   cwd: "."
-  timeoutMs: 10000
+  timeoutMs: 15000
 terminal:
   cols: 120
   rows: 45
@@ -36,7 +36,7 @@ steps:
   - wait:
       process:
         exitCode: 0
-      timeoutMs: 8000
+      timeoutMs: 12000
   - snapshot: tools_timed_out
 outcomes:
   - id: timed_out_probe_is_observable
