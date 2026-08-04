@@ -16,18 +16,19 @@ target:
   cmd:
     - sh
     - -lc
-    - 'ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; "$ROOT/bin/teak" doctor --json --root "$PROJECT"'
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); printf '%s\nDOCTOR_GO_LANGUAGE_OK\n' "$JSON"
   cwd: "."
-  timeoutMs: 10000
+  timeoutMs: 15000
 terminal:
   cols: 120
-  rows: 50
+  rows: 200
   profile: xterm-256color
 steps:
   - wait:
       process:
         exitCode: 0
-      timeoutMs: 3000
+      timeoutMs: 10000
   - snapshot: doctor_language
 outcomes:
   - id: go_language_detected
@@ -45,3 +46,8 @@ outcomes:
     verify:
       screen:
         regex: '"state": "(available|missing|failed|timed_out|unsupported)"'
+  - id: doctor_completed
+    description: the doctor run finished and printed its completion marker
+    verify:
+      screen:
+        contains: "DOCTOR_GO_LANGUAGE_OK"

@@ -21,6 +21,8 @@ target:
       mkdir -p "$TMP/bin" "$HOME/.config/teak" "$PROJECT";
       printf '[[lsp]]\nextensions = [".go"]\ncommand = "gopls"\nlanguage_id = "go"\n[[lsp]]\nextensions = [".c"]\ncommand = "clangd"\nlanguage_id = "c"\n[[lsp]]\nextensions = [".rs"]\ncommand = "rust-analyzer"\nlanguage_id = "rust"\n' > "$HOME/.config/teak/config.toml";
       printf 'package main\n' > "$PROJECT/main.go";
+      printf 'int main(void){return 0;}\n' > "$PROJECT/main.c";
+      printf 'fn main(){}\n' > "$PROJECT/main.rs";
       for tool in gopls clangd rust-analyzer; do printf '%s\n' '#!/bin/sh' 'sleep 10' > "$TMP/bin/$tool"; chmod 755 "$TMP/bin/$tool"; done;
       export PATH="$TMP/bin:$PATH"; START=$(python3 -c 'import time; print(time.monotonic())');
       JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); END=$(python3 -c 'import time; print(time.monotonic())');
