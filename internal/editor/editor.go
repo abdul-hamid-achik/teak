@@ -473,6 +473,11 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 				return e, nil
 			}
 		}
+		// Moving the cursor invalidates hover content anchored to the old
+		// position; dismiss it instead of letting it drift after the cursor.
+		if e.hover.Visible && isNavigationKey(msg.String()) {
+			e.hover.Hide()
+		}
 		return e.handleKeyPress(msg)
 	case tea.MouseClickMsg:
 		return e.handleMouseClick(msg)
@@ -1008,6 +1013,17 @@ func (e Editor) completionPrefix() string {
 		start -= size
 	}
 	return string(line[start:col])
+}
+
+// isNavigationKey reports keys that move the cursor without editing, which
+// must dismiss anchored overlays such as hover.
+func isNavigationKey(key string) bool {
+	switch key {
+	case "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+		"ctrl+up", "ctrl+down", "ctrl+left", "ctrl+right", "ctrl+home", "ctrl+end":
+		return true
+	}
+	return false
 }
 
 // invalidateHighlightForLastChange marks the highlight cache stale for the edit

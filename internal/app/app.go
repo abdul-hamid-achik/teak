@@ -57,6 +57,11 @@ const (
 	FocusAgent
 )
 
+// maxLSPRestarts bounds automatic relaunches of a language server that keeps
+// crashing; beyond it the exit is reported and the server stays down until
+// the user restarts it from the palette.
+const maxLSPRestarts = 3
+
 // setFocus moves keyboard focus to area, releasing whatever the area being left
 // was holding.
 //
@@ -202,6 +207,7 @@ type modelState struct {
 	focus                     FocusArea
 	rootDir                   string
 	lspMgr                    *lsp.Manager
+	lspRestarts               map[string]int // per-server crash restarts this session
 	goToLineMode              bool
 	goToLineInput             string
 	welcome                   *editor.Welcome
@@ -2674,7 +2680,35 @@ func (m Model) handleLspShowMessage(msg lsp.LspShowMessageMsg) (tea.Model, tea.C
 func (m Model) handleServerExited(msg lsp.ServerExitedMsg) (tea.Model, tea.Cmd) {
 	m.status = fmt.Sprintf("Language server %q exited unexpectedly", msg.Command)
 	log.Error("lsp server exited", "command", msg.Command, "err", msg.Err)
-	return m, nil
+	if m.lspMgr == nil {
+		return m, nil
+	}
+	if m.lspRestarts == nil {
+		m.lspRestarts = make(map[string]int)
+	}
+	m.lspRestarts[msg.Command]++
+	if m.lspRestarts[msg.Command] > maxLSPRestarts {
+		// A server that keeps crashing must not be relaunched forever.
+		m.status = fmt.Sprintf("Language server %q keeps crashing; not restarting it again", msg.Command)
+		return m, nil
+	}
+	// Re-open every affected document: EnsureClient replaces the dead client
+	// and didOpen restores the server's view of buffers that were already
+	// open before the crash.
+	m.status = fmt.Sprintf("Language server %q exited unexpectedly; restarting", msg.Command)
+	var cmds []tea.Cmd
+	for i := range m.editors {
+		buf := m.editors[i].Buffer
+		if buf == nil || buf.FilePath == "" {
+			continue
+		}
+		cfg := m.lspMgr.ConfigForFile(buf.FilePath)
+		if cfg == nil || cfg.Command != msg.Command {
+			continue
+		}
+		cmds = append(cmds, m.lspDidOpen(buf))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // --- protocol message routing ---
@@ -5854,6 +5888,30 @@ func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// jumpToProblem moves the problems-panel selection and opens the selected
+// diagnostic's location. Shared by the F8/Shift+F8 bindings and the command
+// palette entries.
+func (m Model) jumpToProblem(prev bool) (tea.Model, tea.Cmd) {
+	if m.problemsPanel.ProblemCount() == 0 {
+		return m, nil
+	}
+	if prev {
+		m.problemsPanel.SelectPrev()
+	} else {
+		m.problemsPanel.SelectNext()
+	}
+	prob := m.problemsPanel.SelectedProblem()
+	if prob == nil {
+		return m, nil
+	}
+	pos := text.Position{Line: prob.Line, Col: prob.Col}
+	m.setPendingCursor(prob.FilePath, pos)
+	model, cmd := m.openFile(prob.FilePath)
+	updated := model.(Model)
+	updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
+	return updated, cmd
+}
+
 // handleCommandPaletteAction dispatches an action from the command palette.
 func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch innerMsg := msg.(type) {
@@ -5944,6 +6002,90 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.findPrev()
 	case quitMsg:
 		return m.requestQuit()
+	case formatFileMsg:
+		ed := m.activeEditor()
+		if ed == nil || ed.Buffer.FilePath == "" {
+			return m, nil
+		}
+		return m, m.requestFormatting(ed.Buffer.FilePath, ed.Config, 0)
+	case gotoDefinitionMsg:
+		return m.requestDefinition()
+	case renameSymbolMsg:
+		m.renameMode = true
+		m.renameInput = ""
+		return m, nil
+	case codeActionsMsg:
+		return m.requestCodeActions()
+	case hoverSymbolMsg:
+		return m.requestHover()
+	case documentSymbolsMsg:
+		return m.requestDocumentSymbols()
+	case toggleSplitMsg:
+		m.toggleSplit()
+		return m, nil
+	case closeSplitMsg:
+		m.unsplit()
+		return m, nil
+	case cycleSplitMsg:
+		m.cycleSplitFocus()
+		return m, nil
+	case toggleBreakpointMsg:
+		if ed := m.activeEditor(); ed != nil && ed.Buffer.FilePath != "" {
+			return m, m.toggleBreakpoint(ed.Buffer.FilePath, ed.Buffer.Cursor.Line)
+		}
+		return m, nil
+	case foldLineMsg:
+		if ed := m.activeEditor(); ed != nil {
+			ed.Folds.Fold(ed.Buffer.Cursor.Line)
+			m.setEditor(m.activeTab, *ed)
+		}
+		return m, nil
+	case unfoldLineMsg:
+		if ed := m.activeEditor(); ed != nil {
+			ed.Folds.Unfold(ed.Buffer.Cursor.Line)
+			m.setEditor(m.activeTab, *ed)
+		}
+		return m, nil
+	case foldAllMsg:
+		if ed := m.activeEditor(); ed != nil {
+			ed.Folds.FoldAll()
+			m.setEditor(m.activeTab, *ed)
+			m.status = "All regions folded"
+		}
+		return m, nil
+	case unfoldAllMsg:
+		if ed := m.activeEditor(); ed != nil {
+			ed.Folds.UnfoldAll()
+			m.setEditor(m.activeTab, *ed)
+			m.status = "All regions unfolded"
+		}
+		return m, nil
+	case nextTabMsg:
+		if len(m.editors) > 1 {
+			m.activateTab((m.activeTab + 1) % len(m.editors))
+		}
+		return m, nil
+	case prevTabMsg:
+		if len(m.editors) > 1 {
+			m.activateTab((m.activeTab - 1 + len(m.editors)) % len(m.editors))
+		}
+		return m, nil
+	case nextProblemMsg:
+		return m.jumpToProblem(false)
+	case prevProblemMsg:
+		return m.jumpToProblem(true)
+	case restartLspMsg:
+		ed := m.activeEditor()
+		if ed == nil || ed.Buffer.FilePath == "" || m.lspMgr == nil {
+			return m, nil
+		}
+		// A manual restart resets the crash budget: the user explicitly asked
+		// for another attempt.
+		if cfg := m.lspMgr.ConfigForFile(ed.Buffer.FilePath); cfg != nil {
+			delete(m.lspRestarts, cfg.Command)
+		}
+		m.status = "Restarting language server..."
+		return m, m.lspDidOpen(ed.Buffer)
 	}
 	return m, nil
 }

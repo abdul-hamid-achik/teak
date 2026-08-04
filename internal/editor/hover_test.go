@@ -132,9 +132,9 @@ func TestHoverViewManyLinesContent(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
-	// Should be limited to 10 lines
-	if strings.Contains(view, "line 9") && !strings.Contains(view, "...") {
-		t.Error("expected truncated hover output to include ellipsis")
+	// Twenty short lines fit the bounded popup, so nothing is dropped.
+	if strings.Contains(view, "…") {
+		t.Error("20 short lines should fit without an ellipsis")
 	}
 }
 
@@ -148,9 +148,9 @@ func TestHoverViewWidthLimit(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
-	// Should be truncated with ellipsis
-	if !strings.Contains(view, "...") {
-		t.Error("expected truncation indicator")
+	// The long word is truncated once; wrapping replaces the old ellipsis.
+	if strings.Contains(view, "...") {
+		t.Error("hard truncation ellipsis should be gone in favor of wrapping")
 	}
 }
 
@@ -176,8 +176,8 @@ func TestHoverViewOneOverMaxWidth(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
-	if !strings.Contains(view, "...") {
-		t.Error("expected truncation indicator")
+	if strings.Contains(view, "...") {
+		t.Error("hard truncation ellipsis should be gone in favor of wrapping")
 	}
 }
 
@@ -209,9 +209,9 @@ func TestHoverViewElevenLines(t *testing.T) {
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
-	// Should show 10 lines + ellipsis
-	if !strings.Contains(view, "...") {
-		t.Error("expected ellipsis for 11 lines")
+	// Eleven short lines fit the 20-line bound; nothing must be dropped.
+	if strings.Contains(view, "…") {
+		t.Error("11 short lines should fit without an ellipsis")
 	}
 }
 

@@ -264,6 +264,157 @@ func (m *Model) commandRegistry() []Command {
 				return commandPaletteMsg{inner: bobCheckMsg{}}
 			},
 		},
+		{
+			ID:       "format_file",
+			Label:    "Format File",
+			Shortcut: "Ctrl+Alt+F",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: formatFileMsg{}}
+			},
+		},
+		{
+			ID:       "goto_definition",
+			Label:    "Go to Definition",
+			Shortcut: "F12",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: gotoDefinitionMsg{}}
+			},
+		},
+		{
+			ID:       "rename_symbol",
+			Label:    "Rename Symbol...",
+			Shortcut: "F2",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: renameSymbolMsg{}}
+			},
+		},
+		{
+			ID:       "code_actions",
+			Label:    "Code Actions...",
+			Shortcut: "Ctrl+K",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: codeActionsMsg{}}
+			},
+		},
+		{
+			ID:       "hover",
+			Label:    "Show Hover",
+			Shortcut: "Alt+K",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: hoverSymbolMsg{}}
+			},
+		},
+		{
+			ID:       "document_symbols",
+			Label:    "Document Symbols...",
+			Shortcut: "Ctrl+Shift+O",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: documentSymbolsMsg{}}
+			},
+		},
+		{
+			ID:       "toggle_split",
+			Label:    "Toggle Split View",
+			Shortcut: "Ctrl+\\",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleSplitMsg{}}
+			},
+		},
+		{
+			ID:       "close_split",
+			Label:    "Close Split",
+			Shortcut: "Ctrl+Shift+\\",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: closeSplitMsg{}}
+			},
+		},
+		{
+			ID:       "cycle_split",
+			Label:    "Cycle Split Pane",
+			Shortcut: "F6",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: cycleSplitMsg{}}
+			},
+		},
+		{
+			ID:       "toggle_breakpoint",
+			Label:    "Toggle Breakpoint",
+			Shortcut: "F9",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleBreakpointMsg{}}
+			},
+		},
+		{
+			ID:       "fold",
+			Label:    "Fold Region",
+			Shortcut: "Ctrl+Shift+[",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: foldLineMsg{}}
+			},
+		},
+		{
+			ID:       "unfold",
+			Label:    "Unfold Region",
+			Shortcut: "Ctrl+Shift+]",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: unfoldLineMsg{}}
+			},
+		},
+		{
+			ID:       "fold_all",
+			Label:    "Fold All Regions",
+			Shortcut: "Ctrl+Shift+0",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: foldAllMsg{}}
+			},
+		},
+		{
+			ID:       "unfold_all",
+			Label:    "Unfold All Regions",
+			Shortcut: "Ctrl+Shift+J",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: unfoldAllMsg{}}
+			},
+		},
+		{
+			ID:       "next_tab",
+			Label:    "Next Tab",
+			Shortcut: "Ctrl+Tab",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: nextTabMsg{}}
+			},
+		},
+		{
+			ID:       "prev_tab",
+			Label:    "Previous Tab",
+			Shortcut: "Ctrl+Shift+Tab",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: prevTabMsg{}}
+			},
+		},
+		{
+			ID:       "next_problem",
+			Label:    "Next Problem",
+			Shortcut: "F8",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: nextProblemMsg{}}
+			},
+		},
+		{
+			ID:       "prev_problem",
+			Label:    "Previous Problem",
+			Shortcut: "Shift+F8",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: prevProblemMsg{}}
+			},
+		},
+		{
+			ID:    "restart_lsp",
+			Label: "Restart Language Server",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: restartLspMsg{}}
+			},
+		},
 	}
 }
 
@@ -291,4 +442,23 @@ type (
 	codemapImpactMsg       struct{}
 	bobPlanMsg             struct{}
 	bobCheckMsg            struct{}
+	formatFileMsg          struct{}
+	gotoDefinitionMsg      struct{}
+	renameSymbolMsg        struct{}
+	codeActionsMsg         struct{}
+	hoverSymbolMsg         struct{}
+	documentSymbolsMsg     struct{}
+	toggleSplitMsg         struct{}
+	closeSplitMsg          struct{}
+	cycleSplitMsg          struct{}
+	toggleBreakpointMsg    struct{}
+	foldLineMsg            struct{}
+	unfoldLineMsg          struct{}
+	foldAllMsg             struct{}
+	unfoldAllMsg           struct{}
+	nextTabMsg             struct{}
+	prevTabMsg             struct{}
+	nextProblemMsg         struct{}
+	prevProblemMsg         struct{}
+	restartLspMsg          struct{}
 )

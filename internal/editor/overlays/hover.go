@@ -37,21 +37,64 @@ func (h Hover) View() string {
 		return ""
 	}
 
-	// Limit width and wrap lines
-	maxWidth := 60
+	// Wrap long lines instead of hard-truncating them: signatures and doc
+	// text are useless when half of them are replaced by an ellipsis. The
+	// popup stays bounded so a giant payload cannot cover the screen.
+	const maxWidth = 60
+	const maxLines = 20
 	lines := strings.Split(h.Content, "\n")
 	var wrapped []string
 	for _, line := range lines {
-		if ansi.StringWidth(line) > maxWidth {
-			line = ansi.Truncate(line, maxWidth-3, "") + "..."
+		wrapped = append(wrapped, wrapANSILine(line, maxWidth)...)
+		if len(wrapped) > maxLines {
+			break
 		}
-		wrapped = append(wrapped, line)
 	}
-	if len(wrapped) > 10 {
-		wrapped = wrapped[:10]
-		wrapped = append(wrapped, "...")
+	if len(wrapped) > maxLines {
+		wrapped = wrapped[:maxLines]
+		wrapped = append(wrapped, "…")
 	}
+	return h.theme.HoverBox.Render(strings.Join(wrapped, "\n"))
+}
 
-	content := strings.Join(wrapped, "\n")
-	return h.theme.HoverBox.Render(content)
+// wrapANSILine wraps a styled line at maxWidth display columns, breaking on
+// spaces where possible. Words longer than the limit are truncated once.
+func wrapANSILine(line string, maxWidth int) []string {
+	if ansi.StringWidth(line) <= maxWidth {
+		return []string{line}
+	}
+	var out []string
+	var current strings.Builder
+	width := 0
+	for _, word := range strings.Split(line, " ") {
+		w := ansi.StringWidth(word)
+		if w > maxWidth {
+			if current.Len() > 0 {
+				out = append(out, current.String())
+				current.Reset()
+				width = 0
+			}
+			out = append(out, ansi.Truncate(word, maxWidth, ""))
+			continue
+		}
+		if width == 0 {
+			current.WriteString(word)
+			width = w
+			continue
+		}
+		if width+1+w > maxWidth {
+			out = append(out, current.String())
+			current.Reset()
+			current.WriteString(word)
+			width = w
+			continue
+		}
+		current.WriteString(" ")
+		current.WriteString(word)
+		width += 1 + w
+	}
+	if current.Len() > 0 {
+		out = append(out, current.String())
+	}
+	return out
 }
