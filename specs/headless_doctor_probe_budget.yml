@@ -1,0 +1,44 @@
+version: 1
+name: teak_headless_doctor_probe_budget
+coversSymbol: runDoctorCLI
+metadata:
+  feature: onboarding
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - doctor
+    - bounded
+intent: |
+  doctor keeps a total probe budget when several configured servers hang.
+target:
+  cmd:
+    - sh
+    - -lc
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home";
+      export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project";
+      mkdir -p "$TMP/bin" "$HOME/.config/teak" "$PROJECT";
+      printf '[[lsp]]\nextensions = [".go"]\ncommand = "gopls"\nlanguage_id = "go"\n[[lsp]]\nextensions = [".c"]\ncommand = "clangd"\nlanguage_id = "c"\n[[lsp]]\nextensions = [".rs"]\ncommand = "rust-analyzer"\nlanguage_id = "rust"\n' > "$HOME/.config/teak/config.toml";
+      printf 'package main\n' > "$PROJECT/main.go";
+      for tool in gopls clangd rust-analyzer; do printf '%s\n' '#!/bin/sh' 'sleep 10' > "$TMP/bin/$tool"; chmod 755 "$TMP/bin/$tool"; done;
+      export PATH="$TMP/bin:$PATH"; START=$(python3 -c 'import time; print(time.monotonic())');
+      JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); END=$(python3 -c 'import time; print(time.monotonic())');
+      python3 -c "import json,sys; p=json.loads(sys.argv[1]); elapsed=float(sys.argv[2]); checks={c.get('name'):c for c in p.get('checks',[])}; langs=[l for l in p.get('languages',[]) if l.get('language_id') == 'go']; names=('tool:gopls','tool:clangd','tool:rust-analyzer'); assert elapsed < 5.0, elapsed; assert len(langs) == 1 and langs[0].get('state') == 'timed_out' and langs[0].get('version_probe') == 'timed_out', langs; assert all(checks[n].get('status') == 'warn' for n in names); assert all('version probe timed out' in checks[n].get('detail','').lower() for n in names), checks; print('DOCTOR_PROBE_BUDGET_JSON_OK')" "$JSON" "$(python3 -c "print(float('$END')-float('$START'))")"
+  cwd: "."
+  timeoutMs: 10000
+terminal:
+  cols: 120
+  rows: 50
+  profile: xterm-256color
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 8000
+outcomes:
+  - id: doctor_probe_budget_enforced
+    description: multiple hanging server probes stay within the total doctor budget and preserve timed_out details
+    verify:
+      screen:
+        contains: "DOCTOR_PROBE_BUDGET_JSON_OK"

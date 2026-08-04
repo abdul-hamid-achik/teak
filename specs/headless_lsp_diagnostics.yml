@@ -1,0 +1,54 @@
+version: 1
+name: teak_headless_lsp_diagnostics
+coversSymbol: runHeadlessLSP
+metadata:
+    feature: headless-lsp
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - lsp
+        - diagnostics
+intent: |
+    a headless client can initialize a configured language server, open a file,
+    and inspect published diagnostics without starting the interactive editor.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; mkdir -p "$HOME/.config/teak" "$PROJECT"; printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "python3"\nargs = ["%s/testdata/glyphrun/lsp-diagnostics-fixture.py"]\nlanguage_id = "fixture"\n' "$ROOT" > "$HOME/.config/teak/config.toml"; printf 'fixture source\n' > "$PROJECT/main.fixture"; JSON=$("$ROOT/bin/teak" headless lsp diagnostics --json --root "$PROJECT" main.fixture); python3 -c "import json,sys; p=json.loads(sys.argv[1]); ds=p.get('diagnostics'); assert p.get('state') == 'ready' and p.get('language_id') == 'fixture' and isinstance(ds,list) and len(ds) == 1 and ds[0].get('message') == 'fixture diagnostic' and ds[0].get('source') == 'fixture' and ds[0].get('line') == 0 and ds[0].get('column') == 1 and ds[0].get('end_line') == 0 and ds[0].get('end_column') == 4" "$JSON"; printf '%s\nLSP_DIAGNOSTICS_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: lsp_diagnostics
+outcomes:
+    - id: diagnostics_ready
+      description: the one-shot LSP workflow reaches a ready state
+      verify:
+        screen:
+            contains: '"state": "ready"'
+    - id: diagnostic_message_reported
+      description: the published fixture diagnostic is returned in structured output
+      verify:
+        screen:
+            contains: "fixture diagnostic"
+    - id: diagnostic_range_reported
+      description: diagnostic source and range metadata are retained
+      verify:
+        screen:
+            contains: '"source": "fixture"'
+    - id: diagnostics_json_validated
+      description: the fixture response is parsed and its state, cardinality, and range are checked
+      verify:
+        screen:
+            contains: "LSP_DIAGNOSTICS_JSON_OK"
+contractHash: sha256:f58d82192748c5d386946993d73894353c6c1fc866cfe982f36eb17b256bb290

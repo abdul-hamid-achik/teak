@@ -1,0 +1,50 @@
+version: 1
+name: teak_headless_semantic_search
+coversSymbol: runHeadlessSemanticSearch
+metadata:
+    feature: semantic-search
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - semantic
+        - vecgrep
+        - read-only
+intent: |
+    semantic search refuses a stale index by default and only runs the
+    potentially expensive index operation after an explicit opt-in.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; export VECGREP_TRACE="$TMP/trace"; export VECGREP_INDEXED="$TMP/indexed"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; printf '%s\n' 'package main' > "$PROJECT/main.go"; : > "$VECGREP_TRACE"; printf '%s\n' '#!/bin/sh' 'case "$1" in' '--version) printf "%s\n" "vecgrep fixture" ;;' 'status) if [ -f "$VECGREP_INDEXED" ]; then printf "%s\n" "{\"index_fresh\":true,\"stats\":{\"files\":1},\"pending_changes\":{\"total_pending\":0},\"freshness\":{\"state\":\"fresh\"},\"lightweight\":true}"; else printf "%s\n" "{\"index_fresh\":false,\"stats\":{\"files\":1},\"pending_changes\":{\"total_pending\":1},\"freshness\":{\"state\":\"stale\"},\"lightweight\":true}"; fi ;;' 'index) printf "%s\n" index >> "$VECGREP_TRACE"; : > "$VECGREP_INDEXED" ;;' 'init) printf "%s\n" init >> "$VECGREP_TRACE" ;;' 'search) printf "%s\n" search >> "$VECGREP_TRACE"; printf "%s\n" "{\"schema_version\":1,\"index\":{\"indexed\":true,\"fresh\":true,\"chunks\":1},\"hits\":[{\"file_path\":\"main.go\",\"relative_path\":\"main.go\",\"line\":2,\"col\":1,\"end_line\":2,\"preview\":\"semantic fixture hit\",\"score\":0.9,\"symbol_name\":\"main\",\"chunk_type\":\"function\"}]}" ;;' 'esac' > "$TMP/bin/vecgrep"; chmod 755 "$TMP/bin/vecgrep"; set +e; COLD=$("$ROOT/bin/teak" headless search --semantic --json --root "$PROJECT" meaning); COLD_CODE=$?; set -e; HOT=$("$ROOT/bin/teak" headless search --semantic --index --json --root "$PROJECT" meaning); python3 -c "import json,sys; cold=json.loads(sys.argv[1]); hot=json.loads(sys.argv[2]); calls=open(sys.argv[3]).read().splitlines(); assert cold.get('mode') == 'semantic' and cold.get('state') == 'stale' and cold.get('indexed') is False and cold.get('truncated') is False; assert hot.get('mode') == 'semantic' and hot.get('state') == 'ready' and hot.get('indexed') is True and hot.get('truncated') is False and len(hot.get('results',[])) == 1; assert sys.argv[4] == '1'; assert 'index' in calls and 'search' in calls and 'init' not in calls" "$COLD" "$HOT" "$VECGREP_TRACE" "$COLD_CODE"; printf '%s\n' 'SEMANTIC_SEARCH_JSON_OK'
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: semantic_search
+outcomes:
+    - id: stale_index_is_visible
+      description: read-only semantic search reports stale state instead of mutating the project
+      verify:
+        screen:
+            contains: "SEMANTIC_SEARCH_JSON_OK"
+    - id: explicit_index_is_required
+      description: the explicit index mode runs a real vecgrep index and query
+      verify:
+        screen:
+            contains: "SEMANTIC_SEARCH_JSON_OK"
+    - id: semantic_json_is_validated
+      description: the fixture parses mode, state, readiness, result cardinality, and exit code
+      verify:
+        screen:
+            contains: "SEMANTIC_SEARCH_JSON_OK"
+contractHash: sha256:13d7b5d4546240a79341dec8ffb959bc5ff5bf8991607477d71b68a6511623b7

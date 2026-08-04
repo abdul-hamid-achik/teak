@@ -1,0 +1,50 @@
+version: 1
+name: teak_headless_vecgrep_legacy_health
+coversSymbol: collectVecgrepStatus
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - vecgrep
+        - memory
+        - negative
+intent: |
+    a legacy vecgrep is reported as unsupported by health checks without
+    falling back to the status command that can load the full vector index.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project"; MARKER="$TMP/legacy-status-invoked"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "codemap fixture"; exit 0; fi' 'if [ "$1" = "structural-manifest" ]; then printf "%s\\n" "{\"schema_version\":1,\"export_schema_version\":1,\"project\":\"fixture\",\"project_key\":\"fixture\",\"index_fingerprint\":\"fixture\",\"total_records\":1,\"complete\":true,\"freshness\":{\"checked\":true,\"fresh\":true,\"changed\":0,\"new\":0,\"deleted\":0}}"; exit 0; fi' 'exit 0' > "$TMP/bin/codemap"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "vecgrep legacy fixture"; exit 0; fi' 'if [ "$1" = "status" ] && [ "$2" = "--lightweight" ]; then printf "%s\\n" "unknown flag: --lightweight" >&2; exit 2; fi' 'if [ "$1" = "status" ]; then : > "$MARKER"; printf "%s\\n" "{\"index_fresh\":true,\"stats\":{\"files\":1},\"pending_changes\":{\"total_pending\":0},\"freshness\":{\"state\":\"fresh\"}}"; exit 0; fi' 'exit 0' > "$TMP/bin/vecgrep"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "hitspec fixture"; exit 0; fi' 'exit 0' > "$TMP/bin/hitspec"; chmod 755 "$TMP/bin/codemap" "$TMP/bin/vecgrep" "$TMP/bin/hitspec"; JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); python3 -c "import json,sys,os; p=json.loads(sys.argv[1]); v={t.get('name'):t for t in p.get('tools',[])}['vecgrep']; assert v.get('state') == 'unsupported' and v.get('ready') is False and 'lightweight' in v.get('hint','').lower() and not os.path.exists(sys.argv[2]), v" "$JSON" "$MARKER"; printf '%s\\nLEGACY_VECGREP_HEALTH_JSON_OK\\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: vecgrep_legacy_health
+outcomes:
+    - id: legacy_vecgrep_is_unsupported
+      description: an old vecgrep exposes an actionable unsupported health state
+      verify:
+        screen:
+            contains: "LEGACY_VECGREP_HEALTH_JSON_OK"
+    - id: legacy_full_status_is_not_called
+      description: health checks never invoke legacy status that can load vectors
+      verify:
+        screen:
+            contains: "LEGACY_VECGREP_HEALTH_JSON_OK"
+    - id: legacy_health_json_validated
+      description: the fixture parses readiness, hint, and non-invocation guarantees
+      verify:
+        screen:
+            contains: "LEGACY_VECGREP_HEALTH_JSON_OK"
+contractHash: sha256:5ec8ee5008fdc2ab2c439ed87812efb49c8e687553efe77918845e78814aaf92

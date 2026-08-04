@@ -1,0 +1,70 @@
+version: 1
+name: teak_headless_mcp
+coversSymbol: runHeadlessMCP
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - mcp
+        - json-rpc
+        - security
+intent: |
+    an MCP-compatible local agent can initialize, enumerate Teak's bounded
+    tools, inspect one workspace, perform one explicitly confirmed optimistic
+    buffer write, receive a typed stale-write result, and perform explicitly
+    confirmed root-confined project mutations without relying on terminal
+    rendering.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-mcp-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_mcp
+outcomes:
+    - id: protocol_initialized
+      description: the fixture completed MCP initialization and tool enumeration
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_JSON_OK"
+    - id: bounded_read_only_tool
+      description: the MCP tool call returned the fixed workspace context
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_JSON_OK"
+    - id: stale_write_result
+      description: a stale confirmed mutation returns the typed optimistic-write error
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_JSON_OK"
+    - id: explicit_write
+      description: a confirmed MCP buffer write persists content through the headless CLI contract
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_WRITE_OK"
+    - id: stale_write_guard
+      description: the MCP fixture proves that a stale digest cannot overwrite the newer file
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_STALE_GUARD_OK"
+    - id: project_mutations_confirmed
+      description: project mkdir, rename, copy, and remove require explicit confirmation and commit inside the workspace
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_PROJECT_MUTATIONS_OK"
+contractHash: sha256:a704292d75710cba2f926262392114d89d786d114daa7fc67b80495c800b7a0a

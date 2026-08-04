@@ -1,0 +1,54 @@
+version: 1
+name: teak_headless_lsp_status
+coversSymbol: runHeadlessLSP
+metadata:
+    feature: headless-lsp
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - lsp
+        - health
+intent: |
+    an agent can inspect configured language servers without indexing the project
+    or opening documents; protocol probing is explicit and bounded.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; MARKER="$TMP/probe-marker"; mkdir -p "$XDG_CONFIG_HOME/teak" "$PROJECT"; printf '%s\n' '[[lsp]]' 'extensions = [".fixture"]' 'command = "python3"' "args = [\"$ROOT/testdata/glyphrun/lsp-diagnostics-fixture.py\"]" 'language_id = "fixture"' "env = { TEAK_LSP_PROBE_MARKER = \"$MARKER\" }" > "$XDG_CONFIG_HOME/teak/config.toml"; DEFAULT=$("$ROOT/bin/teak" headless lsp status --json --root "$PROJECT"); python3 -c "import json,os,sys; p=json.loads(sys.argv[1]); e=next(s for s in p['servers'] if s.get('language_id')=='fixture'); assert e['available'] is True and e['state']=='unsupported' and e['ready'] is False and e['version_probe']=='unsupported' and e.get('protocol_probe','')=='' and not os.path.exists(sys.argv[2]), (p,sys.argv[2])" "$DEFAULT" "$MARKER"; PROBED=$("$ROOT/bin/teak" headless lsp status --probe --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); e=next(s for s in p['servers'] if s.get('language_id')=='fixture'); assert e['state']=='available' and e['ready'] is True and e['version_probe']=='unsupported' and e['protocol_probe']=='ready' and e['capability_probe']=='ready' and e['capabilities']==['hover','definition','references','document_symbols','formatting'] and open(sys.argv[2]).read().splitlines()==['probe'], (p,sys.argv[2])" "$PROBED" "$MARKER"; printf '%s\n%s\nLSP_STATUS_SAFE_DEFAULT_OK\n' "$DEFAULT" "$PROBED"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 100
+    rows: 40
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: lsp_status
+outcomes:
+    - id: workspace_reported
+      description: the structured response identifies the requested workspace
+      verify:
+        screen:
+            contains: "LSP_STATUS_SAFE_DEFAULT_OK"
+    - id: built_in_server_reported
+      description: a protocol-only configured server is reported with typed fields
+      verify:
+        screen:
+            contains: "LSP_STATUS_SAFE_DEFAULT_OK"
+    - id: bounded_probe
+      description: default status stays read-only and explicit probe verifies the handshake
+      verify:
+        screen:
+            contains: "LSP_STATUS_SAFE_DEFAULT_OK"
+    - id: lsp_status_json_validated
+      description: both safe-default and protocol-ready JSON states are parsed semantically
+      verify:
+        screen:
+            contains: "LSP_STATUS_SAFE_DEFAULT_OK"
+contractHash: sha256:cee010ccd807081ff8e01e947fa0c27c283cc7cf8f2c90c9402373d0c2b76fd2

@@ -1,0 +1,54 @@
+version: 1
+name: teak_headless_codemap_queries
+coversSymbol: runHeadlessCodemap
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - codemap
+        - read-only
+intent: |
+    headless codemap queries return bounded structured results without
+    implicitly initializing or indexing the project.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; export CODEMAP_TRACE="$TMP/calls"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; : > "$CODEMAP_TRACE"; printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >> "$CODEMAP_TRACE"' 'if [ "$1" = "--version" ]; then printf "%s\\n" "codemap fixture"; exit 0; fi' 'if [ "$1" = "context" ]; then printf "%s\\n" "{\"definitions\":[{\"symbol\":\"Greeter\",\"fqn\":\"fixture.Greeter\",\"kind\":\"type\",\"file\":\"main.go\",\"start_line\":3,\"end_line\":5}],\"callers\":[],\"callees\":[],\"references\":[],\"tests\":[]}"; exit 0; fi' 'if [ "$1" = "impact" ]; then printf "%s\\n" "{\"locations\":[],\"direct_callers\":[],\"blast_radius\":[{\"symbol\":\"Greeter\",\"fqn\":\"fixture.Greeter\",\"kind\":\"type\",\"file\":\"main.go\",\"start_line\":3,\"end_line\":5,\"depth\":0}],\"tests\":[],\"test_commands\":[\"go test ./...\"]}"; exit 0; fi' 'exit 0' > "$TMP/bin/codemap"; chmod 755 "$TMP/bin/codemap"; CONTEXT=$("$ROOT/bin/teak" headless codemap context --json --root "$PROJECT" Greeter); IMPACT=$("$ROOT/bin/teak" headless codemap impact --json --depth 3 --root "$PROJECT" Greeter); python3 -c "import json,sys; context=json.loads(sys.argv[1]); impact=json.loads(sys.argv[2]); calls=open(sys.argv[3]).read().splitlines(); assert context.get('state') == 'ready' and context.get('operation') == 'context' and context.get('context',{}).get('definitions',[{}])[0].get('symbol') == 'Greeter' and impact.get('state') == 'ready' and impact.get('impact',{}).get('blast_radius',[{}])[0].get('depth') == 0 and all(not line.startswith('init') and not line.startswith('index') for line in calls)" "$CONTEXT" "$IMPACT" "$CODEMAP_TRACE"; printf '%s\n' 'CODEMAP_QUERIES_JSON_OK'
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: codemap_queries
+outcomes:
+    - id: codemap_context_reported
+      description: the context query returns a ready structured response
+      verify:
+        screen:
+            contains: "CODEMAP_QUERIES_JSON_OK"
+    - id: codemap_impact_reported
+      description: the bounded impact query returns blast-radius data
+      verify:
+        screen:
+            contains: "CODEMAP_QUERIES_JSON_OK"
+    - id: codemap_does_not_index_implicitly
+      description: fixture-side assertions prove queries did not run init or index
+      verify:
+        screen:
+            contains: "CODEMAP_QUERIES_JSON_OK"
+    - id: codemap_json_validated
+      description: context, impact, depth, and read-only call traces are parsed
+      verify:
+        screen:
+            contains: "CODEMAP_QUERIES_JSON_OK"
+contractHash: sha256:775eff11c4cbc3f4f1a505398067187620c1e9d918fe5951d1ec8a622dff87b2

@@ -1,0 +1,52 @@
+version: 1
+name: teak_headless_health_dashboard
+coversSymbol: runHeadlessHealth
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - dashboard
+        - trend
+intent: |
+    the read-only dashboard combines a fresh health snapshot with explicitly
+    recorded history and exposes bounded state and runtime trend information.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-health-dashboard-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_health_dashboard
+outcomes:
+    - id: current_snapshot_is_fresh
+      description: the dashboard reports the current state and current health payload
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_DASHBOARD_JSON_OK"
+    - id: explicit_history_is_reused
+      description: the dashboard reads the confirmed snapshot without writing another entry
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_DASHBOARD_JSON_OK"
+    - id: trend_is_bounded
+      description: the dashboard reports one bounded newest-first trend entry and runtime deltas
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_DASHBOARD_JSON_OK"
+contractHash: sha256:6bb63693497c21736a770483686b41d8b49415667fb7f6b95fefa6549a6d3b2a

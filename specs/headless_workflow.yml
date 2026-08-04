@@ -1,0 +1,47 @@
+version: 1
+name: teak_headless_workflow
+coversSymbol: runHeadlessCLI
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - buffer
+        - search
+        - lsp
+intent: |
+    one bounded headless workflow can read, edit, save, search, and inspect
+    diagnostics for the same workspace without an interactive editor.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-workflow-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_workflow
+outcomes:
+    - id: buffer_round_trip
+      description: the workflow reads the original content and persists an optimistic-concurrency edit
+      verify:
+        screen:
+            contains: "HEADLESS_WORKFLOW_JSON_OK"
+    - id: search_and_diagnostics
+      description: the same workspace returns text-search and fixture-LSP diagnostics
+      verify:
+        screen:
+            contains: "HEADLESS_WORKFLOW_JSON_OK"
+contractHash: sha256:1f6c2144bca8470db4139bd1b9c2ca8a7a3ba1f9e28e701b745cb798c593f46a

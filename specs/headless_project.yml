@@ -1,0 +1,57 @@
+version: 1
+name: teak_headless_project
+coversSymbol: runHeadlessProject
+metadata:
+  feature: headless-control-plane
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - project
+    - filesystem
+intent: |
+  an agent can inspect and explicitly mutate a bounded workspace tree without
+  shelling out or following symlinks outside the pinned root.
+target:
+  cmd:
+    - sh
+    - -lc
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); PROJECT="$TMP/project";
+      mkdir -p "$PROJECT/source/nested";
+      printf '%s\n' 'package fixture' > "$PROJECT/source/nested/main.go";
+      MKDIR=$($ROOT/bin/teak headless project mkdir --confirm --json --root "$PROJECT" generated);
+      RENAME=$($ROOT/bin/teak headless project rename --confirm --json --root "$PROJECT" source renamed);
+      COPY=$($ROOT/bin/teak headless project copy --confirm --json --root "$PROJECT" renamed backup);
+      STAT=$($ROOT/bin/teak headless project stat --json --root "$PROJECT" backup/nested/main.go);
+      LIST=$($ROOT/bin/teak headless project list --depth 2 --json --root "$PROJECT");
+      REMOVE=$($ROOT/bin/teak headless project remove --confirm --json --root "$PROJECT" backup);
+      python3 -c "import json,sys,os; mk,rn,cp,st,ls,rm=map(json.loads,sys.argv[1:7]); paths={e['path'] for e in ls['entries']}; assert mk['state']=='committed' and rn['destination']=='renamed' and rn['nodes']==3 and rn['bytes']==16 and cp['nodes']>=2 and st['kind']=='file' and st['relative_path']=='backup/nested/main.go' and {'renamed','renamed/nested','backup','backup/nested/main.go','generated'} <= paths and rm['committed'] and not os.path.exists(os.path.join(sys.argv[7],'backup'))" "$MKDIR" "$RENAME" "$COPY" "$STAT" "$LIST" "$REMOVE" "$PROJECT";
+      printf '%s\n' 'HEADLESS_PROJECT_JSON_OK'
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 120
+  rows: 45
+  profile: xterm-256color
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+  - snapshot: headless_project
+outcomes:
+  - id: project_operations_are_observable
+    description: project mutations and stat/list responses expose typed JSON state
+    verify:
+      screen:
+        contains: "HEADLESS_PROJECT_JSON_OK"
+  - id: clean_exit
+    description: the bounded project workflow exits cleanly
+    verify:
+      process:
+        exitCode: 0

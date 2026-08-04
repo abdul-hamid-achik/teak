@@ -1,0 +1,56 @@
+version: 1
+name: teak_headless_context_depth
+coversSymbol: collectHeadlessContextDepth
+metadata:
+  feature: headless-control-plane
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - context
+    - project-tree
+intent: |
+  an agent can inspect a bounded nested project tree with stable relative paths
+  without granting the context operation permission to follow symlinks.
+target:
+  cmd:
+    - sh
+    - -lc
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); PROJECT="$TMP/project";
+      mkdir -p "$PROJECT/src/nested";
+      printf '%s\n' 'package fixture' > "$PROJECT/src/main.go";
+      printf '%s\n' 'package nested' > "$PROJECT/src/nested/types.go";
+      printf '%s\n' '# fixture' > "$PROJECT/README.md";
+      OUTSIDE="$TMP/outside"; mkdir -p "$OUTSIDE"; printf '%s\n' 'secret' > "$OUTSIDE/secret.txt";
+      ln -s "$OUTSIDE" "$PROJECT/linked";
+      JSON=$("$ROOT/bin/teak" headless context --depth 2 --json --root "$PROJECT");
+      python3 -c "import json,sys; p=json.loads(sys.argv[1]); paths={e['path'] for e in p['entries']}; assert {'README.md','src','src/main.go','src/nested','src/nested/types.go','linked'} <= paths and 'linked/secret.txt' not in paths and not p['truncated']" "$JSON";
+      printf '%s\n' 'HEADLESS_CONTEXT_DEPTH_JSON_OK'
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 120
+  rows: 45
+  profile: xterm-256color
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+  - snapshot: headless_context_depth
+outcomes:
+  - id: nested_paths_are_observable
+    description: the response exposes bounded nested entries by relative path
+    verify:
+      screen:
+        contains: "HEADLESS_CONTEXT_DEPTH_JSON_OK"
+  - id: clean_exit
+    description: the bounded context command exits cleanly
+    verify:
+      process:
+        exitCode: 0

@@ -1,0 +1,58 @@
+version: 1
+name: teak_headless_semantic_adapters
+coversSymbol: headlessRESTServer.routeArgs
+metadata:
+    feature: semantic-search
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - rest
+        - mcp
+        - semantic
+        - confirmation
+intent: |
+    REST and MCP expose the explicit semantic index operation while preserving
+    read-only search and confirmation requirements.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-semantic-adapters-fixture.sh
+    cwd: "."
+    timeoutMs: 20000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 15000
+    - snapshot: semantic_adapters
+outcomes:
+    - id: rest_confirmation
+      description: REST rejects semantic indexing without the explicit confirmation header
+      verify:
+        screen:
+            contains: "SEMANTIC_ADAPTERS_JSON_OK"
+    - id: rest_index
+      description: confirmed REST search builds and queries the semantic index
+      verify:
+        screen:
+            contains: "SEMANTIC_ADAPTERS_JSON_OK"
+    - id: mcp_confirmation
+      description: MCP rejects the same unconfirmed semantic index request
+      verify:
+        screen:
+            contains: "SEMANTIC_ADAPTERS_JSON_OK"
+    - id: mcp_index
+      description: confirmed MCP search reaches the explicit index contract
+      verify:
+        screen:
+            contains: "SEMANTIC_ADAPTERS_JSON_OK"
+contractHash: sha256:a1ce0d5987e4c6920f2586f19f7fc354fe81cee77ede78e13b5085d92c35eec9

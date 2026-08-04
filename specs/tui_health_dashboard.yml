@@ -1,0 +1,72 @@
+version: 1
+name: teak_tui_health_dashboard
+coversSymbol: app.Model.Update
+metadata:
+    feature: workspace-health
+    owner: integration
+    priority: high
+    tags:
+        - tui
+        - health
+        - asynchronous
+intent: |
+    a user can open the bounded workspace health dashboard from the command
+    palette, wait for its asynchronous summary, and dismiss it without leaving
+    the editor lifecycle.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT; export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; export XDG_STATE_HOME="$TMP/state"; CONFIG="$HOME/Library/Application Support/teak"; PROJECT="$TMP/project"; mkdir -p "$CONFIG" "$PROJECT"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.go"; "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "package main"
+        timeoutMs: 5000
+    # Kitty keyboard encoding for Ctrl+Shift+P; Glyphrun's portable press
+    # aliases accept one modifier, while Bubble Tea receives the full event.
+    - send: {bytes: "\\x1b[112;6u"}
+    - wait:
+        screen:
+            contains: "Command Palette"
+        timeoutMs: 3000
+    - type: "health"
+    - wait:
+        screen:
+            contains: "Workspace Health Dashboard"
+        timeoutMs: 3000
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "Workspace health"
+        timeoutMs: 3000
+    - wait:
+        screen:
+            contains: "State:"
+        timeoutMs: 8000
+    - snapshot: health_dashboard_ready
+    - press: "escape"
+    - wait:
+        screen:
+            notContains: "Runtime delta:"
+        timeoutMs: 3000
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: dashboard_dismisses_cleanly
+      description: the read-only dashboard closes and the editor exits through its normal lifecycle
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:5933339380e7180530d37956c51f3fd701e616f5e296387b1146f181edc79078

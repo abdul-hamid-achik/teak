@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="glyphrun" tests="9" failures="0" errors="1" time="5.234s">
+  <testsuite name="teak_settings_modal_captures_mouse" tests="1" failures="0" errors="0" time="0.786s">
+    <testcase name="background_cursor_unchanged" classname="teak_settings_modal_captures_mouse" time="0.786s"></testcase>
+  </testsuite>
+  <testsuite name="teak_sidebar_problems_mouse" tests="1" failures="0" errors="0" time="0.441s">
+    <testcase name="hidden_tree_not_activated" classname="teak_sidebar_problems_mouse" time="0.441s"></testcase>
+  </testsuite>
+  <testsuite name="tui_status_bar" tests="1" failures="0" errors="1" time="0s">
+    <testcase name="run" classname="tui_status_bar" time="0s">
+      <error message="run errored" type="RunError">the run errored before any outcome could be evaluated — see </error>
+    </testcase>
+  </testsuite>
+  <testsuite name="teak_tabbar_wheel" tests="2" failures="0" errors="0" time="0.347s">
+    <testcase name="wheel_switches_tab" classname="teak_tabbar_wheel" time="0.347s"></testcase>
+    <testcase name="clean_exit" classname="teak_tabbar_wheel" time="0.347s"></testcase>
+  </testsuite>
+  <testsuite name="teak_tiny_resize_recovery" tests="2" failures="0" errors="0" time="0.601s">
+    <testcase name="document_recovers_after_tiny_resize" classname="teak_tiny_resize_recovery" time="0.601s"></testcase>
+    <testcase name="clean_exit" classname="teak_tiny_resize_recovery" time="0.601s"></testcase>
+  </testsuite>
+  <testsuite name="teak_unsaved_confirm_mouse" tests="1" failures="0" errors="0" time="2.568s">
+    <testcase name="cancel_click_closes" classname="teak_unsaved_confirm_mouse" time="2.568s"></testcase>
+  </testsuite>
+  <testsuite name="teak_word_wrap_selection" tests="1" failures="0" errors="0" time="0.491s">
+    <testcase name="wrapped_selection_visible" classname="teak_word_wrap_selection" time="0.491s"></testcase>
+  </testsuite>
+</testsuites>

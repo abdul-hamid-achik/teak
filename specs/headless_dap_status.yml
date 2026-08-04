@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_dap_status
+coversSymbol: runHeadlessDAP
+metadata:
+    feature: headless-dap
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - dap
+        - health
+intent: |
+    an agent can inspect the built-in Go debug adapter contract without starting a debug session.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" headless dap status --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); ads=p.get('adapters'); go=[a for a in ads if a.get('type') == 'go']; assert isinstance(ads,list) and len(go) == 1 and go[0].get('command') == 'dlv' and '.go' in go[0].get('extensions',[]) and go[0].get('state') in {'available','missing','failed'} and isinstance(go[0].get('available'),bool)" "$JSON"; printf '%s\nDAP_STATUS_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: dap_status
+outcomes:
+    - id: workspace_reported
+      description: the structured response identifies the requested workspace
+      verify:
+        screen:
+            contains: "DAP_STATUS_JSON_OK"
+    - id: go_adapter_reported
+      description: the response includes the built-in Go adapter contract
+      verify:
+        screen:
+            contains: "DAP_STATUS_JSON_OK"
+    - id: adapter_list_reported
+      description: the response exposes adapters as a stable collection
+      verify:
+        screen:
+            contains: "DAP_STATUS_JSON_OK"
+    - id: dap_status_json_validated
+      description: adapter state, command, extension, and availability types are parsed
+      verify:
+        screen:
+            contains: "DAP_STATUS_JSON_OK"
+contractHash: sha256:88d51cc1c63f302465ed08a15f987aae4090d2c4fb09098eb22e53313449e33d

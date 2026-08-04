@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="glyphrun" tests="3" failures="0" errors="0" time="0.530s">
+  <testsuite name="teak_agent_execution_policy" tests="3" failures="0" errors="0" time="0.530s">
+    <testcase name="policy_contract" classname="teak_agent_execution_policy" time="0.530s"></testcase>
+    <testcase name="fail_closed_contract" classname="teak_agent_execution_policy" time="0.530s"></testcase>
+    <testcase name="capability_profile_contract" classname="teak_agent_execution_policy" time="0.530s"></testcase>
+  </testsuite>
+</testsuites>

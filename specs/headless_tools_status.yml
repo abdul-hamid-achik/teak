@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_tools_status
+coversSymbol: runHeadlessTools
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - metrics
+intent: |
+    a read-only tool health check reports bounded timing and runtime memory metrics without indexing.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); ts=p.get('tools'); m=p.get('metrics'); by_name={t.get('name'):t for t in ts}; assert isinstance(ts,list) and set(by_name) == {'codemap','vecgrep','hitspec'} and by_name['codemap'].get('mode') == 'structural-manifest' and by_name['vecgrep'].get('mode') == 'lightweight-status' and all(isinstance(t.get('duration_ms'),(int,float)) and t.get('duration_ms') >= 0 for t in ts) and isinstance(m,dict) and isinstance(m.get('heap_alloc_bytes'),int) and isinstance(m.get('heap_sys_bytes'),int)" "$JSON"; printf '%s\nTOOLS_STATUS_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: tools_status
+outcomes:
+    - id: tools_reported
+      description: the response contains the individual tool health collection
+      verify:
+        screen:
+            contains: "TOOLS_STATUS_JSON_OK"
+    - id: runtime_metrics_reported
+      description: the response reports heap metrics without requiring monitor
+      verify:
+        screen:
+            contains: "TOOLS_STATUS_JSON_OK"
+    - id: tool_latency_reported
+      description: each health check exposes its bounded duration
+      verify:
+        screen:
+            contains: "TOOLS_STATUS_JSON_OK"
+    - id: tools_json_validated
+      description: tool names, durations, and runtime metric types are parsed and checked
+      verify:
+        screen:
+            contains: "TOOLS_STATUS_JSON_OK"
+contractHash: sha256:6eab2935e2d413078bc7638e98948956a4d3c3cab3408d492a7bb272111456d9

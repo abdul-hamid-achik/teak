@@ -1,14 +1,25 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 3 ]; then
-	echo "usage: run-teak.sh <home-id> <config> <file>" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
+	echo "usage: run-teak.sh <home-id> <config> <file> [assert-first-line <expected>]" >&2
 	exit 64
 fi
 
 home_id=$1
 config_path=$2
 fixture_path=$3
+assert_mode=${4:-}
+expected_first_line=${5:-}
+
+if [ -n "$assert_mode" ] && [ "$assert_mode" != "assert-first-line" ]; then
+	echo "unknown assertion mode: $assert_mode" >&2
+	exit 64
+fi
+if [ "$assert_mode" = "assert-first-line" ] && [ "$#" -ne 5 ]; then
+	echo "assert-first-line requires an expected value" >&2
+	exit 64
+fi
 
 case "$home_id" in
 	"" | *[!A-Za-z0-9_-]*)
@@ -18,7 +29,10 @@ case "$home_id" in
 esac
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-home_dir="${TMPDIR:-/tmp}/teak-glyphrun-$home_id"
+# Include the launcher PID so repeated or parallel Glyphrun executions never
+# share HOME, session state, or plugin/config caches. The value remains derived
+# only from the validated fixture id and this process's private temp directory.
+home_dir="${TMPDIR:-/tmp}/teak-glyphrun-$home_id-$$"
 
 case "$config_path" in
 	/*) config_source=$config_path ;;
@@ -60,4 +74,16 @@ export TZ=UTC
 unset NO_COLOR
 
 cd "$repo_root"
+if [ "$assert_mode" = "assert-first-line" ]; then
+	"$repo_root/bin/teak" "$home_dir/workspace/$(basename -- "$fixture_source")"
+	actual_first_line=$(sed -n '1p' "$home_dir/workspace/$(basename -- "$fixture_source")")
+	if [ "$actual_first_line" != "$expected_first_line" ]; then
+		echo "first-line assertion failed: got <$actual_first_line>, want <$expected_first_line>" >&2
+		exit 1
+	fi
+	# Keep the persistence marker visible after the alternate screen closes so
+	# outcomes can verify both the save report and the on-disk assertion.
+	printf '%s\n' 'SAVE_ASSERT_OK Saved'
+	exit 0
+fi
 exec "$repo_root/bin/teak" "$home_dir/workspace/$(basename -- "$fixture_source")"

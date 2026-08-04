@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="glyphrun" tests="3" failures="0" errors="0" time="0.698s">
+  <testsuite name="teak_headless_rest_multi_workspace" tests="3" failures="0" errors="0" time="0.698s">
+    <testcase name="workspace_allowlist" classname="teak_headless_rest_multi_workspace" time="0.698s"></testcase>
+    <testcase name="fixed_root_routing" classname="teak_headless_rest_multi_workspace" time="0.698s"></testcase>
+    <testcase name="confirmed_project_mutation" classname="teak_headless_rest_multi_workspace" time="0.698s"></testcase>
+  </testsuite>
+</testsuites>

@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_git_status
+coversSymbol: runHeadlessGit
+metadata:
+    feature: headless-git
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - git
+        - status
+intent: |
+    an agent can inspect branch and staged/unstaged/untracked files without opening the editor.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; cd "$PROJECT"; git init -q; git config user.email teak@example.invalid; git config user.name "Teak Test"; printf 'package main\nfunc main() {}\n' > main.go; git add main.go; git commit -qm initial; printf 'package main\nfunc main(){ }\n' > main.go; printf 'new\n' > untracked.txt; OUTPUT=$("$ROOT/bin/teak" headless git status --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); es=p.get('entries'); paths={e.get('path') for e in es}; main=next(e for e in es if e.get('path') == 'main.go'); untracked=next(e for e in es if e.get('path') == 'untracked.txt'); assert p.get('state') == 'ready' and isinstance(es,list) and {'main.go','untracked.txt'} <= paths and main.get('unstaged') is True and main.get('untracked') is False and untracked.get('untracked') is True" "$OUTPUT"; printf '%s\nGIT_STATUS_JSON_OK\n' "$OUTPUT"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 35
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: git_status
+outcomes:
+    - id: git_ready
+      description: the requested workspace is recognized as a Git repository
+      verify:
+        screen:
+            contains: "GIT_STATUS_JSON_OK"
+    - id: modified_file_reported
+      description: the unstaged tracked file is represented in structured output
+      verify:
+        screen:
+            contains: "GIT_STATUS_JSON_OK"
+    - id: untracked_file_reported
+      description: the untracked file is not hidden from the agent
+      verify:
+        screen:
+            contains: "GIT_STATUS_JSON_OK"
+    - id: git_json_validated
+      description: repository state and tracked/untracked flags are parsed semantically
+      verify:
+        screen:
+            contains: "GIT_STATUS_JSON_OK"
+contractHash: sha256:011a8d914668a21a9b6c687fd73ad26046e75fe814596cc7bb508822f6876fbb

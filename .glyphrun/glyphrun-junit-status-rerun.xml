@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="glyphrun" tests="1" failures="0" errors="0" time="0.491s">
+  <testsuite name="teak_status_bar_is_inert" tests="1" failures="0" errors="0" time="0.491s">
+    <testcase name="cursor_unchanged" classname="teak_status_bar_is_inert" time="0.491s"></testcase>
+  </testsuite>
+</testsuites>

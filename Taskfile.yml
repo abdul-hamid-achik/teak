@@ -13,7 +13,153 @@ tasks:
   test:
     desc: Run all tests
     cmds:
-      - go test ./...
+      # External fixtures are intentionally real subprocesses. Serial package
+      # scheduling keeps a busy CI host from turning bounded probe deadlines
+      # into false failures while tests inside a package retain their normal
+      # concurrency semantics.
+      - go test ./... -p 1 -count=1
+
+  race:
+    desc: Run all tests with the Go race detector
+    cmds:
+      - go test -race ./... -p 1 -count=1
+
+  coverage:
+    desc: Run all tests and print the aggregate statement coverage
+    cmds:
+      - go test ./... -p 1 -count=1 -coverprofile=coverage.out
+      - go tool cover -func=coverage.out | tail -1
+
+  specs:
+    desc: Run the Glyphrun terminal behavior suite
+    deps: [build]
+    cmds:
+      # Glyphrun v0.16.1 prunes the shared artifact root from each worker; a
+      # serial gate avoids retention races while preserving deterministic JUnit.
+      - glyph run specs/*.yml --parallel 1 --progress auto --junit .glyphrun/glyphrun-junit.xml
+
+  specs-repeat:
+    desc: Run the Glyphrun suite three times to probe flakiness
+    deps: [build]
+    cmds:
+      - glyph run specs/*.yml --parallel 1 --repeat 3 --progress auto --junit .glyphrun/glyphrun-repeat-junit.xml
+
+  perf:
+    desc: Measure representative input, render, tree, and rope hot paths
+    cmds:
+      - go test ./internal/app ./internal/editor ./internal/filetree ./internal/overlay ./internal/text -run '^$' -bench='(ModelUpdate|ViewportRender|FileTreeView|FileTreeFilter|PickerProjection|PickerRefilter|RopeLineAccess|RopeTypingSimulation)' -benchmem -count=1
+
+  perf-tools:
+    desc: Measure isolated codemap/vecgrep indexing and bounded status RSS (use --json for automation)
+    cmds:
+      - sh scripts/perf-tools.sh {{.CLI_ARGS}}
+
+  perf-tools-test:
+    desc: Verify the deterministic perf-tools corpus and RSS contract
+    cmds:
+      - sh scripts/perf-tools-test.sh
+
+  doctor:
+    desc: Diagnose Teak, its configuration, and project tools
+    deps: [build]
+    cmds:
+      - ./bin/teak doctor {{.CLI_ARGS}}
+
+  context:
+    desc: Inspect a workspace through the read-only headless interface
+    deps: [build]
+    cmds:
+      - ./bin/teak headless context {{.CLI_ARGS}}
+
+  tools-status:
+    desc: Inspect codemap, vecgrep, and hitspec without indexing
+    deps: [build]
+    cmds:
+      - ./bin/teak headless tools status {{.CLI_ARGS}}
+
+  health:
+    desc: Inspect bounded project health and onboarding actions
+    deps: [build]
+    cmds:
+      - ./bin/teak headless health {{.CLI_ARGS}}
+
+  health-dashboard:
+    desc: Read current health with explicit history and trend deltas
+    deps: [build]
+    cmds:
+      - ./bin/teak headless health dashboard {{.CLI_ARGS}}
+
+  health-history:
+    desc: Read explicitly recorded project health snapshots
+    deps: [build]
+    cmds:
+      - ./bin/teak headless health history {{.CLI_ARGS}}
+
+  codemap:
+    desc: Query codemap without implicitly indexing the workspace
+    deps: [build]
+    cmds:
+      - ./bin/teak headless codemap {{.CLI_ARGS}}
+
+  semantic-search:
+    desc: Query or explicitly index vecgrep semantic search
+    deps: [build]
+    cmds:
+      - ./bin/teak headless search --semantic {{.CLI_ARGS}}
+
+  session-status:
+    desc: Inspect the saved session for a workspace
+    deps: [build]
+    cmds:
+      - ./bin/teak headless session show {{.CLI_ARGS}}
+
+  session-list:
+    desc: List named sessions for a workspace
+    deps: [build]
+    cmds:
+      - ./bin/teak headless session list {{.CLI_ARGS}}
+
+  session-health:
+    desc: Check named session health without mutating the workspace
+    deps: [build]
+    cmds:
+      - ./bin/teak headless session health {{.CLI_ARGS}}
+
+  session-cleanup:
+    desc: Remove only stale named sessions after explicit confirmation
+    deps: [build]
+    cmds:
+      - ./bin/teak headless session cleanup --confirm {{.CLI_ARGS}}
+
+  lsp-status:
+    desc: Inspect configured language servers; use --probe for a bounded handshake
+    deps: [build]
+    cmds:
+      - ./bin/teak headless lsp status {{.CLI_ARGS}}
+
+  agent-status:
+    desc: Inspect durable agent runs for a workspace
+    deps: [build]
+    cmds:
+      - ./bin/teak headless agent list {{.CLI_ARGS}}
+
+  check:
+    desc: Run the local correctness gates
+    deps: [build]
+    cmds:
+      - task test
+      - go vet ./...
+      - task race
+      - task perf-tools-test
+      - task specs
+
+  verify:
+    desc: Run the complete deterministic release verification gate
+    deps: [build]
+    cmds:
+      - task check
+      - task coverage
+      - task specs-repeat
 
   demos:
     desc: Generate VHS demo videos

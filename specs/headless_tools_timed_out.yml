@@ -1,0 +1,51 @@
+version: 1
+name: teak_headless_tools_timed_out
+coversSymbol: collectHeadlessToolStatus
+metadata:
+  feature: onboarding
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - health
+    - version-probe
+    - timeout
+intent: |
+  an installed tool that does not answer its bounded version probe is exposed
+  as timed_out and never as ready.
+target:
+  cmd:
+    - sh
+    - -lc
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home";
+      export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project";
+      mkdir -p "$TMP/bin" "$HOME" "$PROJECT";
+      printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then /bin/sleep 5; fi' > "$TMP/bin/hitspec";
+      chmod 755 "$TMP/bin/hitspec";
+      JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT");
+      python3 -c "import json,sys; p=json.loads(sys.argv[1]); tools={t.get('name'):t for t in p.get('tools',[])}; h=tools['hitspec']; assert h.get('state') == 'timed_out' and h.get('version_probe') == 'timed_out' and h.get('ready') is False and 'timed out' in h.get('detail','').lower(), h" "$JSON";
+      printf '%s\nTOOLS_TIMED_OUT_JSON_OK\n' "$JSON"
+  cwd: "."
+  timeoutMs: 10000
+terminal:
+  cols: 120
+  rows: 45
+  profile: xterm-256color
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 8000
+  - snapshot: tools_timed_out
+outcomes:
+  - id: timed_out_probe_is_observable
+    description: the resolved tool exposes an explicit timed_out version-probe state
+    verify:
+      screen:
+        contains: "TOOLS_TIMED_OUT_JSON_OK"
+  - id: timed_out_probe_is_not_ready
+    description: a tool that exceeds its probe budget never reports ready
+    verify:
+      screen:
+        contains: "TOOLS_TIMED_OUT_JSON_OK"

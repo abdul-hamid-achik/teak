@@ -1,0 +1,62 @@
+version: 1
+name: teak_tui_agent_prompt
+coversSymbol: app.Model.handleACPMsg
+metadata:
+    feature: safe-agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - tui
+        - agent
+        - acp
+        - deterministic
+intent: |
+    a user can open Teak's agent panel, send a prompt through a configured ACP
+    subprocess, and see the bounded streamed response without an installed
+    agent or network dependency
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); HOME_DIR="$TMP/home"; CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; mkdir -p "$HOME_DIR" "$CONFIG_HOME/teak" "$PROJECT"; printf '%s\n' '[editor]' 'tab_size = 4' '[ui]' 'show_tree = false' '[agent]' 'enabled = true' 'command = "python3"' "args = [\"$ROOT/testdata/glyphrun/acp-agent-fixture.py\"]" '[session]' 'enabled = false' > "$CONFIG_HOME/teak/config.toml"; printf '%s\n' 'package main' > "$PROJECT/main.go"; export HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$TMP/state" LANG=C LC_ALL=C TZ=UTC; exec "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "Agent"
+        timeoutMs: 5000
+    - press: "ctrl+j"
+    - wait:
+        screen:
+            contains: "Ask the agent..."
+        timeoutMs: 5000
+    - type: "hello teak"
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "GLYPHRUN_AGENT_RESPONSE"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "●"
+        timeoutMs: 5000
+    - snapshot: tui_agent_prompt
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: clean_exit
+      description: the agent subprocess and editor exit through the normal lifecycle
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:45680e130005011a56978a13766e015cb857dcb1d0a2315ad7f81eb6b7a75ce1

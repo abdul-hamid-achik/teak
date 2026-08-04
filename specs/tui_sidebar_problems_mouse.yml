@@ -46,4 +46,6 @@ outcomes:
       verify:
         screen:
             contains: "alpha one"
+artifacts:
+    finalScreen: never
 contractHash: sha256:f861eed562e63d83ae18ce42752176bfd888262e0458aa65976ee9a8e1d0ea99

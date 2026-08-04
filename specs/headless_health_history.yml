@@ -1,0 +1,52 @@
+version: 1
+name: teak_headless_health_history
+coversSymbol: runHeadlessHealth
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - history
+        - dashboard
+intent: |
+    a health snapshot remains read-only while an explicitly confirmed record
+    creates a bounded trend entry that can be queried newest-first.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-health-history-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_health_history
+outcomes:
+    - id: snapshot_is_read_only
+      description: the initial health snapshot completes without creating history
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_HISTORY_JSON_OK"
+    - id: record_requires_confirmation
+      description: the fixture records only through the explicit confirmation path
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_HISTORY_JSON_OK"
+    - id: history_is_bounded
+      description: history returns the requested newest-first bounded entry
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_HISTORY_JSON_OK"
+contractHash: sha256:d0a0d2111dd734423a1fce4c842b7538e554a146f7a12ff11d91bb23a9101b42

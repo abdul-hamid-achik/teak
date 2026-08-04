@@ -1,0 +1,55 @@
+version: 1
+name: teak_headless_rest_agent_control
+coversSymbol: headlessRESTServer.handleAgentMutation
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - rest
+        - agent
+        - cancellation
+intent: |
+    an authenticated local REST client can explicitly cancel a durable run or
+    reap a stale run, while confirmation remains mandatory and no process is
+    launched by the lifecycle controls
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-rest-agent-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_rest_agent_control
+outcomes:
+    - id: confirmation_required
+      description: REST lifecycle mutation refuses to proceed without its confirmation header
+      verify:
+        screen:
+            contains: "HEADLESS_REST_AGENT_CONFIRMATION_OK"
+    - id: cancellation_persisted
+      description: REST cancellation persists a cancelled durable run
+      verify:
+        screen:
+            contains: "HEADLESS_REST_AGENT_CANCEL_OK"
+    - id: stale_recovery_persisted
+      description: REST stale reaping persists an interrupted durable run
+      verify:
+        screen:
+            contains: "HEADLESS_REST_AGENT_REAP_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:a57b4e43b8c5498c41a20384f70eb44c9d85621054b4ef7da7b7b7c1e7fc502b

@@ -1,0 +1,51 @@
+version: 1
+name: teak_headless_agent_recovery
+coversSymbol: runHeadlessAgent
+metadata:
+    feature: agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - agent
+        - recovery
+intent: |
+    the headless control surface can inspect durable agent state without starting
+    an agent or requiring an interactive terminal.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; JSON=$("$ROOT/bin/teak" headless agent list --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get('workspace') == sys.argv[2] and isinstance(p.get('runs'),list) and p.get('path','').endswith('runs.json')" "$JSON" "$PROJECT"; printf '%s\nAGENT_RECOVERY_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: agent_state
+outcomes:
+    - id: workspace_reported
+      description: the runtime inspection identifies the requested workspace
+      verify:
+        screen:
+            contains: "AGENT_RECOVERY_JSON_OK"
+    - id: durable_run_collection_reported
+      description: the response exposes persisted runs as a stable collection
+      verify:
+        screen:
+            contains: "AGENT_RECOVERY_JSON_OK"
+    - id: agent_json_validated
+      description: durable run collection and workspace identity are parsed structurally
+      verify:
+        screen:
+            contains: "AGENT_RECOVERY_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:67f527f20a20c002403faba239fbbc69a01d3ba58c63fe8c08f448681895ff93

@@ -52,4 +52,6 @@ outcomes:
       verify:
         screen:
             notContains: "Unsaved Changes"
+artifacts:
+    finalScreen: never
 contractHash: sha256:42cc5bf9e1face1fdfe84527845ed698a7d810f38eb6ae4384f6a576d75f083f

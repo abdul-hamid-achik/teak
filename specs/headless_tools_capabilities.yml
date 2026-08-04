@@ -1,0 +1,56 @@
+version: 1
+name: teak_headless_tools_capabilities
+coversSymbol: collectHeadlessToolStatus
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - codemap
+        - vecgrep
+        - hitspec
+intent: |
+    installed project tools expose the exact bounded capabilities Teak relies
+    on, rather than being treated as ready from a version string alone.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; printf '%s\n' 'package main' > "$PROJECT/main.go"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "codemap fixture 1.0"; exit 0; fi' 'if [ "$1" = "structural-manifest" ]; then printf "%s\\n" "{\"schema_version\":1,\"export_schema_version\":1,\"project\":\"fixture\",\"project_key\":\"fixture\",\"index_fingerprint\":\"fixture\",\"total_records\":1,\"complete\":true,\"freshness\":{\"checked\":true,\"fresh\":true,\"changed\":0,\"new\":0,\"deleted\":0}}"; exit 0; fi' 'exit 2' > "$TMP/bin/codemap"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "vecgrep fixture 1.0"; exit 0; fi' 'if [ "$1" = "status" ] && [ "$2" = "--lightweight" ]; then printf "%s\\n" "{\"lightweight\":true,\"index_fresh\":true,\"stats\":{\"files\":1},\"pending_changes\":{\"total_pending\":0},\"freshness\":{\"state\":\"fresh\"}}"; exit 0; fi' 'exit 2' > "$TMP/bin/vecgrep"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "hitspec fixture 1.0"; exit 0; fi' 'if [ "$1" = "validate" ] && [ "$2" = "--help" ]; then printf "%s\\n" "validate hitspec files for syntax errors"; exit 0; fi' 'exit 2' > "$TMP/bin/hitspec"; chmod 755 "$TMP/bin/codemap" "$TMP/bin/vecgrep" "$TMP/bin/hitspec"; JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); ts={t.get('name'):t for t in p['tools']}; assert set(ts) == {'codemap','vecgrep','hitspec'}; assert all(t.get('available') is True and t.get('ready') is True and t.get('version_probe') == 'ready' and t.get('capability_probe') == 'ready' for t in ts.values()), ts; assert ts['codemap'].get('capability') == 'structural-manifest' and ts['codemap'].get('state') == 'ready' and ts['codemap'].get('records') == 1, ts['codemap']; assert ts['vecgrep'].get('capability') == 'lightweight-status' and ts['vecgrep'].get('state') == 'ready' and ts['vecgrep'].get('files') == 1, ts['vecgrep']; assert ts['hitspec'].get('capability') == 'validate' and ts['hitspec'].get('mode') == 'validate-contract', ts['hitspec']" "$JSON"; printf '%s\nTOOLS_CAPABILITIES_JSON_OK\n'
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: tools_capabilities
+outcomes:
+    - id: capabilities_are_verified
+      description: each installed fixture exposes a ready capability probe
+      verify:
+        screen:
+            contains: "TOOLS_CAPABILITIES_JSON_OK"
+    - id: codemap_manifest_is_used
+      description: codemap health reports the structural manifest contract
+      verify:
+        screen:
+            contains: "TOOLS_CAPABILITIES_JSON_OK"
+    - id: vecgrep_lightweight_contract_is_used
+      description: vecgrep health reports vector-free lightweight status
+      verify:
+        screen:
+            contains: "TOOLS_CAPABILITIES_JSON_OK"
+    - id: hitspec_validate_contract_is_used
+      description: hitspec health verifies the validate command
+      verify:
+        screen:
+            contains: "TOOLS_CAPABILITIES_JSON_OK"
+contractHash: sha256:2c730506f0aba22ef1cc7b5ac725241d558c5f4540486b0802da4b1a6fc28ebb

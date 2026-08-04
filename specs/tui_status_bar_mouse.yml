@@ -42,4 +42,6 @@ outcomes:
       verify:
         screen:
             contains: "Ln 1, Col 1"
+artifacts:
+    finalScreen: never
 contractHash: sha256:8b7503a37dc98a5daec398dbb9e8fa52b341f93a47aae62ca06c9582f144a768

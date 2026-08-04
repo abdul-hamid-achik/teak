@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_exec
+coversSymbol: runHeadlessExec
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - exec
+        - security
+intent: |
+    a confirmed headless command executes inside the selected workspace and
+    returns bounded machine-readable stdout, stderr, and process state
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-exec-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_exec
+outcomes:
+    - id: confirmation_required
+      description: an unconfirmed command is rejected before the child process starts
+      verify:
+        screen:
+            contains: "HEADLESS_EXEC_JSON_OK"
+    - id: workspace_confined
+      description: the confirmed child runs with the selected workspace as its cwd
+      verify:
+        screen:
+            contains: "HEADLESS_EXEC_JSON_OK"
+    - id: structured_process_result
+      description: stdout, stderr, state, and exit code are validated from JSON
+      verify:
+        screen:
+            contains: "HEADLESS_EXEC_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:dae1d60a94d7366f9458ab2f94f6e675595ed2a141038572d32ad229164760ca

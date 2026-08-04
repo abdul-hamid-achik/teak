@@ -1,0 +1,49 @@
+version: 1
+name: teak_headless_hitspec_validate
+coversSymbol: runHeadlessHitspec
+metadata:
+    feature: headless-control
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - hitspec
+        - validation
+intent: |
+    the headless control surface validates hitspec files without executing
+    HTTP requests and exposes a stable structured result.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$TMP/bin" "$PROJECT"; printf 'GET https://example.com\n' > "$PROJECT/api.http"; cp "$ROOT/testdata/glyphrun/hitspec-validate-fixture.sh" "$TMP/bin/hitspec"; chmod 755 "$TMP/bin/hitspec"; JSON=$("$ROOT/bin/teak" headless hitspec validate --json --root "$PROJECT" api.http); python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get('workspace') == sys.argv[2] and p.get('state') == 'ready' and p.get('valid') is True and p.get('files') == 1" "$JSON" "$PROJECT"; printf '%s\nHITSPEC_VALIDATE_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: hitspec_validate
+outcomes:
+    - id: validation_ready
+      description: a valid hitspec fixture reports a ready state
+      verify:
+        screen:
+            contains: "HITSPEC_VALIDATE_JSON_OK"
+    - id: request_execution_avoided
+      description: the validation contract is parsed without executing an HTTP request
+      verify:
+        screen:
+            contains: "HITSPEC_VALIDATE_JSON_OK"
+    - id: json_structured
+      description: workspace, validity, and file count are validated structurally
+      verify:
+        screen:
+            contains: "HITSPEC_VALIDATE_JSON_OK"
+contractHash: sha256:bbf74bd11de390ad401fe56cce00b33811dc25e58764830cdda401ed64cf24a5

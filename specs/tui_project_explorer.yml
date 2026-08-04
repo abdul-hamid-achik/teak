@@ -1,0 +1,86 @@
+version: 1
+name: teak_project_explorer
+coversSymbol: filetree.Model.handleKeyPress
+metadata:
+  feature: project-explorer
+  owner: core-ui
+  priority: high
+  tags:
+    - regression
+    - filetree
+    - filtering
+intent: |
+  a developer can hide metadata and ignored files, filter the remaining project
+  entries, and open the filtered result from the terminal tree.
+target:
+  cmd:
+    - sh
+    - testdata/glyphrun/run-teak.sh
+    - project-explorer
+    - testdata/glyphrun/config/default.toml
+    - testdata/glyphrun/workspace-explorer/alpha.txt
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 90
+  rows: 24
+  profile: xterm-256color
+  alternateScreen: require
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      screen:
+        contains: ".env"
+      timeoutMs: 5000
+  - mouse: {x: 2, y: 0, button: left, action: click}
+  - press: "ctrl+h"
+  - wait:
+      screen:
+        notContains: ".env"
+      timeoutMs: 3000
+  - press: "ctrl+k"
+  - wait:
+      screen:
+        notContains: "ignored.log"
+      timeoutMs: 3000
+  - press: "/"
+  - type: "alpha"
+  - wait:
+      screen:
+        contains: "/ alpha_"
+      timeoutMs: 3000
+  - press: "enter"
+  - wait:
+      screen:
+        contains: "alpha one"
+      timeoutMs: 3000
+  - snapshot: filtered_project_file
+  - press: "ctrl+q"
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 3000
+outcomes:
+  - id: hidden_files_toggle
+    description: Alt+H removes dotfiles from the visible tree
+    verify:
+      screen:
+        notContains: ".env"
+  - id: ignored_files_toggle
+    description: Alt+I removes gitignored files from the visible tree
+    verify:
+      screen:
+        notContains: "ignored.log"
+  - id: filtered_file_opened
+    description: the slash filter narrows the tree and Enter opens alpha.txt
+    verify:
+      screen:
+        contains: "alpha one"
+  - id: clean_exit
+    description: the explorer flow exits without leaving the TUI running
+    verify:
+      process:
+        exitCode: 0

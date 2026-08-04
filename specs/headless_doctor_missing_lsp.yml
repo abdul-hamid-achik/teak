@@ -1,0 +1,45 @@
+version: 1
+name: teak_headless_doctor_missing_lsp
+coversSymbol: runDoctorCLI
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - doctor
+        - lsp
+        - missing-tool
+intent: |
+    a fresh project reports a configured language server as missing instead of
+    claiming that the language integration is ready.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; mkdir -p "$HOME/.config/teak" "$PROJECT"; printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "teak-missing-lsp-fixture"\nlanguage_id = "fixture"\n' > "$HOME/.config/teak/config.toml"; printf 'fixture\n' > "$PROJECT/main.fixture"; JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); langs=[l for l in p.get('languages',[]) if l.get('language_id') == 'fixture']; checks=[c for c in p.get('checks',[]) if c.get('name') == 'tool:teak-missing-lsp-fixture']; assert len(langs) == 1 and langs[0].get('server') == 'teak-missing-lsp-fixture' and langs[0].get('state') == 'missing' and len(checks) == 1 and checks[0].get('status') == 'warn'" "$JSON"; printf '%s\nDOCTOR_MISSING_LSP_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 120
+    rows: 50
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: doctor_missing_lsp
+outcomes:
+    - id: missing_lsp_reported
+      description: the configured fixture language server is explicitly missing
+      verify:
+        screen:
+            contains: "DOCTOR_MISSING_LSP_JSON_OK"
+    - id: missing_lsp_not_ready
+      description: onboarding keeps the language state out of the ready state
+      verify:
+        screen:
+            contains: "DOCTOR_MISSING_LSP_JSON_OK"
+contractHash: sha256:60999c44293c257441d4b4e588dc2e99ac1048659092b6cc9b8d35c4cd758b31

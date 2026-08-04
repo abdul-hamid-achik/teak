@@ -1,0 +1,52 @@
+version: 1
+name: teak_headless_health
+coversSymbol: runHeadlessHealth
+metadata:
+    feature: project-intelligence
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - metrics
+        - lsp
+intent: |
+    one bounded read-only snapshot aggregates tool, LSP, Git, metrics, timing,
+    and actionable issue state without initializing indexes or services.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-health-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_health
+outcomes:
+    - id: aggregate_snapshot
+      description: the response aggregates bounded component and summary state
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_JSON_OK"
+    - id: metrics_and_timings
+      description: heap/RSS and per-collector timings are typed and non-negative
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_JSON_OK"
+    - id: actionable_issues_capped
+      description: issue state is bounded and remains machine-readable
+      verify:
+        screen:
+            contains: "HEADLESS_HEALTH_JSON_OK"
+contractHash: sha256:fffd81e9bc22094de6a9f0d78b2d604c6207157bc4c4a60ca224ca97b16111e8

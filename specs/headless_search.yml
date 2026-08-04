@@ -1,0 +1,58 @@
+version: 1
+name: teak_headless_search
+coversSymbol: runHeadlessSearch
+metadata:
+    feature: headless-search
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - search
+intent: |
+    an agent can search a fresh workspace through the same bounded text-search
+    path used by the editor and receive stable machine-readable results.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n// Needle 42\nfunc main() {}\n" > "$PROJECT/main.go"; printf "Needle in docs\n" > "$PROJECT/README.md"; JSON=$("$ROOT/bin/teak" headless search --json --root "$PROJECT" "needle"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); rs=p.get('results'); assert p.get('query') == 'needle' and isinstance(rs,list) and len(rs) >= 2 and all(isinstance(r.get('line'),int) and isinstance(r.get('column'),int) for r in rs) and any(r.get('file_path','').endswith('main.go') for r in rs) and p.get('truncated') is False and p.get('duration_ms',-1) >= 0" "$JSON"; printf '%s\nSEARCH_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: search_results
+outcomes:
+    - id: query_reported
+      description: the machine-readable response keeps the original query
+      verify:
+        screen:
+            contains: '"query": "needle"'
+    - id: multiple_files_found
+      description: the search returns matches from both source and documentation files
+      verify:
+        screen:
+            contains: "main.go"
+    - id: result_collection_reported
+      description: the response exposes a stable results collection
+      verify:
+        screen:
+            contains: '"results"'
+    - id: search_latency_reported
+      description: the response records the bounded search duration
+      verify:
+        screen:
+            contains: '"duration_ms"'
+    - id: search_json_validated
+      description: the search response is parsed with result cardinality and typed fields
+      verify:
+        screen:
+            contains: "SEARCH_JSON_OK"
+contractHash: sha256:bfe7b3ecbfbbd98155c45086dea5f9f5efe32a6d63c478b5ec7ca0a05c2ca779

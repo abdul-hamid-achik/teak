@@ -1,0 +1,95 @@
+version: 1
+name: teak_project_explorer_actions
+coversSymbol: app.handleTreeContextMenuAction
+metadata:
+  feature: project-explorer
+  owner: core-ui
+  priority: high
+  tags:
+    - regression
+    - file-operations
+    - mouse
+intent: |
+  a developer can rename a file from the terminal tree context menu without
+  leaving the workspace or blocking the event loop.
+target:
+  cmd:
+    - sh
+    - testdata/glyphrun/run-teak.sh
+    - project-explorer-actions
+    - testdata/glyphrun/config/default.toml
+    - testdata/glyphrun/workspace-explorer/alpha.txt
+  cwd: "."
+  timeoutMs: 15000
+terminal:
+  cols: 90
+  rows: 24
+  profile: xterm-256color
+  alternateScreen: require
+preconditions:
+  commands:
+    - run: "go build -o ./bin/teak ./cmd/teak"
+      timeoutMs: 30000
+steps:
+  - wait:
+      screen:
+        contains: ".env"
+      timeoutMs: 5000
+  - mouse: {x: 2, y: 0, button: left, action: click}
+  - press: "ctrl+h"
+  - press: "ctrl+k"
+  - wait:
+      screen:
+        contains: "rename-me.txt"
+      timeoutMs: 3000
+  - mouse: {x: 5, y: 4, button: right, action: click}
+  - wait:
+      screen:
+        contains: "Rename..."
+      timeoutMs: 3000
+  - press: "down"
+  - press: "down"
+  - press: "down"
+  - press: "down"
+  - press: "enter"
+  - wait:
+      screen:
+        contains: "Rename file or folder"
+      timeoutMs: 3000
+  - press: "ctrl+u"
+  - type: "renamed.txt"
+  - press: "enter"
+  - wait:
+      screen:
+        contains: "Renamed: renamed.txt"
+      timeoutMs: 5000
+  - wait:
+      screen:
+        contains: "renamed.txt"
+      timeoutMs: 5000
+  - wait:
+      screen:
+        notContains: "rename-me.txt"
+      timeoutMs: 5000
+  - snapshot: renamed_project_file
+  - press: "ctrl+q"
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 3000
+outcomes:
+  - id: renamed_file_visible
+    description: the renamed file replaces the old tree entry
+    verify:
+      screen:
+        contains: "renamed.txt"
+  - id: old_name_removed
+    description: the old filename is no longer visible after the refresh
+    verify:
+      screen:
+        notContains: "rename-me.txt"
+  - id: clean_exit
+    description: the file operation flow exits without leaving the TUI running
+    verify:
+      process:
+        exitCode: 0

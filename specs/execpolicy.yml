@@ -1,0 +1,49 @@
+version: 1
+name: teak_agent_execution_policy
+coversSymbol: execpolicy.Policy
+metadata:
+    feature: safe-agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - agent
+        - acp
+        - sandbox
+        - security
+intent: |
+    the agent terminal execution policy validates its modes, reports an
+    unavailable backend instead of claiming isolation, and preserves the
+    workspace capability profile contract
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/execpolicy-fixture.sh
+    cwd: "."
+    timeoutMs: 30000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 20000
+    - snapshot: agent_execution_policy
+outcomes:
+    - id: policy_contract
+      description: policy unit and platform tests pass through the real project harness
+      verify:
+        screen:
+            contains: "EXEC_POLICY_GLYPHRUN_OK"
+    - id: fail_closed_contract
+      description: required mode rejects an unavailable OS backend before child execution
+      verify:
+        screen:
+            contains: "EXEC_POLICY_GLYPHRUN_OK"
+    - id: capability_profile_contract
+      description: workspace write and network permissions remain explicit profile inputs
+      verify:
+        screen:
+            contains: "EXEC_POLICY_GLYPHRUN_OK"
+contractHash: sha256:6cf8bd7ad98a1f1dcde9da27085b31bbd1e47bf58ce8838f746daf14105fbdb1

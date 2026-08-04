@@ -82,3 +82,6 @@ outcomes:
     verify:
       process:
         exitCode: 0
+artifacts:
+  finalScreen: never
+contractHash: sha256:148a79837fcd7d97fec70e6e42e6096b22d6a481a120096d17de163d1136976d

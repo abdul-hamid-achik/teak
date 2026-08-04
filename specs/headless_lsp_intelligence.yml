@@ -1,0 +1,45 @@
+version: 1
+name: teak_headless_lsp_intelligence
+coversSymbol: runHeadlessLSP
+metadata:
+    feature: headless-lsp
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - lsp
+        - symbols
+        - navigation
+intent: |
+    a headless client can inspect document symbols and navigate through hover,
+    definition, and reference queries without starting the interactive editor.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; mkdir -p "$HOME/.config/teak" "$PROJECT"; printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "python3"\nargs = ["%s/testdata/glyphrun/lsp-diagnostics-fixture.py"]\nlanguage_id = "fixture"\n' "$ROOT" > "$HOME/.config/teak/config.toml"; printf 'fixture source\n' > "$PROJECT/main.fixture"; SYMBOLS=$("$ROOT/bin/teak" headless lsp symbols --json --root "$PROJECT" main.fixture); HOVER=$("$ROOT/bin/teak" headless lsp hover --json --line 0 --column 1 --root "$PROJECT" main.fixture); DEFINITION=$("$ROOT/bin/teak" headless lsp definition --json --line 0 --column 1 --root "$PROJECT" main.fixture); REFERENCES=$("$ROOT/bin/teak" headless lsp references --json --line 0 --column 1 --root "$PROJECT" main.fixture); python3 -c "import json,sys; s,h,d,r=map(json.loads,sys.argv[1:]); assert s.get('state') == 'ready' and s.get('symbols',[{}])[0].get('name') == 'Fixture' and s.get('truncated') is False; assert h.get('state') == 'ready' and h.get('found') is True and h.get('content') == 'fixture hover'; assert d.get('state') == 'ready' and d.get('locations',[{}])[0].get('path') == 'main.fixture' and d.get('locations',[{}])[0].get('line') == 0; assert r.get('state') == 'ready' and len(r.get('locations',[])) == 1" "$SYMBOLS" "$HOVER" "$DEFINITION" "$REFERENCES"; printf '%s\n' 'LSP_INTELLIGENCE_JSON_OK'
+    cwd: "."
+    timeoutMs: 20000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 15000
+    - snapshot: lsp_intelligence
+outcomes:
+    - id: intelligence_ready
+      description: symbol and navigation queries reach a verified ready state
+      verify:
+        screen:
+            contains: "LSP_INTELLIGENCE_JSON_OK"
+    - id: structured_contract_validated
+      description: fixture-side JSON assertions cover symbols, hover, definition, references, coordinates, and workspace-relative paths
+      verify:
+        screen:
+            contains: "LSP_INTELLIGENCE_JSON_OK"
+contractHash: sha256:38776b94c717f032f049d8f1dbbdc735f36831b0306e15f5055cf6f0c52b34fa

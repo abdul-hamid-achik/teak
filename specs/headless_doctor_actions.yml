@@ -1,0 +1,63 @@
+version: 1
+name: teak_headless_doctor_actions
+coversSymbol: runDoctorCLI
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - doctor
+        - lsp
+        - onboarding
+intent: |
+    doctor emits a structured install action when a detected language server is
+    configured but unavailable, including a machine-readable hint
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home";
+          export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project";
+          mkdir -p "$HOME/.config/teak" "$PROJECT";
+          printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "teak-missing-actions-lsp"\nlanguage_id = "fixture"\n' > "$HOME/.config/teak/config.toml";
+          printf 'fixture\n' > "$PROJECT/main.fixture";
+          JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT");
+          python3 -c "import json,sys; p=json.loads(sys.argv[1]); actions=[a for a in p.get('actions',[]) if a.get('component') == 'lsp' and a.get('name') == 'fixture']; assert len(actions) == 1 and actions[0].get('state') == 'missing' and actions[0].get('action') == 'install' and actions[0].get('hint'), actions; langs=[l for l in p.get('languages',[]) if l.get('language_id') == 'fixture']; assert len(langs) == 1 and langs[0].get('state') == 'missing', langs" "$JSON";
+          printf '%s\nDOCTOR_ACTIONS_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 120
+    rows: 50
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: doctor_actions
+outcomes:
+    - id: missing_language_server
+      description: the detected fixture language remains explicitly missing
+      verify:
+        screen:
+            contains: "DOCTOR_ACTIONS_JSON_OK"
+    - id: install_action
+      description: the report includes a structured install action for the missing server
+      verify:
+        screen:
+            contains: "DOCTOR_ACTIONS_JSON_OK"
+    - id: actionable_hint
+      description: the action carries a machine-readable installation hint
+      verify:
+        screen:
+            contains: "DOCTOR_ACTIONS_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:148f7aafc8167bf6caf37581e3a7acd31bc18223786603263962479b790ebc6b

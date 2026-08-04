@@ -1,0 +1,46 @@
+version: 1
+name: teak_headless_session_health
+coversSymbol: session.CheckNamed
+metadata:
+    feature: session-recovery
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - session
+        - safety
+intent: |
+    named session health identifies missing tabs without mutating the workspace,
+    while explicit cleanup removes only stale sessions.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/session-health-fixture.sh
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: session_health
+outcomes:
+    - id: stale_session_detected
+      description: health reports the missing tab as stale
+      verify:
+        screen:
+            contains: "SESSION_HEALTH_JSON_OK"
+    - id: cleanup_is_explicit_and_bounded
+      description: cleanup removes only the stale named session and keeps the healthy one
+      verify:
+        screen:
+            contains: "SESSION_HEALTH_JSON_OK"
+contractHash: sha256:0e6e5b5e4b2004233f7f2ed694dc18186097bee9133914373a5ce82e418c79f0

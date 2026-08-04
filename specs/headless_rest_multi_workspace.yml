@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_rest_multi_workspace
+coversSymbol: headlessRESTServer.resolveRouteWorkspace
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - rest
+        - workspace
+        - security
+intent: |
+    an authenticated local REST client can inspect an explicit workspace
+    allowlist and route namespaced requests to the selected fixed root while
+    query parameters cannot replace the workspace chosen at startup.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-rest-multi-workspace-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_rest_multi_workspace
+outcomes:
+    - id: workspace_allowlist
+      description: the authenticated REST adapter lists only the explicitly registered workspaces
+      verify:
+        screen:
+            contains: "HEADLESS_REST_MULTI_WORKSPACE_OK"
+    - id: fixed_root_routing
+      description: namespaced routing selects beta while root query injection is ignored
+      verify:
+        screen:
+            contains: "HEADLESS_REST_ROOT_ALLOWLIST_OK"
+    - id: confirmed_project_mutation
+      description: namespaced project mutations require confirmation and commit only inside the selected fixed root
+      verify:
+        screen:
+            contains: "HEADLESS_REST_PROJECT_MUTATION_OK"
+contractHash: sha256:343747046ec181e6290acbf26dbcce907d6bb77d5e28c2af509c989b5d195c99

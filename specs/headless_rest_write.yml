@@ -1,0 +1,48 @@
+version: 1
+name: teak_headless_rest_write
+coversSymbol: headlessRESTServer.handleBufferWrite
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - rest
+        - buffer
+        - security
+intent: |
+    an authenticated local REST client can perform one explicitly confirmed
+    optimistic buffer write while a stale write is rejected without changing
+    the newer file content.
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-rest-write-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_rest_write
+outcomes:
+    - id: confirmed_write
+      description: the bearer-authenticated REST route persists the confirmed content
+      verify:
+        screen:
+            contains: "HEADLESS_REST_WRITE_OK"
+    - id: stale_write_rejected
+      description: a stale optimistic REST write returns a typed conflict and preserves content
+      verify:
+        screen:
+            contains: "HEADLESS_REST_STALE_GUARD_OK"
+contractHash: sha256:99530b727a3a1d4dedf5753eadb57683c1db8c6d054134d148a9a9b8b3480770

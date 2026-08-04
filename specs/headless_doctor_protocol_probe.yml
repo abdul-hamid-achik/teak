@@ -1,0 +1,41 @@
+version: 1
+name: teak_headless_doctor_protocol_probe
+coversSymbol: runDoctorCLI
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - doctor
+        - lsp
+        - protocol-probe
+intent: |
+    an installed LSP without a CLI version flag is verified through a bounded
+    initialize handshake instead of being falsely treated as ready by path alone.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME/.config/teak" "$PROJECT"; printf '[[lsp]]\nextensions = [".json"]\ncommand = "vscode-json-language-server"\nlanguage_id = "json"\nenv = { TEAK_DOCTOR_FIXTURE = "1" }\n' > "$HOME/.config/teak/config.toml"; printf '{}\n' > "$PROJECT/package.json"; printf '%s\n' '#!/usr/bin/env python3' 'import json,os,sys' 'if os.environ.get("TEAK_DOCTOR_FIXTURE") != "1": sys.exit(7)' 'def read():' '    length = None' '    while True:' '        line = sys.stdin.buffer.readline()' '        if not line: return None' '        if line in (b"\r\n", b"\n"): break' '        if line.lower().startswith(b"content-length:"): length = int(line.split(b":", 1)[1])' '    if length is None: return None' '    return json.loads(sys.stdin.buffer.read(length))' 'def send(message):' '    body = json.dumps(message).encode()' '    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)' '    sys.stdout.buffer.flush()' 'while True:' '    message = read()' '    if message is None: break' '    method = message.get("method")' '    if method == "initialize": send({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"positionEncoding":"utf-8"}}})' '    elif method == "shutdown": send({"jsonrpc":"2.0","id":message["id"],"result":None})' '    elif method == "exit": break' > "$TMP/bin/vscode-json-language-server"; chmod 755 "$TMP/bin/vscode-json-language-server"; PATH="$TMP/bin:$PATH"; export PATH; JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); langs=[l for l in p.get('languages',[]) if l.get('language_id') == 'json']; assert len(langs) == 1 and langs[0].get('state') == 'available' and langs[0].get('version_probe') == 'unsupported' and langs[0].get('protocol_probe') == 'ready', langs" "$JSON"; printf '%s\nDOCTOR_PROTOCOL_PROBE_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 120
+    rows: 50
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: protocol_probe_ready
+      description: the installed server is verified through the LSP handshake
+      verify:
+        screen:
+            contains: "DOCTOR_PROTOCOL_PROBE_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:6565efe39aa213b695787142dfe533e6ce91772eebead54b1cf78c03f1968564

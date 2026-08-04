@@ -21,7 +21,7 @@ jobs:
         run: go build ./...
 
       - name: Test with race detection and coverage
-        run: go test ./... -v -count=1 -race -coverprofile=coverage.out -covermode=atomic
+        run: go test ./... -v -count=1 -race -p 1 -coverprofile=coverage.out -covermode=atomic
 
       - name: Check coverage threshold
         run: |
@@ -32,11 +32,11 @@ jobs:
           # Per-package coverage
           echo ""
           echo "Per-package coverage:"
-          go test ./... -cover 2>&1 | grep -E "coverage:|no test files" || true
+          go test ./... -p 1 -cover 2>&1 | grep -E "coverage:|no test files" || true
 
-          # Current overall threshold is 30% (will increase as we add more tests)
-          # Note: coverage is lower with -race flag due to skipped performance tests
-          THRESHOLD="30"
+          # Keep CI below the current repository baseline only when coverage
+          # regresses materially; the local baseline is above 70%.
+          THRESHOLD="70"
           COVERAGE_INT=$(echo "$COVERAGE" | cut -d'.' -f1)
           if [ "$COVERAGE_INT" -lt "$THRESHOLD" ]; then
             echo "❌ Coverage ${COVERAGE}% is below threshold of ${THRESHOLD}%"
@@ -53,6 +53,9 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Verify bounded external-tool measurement contract
+        run: sh scripts/perf-tools-test.sh
 
       - name: Build binary
         run: go build -o bin/teak ./cmd/teak
@@ -72,12 +75,21 @@ jobs:
         run: go build -o ./bin/teak ./cmd/teak
 
       - name: Install Glyphrun
-        run: go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@latest
+        run: sh scripts/install-glyphrun.sh
 
-      - name: Run Glyphrun specs
+      - name: Run Glyphrun specs with stability probe
         run: |
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          glyph run specs/tui_*.yml
+          GOPATH_BIN="$(go env GOPATH)/bin"
+          export PATH="$PATH:$GOPATH_BIN"
+          glyph run specs/*.yml --parallel 1 --repeat 3 --progress auto --junit .glyphrun/glyphrun-repeat-ci-junit.xml
+
+      - name: Upload Glyphrun JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: glyphrun-repeat-junit
+          path: .glyphrun/glyphrun-repeat-ci-junit.xml
+          if-no-files-found: ignore
 
       - name: Upload glyphrun artifacts
         if: always()

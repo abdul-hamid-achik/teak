@@ -1,0 +1,48 @@
+version: 1
+name: teak_headless_context
+coversSymbol: collectHeadlessContext
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - context
+        - bounded-memory
+intent: |
+    a large workspace context listing is bounded, deterministic, and reports truncation.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); PROJECT="$TMP/project"; mkdir -p "$PROJECT"; python3 -c "import os,sys; root=sys.argv[1]; [open(os.path.join(root, f'entry-{i:04d}'),'w').close() for i in range(2005)]" "$PROJECT"; JSON=$("$ROOT/bin/teak" headless context --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); entries=p['entries']; assert p['truncated'] is True and len(entries)==2000 and entries[0]['name']=='entry-0000' and entries[-1]['name']=='entry-1999'" "$JSON"; printf '%s\nHEADLESS_CONTEXT_BOUNDED_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_context
+outcomes:
+    - id: context_is_bounded
+      description: the context response retains no more than the documented entry limit
+      verify:
+        screen:
+            contains: "HEADLESS_CONTEXT_BOUNDED_JSON_OK"
+    - id: context_is_deterministic
+      description: the fixture parses and checks the lexicographically bounded prefix
+      verify:
+        screen:
+            contains: "HEADLESS_CONTEXT_BOUNDED_JSON_OK"
+    - id: context_reports_truncation
+      description: large workspace context reports that entries were truncated
+      verify:
+        screen:
+            contains: "HEADLESS_CONTEXT_BOUNDED_JSON_OK"
+contractHash: sha256:561fcf2ec3a6af428ad54159ad52e36fd9530d1da94218f36bf8a4202b552fea

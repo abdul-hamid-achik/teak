@@ -1,0 +1,54 @@
+version: 1
+name: teak_headless_session_recovery
+coversSymbol: collectHeadlessSessionByName
+metadata:
+    feature: session-recovery
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - session
+        - recovery
+intent: |
+    a named session can be discovered, inspected, activated, and recovered by a
+    headless caller after the editor process is not running.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; KEY=$(python3 -c 'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' "$PROJECT"); mkdir -p "$XDG_STATE_HOME/teak/sessions/$KEY/named"; printf "{\"version\":1,\"root_dir\":\"%s\",\"active_tab\":0,\"tabs\":[{\"file_path\":\"%s/main.go\",\"cursor_line\":0,\"cursor_col\":0,\"scroll_y\":0,\"pinned\":true}]}\n" "$PROJECT" "$PROJECT" > "$XDG_STATE_HOME/teak/sessions/$KEY/named/review.json"; SHOW=$("$ROOT/bin/teak" headless session show --json --name review --root "$PROJECT"); LIST=$("$ROOT/bin/teak" headless session list --json --root "$PROJECT"); ACTIVATE=$("$ROOT/bin/teak" headless session activate --json review --root "$PROJECT"); DEFAULT=$("$ROOT/bin/teak" headless session show --json --root "$PROJECT"); python3 -c "import json,sys; show,listp,activate,default=map(json.loads,sys.argv[1:5]); assert show.get('name') == 'review' and show.get('state') == 'present' and len(show.get('session',{}).get('tabs',[])) == 1 and 'review' in listp.get('names',[]) and activate.get('state') == 'present' and default.get('state') == 'present' and len(default.get('session',{}).get('tabs',[])) == 1" "$SHOW" "$LIST" "$ACTIVATE" "$DEFAULT"; printf '%s\n%s\n%s\n%s\nSESSION_RECOVERY_JSON_OK\n' "$SHOW" "$LIST" "$ACTIVATE" "$DEFAULT"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 40
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: session_recovery
+outcomes:
+    - id: named_session_found
+      description: the named session is visible to a headless caller
+      verify:
+        screen:
+            contains: "SESSION_RECOVERY_JSON_OK"
+    - id: session_activated
+      description: activation completes and the default session becomes present
+      verify:
+        screen:
+            contains: "SESSION_RECOVERY_JSON_OK"
+    - id: restored_tab_reported
+      description: the recovered session contains its saved tab
+      verify:
+        screen:
+            contains: "SESSION_RECOVERY_JSON_OK"
+    - id: session_json_validated
+      description: named discovery, activation, and restored tab state are parsed
+      verify:
+        screen:
+            contains: "SESSION_RECOVERY_JSON_OK"
+contractHash: sha256:881edbe8b1492df549ac9d91323dcc1008ad79812233661554555451b11bdc59

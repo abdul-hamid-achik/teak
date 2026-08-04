@@ -50,4 +50,6 @@ outcomes:
       verify:
         screen:
             contains: "beta one"
+artifacts:
+    finalScreen: never
 contractHash: sha256:ca9ca85b397a84334d67492927f8d7db932a7260c3f53e23951c70e255bd2ffe

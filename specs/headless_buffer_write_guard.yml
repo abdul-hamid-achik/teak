@@ -1,0 +1,48 @@
+version: 1
+name: teak_headless_buffer_write_guard
+coversSymbol: writeHeadlessBuffer
+metadata:
+    feature: headless-buffer
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - buffer
+        - concurrency
+intent: |
+    an agent can update a workspace buffer only with the version it inspected,
+    and a stale write is rejected without overwriting newer content.
+target:
+    cmd:
+        - sh
+        - -lc
+        - 'ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\nfunc main() {}\n" > "$PROJECT/main.go"; SHA=$(shasum -a 256 "$PROJECT/main.go" | awk "{print \$1}"); printf "package main\nfunc main() { println(\"updated\") }\n" | "$ROOT/bin/teak" headless buffer write --json --root "$PROJECT" --expected-sha256 "$SHA" "$PROJECT/main.go"; set +e; ERROR=$(printf "stale\n" | "$ROOT/bin/teak" headless buffer write --json --root "$PROJECT" --expected-sha256 "$SHA" "$PROJECT/main.go" 2>&1 >/dev/null); STATUS=$?; set -e; [ "$STATUS" -eq 2 ]; python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get(\"state\") == \"error\" and p.get(\"code\") == \"stale_write\"" "$ERROR"; printf "STALE_GUARD_OK\nSTALE_JSON_CODE_OK\n"; "$ROOT/bin/teak" headless buffer read --json --root "$PROJECT" "$PROJECT/main.go"'
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: buffer_write_guard
+outcomes:
+    - id: stale_write_rejected
+      description: the optimistic concurrency check reports the stale write guard
+      verify:
+        screen:
+            contains: "STALE_GUARD_OK"
+    - id: updated_content_readable
+      description: the final read observes the content written with the current digest
+      verify:
+        screen:
+            contains: "updated"
+    - id: stale_write_json_code
+      description: the machine-readable error identifies a stale optimistic write
+      verify:
+        screen:
+            contains: "STALE_JSON_CODE_OK"
+contractHash: sha256:c04a00d3a15616764391bbba2ae1d2961ac1f666e43f39c62a46fa46bf3fd115

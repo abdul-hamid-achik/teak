@@ -1,0 +1,49 @@
+version: 1
+name: teak_headless_tool_overrides
+coversSymbol: configureToolpathFromConfig
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - doctor
+        - tools
+        - configuration
+intent: |
+    an explicit tool path from config.toml is used by both headless health and doctor without relying on PATH.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; OVERRIDE="$TMP/private-codemap"; mkdir -p "$HOME" "$XDG_CONFIG_HOME/teak" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; printf '%s\n' '#!/bin/sh' 'case "$1" in' '--version) printf "%s\n" "private codemap fixture 1.0" ;;' 'structural-manifest) if [ "$2" = "--help" ]; then printf "%s\n" "structural-manifest help"; else printf "%s\n" "{\"schema_version\":1,\"export_schema_version\":1,\"total_records\":4,\"complete\":true,\"freshness\":{\"checked\":true,\"fresh\":true,\"changed\":0,\"new\":0,\"deleted\":0}}"; fi ;;' '*) exit 2 ;;' 'esac' > "$OVERRIDE"; chmod 755 "$OVERRIDE"; printf '%s\n' '[tools]' "codemap = \"$OVERRIDE\"" > "$XDG_CONFIG_HOME/teak/config.toml"; TOOLS=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); DOCTOR=$("$ROOT/bin/teak" doctor --json --root "$PROJECT"); python3 -c "import json,sys; tools=json.loads(sys.argv[1]); doctor=json.loads(sys.argv[2]); t=next(x for x in tools['tools'] if x.get('name')=='codemap'); d=next(x for x in doctor['checks'] if x.get('name')=='tool:codemap'); assert t.get('path')==sys.argv[3] and t.get('state')=='ready' and t.get('ready') is True and t.get('version_probe')=='ready' and t.get('version')=='private codemap fixture 1.0' and t.get('mode')=='structural-manifest'; assert d.get('status')=='pass' and d.get('version')=='private codemap fixture 1.0' and d.get('capability')=='structural-manifest' and sys.argv[3] in d.get('detail',''), (tools,doctor)" "$TOOLS" "$DOCTOR" "$OVERRIDE"; printf '%s\nTOOL_OVERRIDE_JSON_OK\n'
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: tool_overrides
+outcomes:
+    - id: headless_override_used
+      description: headless tool health resolves the configured executable outside PATH
+      verify:
+        screen:
+            contains: "TOOL_OVERRIDE_JSON_OK"
+    - id: doctor_override_used
+      description: doctor reuses the same configured path and verifies its version
+      verify:
+        screen:
+            contains: "TOOL_OVERRIDE_JSON_OK"
+    - id: override_is_verified
+      description: the configured path is reported ready only after its bounded version and structural probes succeed
+      verify:
+        screen:
+            contains: "TOOL_OVERRIDE_JSON_OK"
+contractHash: sha256:8fc2260aba0e3823b961aa3857e7e245312281b405baac70cb2e5dd7bba93bc1

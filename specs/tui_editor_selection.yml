@@ -54,4 +54,6 @@ outcomes:
             char: "a"
             style:
                 bg: "#3b4252"
+artifacts:
+    finalScreen: never
 contractHash: sha256:88ce845f11db7d2fd4044a041f4542d1356aa81e090ff704c0dd2aea7d24cacd

@@ -23,8 +23,16 @@ jobs:
           go-version: "1.26.5"
           cache: true
 
-      - name: Run tests
-        run: go test ./... -count=1
+      - name: Install Glyphrun
+        run: sh scripts/install-glyphrun.sh
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@v3.50.0
+
+      - name: Run complete release verification gate
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          task verify
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7

@@ -1,0 +1,47 @@
+version: 1
+name: teak_headless_doctor_language
+coversSymbol: runDoctorCLI
+metadata:
+  feature: onboarding
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - doctor
+    - lsp
+    - onboarding
+intent: |
+  a fresh project reports the detected language and its relevant language-server state.
+target:
+  cmd:
+    - sh
+    - -lc
+    - 'ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf "package main\n" > "$PROJECT/main.go"; "$ROOT/bin/teak" doctor --json --root "$PROJECT"'
+  cwd: "."
+  timeoutMs: 10000
+terminal:
+  cols: 120
+  rows: 50
+  profile: xterm-256color
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 3000
+  - snapshot: doctor_language
+outcomes:
+  - id: go_language_detected
+    description: the report identifies Go files in the requested project
+    verify:
+      screen:
+        contains: '"language_id": "go"'
+  - id: relevant_server_reported
+    description: the report names the language server relevant to the detected files
+    verify:
+      screen:
+        contains: '"server": "gopls"'
+  - id: actionable_state_present
+    description: the language entry exposes a verified, missing, failed, or unsupported state
+    verify:
+      screen:
+        regex: '"state": "(available|missing|failed|timed_out|unsupported)"'

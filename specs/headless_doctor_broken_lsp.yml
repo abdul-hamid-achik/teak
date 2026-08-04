@@ -1,0 +1,46 @@
+version: 1
+name: teak_headless_doctor_broken_lsp
+coversSymbol: runDoctorCLI
+metadata:
+  feature: onboarding
+  owner: integration
+  priority: high
+  tags:
+    - headless
+    - doctor
+    - lsp
+    - broken-tool
+intent: |
+  a resolved but broken language server is reported as failed rather than ready.
+target:
+  cmd:
+    - sh
+    - -lc
+    - >-
+      set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home";
+      export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project";
+      mkdir -p "$TMP/bin" "$HOME/.config/teak" "$PROJECT";
+      printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "gopls"\nlanguage_id = "fixture"\n' > "$HOME/.config/teak/config.toml";
+      printf 'fixture\n' > "$PROJECT/main.fixture";
+      printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "broken gopls fixture" >&2' 'exit 7' > "$TMP/bin/gopls";
+      chmod 755 "$TMP/bin/gopls"; PATH="$TMP/bin:$PATH"; export PATH;
+      JSON=$("$ROOT/bin/teak" doctor --json --root "$PROJECT");
+      python3 -c "import json,sys; p=json.loads(sys.argv[1]); langs=[l for l in p.get('languages',[]) if l.get('language_id') == 'fixture']; checks=[c for c in p.get('checks',[]) if c.get('name') == 'tool:gopls']; assert len(langs) == 1 and langs[0].get('state') == 'failed' and langs[0].get('version_probe') == 'failed' and len(checks) == 1 and checks[0].get('status') == 'warn'" "$JSON";
+      printf '%s\nDOCTOR_BROKEN_LSP_JSON_OK\n' "$JSON"
+  cwd: "."
+  timeoutMs: 10000
+terminal:
+  cols: 120
+  rows: 50
+  profile: xterm-256color
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+outcomes:
+  - id: broken_lsp_reported
+    description: the resolved but broken language server is explicitly failed
+    verify:
+      screen:
+        contains: "DOCTOR_BROKEN_LSP_JSON_OK"

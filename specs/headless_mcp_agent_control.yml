@@ -1,0 +1,59 @@
+version: 1
+name: teak_headless_mcp_agent_control
+coversSymbol: headlessMCPServer.toolArgs
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - mcp
+        - agent
+        - cancellation
+intent: |
+    an MCP client can explicitly cancel a durable run or reap a stale run,
+    while missing confirmation is rejected before the subprocess boundary
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-mcp-agent-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_mcp_agent_control
+outcomes:
+    - id: tools_published
+      description: MCP tools/list publishes both durable lifecycle controls
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_AGENT_CONFIRMATION_OK"
+    - id: confirmation_required
+      description: missing confirmation is rejected before invoking the CLI
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_AGENT_CONFIRMATION_OK"
+    - id: cancellation_persisted
+      description: confirmed MCP cancellation persists a cancelled durable run
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_AGENT_CANCEL_OK"
+    - id: stale_recovery_persisted
+      description: confirmed MCP stale reaping persists an interrupted durable run
+      verify:
+        screen:
+            contains: "HEADLESS_MCP_AGENT_REAP_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:8908834c1bb0f6400d9df95e7aaa01fd38583aa167cbb3d33e51f2ad20aae791

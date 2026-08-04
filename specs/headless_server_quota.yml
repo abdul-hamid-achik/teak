@@ -1,0 +1,43 @@
+version: 1
+name: teak_headless_server_quota
+coversSymbol: headlessQuota
+metadata:
+    feature: headless-control-plane
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - rest
+        - mcp
+        - quota
+        - performance
+intent: |
+    a live REST control-plane server exposes its aggregate admission quota
+    through healthz before accepting client work
+target:
+    cmd:
+        - sh
+        - testdata/glyphrun/headless-server-quota-fixture.sh
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: headless_server_quota
+outcomes:
+    - id: quota_observable
+      description: the live server publishes idle active, reservation, and concurrency limits
+      verify:
+        screen:
+            contains: "HEADLESS_SERVER_QUOTA_OK"
+contractHash: sha256:c183fc8901eec8714db15c7aaea4e289a5bafe0d0f23a6397df7f9174ccdbce2

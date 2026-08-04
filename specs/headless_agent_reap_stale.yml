@@ -1,0 +1,51 @@
+version: 1
+name: teak_headless_agent_reap_stale
+coversSymbol: runHeadlessAgent
+metadata:
+    feature: agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - agent
+        - recovery
+intent: |
+    the headless agent supervisor can explicitly recover a stale persisted run
+    only with confirmation and a positive heartbeat silence budget
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; RUNS_DIR="$TMP/state/teak/agent-runs/$(python3 -c 'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' "$PROJECT")"; mkdir -p "$RUNS_DIR"; python3 -c "import json,sys; root=sys.argv[1]; run={'id':'stale-run','depth':0,'status':'running','spec':{'objective':'stuck fixture run','workspace':root,'requested_capabilities':{'read':True},'budget':{}},'effective_capabilities':{'read':True},'created_at':'2020-01-01T00:00:00Z','started_at':'2020-01-01T00:00:00Z','last_heartbeat_at':'2020-01-01T00:00:00Z'}; json.dump({'version':1,'runs':[run]},open(sys.argv[2],'w'))" "$PROJECT" "$RUNS_DIR/runs.json"; if "$ROOT/bin/teak" headless agent reap-stale --json --root "$PROJECT" --max-silence 1m >/dev/null 2>&1; then exit 3; fi; JSON=$("$ROOT/bin/teak" headless agent reap-stale --confirm --json --root "$PROJECT" --max-silence 1m); python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get('state') == 'reaped' and p.get('reaped') == ['stale-run']; stored=json.load(open(sys.argv[2])); assert stored['runs'][0]['status'] == 'interrupted'" "$JSON" "$RUNS_DIR/runs.json"; printf '%s\nAGENT_REAP_STALE_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: agent_reap_stale
+outcomes:
+    - id: confirmation_required
+      description: stale recovery refuses to mutate without explicit confirmation
+      verify:
+        screen:
+            contains: "AGENT_REAP_STALE_JSON_OK"
+    - id: stale_run_reaped
+      description: the confirmed operation persists an interrupted stale run
+      verify:
+        screen:
+            contains: "AGENT_REAP_STALE_JSON_OK"
+    - id: machine_response
+      description: the recovery response exposes state and the reaped run id
+      verify:
+        screen:
+            contains: "AGENT_REAP_STALE_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:b9bc79bfcf018507ae6060cd6e8244a2cc2fe5a2650b00a432199b04f1352dc0

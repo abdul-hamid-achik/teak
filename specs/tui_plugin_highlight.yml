@@ -1,0 +1,53 @@
+version: 1
+name: teak_tui_plugin_highlight
+coversSymbol: plugin.ui.set_highlights
+metadata:
+    feature: lua-plugin-ui
+    owner: integration
+    priority: high
+    tags:
+        - tui
+        - plugin
+        - lua
+        - highlight
+intent: |
+    a Lua callback can install a bounded highlight namespace for the active
+    buffer without blocking the editor event loop
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$TMP/config"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; CONFIG="$HOME/Library/Application Support/teak"; PLUGIN="$CONFIG/plugins/highlight"; mkdir -p "$HOME" "$PROJECT" "$PLUGIN"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\nfunc main() {}\n' > "$PROJECT/main.go"; printf 'name = "highlight"\nmain = "init.lua"\n' > "$PLUGIN/plugin.toml"; printf '%s\n' 'function setup()' '  keymap.set("a", "ctrl+e", function()' '    ui.set_highlights(1, {{line = 0, start_col = 0, end_col = 7, fg = "#88c0d0", bold = true}})' '    editor.set_status("HIGHLIGHTED")' '  end)' 'end' > "$PLUGIN/init.lua"; "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "package main"
+        timeoutMs: 5000
+    - press: "ctrl+e"
+    - wait:
+        screen:
+            contains: "HIGHLIGHTED"
+        timeoutMs: 5000
+    - snapshot: plugin_highlight
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: clean_exit
+      description: the plugin highlight remains within the normal TUI lifecycle
+      verify:
+        process:
+            exitCode: 0
+artifacts:
+    finalScreen: never
+contractHash: sha256:707f5a23574dc23eca299a8033636a6a67b0a68948e5357f6ef715c07ae8a6de

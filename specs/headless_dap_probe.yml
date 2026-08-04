@@ -1,0 +1,55 @@
+version: 1
+name: teak_headless_dap_probe
+coversSymbol: runHeadlessDAP
+metadata:
+    feature: headless-dap
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - dap
+        - health
+intent: |
+    a headless client can initialize a configured DAP adapter without launching a debuggee.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; JSON=$("$ROOT/bin/teak" headless dap probe --json --root "$PROJECT" --adapter python3 -- "$ROOT/testdata/glyphrun/dap-probe-fixture.py"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get('state') == 'ready' and p.get('ready') is True and p.get('adapter') == 'python3' and isinstance(p.get('args'),list)" "$JSON"; printf '%s\nDAP_PROBE_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: dap_probe
+outcomes:
+    - id: dap_ready
+      description: the adapter completes the DAP initialize handshake
+      verify:
+        screen:
+            contains: '"state": "ready"'
+    - id: dap_ready_flag
+      description: the machine-readable response confirms the adapter is ready
+      verify:
+        screen:
+            contains: '"ready": true'
+    - id: adapter_reported
+      description: the response identifies the configured adapter command
+      verify:
+        screen:
+            contains: '"adapter": "python3"'
+    - id: dap_json_validated
+      description: the initialize response is parsed and its readiness fields are checked
+      verify:
+        screen:
+            contains: "DAP_PROBE_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:15840ed953029337a00ca0f6bf4e2e04f3bd6e8a04b4f4d6935ff9ad1680d3e6

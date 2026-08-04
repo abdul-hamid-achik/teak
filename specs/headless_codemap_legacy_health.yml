@@ -1,0 +1,45 @@
+version: 1
+name: teak_headless_codemap_legacy_health
+coversSymbol: collectCodemapStatus
+metadata:
+    feature: codemap-health
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - codemap
+        - memory
+        - safety
+intent: |
+    a legacy codemap without the structural-manifest contract is reported as
+    unsupported without invoking its potentially multi-gigabyte status path.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; export CODEMAP_STATUS_MARKER="$TMP/status-called"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; printf '%s\n' '#!/bin/sh' 'case "$1" in' '--version) printf "%s\n" "legacy codemap fixture" ;;' 'structural-manifest) printf "%s\n" "unknown command: structural-manifest" >&2; exit 2 ;;' 'status) : > "$CODEMAP_STATUS_MARKER"; exit 99 ;;' '*) exit 2 ;;' 'esac' > "$TMP/bin/codemap"; chmod 755 "$TMP/bin/codemap"; JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); python3 -c "import json,sys,os; p=json.loads(sys.argv[1]); c={t.get('name'):t for t in p.get('tools',[])}['codemap']; assert c.get('state') == 'unsupported' and c.get('ready') is False and 'structural-manifest' in c.get('hint',''); assert not os.path.exists(sys.argv[2])" "$JSON" "$CODEMAP_STATUS_MARKER"; printf '%s\nCODEMAP_LEGACY_HEALTH_JSON_OK\nCODEMAP_STATUS_NOT_INVOKED_OK\n'
+    cwd: "."
+    timeoutMs: 10000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: codemap_legacy_health
+outcomes:
+    - id: legacy_codemap_is_unsupported
+      description: a legacy binary exposes an explicit unsupported health state
+      verify:
+        screen:
+            contains: "CODEMAP_LEGACY_HEALTH_JSON_OK"
+    - id: legacy_status_is_not_invoked
+      description: health inspection does not fall back to the memory-heavy status command
+      verify:
+        screen:
+            contains: "CODEMAP_STATUS_NOT_INVOKED_OK"
+contractHash: sha256:220baa1d8b7da189bc5b4eee0c2627b0e6835cca2ae6a994252af2dced4a3ae2

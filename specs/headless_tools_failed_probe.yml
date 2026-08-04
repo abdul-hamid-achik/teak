@@ -1,0 +1,50 @@
+version: 1
+name: teak_headless_tools_failed_probe
+coversSymbol: collectHeadlessToolStatus
+metadata:
+    feature: onboarding
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - health
+        - version-probe
+        - negative
+intent: |
+    an installed but unhealthy tool is reported as failed and not ready when
+    its bounded capability probe exits unsuccessfully.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export PATH="$TMP/bin:$PATH"; PROJECT="$TMP/project"; mkdir -p "$TMP/bin" "$HOME" "$PROJECT"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "broken codemap" >&2; exit 7; fi' 'if [ "$1" = "structural-manifest" ]; then printf "%s\\n" "{\"schema_version\":1,\"export_schema_version\":1,\"project\":\"fixture\",\"project_key\":\"fixture\",\"index_fingerprint\":\"fixture\",\"total_records\":1,\"complete\":true,\"freshness\":{\"checked\":true,\"fresh\":true,\"changed\":0,\"new\":0,\"deleted\":0}}"; exit 0; fi' 'exit 0' > "$TMP/bin/codemap"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "broken vecgrep" >&2; exit 7; fi' 'if [ "$1" = "status" ]; then printf "%s\\n" "{\"lightweight\":true,\"index_fresh\":true,\"stats\":{\"files\":1},\"pending_changes\":{\"total_pending\":0},\"freshness\":{\"state\":\"fresh\"}}"; exit 0; fi' 'exit 0' > "$TMP/bin/vecgrep"; printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then printf "%s\\n" "broken hitspec" >&2; exit 7; fi' 'exit 0' > "$TMP/bin/hitspec"; chmod 755 "$TMP/bin/codemap" "$TMP/bin/vecgrep" "$TMP/bin/hitspec"; JSON=$("$ROOT/bin/teak" headless tools status --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); ts={t.get('name'):t for t in p.get('tools',[])}; assert set(ts) == {'codemap','vecgrep','hitspec'} and all(t.get('version_probe') == 'failed' and t.get('state') == 'failed' and t.get('ready') is False for t in ts.values())" "$JSON"; printf '%s\nTOOLS_FAILED_PROBE_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 45
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: tools_failed_probe
+outcomes:
+    - id: failed_probe_is_actionable
+      description: all installed but unhealthy tools expose a failed state
+      verify:
+        screen:
+            contains: "TOOLS_FAILED_PROBE_JSON_OK"
+    - id: failed_probe_is_not_ready
+      description: failed capability probes never report a usable tool
+      verify:
+        screen:
+            contains: "TOOLS_FAILED_PROBE_JSON_OK"
+    - id: failed_probe_json_validated
+      description: the fixture parses version probe, state, and readiness fields
+      verify:
+        screen:
+            contains: "TOOLS_FAILED_PROBE_JSON_OK"
+contractHash: sha256:dced7edd9963206867ceb913c27173cd8ee1f3dd70b1b92e45196c9a93479db6

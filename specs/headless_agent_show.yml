@@ -1,0 +1,55 @@
+version: 1
+name: teak_headless_agent_show
+coversSymbol: runHeadlessAgent
+metadata:
+    feature: agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - agent
+        - observability
+intent: |
+    the headless control surface can inspect one durable agent run by id
+    without launching an agent or changing an active run to interrupted.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; mkdir -p "$HOME" "$PROJECT"; printf 'package main\n' > "$PROJECT/main.go"; RUNS_DIR="$TMP/state/teak/agent-runs/$(python3 -c 'import hashlib,os,sys; print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).hexdigest())' "$PROJECT")"; mkdir -p "$RUNS_DIR"; python3 -c "import json,sys; root=sys.argv[1]; json.dump({'version':1,'runs':[{'id':'fixture-run','depth':0,'status':'running','spec':{'objective':'inspect fixture run','workspace':root,'requested_capabilities':{'read':True},'budget':{}},'effective_capabilities':{'read':True},'created_at':'2026-01-01T00:00:00Z','started_at':'2026-01-01T00:00:00Z','audit':[{'operation':'file_read','outcome':'completed','at':'2026-01-01T00:00:01Z','detail':'bytes=12'}]}]},open(sys.argv[2],'w'))" "$PROJECT" "$RUNS_DIR/runs.json"; JSON=$("$ROOT/bin/teak" headless agent show --json --root "$PROJECT" fixture-run); python3 -c "import json,sys; p=json.loads(sys.argv[1]); stored=json.load(open(sys.argv[3])); run=p.get('run',{}); assert p.get('workspace') == sys.argv[2] and run.get('id') == 'fixture-run' and run.get('status') == 'running' and run.get('spec',{}).get('objective') == 'inspect fixture run' and run.get('audit',[{}])[0].get('operation') == 'file_read' and run.get('audit',[{}])[0].get('detail') == 'bytes=12' and stored['runs'][0]['status'] == 'running'" "$JSON" "$PROJECT" "$RUNS_DIR/runs.json"; printf '%s\nAGENT_SHOW_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 10000
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+terminal:
+    cols: 110
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+    - snapshot: agent_show
+outcomes:
+    - id: requested_run_reported
+      description: the response identifies the requested durable run
+      verify:
+        screen:
+            contains: "AGENT_SHOW_JSON_OK"
+    - id: active_status_reported
+      description: an unfinished persisted run is observed without recovery mutation
+      verify:
+        screen:
+            contains: "AGENT_SHOW_JSON_OK"
+    - id: agent_json_validated
+      description: the run id, workspace, status, and objective are parsed structurally
+      verify:
+        screen:
+            contains: "AGENT_SHOW_JSON_OK"
+artifacts:
+    finalScreen: never
+contractHash: sha256:f78e09978a277a044a33264778565d569b984f2801e4fe646532a224bc69b28b

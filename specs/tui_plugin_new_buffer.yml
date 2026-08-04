@@ -1,0 +1,57 @@
+version: 1
+name: teak_tui_plugin_new_buffer
+coversSymbol: plugin.ui.new_buffer
+metadata:
+    feature: lua-plugin-ui
+    owner: integration
+    priority: high
+    tags:
+        - tui
+        - plugin
+        - lua
+intent: |
+    a Lua callback can create and focus a new untitled buffer through the
+    replayable plugin runtime bridge
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$TMP/config"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; CONFIG="$HOME/Library/Application Support/teak"; PLUGIN="$CONFIG/plugins/new-buffer"; mkdir -p "$HOME" "$PROJECT" "$PLUGIN"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.go"; printf 'name = "new-buffer"\nmain = "init.lua"\n' > "$PLUGIN/plugin.toml"; printf '%s\n' 'function setup()' '  keymap.set("a", "ctrl+u", function()' '    local bufnr = ui.new_buffer()' '    editor.set_status("PLUGIN_BUFFER_" .. tostring(bufnr))' '  end)' 'end' > "$PLUGIN/init.lua"; "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "package main"
+        timeoutMs: 5000
+    - press: "ctrl+u"
+    - wait:
+        screen:
+            contains: "PLUGIN_BUFFER_2"
+        timeoutMs: 5000
+    - snapshot: plugin_new_buffer
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: callback_created_buffer
+      description: the plugin callback leaves the newly created second tab visible
+      verify:
+        screen:
+            contains: "Untitled-1"
+    - id: clean_exit
+      description: the plugin-created buffer remains within the normal TUI lifecycle
+      verify:
+        process:
+            exitCode: 0
+artifacts:
+    finalScreen: never
+contractHash: sha256:e7de8f986176e1008424ed4dda11231a19199cebde142e53d425a3b0e4f0ee3e

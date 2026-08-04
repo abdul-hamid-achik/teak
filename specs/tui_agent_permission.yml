@@ -1,0 +1,66 @@
+version: 1
+name: teak_tui_agent_permission
+coversSymbol: agent.Model.handlePermissionKey
+metadata:
+    feature: safe-agent-runtime
+    owner: integration
+    priority: high
+    tags:
+        - tui
+        - agent
+        - acp
+        - permission
+intent: |
+    an ACP tool request is visible in the agent panel and cannot continue
+    until the user explicitly allows it
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); HOME_DIR="$TMP/home"; CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; mkdir -p "$HOME_DIR" "$CONFIG_HOME/teak" "$PROJECT"; printf '%s\n' '[editor]' 'tab_size = 4' '[ui]' 'show_tree = false' '[agent]' 'enabled = true' 'command = "python3"' "args = [\"$ROOT/testdata/glyphrun/acp-agent-fixture.py\", \"--permission\"]" '[session]' 'enabled = false' > "$CONFIG_HOME/teak/config.toml"; printf '%s\n' 'package main' > "$PROJECT/main.go"; export HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$TMP/state" LANG=C LC_ALL=C TZ=UTC; exec "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "Agent"
+        timeoutMs: 5000
+    - press: "ctrl+j"
+    - wait:
+        screen:
+            contains: "Ask the agent..."
+        timeoutMs: 5000
+    - type: "run the safe fixture"
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "Agent wants to:"
+        timeoutMs: 5000
+    - press: "y"
+    - wait:
+        screen:
+            contains: "PERMISSION_GRANTED"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "●"
+        timeoutMs: 5000
+    - snapshot: tui_agent_permission
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: clean_exit
+      description: permission handling does not strand the ACP process or editor
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:38b7c660559be2e39d1dc850f73cecfbfba088a9632e860c6050fa8d0b6d5fe4

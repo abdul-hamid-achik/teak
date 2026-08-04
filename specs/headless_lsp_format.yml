@@ -1,0 +1,53 @@
+version: 1
+name: teak_headless_lsp_format
+coversSymbol: runHeadlessLSP
+metadata:
+    feature: headless-lsp
+    owner: integration
+    priority: high
+    tags:
+        - headless
+        - lsp
+        - formatting
+intent: |
+    a headless client can preview LSP formatting and return a bounded formatted document.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; PROJECT="$TMP/project"; mkdir -p "$HOME/.config/teak" "$PROJECT"; printf '[[lsp]]\nextensions = [".fixture"]\ncommand = "python3"\nargs = ["%s/testdata/glyphrun/lsp-diagnostics-fixture.py"]\nlanguage_id = "fixture"\n' "$ROOT" > "$HOME/.config/teak/config.toml"; printf 'fixture source\n' > "$PROJECT/main.fixture"; JSON=$("$ROOT/bin/teak" headless lsp format --json --root "$PROJECT" main.fixture); python3 -c "import json,sys; p=json.loads(sys.argv[1]); assert p.get('state') == 'ready' and p.get('changed') is True and p.get('applied') is False and p.get('edits',0) > 0 and 'formatted source' in p.get('content','') and len(p.get('input_sha256','')) == 64 and len(p.get('output_sha256','')) == 64" "$JSON"; printf '%s\nLSP_FORMAT_JSON_OK\n' "$JSON"
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 110
+    rows: 35
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 10000
+    - snapshot: lsp_format
+outcomes:
+    - id: formatting_ready
+      description: the one-shot LSP formatting workflow reaches a ready state
+      verify:
+        screen:
+            contains: "LSP_FORMAT_JSON_OK"
+    - id: formatting_changed
+      description: the response reports that the fixture produced a change
+      verify:
+        screen:
+            contains: "LSP_FORMAT_JSON_OK"
+    - id: formatted_content_reported
+      description: the formatted document is returned for preview or guarded apply
+      verify:
+        screen:
+            contains: "LSP_FORMAT_JSON_OK"
+    - id: formatting_json_validated
+      description: the preview is parsed with hashes, edit count, changed state, and non-application guard
+      verify:
+        screen:
+            contains: "LSP_FORMAT_JSON_OK"
+contractHash: sha256:2039b9ac5b52e08d8243c6bb1484c7a2661dea81aaa57d41922e8f496ecf2ad0
