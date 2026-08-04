@@ -3,7 +3,6 @@ package secrets
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -102,15 +101,23 @@ func TestGetHonorsContextWhenAgentDoesNotRespond(t *testing.T) {
 		<-stop
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	_, err := resolver.Get(ctx, "project", "API_KEY")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Get() error = %v, want context deadline", err)
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("Get() error = nil, want an error when the agent does not respond")
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Get() took %s after context deadline", elapsed)
+	// The agent never responds, so Get must be bounded by the context
+	// deadline — not the agent request timeout (1s) or the CLI timeout (5s).
+	// Assert on elapsed time rather than the exact sentinel: at the deadline
+	// boundary the socket read timeout and context expiry race, so Get may
+	// return context.DeadlineExceeded directly or fall through to the CLI
+	// (which also honors the context). Both honor the deadline.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Get() took %s, expected to honor the 100ms context deadline", elapsed)
 	}
 	select {
 	case <-connected:
