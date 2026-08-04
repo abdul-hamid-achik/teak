@@ -12,11 +12,14 @@ import (
 // pluginAsyncRuntime is a private, mutable snapshot used exclusively by a
 // plugin tea.Cmd. It never retains a pointer to Model or Editor: Lua can run
 // on a worker goroutine while all real model mutations are replayed later in
-// Update. Buffer edits are coalesced into one optimistic full-document effect.
+// Update. Each logical tab owns an immutable-rope snapshot, and buffer edits
+// are coalesced into ordered optimistic full-document effects. This preserves
+// callback order when Lua changes focus or creates a tab before editing it.
 // The Runtime API exposes only one selection, so committing an edit deliberately
 // collapses live multicursors to the callback's resulting primary cursor.
 type pluginAsyncRuntime struct {
 	editorID      uint64
+	targetID      uint64
 	bufferVersion int
 	buffer        *text.Buffer
 	hasBuffer     bool
@@ -29,6 +32,11 @@ type pluginAsyncRuntime struct {
 	status        string
 	tabCount      int
 	activeTab     int
+	tabIDs        []uint64
+	targets       map[uint64]*text.Buffer
+	targetVersion map[uint64]int
+	selections    map[uint64]*text.Selection
+	nextVirtualID uint64
 	effects       []pluginAsyncEffect
 }
 
@@ -44,48 +52,135 @@ const (
 	pluginEffectHidePanel
 	pluginEffectTogglePanel
 	pluginEffectStatus
+	pluginEffectNewBuffer
+	pluginEffectApplyBuffer
+	pluginEffectNewFloat
+	pluginEffectCloseFloat
+	pluginEffectSetHighlights
+	pluginEffectClearHighlights
+	pluginEffectConfirm
+	pluginEffectInput
+	pluginEffectSelect
 )
 
 type pluginAsyncEffect struct {
-	kind  pluginAsyncEffectKind
-	value string
-	level string
-	index int
+	kind               pluginAsyncEffectKind
+	value              string
+	level              string
+	index              int
+	targetID           uint64
+	snapshot           *pluginAsyncBufferEffect
+	options            []string
+	callbackID         uint64
+	initial            string
+	floatID            int
+	float              plugin.UIFloatOptions
+	highlightRequest   plugin.UIHighlightRequest
+	highlightNamespace int
+	expectedVersion    int
+}
+
+type pluginAsyncBufferEffect struct {
+	targetID        uint64
+	expectedVersion int
+	rope            *text.Rope
+	cursor          text.Position
+	bufferChanged   bool
+	cursorChanged   bool
 }
 
 var _ plugin.Runtime = (*pluginAsyncRuntime)(nil)
 
 func newPluginAsyncRuntime(m Model) *pluginAsyncRuntime {
 	r := &pluginAsyncRuntime{
-		rootDir:   m.rootDir,
-		width:     m.width,
-		height:    m.height,
-		status:    m.status,
-		tabCount:  len(m.editors),
-		activeTab: m.activeTab,
+		rootDir:       m.rootDir,
+		width:         m.width,
+		height:        m.height,
+		status:        m.status,
+		tabCount:      len(m.editors),
+		activeTab:     m.activeTab,
+		tabIDs:        make([]uint64, len(m.editors)),
+		targets:       make(map[uint64]*text.Buffer),
+		targetVersion: make(map[uint64]int),
+		selections:    make(map[uint64]*text.Selection),
+		nextVirtualID: 1 << 63,
 	}
-	if m.isActiveDiffTab() {
-		return r
-	}
-	ed := m.activeEditor()
-	if ed == nil || ed.Buffer == nil {
-		return r
-	}
-	r.editorID = ed.ID()
-	r.bufferVersion = ed.Buffer.Version()
-	// Rope snapshots are immutable, so the worker can share the live document
-	// without copying or flattening it on the Bubble Tea update goroutine.
-	r.buffer = text.NewBufferFromRope(ed.Buffer.Rope())
-	r.buffer.FilePath = ed.Buffer.FilePath
-	r.buffer.SetCursor(ed.Buffer.Cursor)
-	if ed.Buffer.Selections != nil && ed.Buffer.Selections.Count() > 0 {
-		selection := ed.Buffer.Selections.Primary()
-		if !selection.IsEmpty() {
-			r.selection = &selection
+	for i := range m.editors {
+		ed := &m.editors[i]
+		if ed.Buffer == nil {
+			continue
+		}
+		id := ed.ID()
+		r.tabIDs[i] = id
+		snapshot := text.NewBufferFromRope(ed.Buffer.Rope())
+		snapshot.FilePath = ed.Buffer.FilePath
+		snapshot.SetCursor(ed.Buffer.Cursor)
+		r.targets[id] = snapshot
+		r.targetVersion[id] = ed.Buffer.Version()
+		if ed.Buffer.Selections != nil && ed.Buffer.Selections.Count() > 0 {
+			selection := ed.Buffer.Selections.Primary()
+			if !selection.IsEmpty() {
+				selectionCopy := selection
+				r.selections[id] = &selectionCopy
+			}
 		}
 	}
-	r.hasBuffer = true
+	if m.isActiveDiffTab() || m.activeTab < 0 || m.activeTab >= len(r.tabIDs) {
+		return r
+	}
+	r.setTarget(r.tabIDs[m.activeTab])
 	return r
+}
+
+func (r *pluginAsyncRuntime) setTarget(targetID uint64) {
+	r.targetID = targetID
+	r.editorID = targetID
+	r.bufferVersion = r.targetVersion[targetID]
+	r.buffer = r.targets[targetID]
+	r.hasBuffer = r.buffer != nil
+	r.selection = nil
+	if selection := r.selections[targetID]; selection != nil {
+		copy := *selection
+		r.selection = &copy
+	}
+	r.bufferChanged = false
+	r.cursorChanged = false
+}
+
+func (r *pluginAsyncRuntime) flushBufferSnapshot() {
+	if !r.hasBuffer || r.buffer == nil || r.targetID == 0 || (!r.bufferChanged && !r.cursorChanged) {
+		return
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:     pluginEffectApplyBuffer,
+		targetID: r.targetID,
+		snapshot: &pluginAsyncBufferEffect{
+			targetID:        r.targetID,
+			expectedVersion: r.bufferVersion,
+			rope:            r.buffer.Rope(),
+			cursor:          r.buffer.Cursor,
+			bufferChanged:   r.bufferChanged,
+			cursorChanged:   r.cursorChanged,
+		},
+	})
+	if r.selection == nil {
+		delete(r.selections, r.targetID)
+	} else {
+		copy := *r.selection
+		r.selections[r.targetID] = &copy
+	}
+	if r.bufferChanged {
+		r.bufferVersion++
+		r.targetVersion[r.targetID] = r.bufferVersion
+	}
+	r.bufferChanged = false
+	r.cursorChanged = false
+}
+
+func (r *pluginAsyncRuntime) newVirtualTarget() uint64 {
+	id := r.nextVirtualID
+	r.nextVirtualID++
+	return id
 }
 
 func (r *pluginAsyncRuntime) activeBuffer() (*text.Buffer, error) {
@@ -233,7 +328,8 @@ func (r *pluginAsyncRuntime) SaveBuffer() error {
 	if buf.FilePath == "" {
 		return fmt.Errorf("active buffer has no file path")
 	}
-	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectSave})
+	r.flushBufferSnapshot()
+	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectSave, targetID: r.targetID})
 	return nil
 }
 
@@ -251,6 +347,21 @@ func (r *pluginAsyncRuntime) BufferDirty() (bool, error) {
 	}
 	return buf.Dirty(), nil
 }
+
+func (r *pluginAsyncRuntime) NewBuffer() (int, error) {
+	bufnr := r.tabCount + 1
+	r.flushBufferSnapshot()
+	targetID := r.newVirtualTarget()
+	r.tabIDs = append(r.tabIDs, targetID)
+	r.targets[targetID] = text.NewBufferFromBytes(nil)
+	r.targetVersion[targetID] = 0
+	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectNewBuffer, targetID: targetID})
+	r.tabCount++
+	r.activeTab = r.tabCount - 1
+	r.setTarget(targetID)
+	return bufnr, nil
+}
+
 func (r *pluginAsyncRuntime) Mode() string  { return "normal" }
 func (r *pluginAsyncRuntime) TabCount() int { return r.tabCount }
 func (r *pluginAsyncRuntime) ActiveTab() int {
@@ -264,8 +375,14 @@ func (r *pluginAsyncRuntime) SetActiveTab(idx int) error {
 	if idx < 0 || idx >= r.tabCount {
 		return fmt.Errorf("invalid tab index %d", idx+1)
 	}
+	r.flushBufferSnapshot()
 	r.activeTab = idx
 	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectSetTab, index: idx})
+	if idx < len(r.tabIDs) {
+		r.setTarget(r.tabIDs[idx])
+	} else {
+		r.setTarget(0)
+	}
 	return nil
 }
 
@@ -282,9 +399,17 @@ func (r *pluginAsyncRuntime) OpenFile(path string) error {
 			return err
 		}
 	}
-	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectOpen, value: filepath.Clean(path)})
+	r.flushBufferSnapshot()
+	targetID := r.newVirtualTarget()
+	r.tabIDs = append(r.tabIDs, targetID)
+	snapshot := text.NewBufferFromBytes(nil)
+	snapshot.FilePath = filepath.Clean(path)
+	r.targets[targetID] = snapshot
+	r.targetVersion[targetID] = 0
+	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectOpen, value: filepath.Clean(path), targetID: targetID})
 	r.tabCount++
 	r.activeTab = r.tabCount - 1
+	r.setTarget(targetID)
 	return nil
 }
 
@@ -298,12 +423,27 @@ func (r *pluginAsyncRuntime) CloseTab(idx int) error {
 	if idx < 0 || idx >= r.tabCount {
 		return fmt.Errorf("invalid tab index %d", idx+1)
 	}
+	r.flushBufferSnapshot()
 	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectClose, index: idx})
+	if idx < len(r.tabIDs) {
+		delete(r.targets, r.tabIDs[idx])
+		delete(r.targetVersion, r.tabIDs[idx])
+		delete(r.selections, r.tabIDs[idx])
+		r.tabIDs = append(r.tabIDs[:idx], r.tabIDs[idx+1:]...)
+	}
 	r.tabCount--
 	if r.tabCount == 0 {
 		r.activeTab = 0
-	} else if r.activeTab >= r.tabCount {
-		r.activeTab = r.tabCount - 1
+		r.setTarget(0)
+	} else {
+		if idx < r.activeTab {
+			r.activeTab--
+		} else if r.activeTab >= r.tabCount {
+			r.activeTab = r.tabCount - 1
+		}
+		if r.activeTab >= 0 && r.activeTab < len(r.tabIDs) {
+			r.setTarget(r.tabIDs[r.activeTab])
+		}
 	}
 	return nil
 }
@@ -341,38 +481,123 @@ func (r *pluginAsyncRuntime) TogglePanel(name string) error {
 	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectTogglePanel, value: name})
 	return nil
 }
+
+func (r *pluginAsyncRuntime) NewFloat(options plugin.UIFloatOptions) (int, error) {
+	if err := validatePluginFloat(options); err != nil {
+		return 0, err
+	}
+	id, err := allocatePluginFloatID()
+	if err != nil {
+		return 0, err
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:    pluginEffectNewFloat,
+		floatID: id,
+		float:   options,
+	})
+	return id, nil
+}
+
+func (r *pluginAsyncRuntime) CloseFloat(id int) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid float id %d", id)
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectCloseFloat, floatID: id})
+	return nil
+}
+
+func (r *pluginAsyncRuntime) SetHighlights(request plugin.UIHighlightRequest) error {
+	if err := validatePluginHighlightRequest(request); err != nil {
+		return err
+	}
+	if _, err := r.activeBuffer(); err != nil {
+		return err
+	}
+	r.flushBufferSnapshot()
+	request.Highlights = append([]plugin.UIHighlight(nil), request.Highlights...)
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:             pluginEffectSetHighlights,
+		targetID:         r.targetID,
+		expectedVersion:  r.bufferVersion,
+		highlightRequest: request,
+	})
+	return nil
+}
+
+func (r *pluginAsyncRuntime) ClearHighlights(namespace int) error {
+	if namespace < 0 {
+		return fmt.Errorf("highlight namespace must not be negative")
+	}
+	if _, err := r.activeBuffer(); err != nil {
+		return err
+	}
+	r.flushBufferSnapshot()
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:               pluginEffectClearHighlights,
+		targetID:           r.targetID,
+		expectedVersion:    r.bufferVersion,
+		highlightNamespace: namespace,
+	})
+	return nil
+}
+
+func (r *pluginAsyncRuntime) RequestConfirm(request plugin.UIConfirmRequest) error {
+	if err := validatePluginConfirm(request); err != nil {
+		return err
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:       pluginEffectConfirm,
+		value:      request.Message,
+		options:    append([]string(nil), request.Options...),
+		callbackID: request.CallbackID,
+	})
+	return nil
+}
+
+func (r *pluginAsyncRuntime) RequestInput(request plugin.UIInputRequest) error {
+	if err := validatePluginInput(request); err != nil {
+		return err
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:       pluginEffectInput,
+		value:      request.Prompt,
+		initial:    request.InitialValue,
+		callbackID: request.CallbackID,
+	})
+	return nil
+}
+
+func (r *pluginAsyncRuntime) RequestSelect(request plugin.UISelectRequest) error {
+	if err := validatePluginSelect(request); err != nil {
+		return err
+	}
+	r.effects = append(r.effects, pluginAsyncEffect{
+		kind:       pluginEffectSelect,
+		value:      request.Prompt,
+		options:    append([]string(nil), request.Options...),
+		callbackID: request.CallbackID,
+	})
+	return nil
+}
 func (r *pluginAsyncRuntime) Notify(message, level string) {
 	r.effects = append(r.effects, pluginAsyncEffect{kind: pluginEffectStatus, value: message, level: level})
 }
 
 func (r *pluginAsyncRuntime) apply(m *Model) tea.Cmd {
+	// Focus and tab effects flush the snapshot at the point where Lua issued
+	// them. Flush the final target now so a callback ending with a buffer edit
+	// is replayed after its preceding focus/new-buffer effect.
+	r.flushBufferSnapshot()
 	direct := newPluginRuntime(m)
-	if (r.bufferChanged || r.cursorChanged) && r.editorID != 0 {
-		idx := -1
-		for i := range m.editors {
-			if m.editors[i].ID() == r.editorID {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 || m.editors[idx].Buffer.Version() != r.bufferVersion {
-			m.status = "Plugin edit discarded: buffer changed while callback ran"
-		} else {
-			previous := m.activeTab
-			m.activateTab(idx)
-			if r.bufferChanged {
-				_ = direct.replaceBufferSnapshot(r.buffer.Rope(), r.buffer.Cursor)
-			} else if r.cursorChanged {
-				_ = direct.SetBufferCursor(r.buffer.Cursor)
-			}
-			m.activateTab(previous)
-		}
-	}
+	virtualTargets := make(map[uint64]uint64)
 	for _, effect := range r.effects {
 		switch effect.kind {
+		case pluginEffectApplyBuffer:
+			r.applyBufferEffect(m, direct, effect, virtualTargets)
 		case pluginEffectSave:
+			targetID := resolvePluginAsyncTarget(effect.targetID, virtualTargets)
 			for i := range m.editors {
-				if m.editors[i].ID() == r.editorID {
+				if m.editors[i].ID() == targetID {
 					if cmd := m.beginSaveForTab(i, false, false); cmd != nil {
 						direct.cmds = append(direct.cmds, cmd)
 					}
@@ -380,7 +605,11 @@ func (r *pluginAsyncRuntime) apply(m *Model) tea.Cmd {
 				}
 			}
 		case pluginEffectOpen:
-			_ = direct.OpenFile(effect.value)
+			if err := direct.OpenFile(effect.value); err == nil && effect.targetID != 0 {
+				if ed := m.activeEditor(); ed != nil {
+					virtualTargets[effect.targetID] = ed.ID()
+				}
+			}
 		case pluginEffectClose:
 			_ = direct.CloseTab(effect.index)
 		case pluginEffectSetTab:
@@ -399,7 +628,101 @@ func (r *pluginAsyncRuntime) apply(m *Model) tea.Cmd {
 			} else {
 				direct.Notify(effect.value, effect.level)
 			}
+		case pluginEffectNewBuffer:
+			if _, err := direct.NewBuffer(); err == nil && effect.targetID != 0 {
+				if ed := m.activeEditor(); ed != nil {
+					virtualTargets[effect.targetID] = ed.ID()
+				}
+			}
+		case pluginEffectNewFloat:
+			_ = direct.newFloatWithID(effect.floatID, effect.float)
+		case pluginEffectCloseFloat:
+			id := effect.floatID
+			if resolved, ok := virtualTargets[uint64(id)]; ok {
+				id = int(resolved)
+			}
+			_ = direct.CloseFloat(id)
+		case pluginEffectSetHighlights:
+			r.applyHighlightEffect(m, effect, virtualTargets, direct)
+		case pluginEffectClearHighlights:
+			r.applyHighlightEffect(m, effect, virtualTargets, direct)
+		case pluginEffectConfirm:
+			_ = direct.RequestConfirm(plugin.UIConfirmRequest{
+				Message:    effect.value,
+				Options:    append([]string(nil), effect.options...),
+				CallbackID: effect.callbackID,
+			})
+		case pluginEffectInput:
+			_ = direct.RequestInput(plugin.UIInputRequest{
+				Prompt:       effect.value,
+				InitialValue: effect.initial,
+				CallbackID:   effect.callbackID,
+			})
+		case pluginEffectSelect:
+			_ = direct.RequestSelect(plugin.UISelectRequest{
+				Prompt:     effect.value,
+				Options:    append([]string(nil), effect.options...),
+				CallbackID: effect.callbackID,
+			})
 		}
 	}
 	return direct.command()
+}
+
+func (r *pluginAsyncRuntime) applyHighlightEffect(m *Model, effect pluginAsyncEffect, virtualTargets map[uint64]uint64, direct *pluginRuntime) {
+	targetID := resolvePluginAsyncTarget(effect.targetID, virtualTargets)
+	index := -1
+	for i := range m.editors {
+		if m.editors[i].ID() == targetID {
+			index = i
+			break
+		}
+	}
+	if index < 0 || m.editors[index].Buffer == nil || m.editors[index].Buffer.Version() != effect.expectedVersion {
+		m.status = "Plugin highlights discarded: buffer changed while callback ran"
+		return
+	}
+	var err error
+	if effect.kind == pluginEffectSetHighlights {
+		err = m.setPluginHighlightsForEditor(index, effect.highlightRequest)
+	} else {
+		err = m.clearPluginHighlightsForEditor(index, effect.highlightNamespace)
+	}
+	if err != nil {
+		direct.Notify(err.Error(), "error")
+	}
+}
+
+func resolvePluginAsyncTarget(targetID uint64, virtualTargets map[uint64]uint64) uint64 {
+	if resolved, ok := virtualTargets[targetID]; ok {
+		return resolved
+	}
+	return targetID
+}
+
+func (r *pluginAsyncRuntime) applyBufferEffect(m *Model, direct *pluginRuntime, effect pluginAsyncEffect, virtualTargets map[uint64]uint64) {
+	snapshot := effect.snapshot
+	if snapshot == nil {
+		return
+	}
+	targetID := resolvePluginAsyncTarget(snapshot.targetID, virtualTargets)
+	idx := -1
+	for i := range m.editors {
+		if m.editors[i].ID() == targetID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || m.editors[idx].Buffer == nil || m.editors[idx].Buffer.Version() != snapshot.expectedVersion {
+		m.status = "Plugin edit discarded: buffer changed while callback ran"
+		return
+	}
+	previous := m.activeTab
+	m.activateTab(idx)
+	if snapshot.bufferChanged {
+		_ = direct.replaceBufferSnapshot(snapshot.rope, snapshot.cursor)
+	} else if snapshot.cursorChanged {
+		_ = direct.SetBufferCursor(snapshot.cursor)
+	}
+	m.activateTab(previous)
 }

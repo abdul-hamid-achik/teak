@@ -134,7 +134,12 @@ type InitializeResult struct {
 
 // DiagnosticsMsg is sent when new diagnostics arrive from the LSP server.
 type DiagnosticsMsg struct {
-	URI         string
+	URI string
+	// Version is the document version used to compute the publication when
+	// supplied by the server. HasVersion distinguishes an explicit version 0
+	// from older callers that do not provide one.
+	Version     int
+	HasVersion  bool
 	Diagnostics []Diagnostic
 }
 

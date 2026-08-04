@@ -3,6 +3,7 @@ package diff
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"teak/internal/ui"
 )
 
@@ -71,6 +72,24 @@ func TestDiffModelUpdateWithUpKey(t *testing.T) {
 	model, _ = model.Update(nil) // nil message should not change state
 	if model.ScrollY != 1 {
 		t.Errorf("Expected ScrollY to remain 1, got %d", model.ScrollY)
+	}
+}
+
+func TestDiffModelClampsScrollToLastVisiblePage(t *testing.T) {
+	lines := make([]DiffLine, 10)
+	model := New("test.go", lines, ui.DefaultTheme())
+	model.SetSize(80, 3)
+
+	for range 20 {
+		model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if got, want := model.ScrollY, 7; got != want {
+		t.Fatalf("scroll after down = %d, want %d", got, want)
+	}
+	model.ScrollY = 0
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if got, want := model.ScrollY, 7; got != want {
+		t.Fatalf("scroll after end = %d, want %d", got, want)
 	}
 }
 

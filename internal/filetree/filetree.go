@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -34,6 +35,16 @@ type DirExpandedMsg struct {
 	Path     string
 	Children []Entry
 	Err      error
+}
+
+// FilterReadyMsg contains a projection built from an immutable flattened tree
+// snapshot. Generation is checked before installation so a slower query can
+// never replace a newer one typed by the user.
+type FilterReadyMsg struct {
+	Generation uint64
+	Filter     string
+	Entries    []Entry
+	Err        error
 }
 
 // RefreshResult is an immutable directory-tree snapshot built away from the
@@ -62,6 +73,7 @@ const (
 	maxGitignoreBytes     = 1 << 20
 	maxGitignorePatterns  = 10_000
 	maxGitignoreLineBytes = 4 << 10
+	maxTreeFilterBytes    = 256
 )
 
 var errDirectoryEntryLimit = errors.New("tree directory entry limit exceeded")
@@ -97,6 +109,14 @@ type Model struct {
 	diagnostics       map[string]int    // path → worst severity (1=error, 2=warn, 3=info, 4=hint)
 	gitStatus         map[string]string // relative path → status ("M", "A", "D", "U")
 	gitignorePatterns []string          // patterns from .gitignore
+	showHidden        bool              // include dotfiles and dot-directories
+	showGitIgnored    bool              // include entries matching .gitignore
+	filter            string            // case-insensitive name filter
+	filterActive      bool              // whether the filter prompt owns typing
+	filterPending     bool              // whether an async projection is in flight
+	filterGeneration  uint64            // rejects results from older queries
+	filterCancel      context.CancelFunc
+	pendingSelection  string // selected path to restore after filtering
 	lastClickPath     string
 	lastClickTime     time.Time
 
@@ -110,7 +130,8 @@ type Model struct {
 }
 
 type flatEntryCache struct {
-	entries []Entry
+	entries []Entry // current visible projection
+	source  []Entry // unfiltered, visibility-aware flattened snapshot
 }
 
 // SetDiagnostics sets the diagnostics map (file paths + directory paths → worst severity).
@@ -121,6 +142,94 @@ func (m *Model) SetDiagnostics(diags map[string]int) {
 // SetGitStatus sets the git status map (relative paths → display status).
 func (m *Model) SetGitStatus(status map[string]string) {
 	m.gitStatus = status
+}
+
+// ShowHidden reports whether dotfiles and dot-directories are visible. The
+// default is true for compatibility with the existing tree, where .gitignore
+// and project metadata were always discoverable.
+func (m Model) ShowHidden() bool { return m.showHidden }
+
+// ShowGitIgnored reports whether entries matched by .gitignore are visible.
+func (m Model) ShowGitIgnored() bool { return m.showGitIgnored }
+
+// ToggleShowHidden changes hidden-entry visibility and keeps the cursor within
+// the newly visible projection of the tree.
+func (m *Model) ToggleShowHidden() bool {
+	m.showHidden = !m.showHidden
+	m.invalidateProjectionPreservingSelection()
+	return m.showHidden
+}
+
+// ToggleShowGitIgnored changes ignored-entry visibility and keeps the cursor
+// within the newly visible projection of the tree.
+func (m *Model) ToggleShowGitIgnored() bool {
+	m.showGitIgnored = !m.showGitIgnored
+	m.invalidateProjectionPreservingSelection()
+	return m.showGitIgnored
+}
+
+// SetShowHidden explicitly configures hidden-entry visibility. It is used when
+// a background tree snapshot replaces the live model.
+func (m *Model) SetShowHidden(show bool) {
+	if m.showHidden == show {
+		return
+	}
+	m.showHidden = show
+	m.invalidateProjectionPreservingSelection()
+}
+
+// SetShowGitIgnored explicitly configures ignored-entry visibility.
+func (m *Model) SetShowGitIgnored(show bool) {
+	if m.showGitIgnored == show {
+		return
+	}
+	m.showGitIgnored = show
+	m.invalidateProjectionPreservingSelection()
+}
+
+// Filter returns the current project-tree name filter.
+func (m Model) Filter() string { return m.filter }
+
+// FilterActive reports whether the tree currently owns text input for its
+// filter prompt.
+func (m Model) FilterActive() bool { return m.filterActive }
+
+// FilterPending reports whether the current query is waiting for its
+// projection command. While pending, navigation deliberately sees no entries
+// rather than acting on a previous query's stale result.
+func (m Model) FilterPending() bool { return m.filterPending }
+
+// StartFilter opens the filter prompt without changing the current query.
+// This is used when an asynchronous tree snapshot replaces the live model.
+func (m *Model) StartFilter() {
+	m.filterActive = true
+	m.ensureCursorVisible()
+}
+
+// SetFilter applies a case-insensitive substring filter to visible entry
+// names. Directories remain visible when a loaded descendant matches.
+func (m *Model) SetFilter(filter string) {
+	filter = normalizeTreeFilter(filter)
+	if m.filter == filter && !m.filterPending {
+		return
+	}
+	selected := m.pendingSelection
+	if selected == "" {
+		selected = m.selectedPath()
+	}
+	m.cancelFilter()
+	m.filter = filter
+	m.filterPending = false
+	m.pendingSelection = ""
+	m.invalidateProjectionCache()
+	m.restoreSelection(selected)
+	m.ensureCursorVisible()
+}
+
+// ClearFilter removes the name filter and closes its prompt.
+func (m *Model) ClearFilter() {
+	m.SetFilter("")
+	m.filterActive = false
 }
 
 // New creates a new file tree model rooted at the given directory.
@@ -138,6 +247,8 @@ func NewEmpty(root string, theme ui.Theme) Model {
 	m := Model{
 		Root:            root,
 		theme:           theme,
+		showHidden:      true,
+		showGitIgnored:  true,
 		sharedFlatCache: &flatEntryCache{},
 	}
 
@@ -438,13 +549,47 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.handleMouseWheel(msg)
 	case DirExpandedMsg:
 		return m.handleDirExpanded(msg)
+	case FilterReadyMsg:
+		return m.handleFilterReady(msg)
 	}
 	return m, nil
 }
 
 func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if m.filterActive {
+		switch msg.String() {
+		case "esc", "escape":
+			m.ClearFilter()
+			return m, nil
+		case "enter":
+			if m.filterPending {
+				return m, nil
+			}
+			m.filterActive = false
+			// Continue into the ordinary Enter handling below so the filtered
+			// selection can be opened without a second keystroke.
+		case "backspace", "delete":
+			return m, m.setFilterForInput(deleteLastFilterRune(m.filter))
+		case "ctrl+u":
+			return m, m.setFilterForInput("")
+		}
+		if msg.Text != "" && !strings.HasPrefix(msg.String(), "ctrl+") && !strings.HasPrefix(msg.String(), "alt+") {
+			return m, m.setFilterForInput(m.filter + msg.Text)
+		}
+	}
+
 	flat := m.flatEntries()
 	switch msg.String() {
+	case "/", "slash":
+		m.filterActive = true
+		m.ensureCursorVisible()
+		return m, nil
+	case "alt+h", "ctrl+h", "ctrl+.":
+		m.ToggleShowHidden()
+		return m, nil
+	case "alt+i", "ctrl+shift+h", "ctrl+shift+.", "ctrl+k":
+		m.ToggleShowGitIgnored()
+		return m, nil
 	case "up":
 		if m.Cursor > 0 {
 			m.Cursor--
@@ -474,7 +619,10 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	if mouse.Y < 0 || (m.Height > 0 && mouse.Y >= m.Height) {
 		return m, nil
 	}
-	idx := m.ScrollY + mouse.Y
+	if m.filterActive && mouse.Y == 0 {
+		return m, nil
+	}
+	idx := m.ScrollY + mouse.Y - m.bodyOffset()
 	flat := m.flatEntries()
 	if idx < 0 || idx >= len(flat) {
 		return m, nil
@@ -504,7 +652,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	mouse := msg.Mouse()
 	flat := m.flatEntries()
-	maxScroll := len(flat) - m.Height
+	maxScroll := len(flat) - m.bodyHeight()
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -530,13 +678,40 @@ func (m Model) handleDirExpanded(msg DirExpandedMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleFilterReady(msg FilterReadyMsg) (Model, tea.Cmd) {
+	if !m.filterPending || msg.Generation != m.filterGeneration || msg.Filter != m.filter {
+		return m, nil
+	}
+	m.filterCancel = nil
+	m.filterPending = false
+	if msg.Err != nil {
+		if errors.Is(msg.Err, context.Canceled) {
+			return m, nil
+		}
+		m.invalidateProjectionCache()
+		return m, nil
+	}
+	if m.sharedFlatCache == nil {
+		m.sharedFlatCache = &flatEntryCache{}
+	}
+	m.cachedFlat = msg.Entries
+	m.sharedFlatCache.entries = msg.Entries
+	m.restoreSelection(m.pendingSelection)
+	m.pendingSelection = ""
+	m.ensureCursorVisible()
+	return m, nil
+}
+
 // EntryAtY returns the entry at the given screen Y position, or nil.
 func (m Model) EntryAtY(y int) *Entry {
 	if y < 0 || (m.Height > 0 && y >= m.Height) {
 		return nil
 	}
+	if m.filterActive && y < m.bodyOffset() {
+		return nil
+	}
 	flat := m.flatEntries()
-	idx := m.ScrollY + y
+	idx := m.ScrollY + y - m.bodyOffset()
 	if idx < 0 || idx >= len(flat) {
 		return nil
 	}
@@ -613,15 +788,16 @@ func setDirectoryLoadResultInSlice(entries []Entry, path string, children []Entr
 
 func (m *Model) ensureCursorVisible() {
 	m.clampCursor()
-	if m.Height <= 0 {
+	bodyHeight := m.bodyHeight()
+	if bodyHeight <= 0 {
 		m.ScrollY = 0
 		return
 	}
 	if m.Cursor < m.ScrollY {
 		m.ScrollY = m.Cursor
 	}
-	if m.Cursor >= m.ScrollY+m.Height {
-		m.ScrollY = m.Cursor - m.Height + 1
+	if m.Cursor >= m.ScrollY+bodyHeight {
+		m.ScrollY = m.Cursor - bodyHeight + 1
 	}
 }
 
@@ -638,7 +814,7 @@ func (m *Model) clampCursor() {
 	if m.Cursor >= len(flat) {
 		m.Cursor = len(flat) - 1
 	}
-	maxScroll := max(0, len(flat)-max(1, m.Height))
+	maxScroll := max(0, len(flat)-max(1, m.bodyHeight()))
 	if m.ScrollY < 0 {
 		m.ScrollY = 0
 	}
@@ -654,8 +830,14 @@ func (m *Model) flatEntries() []Entry {
 	if m.cachedFlat != nil {
 		return m.cachedFlat
 	}
-	var flat []Entry
-	flattenEntries(m.Entries, &flat)
+	if m.filterPending {
+		return nil
+	}
+	source := m.baseFlatEntries()
+	flat := source
+	if m.filter != "" {
+		flat, _ = filterFlatEntriesContext(context.Background(), source, m.filter)
+	}
 	m.cachedFlat = flat
 	if m.sharedFlatCache != nil {
 		m.sharedFlatCache.entries = flat
@@ -663,18 +845,238 @@ func (m *Model) flatEntries() []Entry {
 	return flat
 }
 
+func (m *Model) baseFlatEntries() []Entry {
+	if m.sharedFlatCache == nil {
+		m.sharedFlatCache = &flatEntryCache{}
+	}
+	if m.sharedFlatCache.source != nil {
+		return m.sharedFlatCache.source
+	}
+	var visible []Entry
+	if m.showHidden && m.showGitIgnored {
+		visible = m.Entries
+	} else {
+		visible = visibleEntries(m.Entries, m.showHidden, m.showGitIgnored, "")
+	}
+	var source []Entry
+	flattenEntries(visible, &source)
+	if source == nil {
+		source = make([]Entry, 0)
+	}
+	m.sharedFlatCache.source = source
+	return source
+}
+
+func (m Model) bodyOffset() int {
+	if m.filterActive {
+		return 1
+	}
+	return 0
+}
+
+func (m Model) bodyHeight() int {
+	return max(0, m.Height-m.bodyOffset())
+}
+
+func deleteLastFilterRune(value string) string {
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	return string(runes[:len(runes)-1])
+}
+
+func normalizeTreeFilter(filter string) string {
+	if len(filter) > maxTreeFilterBytes {
+		filter = filter[:maxTreeFilterBytes]
+		for !utf8.ValidString(filter) {
+			filter = filter[:len(filter)-1]
+		}
+	}
+	return filter
+}
+
+func (m *Model) setFilterForInput(filter string) tea.Cmd {
+	filter = normalizeTreeFilter(filter)
+	if m.filter == filter && m.filterPending {
+		return nil
+	}
+	selected := m.pendingSelection
+	if selected == "" {
+		selected = m.selectedPath()
+	}
+	m.cancelFilter()
+	m.filter = filter
+	m.invalidateProjectionCache()
+	if filter == "" {
+		m.filterPending = false
+		m.pendingSelection = ""
+		m.restoreSelection(selected)
+		m.ensureCursorVisible()
+		return nil
+	}
+	source := m.baseFlatEntries()
+	m.filterGeneration++
+	generation := m.filterGeneration
+	ctx, cancel := context.WithCancel(context.Background())
+	m.filterCancel = cancel
+	m.filterPending = true
+	m.pendingSelection = selected
+	return func() tea.Msg {
+		entries, err := filterFlatEntriesContext(ctx, source, filter)
+		return FilterReadyMsg{
+			Generation: generation,
+			Filter:     filter,
+			Entries:    entries,
+			Err:        err,
+		}
+	}
+}
+
+func (m *Model) cancelFilter() {
+	if m.filterCancel != nil {
+		m.filterCancel()
+		m.filterCancel = nil
+	}
+	m.filterPending = false
+}
+
+func (m Model) visibleEntries() []Entry {
+	query := strings.ToLower(m.filter)
+	if m.showHidden && m.showGitIgnored && query == "" {
+		return m.Entries
+	}
+	return visibleEntries(m.Entries, m.showHidden, m.showGitIgnored, query)
+}
+
+func filterFlatEntriesContext(ctx context.Context, source []Entry, query string) ([]Entry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	query = strings.ToLower(query)
+	keep := make([]bool, len(source))
+	ancestors := make([]int, 0, 16)
+	for i, entry := range source {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		for len(ancestors) > 0 && source[ancestors[len(ancestors)-1]].Depth >= entry.Depth {
+			ancestors = ancestors[:len(ancestors)-1]
+		}
+		if strings.Contains(strings.ToLower(entry.Name), query) {
+			keep[i] = true
+			for _, ancestor := range ancestors {
+				keep[ancestor] = true
+			}
+		}
+		if entry.IsDir {
+			ancestors = append(ancestors, i)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries := make([]Entry, 0, len(source))
+	for i, entry := range source {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if keep[i] {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+func visibleEntries(entries []Entry, showHidden, showGitIgnored bool, query string) []Entry {
+	filtered := make([]Entry, 0, len(entries))
+	for _, entry := range entries {
+		if !showHidden && isHiddenEntry(entry.Name) {
+			continue
+		}
+		if !showGitIgnored && entry.IsGitIgnored {
+			continue
+		}
+
+		children := entry.Children
+		if entry.IsDir && entry.Expanded && len(entry.Children) > 0 {
+			children = visibleEntries(entry.Children, showHidden, showGitIgnored, query)
+		}
+		matches := query == "" || strings.Contains(strings.ToLower(entry.Name), query)
+		if query != "" && entry.IsDir && len(children) > 0 {
+			matches = true
+		}
+		if !matches {
+			continue
+		}
+		entry.Children = children
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func isHiddenEntry(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "." && name != ".."
+}
+
 func (m *Model) invalidateFlatCache() {
+	m.cancelFilter()
+	m.filterGeneration++
+	m.pendingSelection = ""
+	m.cachedFlat = nil
+	if m.sharedFlatCache != nil {
+		m.sharedFlatCache.entries = nil
+		m.sharedFlatCache.source = nil
+	}
+}
+
+func (m *Model) invalidateProjectionCache() {
 	m.cachedFlat = nil
 	if m.sharedFlatCache != nil {
 		m.sharedFlatCache.entries = nil
 	}
 }
 
+func (m *Model) invalidateProjectionPreservingSelection() {
+	selected := m.pendingSelection
+	if selected == "" {
+		selected = m.selectedPath()
+	}
+	m.invalidateFlatCache()
+	m.restoreSelection(selected)
+	m.ensureCursorVisible()
+}
+
+func (m *Model) restoreSelection(path string) {
+	if path == "" {
+		return
+	}
+	for index, entry := range m.flatEntries() {
+		if entry.Path == path {
+			m.Cursor = index
+			return
+		}
+	}
+}
+
 func flattenEntries(entries []Entry, flat *[]Entry) {
+	flattenEntriesAtDepth(entries, 0, flat)
+}
+
+func flattenEntriesAtDepth(entries []Entry, depth int, flat *[]Entry) {
 	for _, e := range entries {
+		// The tree is normally populated with depths from readDirEntries, but
+		// snapshots and plugin-created fixtures may omit them. Deriving depth
+		// from the structural recursion keeps rendering and async filtering
+		// correct without trusting a stale copied field.
+		e.Depth = depth
 		*flat = append(*flat, e)
 		if e.IsDir && e.Expanded && e.Children != nil {
-			flattenEntries(e.Children, flat)
+			flattenEntriesAtDepth(e.Children, depth+1, flat)
 		}
 	}
 }
@@ -884,13 +1286,25 @@ func (m Model) View() string {
 	}
 
 	flat := m.flatEntries()
+	offset := m.bodyOffset()
 	var sb strings.Builder
 
 	for i := range m.Height {
-		idx := m.ScrollY + i
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
+		if m.filterActive && i == 0 {
+			sb.WriteString(m.renderFilterLine())
+			continue
+		}
+		if m.filterPending && i == offset {
+			status := m.cachedStyles.base.Background(m.cachedStyles.entryBg).
+				Foreground(ui.Nord3).
+				Render("  Filtering...")
+			sb.WriteString(ansi.Truncate(status, m.Width, ""))
+			continue
+		}
+		idx := m.ScrollY + i - offset
 		if idx < len(flat) {
 			entry := flat[idx]
 			isCursor := idx == m.Cursor
@@ -1038,8 +1452,23 @@ func (m Model) View() string {
 	return sb.String()
 }
 
+func (m Model) renderFilterLine() string {
+	text := "/ " + m.filter
+	if m.filter == "" {
+		text += "type to filter"
+	}
+	text += "_"
+	if ansi.StringWidth(text) > m.Width {
+		text = ansi.Truncate(text, m.Width, "")
+	} else if remaining := m.Width - ansi.StringWidth(text); remaining > 0 {
+		text += strings.Repeat(" ", remaining)
+	}
+	return ansi.Truncate(m.theme.TreeCursor.Render(text), m.Width, "")
+}
+
 // SetSize updates the tree dimensions.
 func (m *Model) SetSize(width, height int) {
 	m.Width = max(0, width)
 	m.Height = max(0, height)
+	m.ensureCursorVisible()
 }

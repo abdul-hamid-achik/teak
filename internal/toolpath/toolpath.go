@@ -15,12 +15,17 @@
 package toolpath
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,6 +35,39 @@ import (
 // session takes effect, and a hit must expire so that uninstalling or
 // relocating one is noticed.
 const cacheTTL = 30 * time.Second
+
+const (
+	// Version probes run external shims and language-tool wrappers. Five
+	// seconds keeps the health contract bounded while leaving enough headroom
+	// for a busy or race-instrumented host to schedule the child process.
+	versionProbeTimeout = 5 * time.Second
+	maxProbeOutput      = 64 << 10
+)
+
+// ErrVersionProbeUnsupported means Teak does not know a safe, non-interactive
+// version command for the requested tool. It is different from a failed probe:
+// callers can report "unsupported" without claiming that the executable is
+// broken.
+var ErrVersionProbeUnsupported = errors.New("version probe is not configured")
+
+var versionProbeArgs = map[string][]string{
+	"bash-language-server":       {"--version"},
+	"clangd":                     {"--version"},
+	"codemap":                    {"--version"},
+	"dlv":                        {"version"},
+	"git":                        {"--version"},
+	"glyph":                      {"--version"},
+	"gopls":                      {"version"},
+	"hitspec":                    {"--version"},
+	"lua-language-server":        {"--version"},
+	"opencode":                   {"--version"},
+	"pyright-langserver":         {"--version"},
+	"rg":                         {"--version"},
+	"rust-analyzer":              {"--version"},
+	"typescript-language-server": {"--version"},
+	"vecgrep":                    {"--version"},
+	"yaml-language-server":       {"--version"},
+}
 
 // MissingToolError reports a binary that could not be resolved. Hint carries an
 // install command when one is known, so callers can render actionable UI
@@ -55,21 +93,32 @@ func IsMissing(err error) bool {
 // installHints maps a binary to the command that installs it. Tools absent from
 // this table still resolve normally; they just produce an error without a hint.
 var installHints = map[string]string{
-	"codemap":                    "brew install codemap",
-	"vecgrep":                    "brew install vecgrep",
-	"bob":                        "brew install bob",
-	"tvault":                     "brew install tvault",
-	"monitor":                    "brew install monitor",
-	"fcheap":                     "go install github.com/abdulachik/fcheap@latest",
-	"dlv":                        "go install github.com/go-delve/delve/cmd/dlv@latest",
-	"gopls":                      "go install golang.org/x/tools/gopls@latest",
-	"rust-analyzer":              "rustup component add rust-analyzer",
-	"typescript-language-server": "npm install -g typescript-language-server typescript",
-	"pyright-langserver":         "npm install -g pyright",
-	"bash-language-server":       "npm install -g bash-language-server",
-	"yaml-language-server":       "npm install -g yaml-language-server",
-	"clangd":                     "brew install llvm",
-	"opencode":                   "curl -fsSL https://opencode.ai/install | bash",
+	"codemap":                     "brew install codemap",
+	"vecgrep":                     "brew install abdul-hamid-achik/tap/vecgrep",
+	"bob":                         "brew install bob",
+	"tvault":                      "brew install tvault",
+	"monitor":                     "brew install monitor",
+	"fcheap":                      "go install github.com/abdulachik/fcheap@latest",
+	"dlv":                         "go install github.com/go-delve/delve/cmd/dlv@latest",
+	"gopls":                       "go install golang.org/x/tools/gopls@latest",
+	"pylsp":                       "python -m pip install python-lsp-server",
+	"rust-analyzer":               "rustup component add rust-analyzer",
+	"typescript-language-server":  "npm install -g typescript-language-server typescript",
+	"pyright-langserver":          "npm install -g pyright",
+	"bash-language-server":        "npm install -g bash-language-server",
+	"yaml-language-server":        "npm install -g yaml-language-server",
+	"clangd":                      "brew install llvm",
+	"jdtls":                       "brew install jdtls",
+	"lua-language-server":         "brew install lua-language-server",
+	"zls":                         "brew install zls",
+	"solargraph":                  "gem install solargraph",
+	"elixir-ls":                   "brew install elixir-ls",
+	"vscode-css-language-server":  "npm install -g vscode-langservers-extracted",
+	"vscode-html-language-server": "npm install -g vscode-langservers-extracted",
+	"vscode-json-language-server": "npm install -g vscode-langservers-extracted",
+	"opencode":                    "curl -fsSL https://opencode.ai/install | bash",
+	"OmniSharp":                   "dotnet tool install --global omnisharp-roslyn",
+	"bp":                          "go install github.com/abdul-hamid-achik/blueprint/cmd/bp@latest",
 }
 
 // Hint returns the install command for a binary, or "" when none is known.
@@ -99,7 +148,12 @@ func New(overrides map[string]string) *Resolver {
 	copied := make(map[string]string, len(overrides))
 	for name, path := range overrides {
 		if path != "" {
-			copied[name] = path
+			if !filepath.IsAbs(path) {
+				if absolute, err := filepath.Abs(path); err == nil {
+					path = absolute
+				}
+			}
+			copied[name] = filepath.Clean(path)
 		}
 	}
 	return &Resolver{
@@ -187,14 +241,31 @@ func (r *Resolver) Resolve(name string) (string, error) {
 	}
 	// A name that already carries a separator is a path, not a PATH lookup.
 	if filepath.IsAbs(name) || filepath.Base(name) != name {
-		if isExecutable(name) {
-			return name, nil
+		candidate := name
+		if !filepath.IsAbs(candidate) {
+			absolute, err := filepath.Abs(candidate)
+			if err != nil {
+				return "", &MissingToolError{Tool: name, Hint: "resolve explicit path: " + err.Error()}
+			}
+			candidate = absolute
+		}
+		if isExecutable(candidate) {
+			return filepath.Clean(candidate), nil
 		}
 		return "", &MissingToolError{Tool: name}
 	}
 
-	now := r.now()
 	r.mu.Lock()
+	if r.now == nil {
+		r.now = time.Now
+	}
+	if r.cache == nil {
+		r.cache = make(map[string]cacheEntry)
+	}
+	if r.extraDirs == nil {
+		r.extraDirs = wellKnownDirs()
+	}
+	now := r.now()
 	if entry, ok := r.cache[name]; ok && now.Before(entry.expires) {
 		r.mu.Unlock()
 		return entry.path, entry.err
@@ -263,11 +334,240 @@ func (r *Resolver) Invalidate(names ...string) {
 // Command builds an *exec.Cmd with an absolute Path, so callers never hand a
 // bare name to os/exec and never depend on the inherited PATH.
 func (r *Resolver) Command(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	path, err := r.Resolve(name)
 	if err != nil {
 		return nil, err
 	}
-	return exec.CommandContext(ctx, path, args...), nil
+	cmd := exec.CommandContext(ctx, path, args...)
+	ConfigureCommand(cmd)
+	return cmd, nil
+}
+
+// ConfigureCommand bounds a resolved command and, on Unix, makes context
+// cancellation terminate its process group. Callers that expose command
+// execution to scripts or agents should use it so descendants cannot keep
+// inherited output pipes alive after the direct process exits.
+func ConfigureCommand(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	configureCommandProcess(cmd)
+	cmd.WaitDelay = 150 * time.Millisecond
+}
+
+// TerminateCommand performs the strongest bounded termination available for a
+// command configured by this package. On Unix, Command's Cancel callback
+// kills the isolated process group; on other platforms it falls back to the
+// direct process cancellation supplied by os/exec.
+func TerminateCommand(cmd *exec.Cmd) error {
+	if cmd == nil {
+		return nil
+	}
+	if cmd.Cancel != nil {
+		return cmd.Cancel()
+	}
+	if cmd.Process == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
+}
+
+// HasVersionProbe reports whether Version knows a safe command for name.
+func (r *Resolver) HasVersionProbe(name string) bool {
+	_, ok := versionProbeArgs[name]
+	return ok
+}
+
+// Version executes a bounded, non-interactive version probe. It resolves the
+// executable through the same absolute-path path as normal tool invocations,
+// caps combined stdout/stderr, and never invokes a shell. A failed probe is
+// returned as an error so onboarding can distinguish an installed-but-broken
+// binary from a merely missing one.
+func (r *Resolver) Version(ctx context.Context, name string) (string, error) {
+	return r.version(ctx, name, nil)
+}
+
+// VersionWithEnv executes the same bounded version probe as Version while
+// forwarding explicit environment overrides. Language servers often depend on
+// a project-selected SDK, PATH, or feature flag; health probes must observe
+// the same configured environment as the interactive launcher or they can
+// report a working server as broken.
+func (r *Resolver) VersionWithEnv(ctx context.Context, name string, env map[string]string) (string, error) {
+	return r.version(ctx, name, env)
+}
+
+func (r *Resolver) version(ctx context.Context, name string, env map[string]string) (string, error) {
+	args, ok := versionProbeArgs[name]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrVersionProbeUnsupported, name)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
+	defer cancel()
+	cmd, err := r.Command(probeCtx, name, args...)
+	if err != nil {
+		return "", err
+	}
+	if len(env) > 0 {
+		cmd.Env = mergeEnvironment(os.Environ(), env)
+	}
+	// A resolved tool may be a shim or wrapper that launches a child process;
+	// keep the whole process tree bounded during the health check.
+	ConfigureCommand(cmd)
+	var output cappedProbeBuffer
+	output.onLimit = func() { _ = TerminateCommand(cmd) }
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		if probeErr := probeCtx.Err(); probeErr != nil {
+			return "", fmt.Errorf("%s version probe: %w", name, probeErr)
+		}
+		if output.Truncated() {
+			return "", fmt.Errorf("%s version probe output exceeds %d bytes", name, maxProbeOutput)
+		}
+		detail := firstProbeOutputLine(output.String())
+		if detail == "" {
+			return "", fmt.Errorf("%s version probe: %w", name, err)
+		}
+		return "", fmt.Errorf("%s version probe: %w: %s", name, err, detail)
+	}
+	if output.Truncated() {
+		return "", fmt.Errorf("%s version probe output exceeds %d bytes", name, maxProbeOutput)
+	}
+	for _, line := range strings.Split(output.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("%s version probe returned no output", name)
+}
+
+func mergeEnvironment(base []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(base)+len(overrides))
+	replaced := make(map[string]struct{}, len(overrides))
+	for _, entry := range base {
+		name, _, hasValue := strings.Cut(entry, "=")
+		value, overridden := overrides[name]
+		if !hasValue || !overridden {
+			result = append(result, entry)
+			continue
+		}
+		if _, alreadyReplaced := replaced[name]; alreadyReplaced {
+			continue
+		}
+		result = append(result, name+"="+value)
+		replaced[name] = struct{}{}
+	}
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, exists := replaced[name]; !exists {
+			result = append(result, name+"="+overrides[name])
+		}
+	}
+	return result
+}
+
+func firstProbeOutputLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		const maxDetail = 256
+		if len(line) > maxDetail {
+			return line[:maxDetail] + "..."
+		}
+		return line
+	}
+	return ""
+}
+
+// cappedProbeBuffer prevents a malformed or unexpectedly verbose tool from
+// turning a health check into an unbounded allocation.
+type cappedProbeBuffer struct {
+	mu        sync.Mutex
+	limitOnce sync.Once
+	bytes.Buffer
+	truncated bool
+	onLimit   func()
+}
+
+func (b *cappedProbeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	remaining := maxProbeOutput - b.Len()
+	if remaining <= 0 {
+		b.truncated = true
+		b.mu.Unlock()
+		b.limitOnce.Do(func() {
+			if b.onLimit != nil {
+				b.onLimit()
+			}
+		})
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = b.Buffer.Write(p[:remaining])
+		b.truncated = true
+		b.mu.Unlock()
+		b.limitOnce.Do(func() {
+			if b.onLimit != nil {
+				b.onLimit()
+			}
+		})
+		return len(p), nil
+	}
+	n, err := b.Buffer.Write(p)
+	b.mu.Unlock()
+	return n, err
+}
+
+// ReadFrom overrides bytes.Buffer.ReadFrom. Because bytes.Buffer is embedded,
+// its optimized implementation would otherwise be promoted and bypass Write,
+// defeating the probe's output cap.
+func (b *cappedProbeBuffer) ReadFrom(r io.Reader) (int64, error) {
+	buf := make([]byte, 32<<10)
+	var total int64
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			written, writeErr := b.Write(buf[:n])
+			total += int64(written)
+			if b.Truncated() {
+				return total, nil
+			}
+			if writeErr != nil {
+				return total, writeErr
+			}
+		}
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+func (b *cappedProbeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
+}
+
+func (b *cappedProbeBuffer) Truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.truncated
 }
 
 // SearchPath returns the directories Resolve consults after PATH. Exposed for
@@ -318,4 +618,14 @@ func Invalidate(names ...string) { Default().Invalidate(names...) }
 // Command calls Command on the default Resolver.
 func Command(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 	return Default().Command(ctx, name, args...)
+}
+
+// Version calls Version on the default Resolver.
+func Version(ctx context.Context, name string) (string, error) {
+	return Default().Version(ctx, name)
+}
+
+// VersionWithEnv calls VersionWithEnv on the default resolver.
+func VersionWithEnv(ctx context.Context, name string, env map[string]string) (string, error) {
+	return Default().VersionWithEnv(ctx, name, env)
 }

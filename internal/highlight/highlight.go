@@ -3,6 +3,7 @@ package highlight
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -46,6 +47,20 @@ func (t StyledToken) Render(text string) string {
 	return t.Style.Render(text)
 }
 
+// WriteTo renders a token directly into a string writer. The fast path writes
+// its precomputed SGR pieces separately, avoiding one temporary concatenated
+// string per token in the viewport frame. It is byte-for-byte equivalent to
+// Render; styles that depend on their input still use lipgloss.Render.
+func (t StyledToken) WriteTo(w io.StringWriter, text string) {
+	if t.FastSGR && !strings.ContainsRune(text, '\t') {
+		_, _ = w.WriteString(t.Prefix)
+		_, _ = w.WriteString(text)
+		_, _ = w.WriteString(t.Suffix)
+		return
+	}
+	_, _ = w.WriteString(t.Style.Render(text))
+}
+
 // ViewportSnapshot is an immutable slice of a rope captured by the UI goroutine
 // before a viewport tokenization command is started. Tokenization commands must
 // not retain a mutable Buffer: an edit may replace its rope while the command is
@@ -73,6 +88,17 @@ type tokenRange struct {
 	end   int
 }
 
+// lineEdit maps current document lines back to the dense cache that existed
+// before a structural edit. Keeping these edits lazy avoids copying a
+// document-sized token slice from Bubble Tea's Update path on every newline.
+type lineEdit struct {
+	start        int
+	newLineCount int
+	delta        int
+}
+
+const maxPendingLineEdits = 256
+
 // Highlighter provides syntax highlighting for a file.
 type Highlighter struct {
 	lexer          chroma.Lexer
@@ -87,6 +113,7 @@ type Highlighter struct {
 	theme          ui.Theme
 	tokenizedStart int
 	tokenizedEnd   int
+	pendingEdits   []lineEdit
 }
 
 // New creates a new Highlighter based on the filename for language detection.
@@ -118,6 +145,7 @@ func (h *Highlighter) Tokenize(content []byte) {
 	h.coveredRanges = []tokenRange{{start: 0, end: len(h.lines)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(h.lines)
+	h.pendingEdits = nil
 	h.dirty = false
 }
 
@@ -293,6 +321,7 @@ func (h *Highlighter) SetLines(lines [][]StyledToken) {
 	h.coveredRanges = []tokenRange{{start: 0, end: len(lines)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(lines)
+	h.pendingEdits = nil
 	h.dirty = false
 }
 
@@ -420,6 +449,7 @@ func (h *Highlighter) TokenizePrefix(content []byte, maxLines int) {
 	h.coveredRanges = []tokenRange{{start: 0, end: len(result)}}
 	h.tokenizedStart = 0
 	h.tokenizedEnd = len(result)
+	h.pendingEdits = nil
 	h.dirty = false
 }
 
@@ -531,10 +561,32 @@ func (h *Highlighter) Line(lineNum int) []StyledToken {
 	if line, ok := h.sparseLines[lineNum]; ok {
 		return line
 	}
-	if h.lines == nil || lineNum >= len(h.lines) {
+	physicalLine, ok := h.denseLine(lineNum)
+	if !ok || h.lines == nil || physicalLine >= len(h.lines) {
 		return nil
 	}
-	return h.lines[lineNum]
+	return h.lines[physicalLine]
+}
+
+// denseLine maps a current logical line to the old dense cache. Structural
+// edits are applied in reverse order. A line inside a replaced range is
+// unavailable until asynchronous tokenization installs fresh tokens.
+func (h *Highlighter) denseLine(line int) (int, bool) {
+	for i := len(h.pendingEdits) - 1; i >= 0; i-- {
+		edit := h.pendingEdits[i]
+		newEnd := edit.start + edit.newLineCount
+		if line < edit.start {
+			continue
+		}
+		if line < newEnd {
+			return 0, false
+		}
+		line -= edit.delta
+	}
+	if line < 0 {
+		return 0, false
+	}
+	return line, true
 }
 
 // LineCount returns the number of tokenized lines.
@@ -591,24 +643,31 @@ func (h *Highlighter) shiftLines(startLine, endLine, lineDelta int) {
 		return
 	}
 	// Typing a character neither adds nor removes lines, which is the common
-	// case: only the edited lines need dropping, with no reallocation.
+	// case: only the edited lines need dropping, with no reallocation. Resolve
+	// through pending structural edits because the dense cache may still use
+	// coordinates from an older document version.
 	if lineDelta == 0 {
-		for line := startLine; line <= endLine && line < len(h.lines); line++ {
-			h.lines[line] = nil
+		for line := startLine; line <= endLine; line++ {
+			if physicalLine, ok := h.denseLine(line); ok && physicalLine < len(h.lines) {
+				h.lines[physicalLine] = nil
+			}
 		}
 		return
 	}
 
-	newLen := max(len(h.lines)+lineDelta, 0)
-	shifted := make([][]StyledToken, newLen)
-	copy(shifted, h.lines[:min(startLine, len(h.lines), newLen)])
-	for line := endLine + 1; line < len(h.lines); line++ {
-		target := line + lineDelta
-		if target >= 0 && target < newLen {
-			shifted[target] = h.lines[line]
-		}
+	if len(h.pendingEdits) >= maxPendingLineEdits {
+		// A full pass will be scheduled by the editor. Dropping the dense cache
+		// is preferable to retaining an unbounded edit history or making every
+		// render walk thousands of transformations.
+		h.lines = nil
+		h.pendingEdits = nil
+		return
 	}
-	h.lines = shifted
+	h.pendingEdits = append(h.pendingEdits, lineEdit{
+		start:        startLine,
+		newLineCount: max(0, endLine-startLine+1+lineDelta),
+		delta:        lineDelta,
+	})
 }
 
 // shiftSparseLines moves the sparse token cache to follow an edit.
@@ -640,6 +699,7 @@ func (h *Highlighter) Invalidate() {
 	// constant-time and avoids any allocation proportional to document size.
 	h.lines = nil
 	h.sparseLines = nil
+	h.pendingEdits = nil
 	h.lineCount = 0
 	h.coveredRanges = nil
 	h.tokenizedStart = -1

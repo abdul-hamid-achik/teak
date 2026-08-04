@@ -77,6 +77,28 @@ func TestDisabledServerIsRetriedAfterCooldown(t *testing.T) {
 	}
 }
 
+func TestServerHealthReportsRetryingCooldown(t *testing.T) {
+	m, clock, _ := newFailingManager(t, errors.New("boom"))
+
+	for range maxRetries {
+		m.EnsureClient("main.tst")
+	}
+
+	health := m.ServerHealth("main.tst")
+	if health.Name != "test-language-server" {
+		t.Fatalf("server name = %q, want test-language-server", health.Name)
+	}
+	if health.State != "retrying" {
+		t.Fatalf("server state = %q, want retrying", health.State)
+	}
+	if health.Attempts != maxRetries {
+		t.Fatalf("server attempts = %d, want %d", health.Attempts, maxRetries)
+	}
+	if !health.RetryAt.After(*clock) {
+		t.Fatalf("retry deadline = %v, want after %v", health.RetryAt, *clock)
+	}
+}
+
 func TestCapacityExhaustionDoesNotBurnRetryBudget(t *testing.T) {
 	m, _, attempts := newFailingManager(t, errors.New("boom"))
 	// Saturate the shared budget so tryAcquire fails before any start happens.

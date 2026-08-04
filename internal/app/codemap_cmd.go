@@ -2,22 +2,48 @@ package app
 
 import (
 	"context"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/codemap"
 	"teak/internal/editor"
+	"teak/internal/overlay"
 )
 
 // codemapResultMsg carries the result of a codemap query.
 type codemapResultMsg struct {
-	kind    string
-	symbols []codemap.Symbol
-	err     error
+	kind       string
+	symbols    []codemap.Symbol
+	err        error
+	generation uint64
+}
+
+type codemapSymbolPickerMsg struct {
+	Symbol codemap.Symbol
+}
+
+const maxCodemapPickerItems = 500
+
+// runCodemapQuery resolves the word at the cursor and runs a codemap query.
+func (m Model) startCodemapQuery(kind string) (Model, tea.Cmd) {
+	if m.codemapCancel != nil {
+		m.codemapCancel()
+	}
+	m.codemapGeneration++
+	ctx, cancel := context.WithCancel(context.Background())
+	m.codemapCancel = cancel
+	cmd := m.runCodemapQuery(kind, m.codemapGeneration, ctx)
+	if cmd == nil {
+		cancel()
+		m.codemapCancel = nil
+	}
+	return m, cmd
 }
 
 // runCodemapQuery resolves the word at the cursor and runs a codemap query.
-func (m Model) runCodemapQuery(kind string) tea.Cmd {
+func (m Model) runCodemapQuery(kind string, generation uint64, ctx context.Context) tea.Cmd {
 	ed := m.activeEditor()
 	if ed == nil {
 		return nil
@@ -31,10 +57,8 @@ func (m Model) runCodemapQuery(kind string) tea.Cmd {
 
 	rootDir := m.rootDir
 	return func() tea.Msg {
-		ctx := context.Background()
-
 		if err := codemap.EnsureReady(ctx, rootDir); err != nil {
-			return codemapResultMsg{kind: kind, err: err}
+			return codemapResultMsg{kind: kind, generation: generation, err: err}
 		}
 
 		var symbols []codemap.Symbol
@@ -53,7 +77,7 @@ func (m Model) runCodemapQuery(kind string) tea.Cmd {
 				}
 			}
 		}
-		return codemapResultMsg{kind: kind, symbols: symbols, err: err}
+		return codemapResultMsg{kind: kind, generation: generation, symbols: symbols, err: err}
 	}
 }
 
@@ -78,4 +102,47 @@ func wordAtCursor(ed *editor.Editor) string {
 		end++
 	}
 	return strings.TrimSpace(string(line[start:end]))
+}
+
+func codemapSymbolsToPickerItems(symbols []codemap.Symbol, rootDir string) []overlay.PickerItem {
+	if len(symbols) > maxCodemapPickerItems {
+		symbols = symbols[:maxCodemapPickerItems]
+	}
+	items := make([]overlay.PickerItem, 0, len(symbols))
+	for _, symbol := range symbols {
+		label := symbol.Symbol
+		if label == "" {
+			label = symbol.FQN
+		}
+		if label == "" {
+			label = "<anonymous>"
+		}
+		file := symbol.File
+		if rootDir != "" && !filepath.IsAbs(file) {
+			file = filepath.Join(rootDir, file)
+		}
+		rel := file
+		if rootDir != "" {
+			if candidate, err := filepath.Rel(rootDir, file); err == nil {
+				rel = candidate
+			}
+		}
+		location := rel
+		if location == "" {
+			location = "<unknown file>"
+		}
+		if symbol.StartLine > 0 {
+			location += ":" + strconv.Itoa(symbol.StartLine)
+		}
+		description := location
+		if symbol.Kind != "" {
+			description = symbol.Kind + " · " + description
+		}
+		items = append(items, overlay.PickerItem{
+			Label:       label,
+			Description: description,
+			Value:       codemapSymbolPickerMsg{Symbol: symbol},
+		})
+	}
+	return items
 }

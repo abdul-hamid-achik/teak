@@ -67,6 +67,7 @@ func (m *Manager) start(config DebugConfig) error {
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
 
+	var staleClient *Client
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -76,11 +77,23 @@ func (m *Manager) start(config DebugConfig) error {
 		m.mu.Unlock()
 		return fmt.Errorf("debug session already active")
 	}
+	if m.client != nil {
+		// A terminated adapter may leave its process alive long enough for the
+		// next start attempt to arrive. Detach and shut it down before replacing
+		// the manager's client so restart cannot orphan the old process.
+		staleClient = m.client
+		m.client = nil
+		m.state = StateInactive
+		m.trackClientLocked(staleClient)
+	}
 	m.config = config
 	generation := m.generation
 	m.beginLifecycleLocked()
 	m.mu.Unlock()
 	defer m.endLifecycle()
+	if staleClient != nil {
+		staleClient.Shutdown()
+	}
 
 	client, err := NewClient(config.Command, config.Args, m.msgChan)
 	if err != nil {
@@ -389,6 +402,9 @@ func (m *Manager) GetScopes(frameId int) ([]Scope, error) {
 func (m *Manager) State() DebugState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.client != nil && !m.client.IsReady() {
+		return StateInactive
+	}
 	return m.state
 }
 

@@ -310,6 +310,24 @@ func TestLSPCoordinatorClearDiagnostics(t *testing.T) {
 	}
 }
 
+func TestLSPCoordinatorRelocateFilePath(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	coord.diagnostics["/src/main.go"] = []lsp.Diagnostic{{Message: "stale"}}
+	coord.triggerChars["/src/main.go"] = []string{"."}
+
+	coord.RelocateFilePath("/src/main.go", "/dest/main.go")
+
+	if got := coord.GetDiagnostics("/src/main.go"); len(got) != 0 {
+		t.Fatalf("old diagnostics = %#v, want empty", got)
+	}
+	if got := coord.GetDiagnostics("/dest/main.go"); len(got) != 1 || got[0].Message != "stale" {
+		t.Fatalf("new diagnostics = %#v, want relocated diagnostics", got)
+	}
+	if got := coord.GetTriggerChars("/dest/main.go"); len(got) != 1 || got[0] != "." {
+		t.Fatalf("new trigger chars = %#v, want relocated trigger", got)
+	}
+}
+
 // TestLSPCoordinatorAggregateDiagnostics tests aggregating diagnostics from all files
 func TestLSPCoordinatorAggregateDiagnostics(t *testing.T) {
 	coord := NewLSPCoordinator(nil)

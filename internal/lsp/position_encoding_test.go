@@ -243,6 +243,52 @@ func TestClientConvertsDiagnosticsFromNegotiatedEncoding(t *testing.T) {
 	}
 }
 
+func TestClientDropsDiagnosticsOlderThanOpenDocument(t *testing.T) {
+	uri := "file:///workspace/main.go"
+	client := &Client{
+		msgChan:          make(chan any, 1),
+		openDocs:         map[string]int{uri: 3},
+		positionEncoding: positionEncodingUTF8,
+	}
+	client.setDocumentSnapshot(uri, 3, "latest")
+	client.handleDiagnostics(json.RawMessage(fmt.Sprintf(`{
+		"uri": %q,
+		"version": 2,
+		"diagnostics": []
+	}`, uri)))
+
+	client.notificationMu.Lock()
+	defer client.notificationMu.Unlock()
+	if len(client.notificationQueue) != 0 {
+		t.Fatalf("queued diagnostics = %d, want stale publication dropped", len(client.notificationQueue))
+	}
+}
+
+func TestClientPreservesDiagnosticDocumentVersion(t *testing.T) {
+	uri := "file:///workspace/main.go"
+	client := &Client{
+		msgChan:          make(chan any, 1),
+		openDocs:         map[string]int{uri: 2},
+		positionEncoding: positionEncodingUTF8,
+	}
+	client.setDocumentSnapshot(uri, 2, "latest")
+	client.handleDiagnostics(json.RawMessage(fmt.Sprintf(`{
+		"uri": %q,
+		"version": 2,
+		"diagnostics": []
+	}`, uri)))
+
+	client.notificationMu.Lock()
+	defer client.notificationMu.Unlock()
+	if len(client.notificationQueue) != 1 {
+		t.Fatalf("queued diagnostics = %d, want 1", len(client.notificationQueue))
+	}
+	msg, ok := client.notificationQueue[0].msg.(DiagnosticsMsg)
+	if !ok || !msg.HasVersion || msg.Version != 2 {
+		t.Fatalf("diagnostics metadata = %#v, want version 2", client.notificationQueue[0].msg)
+	}
+}
+
 func TestClientFormattingConvertsTextEditsFromNegotiatedEncoding(t *testing.T) {
 	uri := "file:///workspace/main.go"
 	stdin := &captureWriteCloser{written: make(chan struct{}, 1)}

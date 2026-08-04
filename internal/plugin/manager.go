@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -39,11 +40,13 @@ type Plugin struct {
 
 // PluginConfig holds plugin metadata.
 type PluginConfig struct {
-	Name        string `toml:"name"`
-	Version     string `toml:"version"`
-	Description string `toml:"description"`
-	Author      string `toml:"author"`
-	Main        string `toml:"main"`
+	Name         string `toml:"name"`
+	Version      string `toml:"version"`
+	Description  string `toml:"description"`
+	Author       string `toml:"author"`
+	Main         string `toml:"main"`
+	APIVersion   int    `toml:"api_version"`
+	EventVersion int    `toml:"event_version"`
 }
 
 // NewManager creates a new plugin manager.
@@ -80,6 +83,7 @@ func (m *Manager) registerAPIs() {
 	m.apiRegistry.Register("keymap", registerKeymapAPI)
 	m.apiRegistry.Register("autocmd", registerAutocmdAPI)
 	m.apiRegistry.Register("ui", registerUIAPI)
+	m.apiRegistry.Register("teak", registerTeakAPI(m.apiRegistry))
 }
 
 // LoadPlugin loads a plugin from disk.
@@ -228,10 +232,10 @@ func (m *Manager) UnloadPlugin(name string) error {
 	m.luaMu.Lock()
 	defer m.luaMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	plugin, ok := m.plugins[name]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("plugin %s not found", name)
 	}
 
@@ -254,6 +258,8 @@ func (m *Manager) UnloadPlugin(name string) error {
 
 	m.luaStates.Put(plugin.State)
 	delete(m.plugins, name)
+	m.mu.Unlock()
+	discardUIConfirmCallbacks(plugin.State)
 	return teardownErr
 }
 
@@ -312,9 +318,14 @@ func (m *Manager) ListPlugins() []*Plugin {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	plugins := make([]*Plugin, 0, len(m.plugins))
-	for _, p := range m.plugins {
-		plugins = append(plugins, p)
+	names := make([]string, 0, len(m.plugins))
+	for name := range m.plugins {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	plugins := make([]*Plugin, 0, len(names))
+	for _, name := range names {
+		plugins = append(plugins, m.plugins[name])
 	}
 
 	return plugins
@@ -467,15 +478,17 @@ func executePluginAction(L *lua.LState, action lua.LValue) error {
 // The caller must hold luaMu and must have returned from the Lua call first.
 func (m *Manager) quarantinePlugin(name string, expected *Plugin, cause error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	plugin, ok := m.plugins[name]
 	if !ok || plugin != expected {
+		m.mu.Unlock()
 		return
 	}
 	plugin.Enabled = false
 	delete(m.plugins, name)
 	m.luaStates.Put(plugin.State)
+	m.mu.Unlock()
+	discardUIConfirmCallbacks(plugin.State)
 }
 
 // loadPluginConfig reads plugin configuration from TOML file.
@@ -503,6 +516,22 @@ func decodePluginConfig(data []byte) (PluginConfig, error) {
 	if config.Main == "" {
 		config.Main = "init.lua"
 	}
+	if err := validatePluginConfig(config); err != nil {
+		return config, err
+	}
 
 	return config, nil
+}
+
+func validatePluginConfig(config PluginConfig) error {
+	if strings.TrimSpace(config.Name) == "" {
+		return fmt.Errorf("plugin name is required")
+	}
+	if config.APIVersion < 0 || config.APIVersion > PluginAPIVersion {
+		return fmt.Errorf("plugin API version %d is unsupported (current %d)", config.APIVersion, PluginAPIVersion)
+	}
+	if config.EventVersion < 0 || config.EventVersion > PluginEventAPIVersion {
+		return fmt.Errorf("plugin event version %d is unsupported (current %d)", config.EventVersion, PluginEventAPIVersion)
+	}
+	return nil
 }

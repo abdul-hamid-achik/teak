@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -77,6 +79,51 @@ func TestHandleEventDoesNotBlockOnFullMessageChannel(t *testing.T) {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("DAP event delivery blocked on an unread UI channel")
+	}
+}
+
+func TestLifecycleEventMarksClientNotReady(t *testing.T) {
+	client := &Client{msgChan: make(chan any, 1), initialized: true, running: true}
+	client.handleEvent(&Event{Event: "terminated"})
+	if client.IsReady() {
+		t.Fatal("terminated adapter remained ready")
+	}
+	client.initialized = true
+	client.running = true
+	client.handleEvent(&Event{Event: "exited", Body: map[string]any{"exitCode": float64(1)}})
+	if client.IsReady() {
+		t.Fatal("exited adapter remained ready")
+	}
+}
+
+func TestRequestReturnsWhenDAPTransportEnds(t *testing.T) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+
+	client := &Client{
+		stdin:       writePipe,
+		pending:     make(map[int]chan callResult),
+		processDone: make(chan struct{}),
+		readDone:    make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.sendRequestContext(ctx, "threads", nil, nil) }()
+	time.Sleep(10 * time.Millisecond)
+	close(client.readDone)
+
+	select {
+	case requestErr := <-done:
+		if requestErr == nil || !strings.Contains(requestErr.Error(), "transport") {
+			t.Fatalf("request error = %v, want transport closure", requestErr)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("request remained blocked after DAP transport ended")
 	}
 }
 
@@ -933,6 +980,27 @@ func TestReadDAPFrameValidatesContentLength(t *testing.T) {
 			}
 			if string(got) != tt.want {
 				t.Fatalf("readDAPFrame() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsExpectedDAPReadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", want: true},
+		{name: "eof", err: io.EOF, want: true},
+		{name: "closed file", err: errors.New("read |0: file already closed"), want: true},
+		{name: "closed pipe", err: errors.New("write: closed pipe"), want: true},
+		{name: "protocol failure", err: errors.New("malformed DAP header"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isExpectedDAPReadError(tt.err); got != tt.want {
+				t.Fatalf("isExpectedDAPReadError(%v) = %t, want %t", tt.err, got, tt.want)
 			}
 		})
 	}

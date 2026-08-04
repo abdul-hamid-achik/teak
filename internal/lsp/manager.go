@@ -534,18 +534,64 @@ func (m *Manager) trackClientLocked(client *Client, budget *clientBudget) {
 	}()
 }
 
-// ServerStatus returns the status of the language server for a file.
-// Returns the server command name, whether it's running, and whether it's ready.
-func (m *Manager) ServerStatus(filePath string) (name string, running bool, ready bool) {
+// ServerHealth is the observable lifecycle state of the configured server for
+// one file. RetryAt is populated while the manager is cooling down after
+// repeated startup failures, so a UI can distinguish a deliberate retry wait
+// from a server that has never been started.
+type ServerHealth struct {
+	Name     string
+	State    string
+	Running  bool
+	Ready    bool
+	Attempts int
+	RetryAt  time.Time
+}
+
+// ServerHealth returns the current lifecycle state without starting a server.
+// It is intentionally read-only and safe to call from rendering code.
+func (m *Manager) ServerHealth(filePath string) ServerHealth {
 	cfg := configForFile(m.configs, filePath)
 	if cfg == nil {
-		return "", false, false
+		return ServerHealth{}
 	}
+	health := ServerHealth{Name: cfg.Command, State: "idle"}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	client, ok := m.clients[cfg.Command]
-	if !ok {
-		return cfg.Command, false, false
+	health.Attempts = m.retries[cfg.Command]
+	if m.closed {
+		health.State = "stopped"
+		return health
 	}
-	return cfg.Command, true, client.IsReady()
+	if _, starting := m.starting[cfg.Command]; starting {
+		health.State = "starting"
+		return health
+	}
+	if until, cooling := m.disabledUntil[cfg.Command]; cooling && m.clock().Before(until) {
+		health.State = "retrying"
+		health.RetryAt = until
+		return health
+	}
+	if client, ok := m.clients[cfg.Command]; ok {
+		health.Running = client.IsRunning()
+		health.Ready = client.IsReady()
+		switch {
+		case health.Ready:
+			health.State = "ready"
+		case health.Running:
+			health.State = "running"
+		default:
+			health.State = "failed"
+		}
+		return health
+	}
+	if health.Attempts > 0 {
+		health.State = "failed"
+	}
+	return health
+}
+
+// ServerStatus retains the compact tuple API used by older callers.
+func (m *Manager) ServerStatus(filePath string) (name string, running bool, ready bool) {
+	health := m.ServerHealth(filePath)
+	return health.Name, health.Running, health.Ready
 }

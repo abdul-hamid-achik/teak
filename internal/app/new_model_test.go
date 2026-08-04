@@ -25,6 +25,26 @@ func TestNewModelRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+func TestNewModelPropagatesLSPEnvironment(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.LSP = []config.LSPConfig{{
+		Extensions: []string{".fixture"},
+		Command:    "fixture-lsp",
+		LanguageID: "fixture",
+		Env:        map[string]string{"TEAK_FIXTURE_MODE": "1"},
+	}}
+	model, err := NewModel("", t.TempDir(), cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	t.Cleanup(model.cleanup)
+	server := model.lspMgr.ConfigForFile("main.fixture")
+	if server == nil || server.Env["TEAK_FIXTURE_MODE"] != "1" {
+		t.Fatalf("interactive LSP config = %#v, want environment preserved", server)
+	}
+}
+
 func TestNewModelWithFilesCreatesTabsAndStartupCursors(t *testing.T) {
 	root := t.TempDir()
 	a := filepath.Join(root, "a.go")
@@ -124,6 +144,7 @@ func TestSessionRestoreMergesCLIStartupFile(t *testing.T) {
 		[]restoredSessionFile{
 			{Tab: session.TabState{FilePath: sessionPath, CursorLine: 0, Pinned: true}, Snapshot: text.New([]byte("package p\n"))},
 		},
+		nil,
 	)
 	if cmd == nil {
 		t.Fatal("expected restore commands")

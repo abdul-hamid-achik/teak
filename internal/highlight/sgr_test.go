@@ -1,6 +1,7 @@
 package highlight
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
@@ -58,6 +59,19 @@ func TestFallbackStyleUsesFastPath(t *testing.T) {
 	tok := newStyledToken("", style, pair)
 	if got, want := tok.Render("fallback"), style.Render("fallback"); got != want {
 		t.Errorf("fallback render = %q, want %q", got, want)
+	}
+}
+
+func TestStyledTokenWriteToMatchesRender(t *testing.T) {
+	h := New("main.go", ui.DefaultTheme())
+	style, pair := h.resolveToken(0)
+	tok := newStyledToken("", style, pair)
+	for _, sample := range []string{"identifier", "áé漢字", "\ttabbed"} {
+		var b strings.Builder
+		tok.WriteTo(&b, sample)
+		if got, want := b.String(), tok.Render(sample); got != want {
+			t.Fatalf("WriteTo(%q) = %q, want %q", sample, got, want)
+		}
 	}
 }
 

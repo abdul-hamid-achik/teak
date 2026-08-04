@@ -123,6 +123,31 @@ func (m *Model) ReplaceFileProblems(filePath string, fileProblems []Problem) {
 	m.clampScroll()
 }
 
+// RelocateFilePath updates all panel state for a file that was moved or
+// renamed. Diagnostics remain visible and their severity counts are retained;
+// only their identity changes.
+func (m *Model) RelocateFilePath(oldPath, newPath string) {
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+	changed := false
+	for i := range m.problems {
+		if m.problems[i].FilePath == oldPath {
+			m.problems[i].FilePath = newPath
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	slices.SortStableFunc(m.problems, Compare)
+	m.groups = m.buildGroups()
+	if m.selectedIndex >= len(m.problems) {
+		m.selectedIndex = max(0, len(m.problems)-1)
+	}
+	m.clampScroll()
+}
+
 // Compare orders problems exactly as the panel presents them. The final
 // comparison leaves truly identical diagnostics stable in their source order.
 func Compare(a, b Problem) int {

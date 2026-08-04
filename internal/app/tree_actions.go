@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,22 +24,27 @@ type treeActionKind uint8
 const (
 	treeActionCreate treeActionKind = iota + 1
 	treeActionDelete
+	treeActionRename
+	treeActionCopy
+	treeActionMove
 )
 
 // treeActionRequest is a complete, immutable filesystem request. Its paths
 // are relative to Root, so every operation remains confined even if a
 // directory is replaced with a symlink between Update and command execution.
 type treeActionRequest struct {
-	Generation         uint64
-	Kind               treeActionKind
-	Root               *os.Root
-	RootPath           string
-	RelativePath       string
-	ParentRelativePath string
-	Path               string
-	Name               string
-	IsFolder           bool
-	DirtyPaths         []string
+	Generation              uint64
+	Kind                    treeActionKind
+	Root                    *os.Root
+	RootPath                string
+	RelativePath            string
+	ParentRelativePath      string
+	DestinationRelativePath string
+	SourcePath              string
+	Path                    string
+	Name                    string
+	IsFolder                bool
+	DirtyPaths              []string
 }
 
 type treeActionOutcome struct {
@@ -55,6 +61,7 @@ type treeActionOutcome struct {
 type treeActionResultMsg struct {
 	Generation  uint64
 	Kind        treeActionKind
+	SourcePath  string
 	Path        string
 	Name        string
 	IsFolder    bool
@@ -182,6 +189,75 @@ func (m *Model) startTreeCreate(dir, name string, isFolder bool) tea.Cmd {
 	})
 }
 
+// startTreeTransfer prepares a rename, copy, or move without touching the
+// filesystem on the UI goroutine. destinationDir is resolved to an absolute
+// workspace path and name is always one path component.
+func (m *Model) startTreeTransfer(target, destinationDir, name string, kind treeActionKind) tea.Cmd {
+	if kind != treeActionRename && kind != treeActionCopy && kind != treeActionMove {
+		m.status = "Invalid tree transfer"
+		return nil
+	}
+	if err := validTreeEntryName(name); err != nil {
+		m.status = fmt.Sprintf("Invalid name: %v", err)
+		return nil
+	}
+	sourceRelative, sourcePath, err := m.workspaceRelativePath(target)
+	if err != nil {
+		m.status = fmt.Sprintf("Error preparing file operation: %v", err)
+		return nil
+	}
+	destinationRelativeDir, rootPath, err := m.treeRelativeDirectory(destinationDir)
+	if err != nil {
+		m.status = fmt.Sprintf("Error preparing file operation: %v", err)
+		return nil
+	}
+	destinationRelative := filepath.Join(destinationRelativeDir, name)
+	destinationPath := filepath.Join(rootPath, destinationRelative)
+	if filepath.Clean(sourcePath) == filepath.Clean(destinationPath) {
+		m.status = "Source and destination are the same"
+		return nil
+	}
+	if kind != treeActionCopy {
+		for _, request := range m.pendingSaves {
+			if isTreeTargetPath(sourcePath, request.Path, true) ||
+				isTreeTargetPath(sourcePath, request.PreviousPath, true) {
+				m.status = "File operation blocked: save in progress"
+				return nil
+			}
+		}
+	}
+	return m.startTreeAction(treeActionRequest{
+		Kind:                    kind,
+		Root:                    m.agentWriteRoot,
+		RootPath:                rootPath,
+		RelativePath:            sourceRelative,
+		ParentRelativePath:      destinationRelativeDir,
+		DestinationRelativePath: destinationRelative,
+		SourcePath:              sourcePath,
+		Path:                    destinationPath,
+		Name:                    name,
+	})
+}
+
+func (m *Model) startTreeRename(target, name string) tea.Cmd {
+	return m.startTreeTransfer(target, filepath.Dir(target), name, treeActionRename)
+}
+
+func (m *Model) startTreeCopy(target, name string) tea.Cmd {
+	return m.startTreeTransfer(target, filepath.Dir(target), name, treeActionCopy)
+}
+
+func (m *Model) startTreeMove(target, destinationDir string) tea.Cmd {
+	if destinationDir == "" {
+		m.status = "Move destination is empty"
+		return nil
+	}
+	if !filepath.IsAbs(destinationDir) {
+		destinationDir = filepath.Join(m.rootDir, destinationDir)
+	}
+	return m.startTreeTransfer(target, destinationDir, filepath.Base(target), treeActionMove)
+}
+
 func isTreeTargetPath(target, candidate string, targetIsDir bool) bool {
 	if candidate == "" {
 		return false
@@ -199,6 +275,38 @@ func isTreeTargetPath(target, candidate string, targetIsDir bool) bool {
 	}
 	rel, err := filepath.Rel(target, candidate)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// relocatedTreePath maps an open/project state path from a committed tree
+// move or rename to its new location. It returns false for unrelated paths so
+// callers can update only the affected tabs and path-keyed caches.
+func relocatedTreePath(source, destination, candidate string, targetIsDir bool) (string, bool) {
+	if source == "" || destination == "" || candidate == "" || !isTreeTargetPath(source, candidate, targetIsDir) {
+		return "", false
+	}
+	if !targetIsDir {
+		return filepath.Clean(destination), true
+	}
+	source, err := filepath.Abs(source)
+	if err != nil {
+		return "", false
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	destination, err = filepath.Abs(destination)
+	if err != nil {
+		return "", false
+	}
+	relative, err := filepath.Rel(source, candidate)
+	if err != nil {
+		return "", false
+	}
+	if relative == "." {
+		return filepath.Clean(destination), true
+	}
+	return filepath.Join(destination, relative), true
 }
 
 // treeCleanupFrame is one open directory in the fast post-order traversal.
@@ -494,6 +602,7 @@ func treeActionCmd(ctx context.Context, request treeActionRequest) tea.Cmd {
 		return treeActionResultMsg{
 			Generation:  request.Generation,
 			Kind:        request.Kind,
+			SourcePath:  request.SourcePath,
 			Path:        path,
 			Name:        request.Name,
 			IsFolder:    request.IsFolder,
@@ -534,9 +643,163 @@ func executeTreeAction(ctx context.Context, request treeActionRequest) treeActio
 		return executeTreeCreate(ctx, root, request)
 	case treeActionDelete:
 		return executeTreeDelete(ctx, root, request)
+	case treeActionRename, treeActionMove:
+		return executeTreeMove(ctx, root, request)
+	case treeActionCopy:
+		return executeTreeCopy(ctx, root, request)
 	default:
 		return treeActionOutcome{Err: fmt.Errorf("unsupported tree action %d", request.Kind)}
 	}
+}
+
+func executeTreeMove(ctx context.Context, root *os.Root, request treeActionRequest) treeActionOutcome {
+	if request.RelativePath == "." || request.DestinationRelativePath == "." {
+		return treeActionOutcome{Err: errors.New("cannot move or rename the workspace root")}
+	}
+	info, err := root.Lstat(request.RelativePath)
+	if err != nil {
+		return treeActionOutcome{Err: err}
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return treeActionOutcome{Err: errors.New("source is not a regular file, directory, or symlink")}
+	}
+	if info.IsDir() && isTreeTargetPath(request.SourcePath, request.Path, true) {
+		return treeActionOutcome{Err: errors.New("cannot move a directory inside itself")}
+	}
+	parentInfo, err := root.Stat(request.ParentRelativePath)
+	if err != nil {
+		return treeActionOutcome{Err: fmt.Errorf("inspect destination directory: %w", err)}
+	}
+	if !parentInfo.IsDir() {
+		return treeActionOutcome{Err: errors.New("destination is not a directory")}
+	}
+	if _, err := root.Lstat(request.DestinationRelativePath); err == nil {
+		return treeActionOutcome{Err: errors.New("destination already exists")}
+	} else if !os.IsNotExist(err) {
+		return treeActionOutcome{Err: fmt.Errorf("inspect destination: %w", err)}
+	}
+	if err := ctx.Err(); err != nil {
+		return treeActionOutcome{Err: err}
+	}
+	if err := root.Rename(request.RelativePath, request.DestinationRelativePath); err != nil {
+		return treeActionOutcome{Err: err}
+	}
+	treeActionAfterCommit(request)
+	return treeActionOutcome{
+		Path:        request.Path,
+		TargetIsDir: info.IsDir(),
+		Committed:   true,
+	}
+}
+
+func executeTreeCopy(ctx context.Context, root *os.Root, request treeActionRequest) treeActionOutcome {
+	if request.RelativePath == "." || request.DestinationRelativePath == "." {
+		return treeActionOutcome{Err: errors.New("cannot copy the workspace root")}
+	}
+	info, err := root.Lstat(request.RelativePath)
+	if err != nil {
+		return treeActionOutcome{Err: err}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return treeActionOutcome{Err: errors.New("copying symlinks is disabled; move the link instead")}
+	}
+	parentInfo, err := root.Stat(request.ParentRelativePath)
+	if err != nil {
+		return treeActionOutcome{Err: fmt.Errorf("inspect destination directory: %w", err)}
+	}
+	if !parentInfo.IsDir() {
+		return treeActionOutcome{Err: errors.New("destination is not a directory")}
+	}
+	if _, err := root.Lstat(request.DestinationRelativePath); err == nil {
+		return treeActionOutcome{Err: errors.New("destination already exists")}
+	} else if !os.IsNotExist(err) {
+		return treeActionOutcome{Err: fmt.Errorf("inspect destination: %w", err)}
+	}
+	if err := ctx.Err(); err != nil {
+		return treeActionOutcome{Err: err}
+	}
+	if err := copyTreeRoot(ctx, root, request.RelativePath, request.DestinationRelativePath, info); err != nil {
+		cleanupErr := cleanupTreeRoot(root, request.DestinationRelativePath)
+		if cleanupErr != nil {
+			err = fmt.Errorf("copy failed: %w (cleanup failed: %v)", err, cleanupErr)
+		}
+		return treeActionOutcome{Err: err}
+	}
+	treeActionAfterCommit(request)
+	return treeActionOutcome{
+		Path:        request.Path,
+		TargetIsDir: info.IsDir(),
+		Committed:   true,
+	}
+}
+
+// copyTreeRoot copies one regular file or a directory tree using only the
+// pinned root. It rejects symlinks and special files instead of accidentally
+// copying a device or following a link with surprising semantics.
+func copyTreeRoot(ctx context.Context, root *os.Root, source, destination string, sourceInfo os.FileInfo) error {
+	if sourceInfo.IsDir() {
+		if err := root.Mkdir(destination, sourceInfo.Mode().Perm()); err != nil {
+			return err
+		}
+		return fs.WalkDir(root.FS(), source, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if path == source {
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("copying symlink %q is disabled", path)
+			}
+			relative, err := filepath.Rel(source, path)
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(destination, relative)
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return root.Mkdir(target, info.Mode().Perm())
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("cannot copy special file %q", path)
+			}
+			return copyTreeFile(ctx, root, path, target, info.Mode().Perm())
+		})
+	}
+	if !sourceInfo.Mode().IsRegular() {
+		return errors.New("cannot copy special file")
+	}
+	return copyTreeFile(ctx, root, source, destination, sourceInfo.Mode().Perm())
+}
+
+func copyTreeFile(ctx context.Context, root *os.Root, source, destination string, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	src, err := root.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := root.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return ctx.Err()
 }
 
 func executeTreeCreate(ctx context.Context, root *os.Root, request treeActionRequest) treeActionOutcome {
@@ -626,6 +889,12 @@ func (m Model) handleTreeActionResult(msg treeActionResultMsg) (tea.Model, tea.C
 			m.status = fmt.Sprintf("Error creating file: %v", msg.Err)
 		case msg.Kind == treeActionDelete:
 			m.status = fmt.Sprintf("Error deleting: %v", msg.Err)
+		case msg.Kind == treeActionRename:
+			m.status = fmt.Sprintf("Error renaming: %v", msg.Err)
+		case msg.Kind == treeActionMove:
+			m.status = fmt.Sprintf("Error moving: %v", msg.Err)
+		case msg.Kind == treeActionCopy:
+			m.status = fmt.Sprintf("Error copying: %v", msg.Err)
 		}
 		return m, nil
 	}
@@ -676,6 +945,22 @@ func (m Model) handleTreeActionResult(msg treeActionResultMsg) (tea.Model, tea.C
 		if !closedAny && preservedDirty == 0 {
 			cmds = append(cmds, m.triggerPluginEvents(m.pluginEvent(plugin.EventBufDelete, msg.Path)))
 		}
+		return m, tea.Batch(cmds...)
+
+	case treeActionRename, treeActionMove, treeActionCopy:
+		search.InvalidateSemanticIndex(m.rootDir)
+		label := "Copied"
+		if msg.Kind == treeActionRename {
+			label = "Renamed"
+		} else if msg.Kind == treeActionMove {
+			label = "Moved"
+		}
+		m.status = fmt.Sprintf("%s: %s", label, filepath.Base(msg.Path))
+		var cmds []tea.Cmd
+		if msg.Kind != treeActionCopy {
+			cmds = append(cmds, m.reconcileTreeTransfer(msg.SourcePath, msg.Path, msg.TargetIsDir))
+		}
+		cmds = append(cmds, m.queueTreeRefresh())
 		return m, tea.Batch(cmds...)
 	}
 	return m, nil

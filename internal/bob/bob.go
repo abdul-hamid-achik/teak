@@ -3,6 +3,7 @@ package bob
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -59,7 +60,8 @@ func Check(ctx context.Context, rootDir string) (*CheckResult, error) {
 	out, err := run(ctx, rootDir, "check", "--json")
 	if err != nil {
 		// Exit code 3 = drift detected, still parse output
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 3 {
 			var result CheckResult
 			if json.Unmarshal(out, &result) == nil {
 				return &result, nil
@@ -84,6 +86,9 @@ func HasManifest(rootDir string) bool {
 }
 
 func run(ctx context.Context, rootDir string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
@@ -92,18 +97,13 @@ func run(ctx context.Context, rootDir string, args ...string) ([]byte, error) {
 		return nil, err
 	}
 	cmd.Dir = rootDir
-	out, err := cmd.Output()
+	out, stderr, err := toolpath.RunBounded(cmd, maxOutputBytes, maxOutputBytes)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			detail := strings.TrimSpace(string(exitErr.Stderr))
-			if detail != "" {
-				return nil, fmt.Errorf("%w: %s", err, detail)
-			}
+		detail := strings.TrimSpace(string(stderr))
+		if detail != "" {
+			return out, fmt.Errorf("%w: %s", err, detail)
 		}
-		return nil, err
-	}
-	if len(out) > maxOutputBytes {
-		out = out[:maxOutputBytes]
+		return out, err
 	}
 	return out, nil
 }

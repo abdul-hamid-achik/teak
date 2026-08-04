@@ -89,6 +89,13 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:    "health_dashboard",
+			Label: "Workspace Health Dashboard",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: openHealthDashboardMsg{}}
+			},
+		},
+		{
 			ID:       "find",
 			Label:    "Find",
 			Shortcut: "Ctrl+F",
@@ -105,9 +112,8 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
-			ID:       "semantic_search",
-			Label:    "Semantic Search",
-			Shortcut: "Ctrl+Shift+F",
+			ID:    "semantic_search",
+			Label: "Semantic Search",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: openSearchMsg{mode: search.ModeSemantic}}
 			},
@@ -245,13 +251,6 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
-			ID:    "semantic_search",
-			Label: "Semantic Search",
-			Execute: func() tea.Msg {
-				return commandPaletteMsg{inner: openSearchMsg{mode: search.ModeSemantic}}
-			},
-		},
-		{
 			ID:    "bob_plan",
 			Label: "Bob: Plan Review",
 			Execute: func() tea.Msg {
@@ -270,25 +269,26 @@ func (m *Model) commandRegistry() []Command {
 
 // Internal message types for command palette actions.
 type (
-	saveRequestMsg       struct{}
-	toggleTreeMsg        struct{}
-	toggleGitMsg         struct{}
-	toggleProblemsMsg    struct{}
-	openSearchMsg        struct{ mode search.Mode }
-	openSearchReplaceMsg struct{}
-	goToLineMsg          struct{}
-	quickOpenMsg         struct{}
-	showHelpMsg          struct{}
-	openSettingsMsg      struct{}
-	reopenTabMsg         struct{}
-	debugStartMsg        struct{}
-	debugStopMsg         struct{}
-	quitMsg              struct{}
-	newFileMsg           struct{}
-	saveAsMsg            struct{}
-	codemapCallersMsg    struct{}
-	codemapCalleesMsg    struct{}
-	codemapImpactMsg     struct{}
-	bobPlanMsg           struct{}
-	bobCheckMsg          struct{}
+	saveRequestMsg         struct{}
+	toggleTreeMsg          struct{}
+	toggleGitMsg           struct{}
+	toggleProblemsMsg      struct{}
+	openSearchMsg          struct{ mode search.Mode }
+	openSearchReplaceMsg   struct{}
+	goToLineMsg            struct{}
+	quickOpenMsg           struct{}
+	showHelpMsg            struct{}
+	openSettingsMsg        struct{}
+	openHealthDashboardMsg struct{}
+	reopenTabMsg           struct{}
+	debugStartMsg          struct{}
+	debugStopMsg           struct{}
+	quitMsg                struct{}
+	newFileMsg             struct{}
+	saveAsMsg              struct{}
+	codemapCallersMsg      struct{}
+	codemapCalleesMsg      struct{}
+	codemapImpactMsg       struct{}
+	bobPlanMsg             struct{}
+	bobCheckMsg            struct{}
 )

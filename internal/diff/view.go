@@ -27,6 +27,11 @@ type Model struct {
 	rightLineMap []int
 }
 
+func (m Model) maxScroll() int {
+	visible := max(m.Height, 1)
+	return max(len(m.Lines)-visible, 0)
+}
+
 // New creates a new diff view model.
 func New(filePath string, lines []DiffLine, theme ui.Theme) Model {
 	m := Model{
@@ -100,10 +105,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.ScrollY--
 			}
 		case "down":
-			maxScroll := len(m.Lines) - 1
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+			maxScroll := m.maxScroll()
 			if m.ScrollY < maxScroll {
 				m.ScrollY++
 			}
@@ -114,20 +116,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case "pgdown", "page_down":
 			m.ScrollY += m.Height
-			maxScroll := len(m.Lines) - 1
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+			maxScroll := m.maxScroll()
 			if m.ScrollY > maxScroll {
 				m.ScrollY = maxScroll
 			}
 		case "home":
 			m.ScrollY = 0
 		case "end":
-			m.ScrollY = len(m.Lines) - 1
-			if m.ScrollY < 0 {
-				m.ScrollY = 0
-			}
+			m.ScrollY = m.maxScroll()
 		}
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
@@ -139,10 +135,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case tea.MouseWheelDown:
 			m.ScrollY += 3
-			maxScroll := len(m.Lines) - 1
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+			maxScroll := m.maxScroll()
 			if m.ScrollY > maxScroll {
 				m.ScrollY = maxScroll
 			}

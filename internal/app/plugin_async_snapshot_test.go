@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"teak/internal/editor"
@@ -18,6 +20,126 @@ func TestPluginAsyncRuntimeCapturesImmutableRopeWithoutMaterializing(t *testing.
 
 	if runtime.buffer.Rope() != source {
 		t.Fatal("newPluginAsyncRuntime materialized the document instead of sharing its immutable rope")
+	}
+}
+
+func TestPluginAsyncRuntimeQueuesNewBufferEffect(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	runtime := newPluginAsyncRuntime(model)
+
+	bufnr, err := runtime.NewBuffer()
+	if err != nil {
+		t.Fatalf("NewBuffer() error = %v", err)
+	}
+	if bufnr != 2 {
+		t.Fatalf("NewBuffer() = %d, want 2 for the second tab", bufnr)
+	}
+	if got := len(model.editors); got != 1 {
+		t.Fatalf("async NewBuffer mutated model before apply: editors=%d", got)
+	}
+
+	runtime.apply(&model)
+	if got := len(model.editors); got != 2 {
+		t.Fatalf("editor count after NewBuffer() = %d, want 2", got)
+	}
+	if got := model.activeTab; got != 1 {
+		t.Fatalf("active tab after NewBuffer() = %d, want 1", got)
+	}
+	if got := model.tabBar.Tabs[1].Label; got != "Untitled-1" {
+		t.Fatalf("new tab label = %q, want Untitled-1", got)
+	}
+	if got := model.editors[1].Buffer.FilePath; got != "" {
+		t.Fatalf("new buffer filepath = %q, want empty", got)
+	}
+}
+
+func TestPluginAsyncRuntimeAppliesEditsToTabSelectedByCallback(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+
+	first := text.NewBufferFromBytes([]byte("first"))
+	first.FilePath = "first.go"
+	model.editors[0] = editor.New(first, model.theme, editor.DefaultConfig())
+	model.tabBar.Tabs[0].FilePath = first.FilePath
+
+	second := text.NewBufferFromBytes([]byte("second"))
+	second.FilePath = "second.go"
+	model.editors = append(model.editors, editor.New(second, model.theme, editor.DefaultConfig()))
+	model.tabBar.AddTab("second.go", second.FilePath)
+
+	runtime := newPluginAsyncRuntime(model)
+	if err := runtime.SetActiveTab(1); err != nil {
+		t.Fatalf("SetActiveTab() error = %v", err)
+	}
+	if err := runtime.SetBufferText("second edited"); err != nil {
+		t.Fatalf("SetBufferText() error = %v", err)
+	}
+
+	runtime.apply(&model)
+
+	if got := model.editors[0].Buffer.Content(); got != "first" {
+		t.Fatalf("first tab content = %q, want unchanged first tab", got)
+	}
+	if got := model.editors[1].Buffer.Content(); got != "second edited" {
+		t.Fatalf("selected tab content = %q, want second edited", got)
+	}
+	if got := model.activeTab; got != 1 {
+		t.Fatalf("active tab = %d, want 1", got)
+	}
+}
+
+func TestPluginAsyncRuntimeAppliesEditsToNewBufferCreatedByCallback(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.editors[0].Buffer.SetCursor(text.Position{})
+	original := model.editors[0].Buffer.Content()
+
+	runtime := newPluginAsyncRuntime(model)
+	if _, err := runtime.NewBuffer(); err != nil {
+		t.Fatalf("NewBuffer() error = %v", err)
+	}
+	if err := runtime.SetBufferText("new content"); err != nil {
+		t.Fatalf("SetBufferText() error = %v", err)
+	}
+
+	runtime.apply(&model)
+
+	if got := model.editors[0].Buffer.Content(); got != original {
+		t.Fatalf("original tab content = %q, want %q", got, original)
+	}
+	if got := len(model.editors); got != 2 {
+		t.Fatalf("editor count = %d, want 2", got)
+	}
+	if got := model.editors[1].Buffer.Content(); got != "new content" {
+		t.Fatalf("new buffer content = %q, want new content", got)
+	}
+	if got := model.activeTab; got != 1 {
+		t.Fatalf("active tab = %d, want 1", got)
+	}
+}
+
+func TestPluginAsyncRuntimeAppliesEditsToFileOpenedByCallback(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	path := filepath.Join(t.TempDir(), "opened.go")
+	if err := os.WriteFile(path, []byte("loaded later"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	runtime := newPluginAsyncRuntime(model)
+	if err := runtime.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if err := runtime.SetBufferText("plugin content"); err != nil {
+		t.Fatalf("SetBufferText() after OpenFile() error = %v", err)
+	}
+
+	cmd := runtime.apply(&model)
+	if cmd == nil {
+		t.Fatal("OpenFile() did not retain the asynchronous file-load command")
+	}
+	if got := model.activeEditor().Buffer.FilePath; got != path {
+		t.Fatalf("opened filepath = %q, want %q", got, path)
+	}
+	if got := model.activeEditor().Buffer.Content(); got != "plugin content" {
+		t.Fatalf("opened buffer content = %q, want plugin content", got)
 	}
 }
 

@@ -225,11 +225,31 @@ func TestAuditQuickOpenResultHandlesStaleSuccessAndFailure(t *testing.T) {
 		t.Fatalf("failed scan state ready=%v status=%q", failed.cachedFilesReady, failed.status)
 	}
 
-	updatedAny, _ := failed.Update(FileListMsg{Generation: generation, Files: []string{"nested/main.go", "README.md"}})
+	updatedAny, refreshCmd := failed.Update(FileListMsg{Generation: generation, Files: []string{"nested/main.go", "README.md"}})
 	updated := updatedAny.(Model)
 	if len(updated.cachedFiles) != 2 {
 		t.Fatalf("quick-open cache = %v", updated.cachedFiles)
 	}
+	if refreshCmd == nil {
+		t.Fatal("quick-open result did not schedule picker projection")
+	}
+	rawReady := refreshCmd()
+	itemsReady, ok := rawReady.(overlay.PickerItemsReadyMsg)
+	if !ok {
+		t.Fatalf("quick-open item command returned %T, want PickerItemsReadyMsg", rawReady)
+	}
+	updatedAny, filterCmd := updated.Update(itemsReady)
+	updated = updatedAny.(Model)
+	if filterCmd == nil {
+		t.Fatal("quick-open item result did not schedule picker projection")
+	}
+	rawFilterReady := filterCmd()
+	filterReady, ok := rawFilterReady.(overlay.PickerFilterReadyMsg)
+	if !ok {
+		t.Fatalf("quick-open filter command returned %T, want PickerFilterReadyMsg", rawFilterReady)
+	}
+	updatedAny, _ = updated.Update(filterReady)
+	updated = updatedAny.(Model)
 	picker, ok := updated.overlayStack.Top().(*overlay.Picker)
 	if !ok || picker.FilteredCount() != 2 {
 		t.Fatalf("quick-open picker was not refreshed: %T count=%d", updated.overlayStack.Top(), picker.FilteredCount())

@@ -301,14 +301,14 @@ func TestRestoreSessionMapsStateAfterMissingTab(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = pinned.Close() }()
-	state, files, err := readSessionRestoreFiles(context.Background(), pinned, root, session.State{RootDir: root, ActiveTab: 1, Tabs: []session.TabState{
+	state, files, _, err := readSessionRestoreFiles(context.Background(), pinned, root, session.State{RootDir: root, ActiveTab: 1, Tabs: []session.TabState{
 		{FilePath: missing, CursorLine: 8, CursorCol: 2, ScrollY: 5},
 		{FilePath: kept, CursorLine: 3, CursorCol: 0, ScrollY: 2, WrapScrollY: 4, Pinned: true},
 	}}, maxStartupSessionBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := m.restoreSessionFromPinnedRead(state, files)
+	cmd := m.restoreSessionFromPinnedRead(state, files, nil)
 	if len(m.editors) != 1 || m.activeTab != 0 {
 		t.Fatalf("restore tabs=%d active=%d", len(m.editors), m.activeTab)
 	}

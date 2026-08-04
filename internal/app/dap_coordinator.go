@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/dap"
+	"teak/internal/debugger"
 )
 
 // DAPCoordinator manages DAP debug session lifecycle and event handling.
@@ -74,8 +76,7 @@ func (c *DAPCoordinator) handleContinued(msg dap.ContinuedEventMsg) []tea.Cmd {
 func (c *DAPCoordinator) handleTerminated(msg dap.TerminatedEventMsg) []tea.Cmd {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.state = dap.StateInactive
-	c.outputLog = nil
+	c.resetInactiveLocked()
 	return []tea.Cmd{func() tea.Msg { return msg }}
 }
 
@@ -83,8 +84,16 @@ func (c *DAPCoordinator) handleTerminated(msg dap.TerminatedEventMsg) []tea.Cmd 
 func (c *DAPCoordinator) handleExited(msg dap.ExitedEventMsg) []tea.Cmd {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.state = dap.StateInactive
+	c.resetInactiveLocked()
 	return []tea.Cmd{func() tea.Msg { return msg }}
+}
+
+func (c *DAPCoordinator) resetInactiveLocked() {
+	c.state = dap.StateInactive
+	c.stackFrames = nil
+	c.variables = nil
+	c.outputLog = nil
+	c.currentFrame = 0
 }
 
 // handleOutput handles output event (stdout/stderr from debuggee).
@@ -103,7 +112,7 @@ func (c *DAPCoordinator) handleBreakpoint(msg dap.BreakpointEventMsg) []tea.Cmd 
 func (c *DAPCoordinator) SetStackFrames(frames []dap.StackFrame) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stackFrames = frames
+	c.stackFrames = slices.Clone(frames)
 	c.currentFrame = 0
 }
 
@@ -111,7 +120,7 @@ func (c *DAPCoordinator) SetStackFrames(frames []dap.StackFrame) {
 func (c *DAPCoordinator) SetVariables(vars []dap.Variable) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.variables = vars
+	c.variables = slices.Clone(vars)
 }
 
 // SetState sets the debug state.
@@ -148,23 +157,19 @@ func (c *DAPCoordinator) IsPaused() bool {
 
 // SelectFrame selects a stack frame and returns a command to jump to it.
 func (c *DAPCoordinator) SelectFrame(idx int) tea.Cmd {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if idx < 0 || idx >= len(c.stackFrames) {
-		c.mu.RUnlock()
 		return nil
 	}
-	c.mu.RUnlock()
-
-	c.mu.Lock()
 	c.currentFrame = idx
 	frame := c.stackFrames[idx]
-	c.mu.Unlock()
 
 	if frame.Source.Path == "" {
 		return nil
 	}
 	return func() tea.Msg {
-		return JumpToFrameMsg{
+		return debugger.JumpToFrameMsg{
 			FilePath: frame.Source.Path,
 			Line:     frame.Line - 1, // DAP is 1-based, we use 0-based
 		}
@@ -185,14 +190,14 @@ func (c *DAPCoordinator) GetCurrentFrame() dap.StackFrame {
 func (c *DAPCoordinator) GetStackFrames() []dap.StackFrame {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.stackFrames
+	return slices.Clone(c.stackFrames)
 }
 
 // GetVariables returns all variables.
 func (c *DAPCoordinator) GetVariables() []dap.Variable {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.variables
+	return slices.Clone(c.variables)
 }
 
 // AppendOutput adds a line to the output log.
@@ -217,7 +222,7 @@ func (c *DAPCoordinator) ClearOutput() {
 func (c *DAPCoordinator) GetOutputLog() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.outputLog
+	return slices.Clone(c.outputLog)
 }
 
 // GetCurrentFrameIndex returns the current frame index.

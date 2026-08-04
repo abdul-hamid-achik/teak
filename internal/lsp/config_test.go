@@ -1,6 +1,10 @@
 package lsp
 
-import "testing"
+import (
+	"testing"
+
+	"teak/internal/toolpath"
+)
 
 func TestConfigForFileBlueprint(t *testing.T) {
 	cfg := ConfigForFile("/tmp/service.bp")
@@ -15,5 +19,18 @@ func TestConfigForFileBlueprint(t *testing.T) {
 	}
 	if cfg.LanguageID != "blueprint" {
 		t.Fatalf("LanguageID = %q, want %q", cfg.LanguageID, "blueprint")
+	}
+}
+
+func TestDefaultLanguageServersHaveInstallationHints(t *testing.T) {
+	seen := make(map[string]struct{})
+	for _, cfg := range DefaultConfigs() {
+		if _, ok := seen[cfg.Command]; ok {
+			continue
+		}
+		seen[cfg.Command] = struct{}{}
+		if hint := toolpath.Hint(cfg.Command); hint == "" {
+			t.Errorf("default language server %q has no installation hint", cfg.Command)
+		}
 	}
 }

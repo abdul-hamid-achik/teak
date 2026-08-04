@@ -644,6 +644,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if msg.Title != nil {
 				tc.Title = truncateUTF8Bytes(*msg.Title, 4096)
 			}
+			if msg.Kind != nil {
+				tc.Kind = *msg.Kind
+			}
 			if msg.Status != nil {
 				tc.Status = *msg.Status
 				if *msg.Status == sdk.ToolCallStatusCompleted || *msg.Status == sdk.ToolCallStatusFailed {
@@ -1009,11 +1012,11 @@ func (m Model) handlePermissionKey(key string) (Model, tea.Cmd) {
 		if perm.ToolCall.Kind != nil {
 			kind = string(*perm.ToolCall.Kind)
 		}
-		if kind != "" {
-			m.alwaysAllow[kind] = true
-		}
 		for _, opt := range perm.Options {
 			if opt.Kind == sdk.PermissionOptionKindAllowAlways {
+				if kind != "" {
+					m.alwaysAllow[kind] = true
+				}
 				deliverPermissionResponse(perm.ResponseCh, sdk.RequestPermissionResponse{
 					Outcome: sdk.NewRequestPermissionOutcomeSelected(opt.OptionId),
 				})
@@ -1446,11 +1449,22 @@ func (m Model) renderPermission(width int) []string {
 	optLine += zone.Mark("agent-perm-allow", lipgloss.NewStyle().Foreground(ui.Nord14).Render("[y] Allow"))
 	optLine += "  "
 	optLine += zone.Mark("agent-perm-deny", lipgloss.NewStyle().Foreground(ui.Nord11).Render("[n] Deny"))
-	optLine += "  "
-	optLine += zone.Mark("agent-perm-always", lipgloss.NewStyle().Foreground(ui.Nord13).Render("[a] Always"))
+	if permissionHasOption(perm.Options, sdk.PermissionOptionKindAllowAlways) {
+		optLine += "  "
+		optLine += zone.Mark("agent-perm-always", lipgloss.NewStyle().Foreground(ui.Nord13).Render("[a] Always"))
+	}
 	lines = append(lines, optLine)
 
 	return lines
+}
+
+func permissionHasOption(options []sdk.PermissionOption, kind sdk.PermissionOptionKind) bool {
+	for _, option := range options {
+		if option.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) renderWriteProposal(width int) []string {

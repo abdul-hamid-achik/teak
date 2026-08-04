@@ -81,19 +81,36 @@ func ripgrepSearchContext(ctx context.Context, rootDir, query string, opts Searc
 	}
 	cmd.Dir = rootDir
 
-	stdout := &boundedCommandBuffer{limit: maxRipgrepOutputBytes}
-	stderr := &boundedCommandBuffer{limit: maxRipgrepStderrBytes}
+	stdout := &boundedCommandBuffer{limit: maxRipgrepOutputBytes, onLimit: cancel}
+	stderr := &boundedCommandBuffer{limit: maxRipgrepStderrBytes, onLimit: cancel}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
 
 	results, parseErr := parseRipgrepJSON(stdout.Bytes(), maxResults)
+	if stdout.exceeded {
+		// A bounded stdout stream may contain valid matches before it is
+		// truncated. Those matches are only a prefix of the search, though,
+		// so returning them as success would silently hide later files. Let
+		// TextSearchContext use the bounded Go walker to recover a complete
+		// result set instead.
+		return nil, errors.New("ripgrep output exceeded limit")
+	}
+	if parseErr != nil {
+		// A scanner error means the stream was not fully readable (for example,
+		// a single JSON record exceeded maxSearchLineBytes). Even when earlier
+		// matches parsed successfully, returning them as success would silently
+		// hide the remainder of the search. Let the caller use the complete
+		// bounded Go fallback instead.
+		return nil, parseErr
+	}
 	if len(results) > 0 {
-		// Matches already parsed are valid even if rg was later killed for
-		// exceeding the output cap or exited with an error after emitting
-		// them (e.g. a later file in the walk hit a permission error).
-		// Discarding them would throw away real results for no benefit.
+		// Matches already parsed are valid even if rg exited with an error
+		// after emitting them (e.g. a later file in the walk hit a permission
+		// error). Discarding them would throw away real results for no
+		// benefit. Output-limit termination is handled above because those
+		// matches are only a partial prefix of the search.
 		return results, nil
 	}
 
@@ -112,10 +129,6 @@ func ripgrepSearchContext(ctx context.Context, rootDir, query string, opts Searc
 			return nil, fmt.Errorf("ripgrep: %w: %s", runErr, detail)
 		}
 		return nil, fmt.Errorf("ripgrep: %w", runErr)
-	}
-
-	if stdout.exceeded {
-		return nil, errors.New("ripgrep output exceeded limit before producing any parsable match")
 	}
 
 	if parseErr != nil {
@@ -204,10 +217,18 @@ func parseRipgrepJSON(data []byte, maxResults int) ([]Result, error) {
 		if err := json.Unmarshal(line, &msg); err != nil {
 			// A single unparsable line (most often the last one, truncated
 			// by the output cap) should not invalidate matches already
-			// collected from earlier, well-formed lines.
+			// collected from earlier, well-formed lines. Scanner/stream errors are not
+			// tolerated: callers need to know that the result set may be incomplete.
 			continue
 		}
 		if msg.Type != "match" || len(msg.Data.Submatches) == 0 {
+			continue
+		}
+		if msg.Data.Path.Text == "" || msg.Data.LineNumber <= 0 || msg.Data.Submatches[0].Start < 0 {
+			// Do not expose malformed external-tool data as a negative or
+			// workspace-less editor location. A valid rg match always has a
+			// non-empty path, a 1-based line number, and a non-negative byte
+			// offset.
 			continue
 		}
 
@@ -222,8 +243,11 @@ func parseRipgrepJSON(data []byte, maxResults int) ([]Result, error) {
 		})
 	}
 
-	if err := scanner.Err(); err != nil && len(results) == 0 {
-		return nil, err
+	if err := scanner.Err(); err != nil {
+		// Preserve already decoded matches for diagnostics/tests, but report the
+		// stream error so callers never mistake a partial result set for a
+		// complete search.
+		return results, err
 	}
 	return results, nil
 }

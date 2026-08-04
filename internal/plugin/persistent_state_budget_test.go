@@ -284,6 +284,7 @@ func newManagerAPIRegistryForTest() *APIRegistry {
 	registry.Register("keymap", registerKeymapAPI)
 	registry.Register("autocmd", registerAutocmdAPI)
 	registry.Register("ui", registerUIAPI)
+	registry.Register("teak", registerTeakAPI(registry))
 	return registry
 }
 

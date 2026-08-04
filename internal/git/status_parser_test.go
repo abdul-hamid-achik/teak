@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +102,44 @@ func TestParseStatusPorcelainZIntegration(t *testing.T) {
 	refresh := refreshAfter(repo)
 	if len(refresh.Entries) != 1 || refresh.Entries[0] != entry {
 		t.Errorf("refresh entries = %+v, want %+v", refresh.Entries, []StatusEntry{entry})
+	}
+}
+
+func TestStatusContextReturnsReadOnlySnapshot(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "teak@example.test")
+	runGit(t, repo, "config", "user.name", "Teak Test")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "tracked.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "untracked file.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := StatusContext(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("StatusContext() error = %v", err)
+	}
+	if snapshot.Branch == "" || len(snapshot.Entries) != 2 {
+		t.Fatalf("snapshot = %#v, want branch and two entries", snapshot)
+	}
+	var tracked, untracked bool
+	for _, entry := range snapshot.Entries {
+		switch entry.Path {
+		case "tracked.txt":
+			tracked = entry.IsUnstagedChange()
+		case "untracked file.txt":
+			untracked = entry.IsUntracked()
+		}
+	}
+	if !tracked || !untracked {
+		t.Fatalf("entries = %#v, want tracked and untracked states", snapshot.Entries)
 	}
 }
 

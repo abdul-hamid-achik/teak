@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"teak/internal/ui"
 )
 
@@ -136,4 +137,43 @@ func BenchmarkFileTreeFlatEntries(b *testing.B) {
 		m.sharedFlatCache = &flatEntryCache{}
 		_ = m.flatEntries()
 	}
+}
+
+func BenchmarkFileTreeFilterInput100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	model.StartFilter()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		candidate, cmd := candidate.Update(tea.KeyPressMsg{Text: "needle"})
+		if cmd == nil || !candidate.FilterPending() {
+			b.Fatal("filter input did not schedule a pending projection")
+		}
+		_ = cmd()
+	}
+}
+
+func BenchmarkFileTreeFilterUpdate100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	model.StartFilter()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		candidate, cmd := candidate.Update(tea.KeyPressMsg{Text: "needle"})
+		if cmd == nil || !candidate.FilterPending() {
+			b.Fatal("filter input did not schedule a pending projection")
+		}
+	}
+}
+
+func largeFilterBenchmarkModel(b *testing.B) Model {
+	b.Helper()
+	model := NewEmpty(b.TempDir(), ui.DefaultTheme())
+	model.Entries = make([]Entry, 100_000)
+	for i := range model.Entries {
+		name := getTestFileName(i)
+		model.Entries[i] = Entry{Name: name, Path: filepath.Join("/workspace", name)}
+	}
+	_ = model.flatEntries() // the interactive path reuses this immutable source
+	return model
 }

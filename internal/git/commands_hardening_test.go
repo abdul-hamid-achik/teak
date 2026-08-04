@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"teak/internal/toolpath"
 )
 
 func TestStageCmdSafelyStagesDashPrefixedPath(t *testing.T) {
@@ -85,7 +88,10 @@ func TestCommitCmdAcceptsOptionLikeCommitMessage(t *testing.T) {
 }
 
 func TestNewGitCommandIsNonInteractiveAndPreservesArgumentBoundary(t *testing.T) {
-	cmd := newGitCommand(context.Background(), t.TempDir(), "switch", "--", "-not-an-option")
+	cmd, err := newGitCommand(context.Background(), t.TempDir(), "switch", "--", "-not-an-option")
+	if err != nil {
+		t.Fatalf("newGitCommand() error = %v", err)
+	}
 	// argv[0] is the resolved git path, so compare its basename; the argument
 	// boundary after it is what this test actually guards.
 	if len(cmd.Args) == 0 {
@@ -103,6 +109,18 @@ func TestNewGitCommandIsNonInteractiveAndPreservesArgumentBoundary(t *testing.T)
 		if !strings.Contains(env, want) {
 			t.Errorf("environment does not contain %q", want)
 		}
+	}
+}
+
+func TestNewGitCommandRejectsConfiguredMissingBinary(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-git")
+	toolpath.Configure(map[string]string{"git": missing})
+	t.Cleanup(func() { toolpath.Configure(nil) })
+
+	if _, err := newGitCommand(context.Background(), t.TempDir(), "status"); err == nil {
+		t.Fatal("newGitCommand() returned a command for a missing configured git path")
+	} else if !toolpath.IsMissing(err) {
+		t.Fatalf("newGitCommand() error = %v, want MissingToolError", err)
 	}
 }
 
@@ -127,6 +145,28 @@ func TestRunGitOutputStopsAtOutputLimit(t *testing.T) {
 	_, err := runCommandOutput(cmd, 4)
 	if !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("runCommandOutput error = %v, want ErrOutputLimit", err)
+	}
+}
+
+func TestRunGitOutputTerminatesProcessTreeAtOutputLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX process group")
+	}
+
+	marker := filepath.Join(t.TempDir(), "finished")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "i=0; while [ $i -lt 1000 ]; do printf '1234567890'; i=$((i+1)); done; sleep 5; touch \""+marker+"\"")
+	toolpath.ConfigureCommand(cmd)
+
+	started := time.Now()
+	_, err := runCommandOutput(cmd, 1024)
+	if !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("runCommandOutput error = %v, want ErrOutputLimit", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("output-limit termination took %s, want bounded process teardown", elapsed)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("git command descendant continued after its output exceeded the limit")
 	}
 }
 

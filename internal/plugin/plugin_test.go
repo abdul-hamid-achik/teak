@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,28 @@ func TestPluginManagerNew(t *testing.T) {
 
 	if mgr.luaStates == nil {
 		t.Fatal("Lua state factory should be initialized")
+	}
+}
+
+func TestPluginManagerListPluginsIsStable(t *testing.T) {
+	mgr, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	mgr.plugins["zeta"] = &Plugin{Name: "zeta"}
+	mgr.plugins["alpha"] = &Plugin{Name: "alpha"}
+	mgr.plugins["middle"] = &Plugin{Name: "middle"}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		plugins := mgr.ListPlugins()
+		if len(plugins) != 3 {
+			t.Fatalf("ListPlugins() length = %d, want 3", len(plugins))
+		}
+		for i, want := range []string{"alpha", "middle", "zeta"} {
+			if plugins[i].Name != want {
+				t.Fatalf("ListPlugins() attempt %d = [%s, %s, %s], want alpha, middle, zeta", attempt, plugins[0].Name, plugins[1].Name, plugins[2].Name)
+			}
+		}
 	}
 }
 
@@ -570,6 +593,19 @@ func TestAPIRegistry(t *testing.T) {
 	}
 }
 
+func TestAPIRegistryNamesAreStable(t *testing.T) {
+	registry := NewAPIRegistry()
+	registry.Register("ui", func(*lua.LState) {})
+	registry.Register("buffer", func(*lua.LState) {})
+	registry.Register("editor", func(*lua.LState) {})
+
+	want := []string{"buffer", "editor", "ui"}
+	got := registry.Names()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Names() = %v, want %v", got, want)
+	}
+}
+
 func TestLoadPluginConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "plugin.toml")
@@ -652,5 +688,35 @@ description = "Works with TOML comments"
 	}
 	if config.Description != "Works with TOML comments" {
 		t.Fatalf("Expected description to decode correctly, got %q", config.Description)
+	}
+}
+
+func TestDecodePluginConfigRequiresStableName(t *testing.T) {
+	if _, err := decodePluginConfig([]byte("main = \"init.lua\"\n")); err == nil || !strings.Contains(err.Error(), "name") {
+		t.Fatalf("decodePluginConfig() error = %v, want missing name error", err)
+	}
+}
+
+func TestDecodePluginConfigRejectsUnsupportedContractVersion(t *testing.T) {
+	for _, manifest := range []string{
+		"name = \"future-api\"\napi_version = 2\n",
+		"name = \"future-events\"\nevent_version = 3\n",
+	} {
+		if _, err := decodePluginConfig([]byte(manifest)); err == nil || !strings.Contains(err.Error(), "version") {
+			t.Fatalf("decodePluginConfig(%q) error = %v, want unsupported version error", manifest, err)
+		}
+	}
+}
+
+func TestDecodePluginConfigAcceptsDeclaredContractVersion(t *testing.T) {
+	for _, eventVersion := range []int{1, PluginEventAPIVersion} {
+		manifest := fmt.Sprintf("name = \"declared-%d\"\napi_version = 1\nevent_version = %d\n", eventVersion, eventVersion)
+		config, err := decodePluginConfig([]byte(manifest))
+		if err != nil {
+			t.Fatalf("decodePluginConfig(%q) error = %v", manifest, err)
+		}
+		if config.APIVersion != PluginAPIVersion || config.EventVersion != eventVersion {
+			t.Fatalf("contract versions = api %d/events %d, want api %d/events %d", config.APIVersion, config.EventVersion, PluginAPIVersion, eventVersion)
+		}
 	}
 }

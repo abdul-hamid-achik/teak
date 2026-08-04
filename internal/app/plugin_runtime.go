@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/editor"
+	"teak/internal/overlay"
 	"teak/internal/plugin"
 	"teak/internal/text"
 )
@@ -195,7 +196,6 @@ func (r *pluginRuntime) SetBufferCursor(pos text.Position) error {
 	prevCursor := ed.Buffer.Cursor
 	pos = r.clampPosition(ed.Buffer, pos)
 	ed.Buffer.SetCursor(pos)
-	ed.Buffer.Cursor = pos
 	ed.EnsureCursorVisible()
 	if cmd := r.model.triggerEditorAutocmds(ed.Buffer.FilePath, ed.Buffer.Version(), ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor); cmd != nil {
 		r.cmds = append(r.cmds, cmd)
@@ -294,6 +294,12 @@ func (r *pluginRuntime) BufferDirty() (bool, error) {
 	return ed.Buffer.Dirty(), nil
 }
 
+func (r *pluginRuntime) NewBuffer() (int, error) {
+	result, cmd := r.model.newUntitledTab()
+	r.applyModelCmd(result, cmd)
+	return len(r.model.editors), nil
+}
+
 func (r *pluginRuntime) Mode() string {
 	return "normal"
 }
@@ -323,11 +329,18 @@ func (r *pluginRuntime) OpenFile(path string) error {
 	if err != nil {
 		return err
 	}
+	normalizedPath, err := r.model.normalizeEditorFilePath(resolvedPath)
+	if err != nil {
+		return err
+	}
 	result, cmd := r.model.openFilePinned(resolvedPath)
 	// File reads are deliberately deferred. Running cmd() here used to perform
 	// arbitrary filesystem I/O in Update and made a plugin keybinding capable
 	// of freezing the terminal UI.
 	r.applyModelCmd(result, cmd)
+	if r.model.tabBar.FindTab(normalizedPath) < 0 {
+		return fmt.Errorf("open file failed: %s", normalizedPath)
+	}
 	return nil
 }
 
@@ -432,6 +445,10 @@ func (r *pluginRuntime) ShowPanel(name string) error {
 	case "agent":
 		r.model.showAgent = true
 		r.model.setFocus(FocusAgent)
+		// ShowPanel is an imperative plugin API and cannot return a tea.Cmd,
+		// but it must still focus the text input or the panel would visually
+		// claim focus while keystrokes are ignored by the agent field.
+		_ = r.model.agentPanel.Focus()
 		r.model.relayout()
 		return nil
 	default:
@@ -517,6 +534,51 @@ func (r *pluginRuntime) TogglePanel(name string) error {
 	default:
 		return fmt.Errorf("unsupported panel %q", name)
 	}
+}
+
+func (r *pluginRuntime) NewFloat(options plugin.UIFloatOptions) (int, error) {
+	id, err := allocatePluginFloatID()
+	if err != nil {
+		return 0, err
+	}
+	if err := r.model.showPluginFloatWithID(id, options); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (r *pluginRuntime) newFloatWithID(id int, options plugin.UIFloatOptions) error {
+	return r.model.showPluginFloatWithID(id, options)
+}
+
+func (r *pluginRuntime) CloseFloat(id int) error {
+	return r.model.closePluginFloat(id)
+}
+
+func (r *pluginRuntime) SetHighlights(request plugin.UIHighlightRequest) error {
+	return r.model.setPluginHighlightsForActive(request)
+}
+
+func (r *pluginRuntime) ClearHighlights(namespace int) error {
+	return r.model.clearPluginHighlightsForActive(namespace)
+}
+
+func (r *pluginRuntime) RequestConfirm(request plugin.UIConfirmRequest) error {
+	return r.model.showPluginConfirm(request)
+}
+
+func (r *pluginRuntime) RequestInput(request plugin.UIInputRequest) error {
+	if err := r.model.showPluginInput(request); err != nil {
+		return err
+	}
+	if input, ok := r.model.overlayStack.Top().(*overlay.Input); ok {
+		r.cmds = append(r.cmds, input.Focus())
+	}
+	return nil
+}
+
+func (r *pluginRuntime) RequestSelect(request plugin.UISelectRequest) error {
+	return r.model.showPluginSelect(request)
 }
 
 func (r *pluginRuntime) Notify(message, level string) {

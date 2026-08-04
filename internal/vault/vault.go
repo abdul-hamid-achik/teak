@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -41,6 +40,9 @@ type StashEntry struct {
 
 // StashFile snapshots a file or directory to the vault.
 func StashFile(ctx context.Context, path string) (*StashResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
@@ -58,6 +60,9 @@ func StashFile(ctx context.Context, path string) (*StashResult, error) {
 
 // ListStashes returns recent stashes created by teak.
 func ListStashes(ctx context.Context, limit int) ([]StashEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
@@ -75,6 +80,9 @@ func ListStashes(ctx context.Context, limit int) ([]StashEntry, error) {
 
 // RestoreStash extracts a stash to a temporary directory and returns the path.
 func RestoreStash(ctx context.Context, id string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
@@ -93,22 +101,20 @@ func RestoreStash(ctx context.Context, id string) (string, error) {
 }
 
 func runFcheap(ctx context.Context, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cmd, err := toolpath.Command(ctx, "fcheap", args...)
 	if err != nil {
 		return nil, err
 	}
-	out, err := cmd.Output()
+	out, stderr, err := toolpath.RunBounded(cmd, maxOutputBytes, maxOutputBytes)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			detail := strings.TrimSpace(string(exitErr.Stderr))
-			if detail != "" {
-				return nil, fmt.Errorf("%w: %s", err, detail)
-			}
+		detail := strings.TrimSpace(string(stderr))
+		if detail != "" {
+			return out, fmt.Errorf("%w: %s", err, detail)
 		}
-		return nil, err
-	}
-	if len(out) > maxOutputBytes {
-		out = out[:maxOutputBytes]
+		return out, err
 	}
 	return out, nil
 }

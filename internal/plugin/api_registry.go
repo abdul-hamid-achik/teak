@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"slices"
+
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -26,7 +28,8 @@ func (r *APIRegistry) Register(name string, fn APIFunc) {
 
 // RegisterInState registers all APIs in a Lua state.
 func (r *APIRegistry) RegisterInState(L *lua.LState) {
-	for name, fn := range r.apis {
+	for _, name := range r.Names() {
+		fn := r.apis[name]
 		fn(L)
 		// The module should be at the top of the stack after fn(L)
 		if L.GetTop() > 0 {
@@ -35,4 +38,19 @@ func (r *APIRegistry) RegisterInState(L *lua.LState) {
 			L.SetGlobal(name, mod)
 		}
 	}
+}
+
+// Names returns the registered API module names in stable order.
+//
+// Registration happens while the manager is being constructed, before plugin
+// states are shared with the rest of the application. Keeping the registry
+// immutable after that point means a sorted snapshot is enough here and also
+// makes plugin discovery deterministic.
+func (r *APIRegistry) Names() []string {
+	names := make([]string, 0, len(r.apis))
+	for name := range r.apis {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }

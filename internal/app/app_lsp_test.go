@@ -42,6 +42,20 @@ func TestAppLSPMessageHandling(t *testing.T) {
 	}
 }
 
+func TestLSPCoordinatorCopiesDiagnosticsAtItsBoundary(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	diagnostics := []lsp.Diagnostic{{Message: "original"}}
+	coord.HandleMessage(lsp.DiagnosticsMsg{URI: "file:///test.go", Diagnostics: diagnostics})
+
+	diagnostics[0].Message = "caller mutation"
+	got := coord.GetDiagnostics("/test.go")
+	got[0].Message = "getter mutation"
+
+	if got := coord.GetDiagnostics("/test.go")[0].Message; got != "original" {
+		t.Fatalf("diagnostic leaked through coordinator boundary: %q", got)
+	}
+}
+
 // TestAppLSPMultipleDiagnostics tests multiple LSP diagnostics
 func TestAppLSPMultipleDiagnostics(t *testing.T) {
 	cfg := config.DefaultConfig()

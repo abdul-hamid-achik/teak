@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	sdk "github.com/coder/acp-go-sdk"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/acp"
 	"teak/internal/ui"
 )
@@ -258,6 +259,60 @@ func TestAgentAlwaysAllowDoesNotPersistForUnknownToolKind(t *testing.T) {
 	case <-response:
 		t.Fatal("second unknown tool request was auto-approved")
 	default:
+	}
+}
+
+func TestAgentAlwaysAllowRequiresExplicitOption(t *testing.T) {
+	toolKind := sdk.ToolKindExecute
+	response := make(chan sdk.RequestPermissionResponse, 1)
+	model := New(ui.DefaultTheme())
+	model.permission = &PermissionPrompt{
+		ToolCall: sdk.RequestPermissionToolCall{ToolCallId: "once-only", Kind: &toolKind},
+		Options: []sdk.PermissionOption{
+			{Kind: sdk.PermissionOptionKindAllowOnce, OptionId: "once"},
+			{Kind: sdk.PermissionOptionKindRejectOnce, OptionId: "reject"},
+		},
+		ResponseCh: response,
+	}
+
+	model, _ = model.handlePermissionKey("a")
+	if model.alwaysAllow[string(toolKind)] {
+		t.Fatal("always-allow state persisted without an allow_always option")
+	}
+	select {
+	case got := <-response:
+		if got.Outcome.Selected == nil || got.Outcome.Selected.OptionId != "once" {
+			t.Fatalf("response = %#v, want allow-once selection", got)
+		}
+	default:
+		t.Fatal("allow-once fallback did not respond")
+	}
+}
+
+func TestAgentPermissionViewOnlyShowsSupportedOptions(t *testing.T) {
+	zone.NewGlobal()
+	toolKind := sdk.ToolKindExecute
+	model := New(ui.DefaultTheme())
+	model.permission = &PermissionPrompt{
+		ToolCall: sdk.RequestPermissionToolCall{ToolCallId: "once-only", Kind: &toolKind},
+		Options: []sdk.PermissionOption{
+			{Kind: sdk.PermissionOptionKindAllowOnce, OptionId: "once"},
+			{Kind: sdk.PermissionOptionKindRejectOnce, OptionId: "reject"},
+		},
+		ResponseCh: make(chan sdk.RequestPermissionResponse, 1),
+	}
+
+	withoutAlways := strings.Join(model.renderPermission(80), "\n")
+	if strings.Contains(withoutAlways, "[a] Always") {
+		t.Fatal("permission view advertised allow_always when ACP did not offer it")
+	}
+
+	model.permission.Options = append(model.permission.Options,
+		sdk.PermissionOption{Kind: sdk.PermissionOptionKindAllowAlways, OptionId: "always"},
+	)
+	withAlways := strings.Join(model.renderPermission(80), "\n")
+	if !strings.Contains(withAlways, "[a] Always") {
+		t.Fatal("permission view hid allow_always when ACP offered it")
 	}
 }
 
@@ -1773,6 +1828,65 @@ func TestAgentMethodsExist(t *testing.T) {
 	_ = model.CurrentMode()
 	model.AddSystemMessage("test")
 	model.ClearHistory()
+}
+
+func TestAgentViewAndInputFocusAcrossConnectionStates(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetSize(40, 30)
+	if view := model.View(); !strings.Contains(view, "Agent not connected") {
+		t.Fatalf("disconnected view = %q, want connection hint", view)
+	}
+	if model.IsInputFocused() {
+		t.Fatal("new agent input should not be focused")
+	}
+	if cmd := model.Focus(); cmd == nil || !model.IsInputFocused() {
+		t.Fatal("Focus() did not focus the input")
+	}
+	model.Blur()
+	if model.IsInputFocused() {
+		t.Fatal("Blur() left the input focused")
+	}
+
+	model.SetConnected(true)
+	model.currentModel = sdk.ModelId(strings.Repeat("model-", 10))
+	model.loading = true
+	model.AddSystemMessage("system message")
+	model.permission = &PermissionPrompt{
+		ToolCall:   sdk.RequestPermissionToolCall{},
+		Options:    []sdk.PermissionOption{{Kind: sdk.PermissionOptionKindAllowOnce, OptionId: "once"}},
+		ResponseCh: make(chan sdk.RequestPermissionResponse, 1),
+	}
+	model.pendingWrite = &acp.AgentWriteFileMsg{Path: "main.go", Content: "package main\n"}
+	view := model.View()
+	for _, want := range []string{"Agent", "system message", "Agent wants to", "Edit proposal"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("connected view missing %q: %q", want, view)
+		}
+	}
+
+	model.permission = nil
+	model.pendingWrite = nil
+	model.loading = false
+	for _, state := range []AgentState{AgentDisconnected, AgentIdle, AgentThinking, AgentPermission} {
+		model.state = state
+		if got := model.View(); got == "" {
+			t.Fatalf("View() for state %v is empty", state)
+		}
+	}
+}
+
+func TestAgentLastVisibleToolCallPrefersStream(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	completed := &ToolCallState{ID: "completed", Title: "done"}
+	streaming := &ToolCallState{ID: "streaming", Title: "active"}
+	model.messages = []ChatMessage{{ToolCalls: []*ToolCallState{completed}}}
+	if got := model.lastVisibleToolCall(); got != completed {
+		t.Fatalf("lastVisibleToolCall() = %#v, want completed message call", got)
+	}
+	model.streamBlocks = []StreamBlock{{Kind: BlockToolCall, ToolCall: streaming}}
+	if got := model.lastVisibleToolCall(); got != streaming {
+		t.Fatalf("lastVisibleToolCall() = %#v, want streaming call", got)
+	}
 }
 
 // TestAgentAllFieldsHaveZeroValues tests that all fields have proper zero values

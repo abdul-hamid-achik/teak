@@ -13,13 +13,27 @@ import (
 var ErrPluginResourceLimit = errors.New("plugin resource limit exceeded")
 
 const (
-	maxPluginManifestBytes    int64 = 64 << 10
-	maxPluginSourceBytes      int64 = 2 << 20
-	maxLoadedPlugins                = 64
-	maxPluginDirectoryEntries       = 256
-	maxPluginKeymaps                = 512
-	maxPluginAutocmds               = 512
-	maxPluginCommands               = 512
+	maxPluginManifestBytes         int64 = 64 << 10
+	maxPluginSourceBytes           int64 = 2 << 20
+	maxLoadedPlugins                     = 64
+	maxPluginDirectoryEntries            = 256
+	maxPluginKeymaps                     = 512
+	maxPluginAutocmds                    = 512
+	maxPluginCommands                    = 512
+	maxPluginUIConfirmCallbacks          = 256
+	maxPluginUIConfirmOptions            = 8
+	maxPluginUISelectOptions             = 128
+	maxPluginUIInputBytes                = 4096
+	maxPluginUIInputPromptBytes          = 4096
+	maxPluginUIConfirmMessageBytes       = 16 << 10
+	maxPluginUIConfirmOptionBytes        = 256
+	maxPluginUISelectOptionBytes         = 256
+	maxPluginUIFloatContentBytes         = 64 << 10
+	maxPluginUIFloatWidth                = 120
+	maxPluginUIFloatHeight               = 40
+	maxPluginUIHighlights                = 512
+	maxPluginUIHighlightRangeBytes       = 4096
+	maxPluginUIHighlightColorBytes       = 64
 )
 
 func readPluginRootFile(root *os.Root, name string, limit int64) ([]byte, error) {

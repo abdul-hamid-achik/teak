@@ -31,20 +31,19 @@ var ErrOutputLimit = errors.New("git command output exceeds limit")
 
 // newGitCommand consistently makes Git commands bounded and non-interactive.
 // In particular, commands issued from a TUI must never open a credential,
-// pager, or editor prompt behind the user's terminal.
-func newGitCommand(ctx context.Context, rootDir string, args ...string) *exec.Cmd {
+// pager, or editor prompt behind the user's terminal. Resolution errors are
+// returned instead of falling back to a bare executable name, so a missing or
+// configured Git binary cannot accidentally be selected from PATH.
+func newGitCommand(ctx context.Context, rootDir string, args ...string) (*exec.Cmd, error) {
 	commandArgs := append([]string{"-c", "credential.interactive=never"}, args...)
-	// Resolving keeps Git working when Teak inherited a PATH without it; on
-	// failure fall back to the bare name so the exec error still names git.
-	gitPath, err := toolpath.Resolve("git")
+	cmd, err := toolpath.Command(ctx, "git", commandArgs...)
 	if err != nil {
-		gitPath = "git"
+		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, gitPath, commandArgs...)
 	cmd.Dir = rootDir
 	cmd.WaitDelay = time.Second
 	cmd.Env = gitEnvironment(os.Environ())
-	return cmd
+	return cmd, nil
 }
 
 func gitEnvironment(base []string) []string {
@@ -118,7 +117,11 @@ func runCommandOutput(cmd *exec.Cmd, limit int64) ([]byte, error) {
 }
 
 func runGitCommand(ctx context.Context, rootDir string, limit int64, args ...string) ([]byte, error) {
-	return runCommandOutput(newGitCommand(ctx, rootDir, args...), limit)
+	cmd, err := newGitCommand(ctx, rootDir, args...)
+	if err != nil {
+		return nil, err
+	}
+	return runCommandOutput(cmd, limit)
 }
 
 func runGitCommandTimeout(rootDir string, timeout time.Duration, limit int64, args ...string) ([]byte, error) {
@@ -140,6 +143,34 @@ func CurrentBranch(rootDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// StatusSnapshot is the bounded, read-only repository state consumed by
+// headless tooling and the interactive panel. Entries retain Git's two status
+// columns so callers can distinguish staged work from working-tree changes.
+type StatusSnapshot struct {
+	Branch  string
+	Entries []StatusEntry
+}
+
+// StatusContext returns the current branch and porcelain status for rootDir.
+// It never mutates the repository and preserves NUL-delimited paths, including
+// names containing spaces, quotes, Unicode, or backslashes.
+func StatusContext(ctx context.Context, rootDir string) (StatusSnapshot, error) {
+	ctx, cancel := withGitTimeout(ctx, gitReadTimeout)
+	defer cancel()
+	branchOut, err := runGitCommand(ctx, rootDir, 64<<10, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		if ctx.Err() != nil {
+			return StatusSnapshot{}, ctx.Err()
+		}
+		return StatusSnapshot{}, fmt.Errorf("detect git branch: %w", err)
+	}
+	entries, err := readStatusEntriesContext(ctx, rootDir)
+	if err != nil {
+		return StatusSnapshot{}, fmt.Errorf("read git status: %w", err)
+	}
+	return StatusSnapshot{Branch: strings.TrimSpace(string(branchOut)), Entries: entries}, nil
 }
 
 func withGitTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

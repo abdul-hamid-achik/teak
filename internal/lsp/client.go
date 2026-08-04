@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,6 +177,31 @@ func (c *Client) IsReady() bool {
 	return c.initialized && c.running
 }
 
+// IsRunning reports whether the underlying server process is still alive.
+// Initialization is intentionally not part of this check: status surfaces use
+// it to distinguish a starting/failed server from a process that has exited.
+func (c *Client) IsRunning() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.running
+}
+
+// Capabilities returns the immutable initialize snapshot used by capability
+// checks. The map-valued protocol fields are treated as read-only after
+// initialize, so returning the value copy does not expose client lifecycle
+// state or locks to callers.
+func (c *Client) Capabilities() ServerCapabilities {
+	if c == nil {
+		return ServerCapabilities{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.capabilities
+}
+
 // SupportsHover returns whether the server supports hover requests.
 func (c *Client) SupportsHover() bool {
 	c.mu.RLock()
@@ -234,6 +260,16 @@ func (c *Client) SupportsFormatting() bool {
 		return c.capsChecker.SupportsFormatting()
 	}
 	return capabilityEnabled(c.capabilities.FormattingProvider)
+}
+
+// SupportsDocumentSymbol returns whether the server supports document symbols.
+func (c *Client) SupportsDocumentSymbol() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.capsChecker != nil {
+		return c.capsChecker.SupportsDocumentSymbol()
+	}
+	return capabilityEnabled(c.capabilities.DocumentSymbolProvider)
 }
 
 // GetCompletionTriggerCharacters returns the trigger characters for completion.
@@ -620,13 +656,11 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 		return nil, fmt.Errorf("language server %q not found: %w", cfg.Command, err)
 	}
 
-	cmd := exec.Command(resolved, cfg.Args...)
+	cmd := exec.CommandContext(context.Background(), resolved, cfg.Args...)
+	toolpath.ConfigureCommand(cmd)
 	cmd.Dir = rootDir
 	if len(cfg.Env) > 0 {
-		cmd.Env = os.Environ()
-		for k, v := range cfg.Env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
+		cmd.Env = mergeEnvironment(os.Environ(), cfg.Env)
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -665,6 +699,40 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 	go c.readLoop(ctx)
 
 	return c, nil
+}
+
+// mergeEnvironment applies configured overrides without leaving duplicate
+// entries behind. Duplicate environment keys have platform-dependent lookup
+// behavior, so appending PATH/VIRTUAL_ENV after os.Environ is not a reliable
+// override.
+func mergeEnvironment(base []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(base)+len(overrides))
+	replaced := make(map[string]struct{}, len(overrides))
+	for _, entry := range base {
+		name, _, hasValue := strings.Cut(entry, "=")
+		value, overridden := overrides[name]
+		if !hasValue || !overridden {
+			result = append(result, entry)
+			continue
+		}
+		if _, alreadyReplaced := replaced[name]; alreadyReplaced {
+			continue
+		}
+		result = append(result, name+"="+value)
+		replaced[name] = struct{}{}
+	}
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		value := overrides[name]
+		if _, exists := replaced[name]; !exists {
+			result = append(result, name+"="+value)
+		}
+	}
+	return result
 }
 
 // Initialize sends the initialize request to the server.
@@ -805,6 +873,23 @@ func (c *Client) Shutdown() {
 		c.mu.Unlock()
 		go c.shutdownProcess()
 	})
+}
+
+// Terminate forcefully stops the server process group. It is intended for
+// callers whose request context has already been cancelled and cannot afford
+// to wait for a graceful LSP shutdown handshake (for example a disconnected
+// headless HTTP request). Shutdown should still be called first when the
+// caller wants the normal protocol teardown to begin.
+func (c *Client) Terminate() {
+	if c == nil {
+		return
+	}
+	c.mu.RLock()
+	cmd := c.cmd
+	c.mu.RUnlock()
+	if cmd != nil {
+		_ = toolpath.TerminateCommand(cmd)
+	}
 }
 
 // WaitForShutdown waits until the server process has been reaped or ctx is
@@ -1096,6 +1181,14 @@ func (c *Client) callInternal(ctx context.Context, method string, params any, re
 		c.mu.Unlock()
 		return nil, errClientNotRunning
 	}
+	if requireRunning && c.readDone != nil {
+		select {
+		case <-c.readDone:
+			c.mu.Unlock()
+			return nil, errClientNotRunning
+		default:
+		}
+	}
 	c.requestID++
 	id := c.requestID
 	ch := make(chan callResult, 1)
@@ -1137,6 +1230,11 @@ func (c *Client) callInternal(ctx context.Context, method string, params any, re
 		c.cancelRequest(id)
 		return nil, ctx.Err()
 	case <-c.processDone:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, errClientNotRunning
+	case <-c.readDone:
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -1496,6 +1594,10 @@ func (c *Client) sendEncoded(data []byte) error {
 
 func (c *Client) readLoop(ctx context.Context) {
 	defer func() {
+		c.mu.Lock()
+		c.running = false
+		c.initialized = false
+		c.mu.Unlock()
 		if c.readDone != nil {
 			close(c.readDone)
 		}
@@ -1555,6 +1657,9 @@ func (c *Client) reapProcess() {
 		return
 	}
 	err := c.cmd.Wait()
+	c.mu.Lock()
+	c.running = false
+	c.mu.Unlock()
 	if c.processDone != nil {
 		close(c.processDone)
 	}
@@ -1611,7 +1716,7 @@ func (c *Client) shutdownProcess() {
 		return
 	}
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = toolpath.TerminateCommand(cmd)
 	}
 	if !lspWaitForDone(c.processDone, lspShutdownReapTimeout) {
 		log.Warn("lsp: process did not exit after forced shutdown")
@@ -2072,6 +2177,7 @@ func (c *Client) sendErrorResponse(id int, code int, message string, data any) {
 func (c *Client) handleDiagnostics(params json.RawMessage) {
 	var p struct {
 		URI         string `json:"uri"`
+		Version     *int   `json:"version"`
 		Diagnostics []struct {
 			Range struct {
 				Start struct {
@@ -2091,6 +2197,14 @@ func (c *Client) handleDiagnostics(params json.RawMessage) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		log.Error("lsp: failed to parse diagnostics", "err", err)
 		return
+	}
+	if p.Version != nil {
+		if current, open := c.DocumentVersion(p.URI); open && current > *p.Version {
+			// The server computed this publication for an older document. It is
+			// safe to discard it before it reaches the UI, where it could paint
+			// ranges against newer text.
+			return
+		}
 	}
 
 	diags := make([]Diagnostic, 0, len(p.Diagnostics))
@@ -2117,8 +2231,17 @@ func (c *Client) handleDiagnostics(params json.RawMessage) {
 
 	c.queueNotification("diagnostics:"+p.URI, DiagnosticsMsg{
 		URI:         p.URI,
+		Version:     intValue(p.Version),
+		HasVersion:  p.Version != nil,
 		Diagnostics: diags,
 	})
+}
+
+func intValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (c *Client) queueNotification(key string, msg any) {

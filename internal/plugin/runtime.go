@@ -8,7 +8,8 @@ import (
 )
 
 // Runtime exposes the current app/editor state to plugin APIs during dispatch.
-// Methods operate on the active editor and current app model.
+// Synchronous runtimes apply immediately; asynchronous runtimes replay each
+// callback's logical tab/focus sequence in order before committing mutations.
 type Runtime interface {
 	BufferText() (string, error)
 	SetBufferText(string) error
@@ -22,6 +23,9 @@ type Runtime interface {
 	SaveBuffer() error
 	BufferFilePath() (string, error)
 	BufferDirty() (bool, error)
+	// NewBuffer creates and focuses a new untitled editor buffer, returning its
+	// 1-based tab/buffer number.
+	NewBuffer() (int, error)
 	Mode() string
 	TabCount() int
 	ActiveTab() int
@@ -38,7 +42,89 @@ type Runtime interface {
 	ShowPanel(string) error
 	HidePanel(string) error
 	TogglePanel(string) error
+	NewFloat(UIFloatOptions) (int, error)
+	CloseFloat(int) error
+	SetHighlights(UIHighlightRequest) error
+	ClearHighlights(int) error
+	RequestConfirm(UIConfirmRequest) error
+	RequestInput(UIInputRequest) error
+	RequestSelect(UISelectRequest) error
 	Notify(string, string)
+}
+
+// UIConfirmRequest describes a non-blocking confirmation dialog. The callback
+// is resumed by the manager after the user chooses an option or dismisses the
+// dialog; the original Lua dispatch never waits for terminal input.
+type UIConfirmRequest struct {
+	Message    string
+	Options    []string
+	CallbackID uint64
+}
+
+// UIConfirmResult is passed to a callback as option, one-based index, and
+// accepted boolean. A dismissal has Accepted=false, Index=0, and an empty
+// Option.
+type UIConfirmResult struct {
+	Option   string
+	Index    int
+	Accepted bool
+}
+
+// UIInputRequest describes a non-blocking single-line text prompt. The
+// callback is resumed with the entered value and an accepted flag.
+type UIInputRequest struct {
+	Prompt       string
+	InitialValue string
+	CallbackID   uint64
+}
+
+// UIInputResult is passed to an input callback. A dismissal has Accepted=false
+// and preserves no user-entered value.
+type UIInputResult struct {
+	Value    string
+	Accepted bool
+}
+
+// UISelectRequest describes a non-blocking fuzzy selector. The callback is
+// resumed with the selected option, its one-based index, and an accepted flag.
+type UISelectRequest struct {
+	Prompt     string
+	Options    []string
+	CallbackID uint64
+}
+
+// UISelectResult is passed to a selector callback. Escape produces an empty
+// option, index zero, and Accepted=false.
+type UISelectResult struct {
+	Option   string
+	Index    int
+	Accepted bool
+}
+
+// UIFloatOptions describes a bounded, read-only floating panel.
+type UIFloatOptions struct {
+	Title   string
+	Content string
+	Width   int
+	Height  int
+}
+
+// UIHighlight describes a 0-based byte range in the active buffer. Empty
+// style fields inherit the current editor foreground/background.
+type UIHighlight struct {
+	Line       int
+	StartCol   int
+	EndCol     int
+	Foreground string
+	Background string
+	Bold       bool
+	Underline  bool
+}
+
+// UIHighlightRequest replaces one namespace for the active buffer.
+type UIHighlightRequest struct {
+	Namespace  int
+	Highlights []UIHighlight
 }
 
 var pluginRuntimes = struct {

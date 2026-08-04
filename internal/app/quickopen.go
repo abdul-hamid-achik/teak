@@ -206,3 +206,19 @@ func filesToPickerItems(files []string) []overlay.PickerItem {
 	}
 	return items
 }
+
+// preparePickerItemsCmd moves the O(N) conversion from a FileListMsg handler
+// into a Bubble Tea command. The picker then performs its fuzzy projection in
+// a second cancellable command, so a large quick-open result never makes the
+// root Update loop build or sort thousands of items.
+func preparePickerItemsCmd(instanceID uint64, zoneID string, files []string, agent bool) tea.Cmd {
+	return func() tea.Msg {
+		var items []overlay.PickerItem
+		if agent {
+			items = filesToAgentPickerItems(files)
+		} else {
+			items = filesToPickerItems(files)
+		}
+		return overlay.PickerItemsReadyMsg{InstanceID: instanceID, ZoneID: zoneID, Items: items}
+	}
+}

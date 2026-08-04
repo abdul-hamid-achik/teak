@@ -56,6 +56,28 @@ func TestSetFocusReleasesGitCommitForm(t *testing.T) {
 	}
 }
 
+func TestSetFocusFromTreeClearsActiveFilter(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.setFocus(FocusTree)
+	m.tree.StartFilter()
+	m.tree.SetFilter("main")
+	if !m.tree.FilterActive() {
+		t.Fatal("setup: tree filter should be active")
+	}
+
+	updatedAny, _ := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: m.treeWidth() + 2, Y: 1}))
+	updated := updatedAny.(Model)
+	if updated.focus != FocusEditor {
+		t.Fatalf("focus = %v, want FocusEditor", updated.focus)
+	}
+	if updated.tree.FilterActive() {
+		t.Fatal("tree filter remains active after focus moved to editor")
+	}
+	if got := updated.tree.Filter(); got != "" {
+		t.Fatalf("tree filter = %q, want empty after focus moved", got)
+	}
+}
+
 func TestSidebarFocusFollowsVisibleTab(t *testing.T) {
 	tests := []struct {
 		tab  SidebarTab

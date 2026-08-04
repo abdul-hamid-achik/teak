@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"teak/internal/toolpath"
 )
 
 const (
@@ -199,7 +200,10 @@ func runCopyCommand(candidate []string, text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), clipboardCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, candidate[0], candidate[1:]...)
+	cmd, err := toolpath.Command(ctx, candidate[0], candidate[1:]...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", candidate[0], err)
+	}
 	cmd.Stdin = strings.NewReader(text)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -217,7 +221,10 @@ func runPasteCommand(candidate []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), clipboardCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, candidate[0], candidate[1:]...)
+	cmd, err := toolpath.Command(ctx, candidate[0], candidate[1:]...)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", candidate[0], err)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("%s stdout: %w", candidate[0], err)

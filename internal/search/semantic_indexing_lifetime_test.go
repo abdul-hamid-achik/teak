@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,32 @@ func configureFakeVecgrep(t *testing.T, bin string) {
 	t.Cleanup(func() { toolpath.Configure(nil) })
 }
 
+func TestSemanticIndexRSSBudgetUsesConservativeDefault(t *testing.T) {
+	const want = uint64(512 << 20)
+	if defaultSemanticIndexRSSBudget != want {
+		t.Fatalf("default semantic index RSS budget = %d, want %d", defaultSemanticIndexRSSBudget, want)
+	}
+	if got := semanticIndexRSSBudgetFromContext(WithSemanticIndexRSSBudget(context.Background(), 0)); got != want {
+		t.Fatalf("zero WithSemanticIndexRSSBudget() = %d, want default %d", got, want)
+	}
+	if got := semanticIndexRSSBudgetFromContext(WithSemanticIndexRSSBudget(context.Background(), 768<<20)); got != 768<<20 {
+		t.Fatalf("explicit WithSemanticIndexRSSBudget() = %d, want 768 MiB", got)
+	}
+}
+
+func TestSemanticQueryRSSBudgetUsesConservativeDefault(t *testing.T) {
+	const want = uint64(512 << 20)
+	if defaultSemanticQueryRSSBudget != want {
+		t.Fatalf("default semantic query RSS budget = %d, want %d", defaultSemanticQueryRSSBudget, want)
+	}
+	if got := semanticQueryRSSBudgetFromContext(WithSemanticQueryRSSBudget(context.Background(), 0)); got != want {
+		t.Fatalf("zero WithSemanticQueryRSSBudget() = %d, want %d", got, want)
+	}
+	if got := semanticQueryRSSBudgetFromContext(WithSemanticQueryRSSBudget(context.Background(), 768<<20)); got != 768<<20 {
+		t.Fatalf("explicit WithSemanticQueryRSSBudget() = %d, want 768 MiB", got)
+	}
+}
+
 // subprocessTimeout bounds waits on the fake vecgrep subprocess. It is a
 // safety net against a hang, not a performance assertion: these tests spawn a
 // real shell script, and under a full parallel test run process startup and
@@ -153,7 +180,7 @@ func TestIndexingSurvivesLeaderContextCancellation(t *testing.T) {
 	case <-time.After(subprocessTimeout):
 		t.Fatal("indexing did not complete after release was signaled")
 	}
-	if _, ok := vecgrepReady.Load(rootDir); !ok {
+	if _, ok := vecgrepReady.Load(workspaceKey(rootDir)); !ok {
 		t.Fatal("vecgrepReady was not marked ready after a successful index build")
 	}
 }
@@ -199,6 +226,208 @@ func TestCancelIndexingStopsSubprocessAndWaitForShutdown(t *testing.T) {
 	}
 }
 
+func TestInteractiveIndexBuildHasBoundedTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+	bin, state := fakeVecgrepScript(t)
+	configureFakeVecgrep(t, bin)
+	previousTimeout := semanticIndexTimeout
+	semanticIndexTimeout = time.Second
+	t.Cleanup(func() {
+		semanticIndexTimeout = previousTimeout
+		CancelIndexing()
+		_ = WaitForIndexingShutdown(context.Background())
+	})
+
+	rootDir := t.TempDir()
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		result <- ensureVecgrepReadyContext(context.Background(), rootDir)
+	}()
+	waitForFileToExist(t, filepath.Join(state, "started"), 5*time.Second)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ensureVecgrepReadyContext() error = %v, want deadline exceeded", err)
+		}
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("interactive index timeout took %s, want bounded termination", elapsed)
+		}
+	case <-time.After(subprocessTimeout):
+		t.Fatal("interactive index build exceeded its configured timeout")
+	}
+	if _, err := os.Stat(filepath.Join(state, "indexed")); err == nil {
+		t.Fatal("timed-out vecgrep index completed after its deadline")
+	}
+}
+
+func TestVecgrepIndexChecksRSSBudgetBeforeFirstPollInterval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+	bin, state := fakeVecgrepScript(t)
+	configureFakeVecgrep(t, bin)
+	previousSampler := semanticRSSSampler
+	previousInterval := semanticRSSPollInterval
+	semanticRSSSampler = func(context.Context, int) (uint64, error) { return 2, nil }
+	semanticRSSPollInterval = time.Second
+	t.Cleanup(func() {
+		semanticRSSSampler = previousSampler
+		semanticRSSPollInterval = previousInterval
+		CancelIndexing()
+		_ = WaitForIndexingShutdown(context.Background())
+	})
+
+	rootDir := t.TempDir()
+	started := time.Now()
+	result := make(chan error, 1)
+	go func() {
+		result <- ensureVecgrepReadyContext(WithSemanticIndexRSSBudget(context.Background(), 1), rootDir)
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrSemanticIndexRSSBudgetExceeded) {
+			t.Fatalf("ensureVecgrepReadyContext() error = %v, want RSS budget error", err)
+		}
+		if elapsed := time.Since(started); elapsed >= semanticRSSPollInterval {
+			t.Fatalf("RSS budget was enforced after %s, want before first poll interval", elapsed)
+		}
+	case <-time.After(subprocessTimeout):
+		t.Fatal("RSS-limited vecgrep index did not terminate")
+	}
+	if _, err := os.Stat(filepath.Join(state, "indexed")); err == nil {
+		t.Fatal("RSS-limited vecgrep index completed after its budget was exceeded")
+	}
+}
+
+func TestVecgrepIndexFailsClosedWhenRSSIsUnavailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+	bin, state := fakeVecgrepScript(t)
+	configureFakeVecgrep(t, bin)
+	previousSampler := semanticRSSSampler
+	previousInterval := semanticRSSPollInterval
+	semanticRSSSampler = func(context.Context, int) (uint64, error) {
+		return 0, errors.New("fixture RSS sampler unavailable")
+	}
+	semanticRSSPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		semanticRSSSampler = previousSampler
+		semanticRSSPollInterval = previousInterval
+		CancelIndexing()
+		_ = WaitForIndexingShutdown(context.Background())
+	})
+
+	rootDir := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		result <- ensureVecgrepReadyContext(context.Background(), rootDir)
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrSemanticIndexRSSUnavailable) {
+			t.Fatalf("ensureVecgrepReadyContext() error = %v, want RSS unavailable error", err)
+		}
+	case <-time.After(subprocessTimeout):
+		t.Fatal("vecgrep index did not fail closed when RSS sampling was unavailable")
+	}
+	if _, err := os.Stat(filepath.Join(state, "indexed")); err == nil {
+		t.Fatal("vecgrep index completed despite unavailable RSS supervision")
+	}
+}
+
+func TestVecgrepSemanticQueryFailsClosedWhenRSSBudgetIsExceeded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+
+	root := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "query-finished")
+	fixture := filepath.Join(t.TempDir(), "vecgrep-query-rss")
+	script := `#!/bin/sh
+case "$1" in
+  status)
+    printf '%s\n' '{"index_fresh":true,"stats":{"files":1},"pending_changes":{"total_pending":0},"freshness":{"state":"fresh"},"lightweight":true}'
+    ;;
+  search)
+    sleep 5
+    : > "` + marker + `"
+    ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fixture, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configureFakeVecgrep(t, fixture)
+	previousSampler := semanticRSSSampler
+	previousInterval := semanticRSSPollInterval
+	semanticRSSSampler = func(context.Context, int) (uint64, error) { return 2, nil }
+	semanticRSSPollInterval = time.Second
+	t.Cleanup(func() {
+		semanticRSSSampler = previousSampler
+		semanticRSSPollInterval = previousInterval
+	})
+
+	_, err := SemanticSearchReadyContext(WithSemanticQueryRSSBudget(context.Background(), 1), root, "meaning")
+	if !errors.Is(err, ErrSemanticQueryRSSBudgetExceeded) {
+		t.Fatalf("SemanticSearchReadyContext() error = %v, want query RSS budget error", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("RSS-limited vecgrep query completed or stat failed: %v", statErr)
+	}
+}
+
+func TestVecgrepSemanticQueryFailsClosedWhenRSSIsUnavailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+
+	root := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "query-finished")
+	fixture := filepath.Join(t.TempDir(), "vecgrep-query-rss-unavailable")
+	script := `#!/bin/sh
+case "$1" in
+  status)
+    printf '%s\n' '{"index_fresh":true,"stats":{"files":1},"pending_changes":{"total_pending":0},"freshness":{"state":"fresh"},"lightweight":true}'
+    ;;
+  search)
+    sleep 5
+    : > "` + marker + `"
+    ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fixture, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configureFakeVecgrep(t, fixture)
+	previousSampler := semanticRSSSampler
+	previousInterval := semanticRSSPollInterval
+	semanticRSSSampler = func(context.Context, int) (uint64, error) {
+		return 0, errors.New("fixture query RSS sampler unavailable")
+	}
+	semanticRSSPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		semanticRSSSampler = previousSampler
+		semanticRSSPollInterval = previousInterval
+	})
+
+	_, err := SemanticSearchReadyContext(WithSemanticQueryRSSBudget(context.Background(), 1<<20), root, "meaning")
+	if !errors.Is(err, ErrSemanticQueryRSSUnavailable) {
+		t.Fatalf("SemanticSearchReadyContext() error = %v, want query RSS unavailable sentinel", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("RSS-unsupervised vecgrep query completed or stat failed: %v", statErr)
+	}
+}
+
 // TestConcurrentSemanticSearchesShareOneIndexBuild ensures the fix for
 // context lifetime did not regress the existing single-flight guarantee:
 // many concurrent first-time semantic searches for the same workspace must
@@ -213,15 +442,20 @@ func TestConcurrentSemanticSearchesShareOneIndexBuild(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
+	aliasParent := t.TempDir()
+	rootAlias := filepath.Join(aliasParent, "workspace-link")
+	if err := os.Symlink(rootDir, rootAlias); err != nil {
+		t.Fatalf("symlink workspace: %v", err)
+	}
 	const callers = 8
 	errs := make(chan error, callers)
 	var wg sync.WaitGroup
 	for i := 0; i < callers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(workspace string) {
 			defer wg.Done()
-			errs <- ensureVecgrepReadyContext(context.Background(), rootDir)
-		}()
+			errs <- ensureVecgrepReadyContext(context.Background(), workspace)
+		}([]string{rootDir, rootAlias}[i%2])
 	}
 	wg.Wait()
 	close(errs)
@@ -241,6 +475,26 @@ func TestConcurrentSemanticSearchesShareOneIndexBuild(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("vecgrep index invoked %d times, want 1 (concurrent searches must share one build)", got)
+	}
+}
+
+func TestVecgrepStatusErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{name: "missing project", err: "vecgrep status: not in a vecgrep project", want: true},
+		{name: "not initialized", err: "project not initialized", want: true},
+		{name: "permission denied", err: "permission denied", want: false},
+		{name: "timeout", err: "context deadline exceeded", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isVecgrepProjectMissing(errors.New(tt.err)); got != tt.want {
+				t.Fatalf("isVecgrepProjectMissing(%q) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

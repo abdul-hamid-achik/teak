@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -76,6 +77,64 @@ func TestInputRoutingGlobalShortcutDoesNotReachEditor(t *testing.T) {
 	}
 	if got := updated.activeEditor().Buffer.Content(); got != "" {
 		t.Fatalf("editor content after ctrl+b = %q, want unchanged", got)
+	}
+}
+
+func TestFileTreeVisibilityShortcutsAreContextual(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.showTree = true
+	model.focus = FocusTree
+	model.sidebarTab = SidebarFiles
+
+	updated := updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+	if updated.tree.ShowHidden() {
+		t.Fatal("Ctrl+H in the file tree did not hide hidden entries")
+	}
+	if !strings.Contains(updated.status, "Hidden files hidden") {
+		t.Fatalf("status = %q, want contextual hidden-file status", updated.status)
+	}
+
+	updated = updateInputRoutingModel(t, updated, tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	if updated.tree.ShowGitIgnored() {
+		t.Fatal("Ctrl+K in the file tree did not hide ignored entries")
+	}
+}
+
+func TestF2StartsRenameSymbolInput(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	updatedAny, cmd, handled := model.handleGlobalKey(tea.KeyPressMsg{Code: tea.KeyF2})
+	updated := updatedAny.(Model)
+	if !handled {
+		t.Fatal("F2 was not handled")
+	}
+	if cmd != nil {
+		t.Fatal("F2 returned a command before the rename name was submitted")
+	}
+	if !updated.renameMode || updated.renameInput != "" {
+		t.Fatalf("F2 rename state = mode %v input %q, want active empty input", updated.renameMode, updated.renameInput)
+	}
+}
+
+func TestCommandRegistryHasUniqueIDsAndOneSemanticSearchEntry(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	seen := make(map[string]int)
+	semantic := 0
+	for _, command := range model.commandRegistry() {
+		seen[command.ID]++
+		if command.ID == "semantic_search" {
+			semantic++
+			if command.Shortcut != "" {
+				t.Fatalf("semantic search advertises shortcut %q, but Ctrl+Shift+F opens text search", command.Shortcut)
+			}
+		}
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("command %q appears %d times in the palette", id, count)
+		}
+	}
+	if semantic != 1 {
+		t.Fatalf("semantic search entries = %d, want 1", semantic)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"teak/internal/toolpath"
@@ -85,6 +86,19 @@ func TestParseRipgrepJSONTruncatedTrailingLine(t *testing.T) {
 	}
 }
 
+func TestParseRipgrepJSONReportsOversizedLineAfterResults(t *testing.T) {
+	valid := `{"type":"match","data":{"path":{"text":"./a.go"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0}]}}`
+	input := []byte(valid + "\n" + strings.Repeat("x", maxSearchLineBytes))
+
+	results, err := parseRipgrepJSON(input, maxTextSearchResults)
+	if err == nil {
+		t.Fatal("parseRipgrepJSON() error = nil, want scanner error for oversized line")
+	}
+	if len(results) != 1 || results[0].FilePath != "a.go" {
+		t.Fatalf("parseRipgrepJSON() results = %+v, want the valid prefix preserved", results)
+	}
+}
+
 func TestParseRipgrepJSONIgnoresNonMatchLines(t *testing.T) {
 	input := `{"type":"begin","data":{"path":{"text":"./a.txt"}}}
 {"type":"end","data":{"path":{"text":"./a.txt"}}}
@@ -96,6 +110,18 @@ func TestParseRipgrepJSONIgnoresNonMatchLines(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("expected 0 results for begin/end/summary-only input, got %d", len(results))
+	}
+}
+
+func TestParseRipgrepJSONRejectsInvalidMatchRecords(t *testing.T) {
+	input := `{"type":"match","data":{"path":{"text":""},"lines":{"text":"bad\n"},"line_number":0,"submatches":[{"start":-1}]}}
+{"type":"match","data":{"path":{"text":"./valid.go"},"lines":{"text":"needle\n"},"line_number":2,"submatches":[{"start":0}]}}`
+	results, err := parseRipgrepJSON([]byte(input), maxTextSearchResults)
+	if err != nil {
+		t.Fatalf("parseRipgrepJSON() error = %v", err)
+	}
+	if len(results) != 1 || results[0].FilePath != "valid.go" || results[0].Line != 1 || results[0].Col != 0 {
+		t.Fatalf("parseRipgrepJSON() = %+v, want only the valid 0-based result", results)
 	}
 }
 
@@ -210,6 +236,45 @@ func TestTextSearchContextFallsBackWhenRipgrepUnavailable(t *testing.T) {
 	}
 }
 
+func TestTextSearchFallbackFindsUnknownTextExtension(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "component.svelte")
+	if err := os.WriteFile(path, []byte("<script>const needle = true</script>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withRipgrepSeams(t, func() bool { return false }, nil)
+	results, err := TextSearchContext(context.Background(), root, "needle", SearchOpts{})
+	if err != nil {
+		t.Fatalf("TextSearchContext() error = %v", err)
+	}
+	if len(results) != 1 || results[0].FilePath != "component.svelte" {
+		t.Fatalf("fallback results = %+v, want component.svelte", results)
+	}
+}
+
+func TestTextSearchFallbackSearchesWorkspaceNamedCommonSkipDir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n// needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withRipgrepSeams(t, func() bool { return false }, nil)
+	results, err := TextSearchContext(context.Background(), root, "needle", SearchOpts{})
+	if err != nil {
+		t.Fatalf("TextSearchContext() error = %v", err)
+	}
+	if len(results) != 1 || results[0].FilePath != "main.go" {
+		t.Fatalf("workspace-root results = %+v, want main.go", results)
+	}
+}
+
 // TestTextSearchContextFallsBackOnRipgrepFailure simulates rg resolving but
 // then failing on this particular invocation (e.g. exit code 2 for a
 // rejected pattern, per requirement #4). The dispatcher must silently retry
@@ -232,6 +297,54 @@ func TestTextSearchContextFallsBackOnRipgrepFailure(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected the Go walker fallback to find 1 result, got %d", len(results))
+	}
+}
+
+func TestTextSearchContextFallsBackAfterRipgrepOutputLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, name := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte("package main\n// needle here\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	withRipgrepSeams(t, func() bool { return true }, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		// Emit one valid match and then enough output to trip the bounded
+		// stdout buffer. The fallback must discover the second file rather
+		// than treating the partial rg result as a complete success.
+		script := `printf '%s\n' '{"type":"match","data":{"path":{"text":"./a.go"},"lines":{"text":"needle\\n"},"line_number":2,"submatches":[{"start":3}]}}'; dd if=/dev/zero bs=1048576 count=9 2>/dev/null`
+		return exec.CommandContext(ctx, "sh", "-c", script), nil
+	})
+
+	results, err := TextSearchContext(context.Background(), tmpDir, "needle", SearchOpts{})
+	if err != nil {
+		t.Fatalf("TextSearchContext() error = %v, want bounded fallback", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected the fallback to find both files after rg output truncation, got %d: %+v", len(results), results)
+	}
+}
+
+func TestTextSearchContextFallsBackAfterRipgrepParserStreamError(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main\n// needle here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withRipgrepSeams(t, func() bool { return true }, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		// The first record is valid, but the following JSON line exceeds the
+		// parser's line budget. The dispatcher must reject that partial stream
+		// and let the complete Go walker recover the result.
+		script := `printf '%s\n' '{"type":"match","data":{"path":{"text":"./a.go"},"lines":{"text":"needle\n"},"line_number":2,"submatches":[{"start":3}]}}'; head -c 1048577 /dev/zero`
+		return exec.CommandContext(ctx, "sh", "-c", script), nil
+	})
+
+	results, err := TextSearchContext(context.Background(), tmpDir, "needle", SearchOpts{})
+	if err != nil {
+		t.Fatalf("TextSearchContext() error = %v, want parser-error fallback", err)
+	}
+	if len(results) != 1 || results[0].FilePath != "a.go" {
+		t.Fatalf("fallback results = %+v, want complete a.go result", results)
 	}
 }
 

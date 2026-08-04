@@ -58,6 +58,16 @@ func TestCoordinatorHandleDAPMessage(t *testing.T) {
 	}
 }
 
+func TestCoordinatorHandlesWrappedDAPMessage(t *testing.T) {
+	coord := NewCoordinator(nil, nil, nil)
+
+	coord.HandleMessage(dapMsg{msg: dap.StoppedEventMsg{Reason: "breakpoint"}})
+
+	if got := coord.GetDAPCoordinator().GetState(); got != dap.StatePaused {
+		t.Fatalf("wrapped DAP message left state at %v, want %v", got, dap.StatePaused)
+	}
+}
+
 // TestCoordinatorHandleACPMessage tests routing ACP messages
 func TestCoordinatorHandleACPMessage(t *testing.T) {
 	coord := NewCoordinator(nil, nil, nil)

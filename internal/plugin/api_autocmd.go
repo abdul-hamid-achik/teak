@@ -17,8 +17,6 @@ const (
 	EventBufWrite    = "BufWrite"
 	EventBufNew      = "BufNew"
 	EventBufDelete   = "BufDelete"
-	EventInsertEnter = "InsertEnter"
-	EventInsertLeave = "InsertLeave"
 	EventTextChanged = "TextChanged"
 	EventCursorMoved = "CursorMoved"
 	EventFileType    = "FileType"
@@ -67,7 +65,7 @@ var autocmdAPIFunctions = map[string]lua.LGFunction{
 
 // autocmd.register(event, callback, opts?)
 func autocmdRegister(L *lua.LState) int {
-	event := L.CheckString(1)
+	event := checkAutocmdEvent(L, 1)
 	callback := L.CheckFunction(2)
 
 	cmd := Autocommand{
@@ -115,7 +113,7 @@ func autocmdRegister(L *lua.LState) int {
 
 // autocmd.unregister(event, callback?)
 func autocmdUnregister(L *lua.LState) int {
-	event := L.CheckString(1)
+	event := checkAutocmdEvent(L, 1)
 	var callback *lua.LFunction
 	if L.GetTop() >= 2 {
 		callback = L.CheckFunction(2)
@@ -155,6 +153,9 @@ func autocmdClear(L *lua.LState) int {
 	event := ""
 	if L.GetTop() >= 1 {
 		event = L.CheckString(1)
+		if event != "" {
+			event = checkAutocmdEvent(L, 1)
+		}
 	}
 
 	pluginAutocommands.mu.Lock()
@@ -181,6 +182,9 @@ func autocmdList(L *lua.LState) int {
 	event := ""
 	if L.GetTop() >= 1 {
 		event = L.CheckString(1)
+		if event != "" {
+			event = checkAutocmdEvent(L, 1)
+		}
 	}
 
 	pluginAutocommands.mu.RLock()
@@ -223,6 +227,14 @@ func autocmdList(L *lua.LState) int {
 	}
 	L.Push(result)
 	return 1
+}
+
+func checkAutocmdEvent(L *lua.LState, index int) string {
+	event := L.CheckString(index)
+	if !isKnownPluginEvent(event) {
+		L.RaiseError("unsupported autocmd event %q", event)
+	}
+	return event
 }
 
 func (r *autocmdRegistry) ensureStateLocked(L *lua.LState) map[string][]Autocommand {

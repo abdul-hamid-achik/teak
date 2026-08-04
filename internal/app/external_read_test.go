@@ -92,6 +92,34 @@ func TestExternalFallbackReadsAreSerializedAcrossOpenFiles(t *testing.T) {
 	}
 }
 
+func TestOwnWriteRecheckMatchingBytesDoesNotCreateConflict(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "main.go", "disk\n", "saved by teak\n")
+	path := model.editors[0].Buffer.FilePath
+	expected := model.editors[0].Buffer.Rope()
+	model.editors[0].Buffer.MarkSavedSnapshot(path, expected)
+	model.lastSaveWatcherWatermarks[path] = 1
+	change := FileChangedMsg{
+		Path:              path,
+		Observation:       1,
+		OwnWriteCandidate: true,
+		OwnWriteSnapshot:  expected,
+		RequiresConflict:  true,
+	}
+	model.externalReads.inFlight = true
+	model.externalReads.current = change
+
+	updatedAny, _ := model.handleExternalFileReadPrepared(externalFileReadPreparedMsg{
+		Change:        change,
+		Snapshot:      text.NewFromString("saved by teak\n"),
+		OwnWriteMatch: true,
+	})
+	updated := updatedAny.(Model)
+	if updated.hasExternalConflict(path) || updated.unsavedConfirm != nil {
+		t.Fatalf("matching bytes from Teak's own atomic save created an external conflict: conflict=%#v confirm=%#v dirty=%v observed=%d watermark=%d status=%q", updated.externalConflicts[path], updated.unsavedConfirm, updated.editors[0].Buffer.Dirty(), updated.externalChangeObserved[path], updated.lastSaveWatcherWatermarks[path], updated.status)
+	}
+}
+
 func TestExternalFallbackReadKeepsOnlyNewestObservationPerPath(t *testing.T) {
 	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
 	addDirtyEditor(t, &model, "main.go", "disk\n", "local\n")

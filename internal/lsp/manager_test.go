@@ -339,6 +339,24 @@ func TestManagerEnsureClientWaitsForConcurrentStartup(t *testing.T) {
 	}
 }
 
+func TestServerStatusReportsDeadClientAsNotRunning(t *testing.T) {
+	rootDir := t.TempDir()
+	m := NewManager(rootDir, []ServerConfig{{
+		Extensions: []string{".go"},
+		Command:    "fake-lsp",
+		LanguageID: "go",
+	}})
+	m.clients["fake-lsp"] = &Client{initialized: true, running: false}
+
+	name, running, ready := m.ServerStatus(filepath.Join(rootDir, "main.go"))
+	if name != "fake-lsp" {
+		t.Fatalf("server name = %q, want fake-lsp", name)
+	}
+	if running || ready {
+		t.Fatalf("dead server status = running %v ready %v, want false/false", running, ready)
+	}
+}
+
 func TestManagerConfigForFileUsesMergedUserConfig(t *testing.T) {
 	m := NewManager("/tmp", []ServerConfig{
 		{

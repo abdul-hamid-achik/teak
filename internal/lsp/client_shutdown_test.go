@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,10 @@ import (
 	"testing"
 	"time"
 )
+
+type lspNopWriteCloser struct{ bytes.Buffer }
+
+func (lspNopWriteCloser) Close() error { return nil }
 
 func TestIsExpectedShutdownError(t *testing.T) {
 	tests := []struct {
@@ -66,6 +71,38 @@ func TestIsExpectedShutdownError(t *testing.T) {
 				t.Fatalf("isExpectedShutdownError() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCallReturnsWhenLSPTransportReadLoopCloses(t *testing.T) {
+	client := &Client{
+		stdin:       &lspNopWriteCloser{},
+		pending:     make(map[int]chan callResult),
+		running:     true,
+		processDone: make(chan struct{}),
+		readDone:    make(chan struct{}),
+	}
+	close(client.readDone)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.call(context.Background(), "workspace/symbol", nil)
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errClientNotRunning) {
+			t.Fatalf("call() error = %v, want client-not-running after transport EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("call() remained blocked after the LSP read loop closed")
+	}
+	client.mu.RLock()
+	pending := len(client.pending)
+	client.mu.RUnlock()
+	if pending != 0 {
+		t.Fatalf("pending requests = %d, want 0 after transport EOF", pending)
 	}
 }
 
@@ -148,4 +185,46 @@ func TestLSPShutdownHelperProcess(t *testing.T) {
 		return
 	}
 	select {}
+}
+
+func TestReapProcessMarksClientNotReady(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLSPReapExitHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "TEAK_LSP_REAP_EXIT_HELPER=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdout,
+		pending:     make(map[int]chan callResult),
+		running:     true,
+		initialized: true,
+		processDone: make(chan struct{}),
+	}
+
+	go client.reapProcess()
+	// The helper is a separate instrumented test binary under -race; startup
+	// and teardown can exceed one second on a busy machine even though the
+	// child exits immediately.
+	if !lspWaitForDone(client.processDone, 5*time.Second) {
+		t.Fatal("server was not reaped")
+	}
+	if client.IsReady() {
+		t.Fatal("reaped client reported ready")
+	}
+}
+
+func TestLSPReapExitHelperProcess(t *testing.T) {
+	if os.Getenv("TEAK_LSP_REAP_EXIT_HELPER") != "1" {
+		return
+	}
 }

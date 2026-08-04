@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -70,10 +71,18 @@ func (c *LSPCoordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 
 // handleDiagnostics stores diagnostics for a file.
 func (c *LSPCoordinator) handleDiagnostics(msg lsp.DiagnosticsMsg) []tea.Cmd {
+	path := lsp.URIToPath(msg.URI)
+	if msg.HasVersion && c.mgr != nil {
+		if client := c.mgr.ClientForFile(path); client != nil {
+			if current, open := client.DocumentVersion(msg.URI); open && current > msg.Version {
+				return nil
+			}
+		}
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	path := lsp.URIToPath(msg.URI)
-	c.diagnostics[path] = msg.Diagnostics
+	c.diagnostics[path] = slices.Clone(msg.Diagnostics)
 
 	// Clean old entries if too many files
 	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
@@ -183,21 +192,21 @@ func (c *LSPCoordinator) handleLspReady(msg LspReadyMsg) []tea.Cmd {
 func (c *LSPCoordinator) GetDiagnostics(path string) []lsp.Diagnostic {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.diagnostics[path]
+	return slices.Clone(c.diagnostics[path])
 }
 
 // SetTriggerChars sets trigger characters for a file.
 func (c *LSPCoordinator) SetTriggerChars(path string, chars []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.triggerChars[path] = chars
+	c.triggerChars[path] = slices.Clone(chars)
 }
 
 // GetTriggerChars returns trigger characters for a file.
 func (c *LSPCoordinator) GetTriggerChars(path string) []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.triggerChars[path]
+	return slices.Clone(c.triggerChars[path])
 }
 
 // ClearDiagnostics clears diagnostics for a file.
@@ -205,6 +214,26 @@ func (c *LSPCoordinator) ClearDiagnostics(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.diagnostics, path)
+}
+
+// RelocateFilePath keeps coordinator caches attached to a file after a
+// committed filesystem move or rename. The next didOpen publication can then
+// replace these values with fresh server state without a transient old-path
+// entry in the UI.
+func (c *LSPCoordinator) RelocateFilePath(oldPath, newPath string) {
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if diagnostics, ok := c.diagnostics[oldPath]; ok {
+		c.diagnostics[newPath] = diagnostics
+		delete(c.diagnostics, oldPath)
+	}
+	if chars, ok := c.triggerChars[oldPath]; ok {
+		c.triggerChars[newPath] = chars
+		delete(c.triggerChars, oldPath)
+	}
 }
 
 // AggregateDiagnostics returns all diagnostics from all files.

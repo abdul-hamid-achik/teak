@@ -84,6 +84,23 @@ func TestInvalidateEditedShiftsTokensWhenLinesAreInserted(t *testing.T) {
 	}
 }
 
+func TestInvalidateEditedStructuralChangeKeepsDenseCacheLazy(t *testing.T) {
+	h, _ := tokenizedHighlighter(t, 20)
+	originalLen := len(h.lines)
+
+	h.InvalidateEdited(2, 2, 1)
+
+	if len(h.lines) != originalLen {
+		t.Fatalf("dense cache length = %d, want unchanged %d", len(h.lines), originalLen)
+	}
+	if got := h.Line(11); len(got) == 0 {
+		t.Fatal("lazy line mapping lost the token below the inserted line")
+	}
+	if got := h.Line(2); got != nil {
+		t.Fatal("inserted line unexpectedly reused stale tokens")
+	}
+}
+
 func TestInvalidateEditedShiftsTokensWhenLinesAreDeleted(t *testing.T) {
 	h, _ := tokenizedHighlighter(t, 20)
 	before := h.Line(10)

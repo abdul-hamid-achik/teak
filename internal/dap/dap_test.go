@@ -123,6 +123,33 @@ func TestManagerStateMethod(t *testing.T) {
 	}
 }
 
+func TestManagerStateBecomesInactiveAfterClientLifecycleEnds(t *testing.T) {
+	manager := NewManager("/test")
+	manager.state = StateRunning
+	manager.client = &Client{initialized: true}
+	if manager.State() != StateRunning {
+		t.Fatalf("State() = %v while client is ready, want running", manager.State())
+	}
+	manager.client.initialized = false
+	if manager.State() != StateInactive {
+		t.Fatalf("State() = %v after client lifecycle ended, want inactive", manager.State())
+	}
+}
+
+func TestManagerStartDetachesUnreadyClientBeforeRestart(t *testing.T) {
+	manager := NewManager("/test")
+	manager.client = &Client{initialized: false}
+	manager.state = StateRunning
+
+	err := manager.Start(DebugConfig{Command: "teak-definitely-missing-debug-adapter"})
+	if err == nil {
+		t.Fatal("Start() error = nil, want missing adapter error")
+	}
+	if manager.client != nil {
+		t.Fatal("Start() retained an unready client after beginning a restart")
+	}
+}
+
 // TestManagerStopWithNilClient tests Stop with nil client
 func TestManagerStopWithNilClient(t *testing.T) {
 	manager := NewManager("/test")

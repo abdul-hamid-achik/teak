@@ -3,10 +3,13 @@ package clipboard
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+
+	"teak/internal/toolpath"
 )
 
 func TestMain(m *testing.M) {
@@ -424,5 +427,57 @@ func TestInternalClipboardConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	if runtime.GOOS == "" {
 		t.Fatal("unreachable")
+	}
+}
+
+func TestRunClipboardCommands(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX shell")
+	}
+	if err := runCopyCommand([]string{"sh", "-c", "cat >/dev/null"}, "payload"); err != nil {
+		t.Fatalf("runCopyCommand() error = %v", err)
+	}
+	got, err := runPasteCommand([]string{"sh", "-c", "printf '%s' pasted"})
+	if err != nil || got != "pasted" {
+		t.Fatalf("runPasteCommand() = %q, %v, want pasted", got, err)
+	}
+}
+
+func TestRunClipboardCommandsRejectInvalidCandidates(t *testing.T) {
+	if err := runCopyCommand(nil, "payload"); err == nil {
+		t.Fatal("runCopyCommand(nil) error = nil")
+	}
+	if _, err := runPasteCommand(nil); err == nil {
+		t.Fatal("runPasteCommand(nil) error = nil")
+	}
+}
+
+func TestRunPasteCommandEnforcesOutputLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX shell")
+	}
+	_, err := runPasteCommand([]string{"sh", "-c", "head -c 16777217 /dev/zero"})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("runPasteCommand(oversized) error = %v, want output-limit error", err)
+	}
+}
+
+func TestClipboardCommandsUseConfiguredToolpathOverride(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "clipboard-fixture")
+	if err := os.WriteFile(fixture, []byte("#!/bin/sh\nif [ \"$1\" = paste ]; then printf '%s' override; else cat >/dev/null; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toolpath.Configure(map[string]string{"clipboard-fixture": fixture})
+	t.Cleanup(func() { toolpath.Configure(nil) })
+
+	if err := runCopyCommand([]string{"clipboard-fixture"}, "payload"); err != nil {
+		t.Fatalf("runCopyCommand() with override = %v", err)
+	}
+	got, err := runPasteCommand([]string{"clipboard-fixture", "paste"})
+	if err != nil {
+		t.Fatalf("runPasteCommand() with override = %v", err)
+	}
+	if got != "override" {
+		t.Fatalf("runPasteCommand() = %q, want override", got)
 	}
 }

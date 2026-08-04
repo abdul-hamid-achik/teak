@@ -39,6 +39,41 @@ func TestNewModelDefersInitialTreeRead(t *testing.T) {
 	}
 }
 
+func TestTreeFilterReadyMessageIsRoutedToTheLiveTree(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+
+	model.tree.Entries = []filetree.Entry{
+		{Name: "main.go", Path: filepath.Join(root, "main.go")},
+		{Name: "notes.txt", Path: filepath.Join(root, "notes.txt")},
+	}
+	model.tree.SetSize(40, 5)
+	model.tree.StartFilter()
+	updatedTree, cmd := model.tree.Update(tea.KeyPressMsg{Text: "main"})
+	if cmd == nil || !updatedTree.FilterPending() {
+		t.Fatal("tree did not schedule an asynchronous filter projection")
+	}
+	msg := cmd()
+	routed, followup := model.Update(msg)
+	if followup != nil {
+		t.Fatal("filter result produced an unexpected follow-up command")
+	}
+	updated := routed.(Model)
+	if updated.tree.FilterPending() {
+		t.Fatal("root model did not install the routed filter result")
+	}
+	entry := updated.tree.EntryAtY(1)
+	if entry == nil || entry.Name != "main.go" {
+		t.Fatalf("routed filtered entry = %#v, want main.go", entry)
+	}
+}
+
 func TestHandleTreeChangeDebouncesGitRefresh(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.DefaultConfig()
@@ -78,8 +113,12 @@ func TestHandleTreeChangeDebouncesGitRefresh(t *testing.T) {
 		t.Fatal("expected fresh debounce message to trigger git refresh")
 	}
 	msg := refreshCmd()
-	if _, ok := msg.(git.RefreshMsg); !ok {
+	refresh, ok := msg.(git.RefreshMsg)
+	if !ok {
 		t.Fatalf("refreshCmd() returned %T, want git.RefreshMsg", msg)
+	}
+	if refresh.Generation != 2 {
+		t.Fatalf("refresh generation = %d, want 2", refresh.Generation)
 	}
 }
 

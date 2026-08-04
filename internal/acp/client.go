@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	log "github.com/charmbracelet/log"
 	sdk "github.com/coder/acp-go-sdk"
 
+	agentruntime "teak/internal/agent/runtime"
+	"teak/internal/execpolicy"
 	"teak/internal/toolpath"
 )
 
@@ -26,6 +29,7 @@ const (
 	acpCancelTimeout        = 750 * time.Millisecond
 	acpSessionChangeTimeout = 5 * time.Second
 	acpPromptTimeout        = 10 * time.Minute
+	acpHeartbeatInterval    = 15 * time.Second
 	maxTaggedFiles          = 32
 	maxTaggedFileBytes      = 256 << 10
 	maxTaggedTotalBytes     = 2 << 20
@@ -66,6 +70,10 @@ type Manager struct {
 	promptActive     bool
 	promptGeneration uint64
 	promptCancel     context.CancelFunc
+	// connectionGeneration changes on every start attempt. Runtime capability
+	// authorization is bound to this token so a stale ACP transport cannot
+	// reuse the run ID of a later restarted agent session.
+	connectionGeneration uint64
 
 	lifecycle        int
 	lifecycleChanged chan struct{}
@@ -79,14 +87,41 @@ type Manager struct {
 
 	// MCP servers to pass through
 	mcpServers []sdk.McpServer
+
+	// runManager is optional so ACP remains usable by embedders that do not
+	// want persistence. Interactive Teak wires it to the workspace store.
+	runManager  *agentruntime.Manager
+	activeRunID agentruntime.RunID
+
+	executionPolicy execpolicy.Policy
 }
 
 // NewManager creates a new ACP manager. Does not start the subprocess.
 func NewManager(rootDir, command string, args []string) *Manager {
+	return NewManagerWithRuntimeAndPolicy(rootDir, command, args, nil, execpolicy.Default(rootDir))
+}
+
+// NewManagerWithRuntime creates an ACP manager with an optional durable run
+// manager. The runtime owns lifecycle and verification bookkeeping; ACP still
+// owns protocol transport and the interactive permission UI.
+func NewManagerWithRuntime(rootDir, command string, args []string, runManager *agentruntime.Manager) *Manager {
+	return NewManagerWithRuntimeAndPolicy(rootDir, command, args, runManager, execpolicy.Default(rootDir))
+}
+
+// NewManagerWithRuntimeAndPolicy creates an ACP manager with durable run
+// lifecycle and an explicit child-process execution policy. The policy is
+// applied to ACP-created terminals; the ACP transport itself remains outside
+// that terminal sandbox because it may need its configured model network.
+func NewManagerWithRuntimeAndPolicy(rootDir, command string, args []string, runManager *agentruntime.Manager, policy execpolicy.Policy) *Manager {
+	if policy.Mode == "" {
+		policy = execpolicy.Default(rootDir)
+	}
 	mgr := &Manager{
 		rootDir:          rootDir,
 		command:          command,
 		args:             args,
+		runManager:       runManager,
+		executionPolicy:  policy,
 		msgChan:          make(chan tea.Msg, 100),
 		lifecycleChanged: make(chan struct{}),
 		trackedDone:      make(map[chan struct{}]struct{}),
@@ -107,6 +142,15 @@ func (m *Manager) IsRunning() bool {
 	return m.running
 }
 
+func (m *Manager) runtimeRunIDForConnection(generation uint64) agentruntime.RunID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if generation == 0 || generation != m.connectionGeneration {
+		return ""
+	}
+	return m.activeRunID
+}
+
 // Start spawns the agent subprocess, initializes the connection,
 // and creates a session.
 func (m *Manager) Start() error {
@@ -116,6 +160,8 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("agent already running")
 	}
 	m.starting = true
+	m.connectionGeneration++
+	connectionGeneration := m.connectionGeneration
 	m.beginLifecycleLocked()
 	m.mu.Unlock()
 	defer m.endLifecycle()
@@ -140,6 +186,7 @@ func (m *Manager) Start() error {
 	defer cancelStartup()
 
 	cmd := exec.CommandContext(processCtx, resolved, m.args...)
+	toolpath.ConfigureCommand(cmd)
 	cmd.Dir = m.rootDir
 
 	stdin, err := cmd.StdinPipe()
@@ -169,7 +216,7 @@ func (m *Manager) Start() error {
 	if !m.starting || m.running {
 		m.mu.Unlock()
 		cancelProcess()
-		_ = cmd.Process.Kill()
+		_ = toolpath.TerminateCommand(cmd)
 		go reapACPProcess(cmd, done, nil)
 		return fmt.Errorf("agent lifecycle changed while starting")
 	}
@@ -181,7 +228,16 @@ func (m *Manager) Start() error {
 	go reapACPProcess(cmd, done, m)
 
 	handler := newClientHandler(m.msgChan, m.rootDir)
+	handler.setRuntime(m.runManager, func() agentruntime.RunID {
+		return m.runtimeRunIDForConnection(connectionGeneration)
+	})
+	handler.setExecutionPolicy(m.executionPolicy)
 	conn := sdk.NewClientSideConnection(handler, stdin, stdout)
+	// The ACP SDK defaults to slog.Default(), which writes connection
+	// diagnostics to stderr and corrupts Bubble Tea's terminal frame. Teak's
+	// own logger is already configured by the app to a private file, so keep
+	// protocol diagnostics off the interactive terminal as well.
+	conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Initialize
 	initResp, err := conn.Initialize(startupCtx, sdk.InitializeRequest{
@@ -262,9 +318,101 @@ type TaggedFile struct {
 // state when a user cancels then immediately retries.
 func (m *Manager) Prompt(text string, files []TaggedFile) tea.Cmd {
 	m.mu.Lock()
+	runManager := m.runManager
+	rootDir := m.rootDir
+	connectionGeneration := m.connectionGeneration
+	m.mu.Unlock()
+	if runManager != nil && rootDir != "" {
+		return m.promptTracked(runManager, text, files, connectionGeneration)
+	}
+	return m.promptWithContext(context.Background(), text, files)
+}
+
+func (m *Manager) promptTracked(runManager *agentruntime.Manager, text string, files []TaggedFile, connectionGeneration uint64) tea.Cmd {
+	return func() tea.Msg {
+		m.mu.Lock()
+		currentGeneration := m.connectionGeneration
+		running := m.running
+		m.mu.Unlock()
+		if currentGeneration != connectionGeneration || (connectionGeneration != 0 && !running) {
+			return AgentPromptResponseMsg{Err: fmt.Errorf("agent connection is no longer active")}
+		}
+		spec := agentruntime.RunSpec{
+			Objective: text,
+			Workspace: m.rootDir,
+			DoneCriteria: []string{
+				"ACP prompt returned a terminal response",
+			},
+			// ACP write proposals are still gated by the interactive permission
+			// flow. Recording write here makes the run contract honest without
+			// bypassing that approval gate.
+			RequestedCapabilities: agentruntime.Capabilities{Read: true, Write: true, Shell: true},
+		}
+		handle, err := runManager.Start(spec)
+		if err != nil {
+			return AgentPromptResponseMsg{Err: fmt.Errorf("start agent run: %w", err)}
+		}
+		m.mu.Lock()
+		m.activeRunID = handle.ID
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			if m.activeRunID == handle.ID {
+				m.activeRunID = ""
+			}
+			m.mu.Unlock()
+		}()
+		heartbeatCtx, stopHeartbeat := context.WithCancel(handle.Context)
+		defer stopHeartbeat()
+		go maintainTrackedRunHeartbeat(heartbeatCtx, runManager, handle.ID)
+
+		msg := m.promptWithContext(handle.Context, text, files)()
+		response, ok := msg.(AgentPromptResponseMsg)
+		if !ok {
+			_ = runManager.Fail(handle.ID, fmt.Errorf("ACP returned unexpected message %T", msg))
+			return msg
+		}
+		if response.Err != nil {
+			_ = runManager.Fail(handle.ID, response.Err)
+			return response
+		}
+
+		handoff := agentruntime.Handoff{
+			Summary:           "ACP prompt completed",
+			CompletedCriteria: append([]string(nil), spec.DoneCriteria...),
+			Verification:      []string{"ACP returned a terminal prompt response"},
+			Verified:          true,
+		}
+		if err := runManager.Complete(handle.ID, handoff); err != nil {
+			_ = runManager.Fail(handle.ID, err)
+			response.Err = fmt.Errorf("complete agent run: %w", err)
+		}
+		return response
+	}
+}
+
+func maintainTrackedRunHeartbeat(ctx context.Context, runManager *agentruntime.Manager, id agentruntime.RunID) {
+	ticker := time.NewTicker(acpHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := runManager.Heartbeat(id); err != nil {
+				log.Warn("agent heartbeat stopped", "run_id", id, "error", err)
+				return
+			}
+		}
+	}
+}
+
+func (m *Manager) promptWithContext(parent context.Context, text string, files []TaggedFile) tea.Cmd {
+	m.mu.Lock()
 	conn := m.conn
 	sessionID := m.sessionID
 	running := m.running
+	handler := m.handler
 	if !running || conn == nil {
 		m.mu.Unlock()
 		return func() tea.Msg {
@@ -277,7 +425,7 @@ func (m *Manager) Prompt(text string, files []TaggedFile) tea.Cmd {
 			return AgentErrorMsg{Err: fmt.Errorf("another agent prompt is still running")}
 		}
 	}
-	ctx, generation, err := m.startPromptLocked()
+	ctx, generation, err := m.startPromptWithParentLocked(parent)
 	if err != nil {
 		m.mu.Unlock()
 		return func() tea.Msg { return AgentPromptResponseMsg{Err: err} }
@@ -298,6 +446,9 @@ func (m *Manager) Prompt(text string, files []TaggedFile) tea.Cmd {
 			return AgentPromptResponseMsg{Generation: generation, Err: err}
 		}
 		blocks = append([]sdk.ContentBlock{sdk.TextBlock(text)}, blocks...)
+		if handler != nil {
+			handler.beginPromptOutput()
+		}
 
 		resp, err := conn.Prompt(ctx, sdk.PromptRequest{
 			SessionId: sessionID,
@@ -320,6 +471,10 @@ func (m *Manager) beginPrompt() (context.Context, uint64, error) {
 }
 
 func (m *Manager) startPromptLocked() (context.Context, uint64, error) {
+	return m.startPromptWithParentLocked(context.Background())
+}
+
+func (m *Manager) startPromptWithParentLocked(parent context.Context) (context.Context, uint64, error) {
 	if !m.running {
 		return nil, 0, fmt.Errorf("agent not running")
 	}
@@ -328,7 +483,10 @@ func (m *Manager) startPromptLocked() (context.Context, uint64, error) {
 	}
 	m.promptActive = true
 	m.promptGeneration++
-	ctx, cancel := context.WithTimeout(context.Background(), acpPromptTimeout)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, acpPromptTimeout)
 	m.promptCancel = cancel
 	return ctx, m.promptGeneration, nil
 }
@@ -484,8 +642,14 @@ func (m *Manager) Cancel() {
 	conn := m.conn
 	sessionID := m.sessionID
 	running := m.running
+	runManager := m.runManager
+	activeRunID := m.activeRunID
+	m.activeRunID = ""
 	m.cancelCurrentPromptLocked()
 	m.mu.Unlock()
+	if runManager != nil && activeRunID != "" {
+		_ = runManager.Cancel(activeRunID)
+	}
 
 	if !running || conn == nil {
 		return
@@ -508,6 +672,9 @@ func (m *Manager) Cancel() {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	m.cancelCurrentPromptLocked()
+	runManager := m.runManager
+	activeRunID := m.activeRunID
+	m.activeRunID = ""
 	cancel := m.cancelFunc
 	m.cancelFunc = nil
 	done := m.done
@@ -518,12 +685,15 @@ func (m *Manager) Stop() {
 	m.sessionCtl = nil
 	m.trackDoneLocked(done)
 	m.mu.Unlock()
+	if runManager != nil && activeRunID != "" {
+		_ = runManager.Cancel(activeRunID)
+	}
 	if cancel != nil {
 		cancel()
 	}
 	if proc != nil && proc.Process != nil {
 		go func() {
-			_ = proc.Process.Kill()
+			_ = toolpath.TerminateCommand(proc)
 			if !waitACPDone(done, acpShutdownTimeout) {
 				log.Warn("acp: process did not exit after forced shutdown")
 			}
@@ -605,7 +775,7 @@ func (m *Manager) abortStart(cmd *exec.Cmd) {
 			cancel()
 		}
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			_ = toolpath.TerminateCommand(cmd)
 		}
 		return
 	}

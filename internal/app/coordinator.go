@@ -18,6 +18,7 @@ type LSPCoordinatorInterface interface {
 	SetTriggerChars(path string, chars []string)
 	GetTriggerChars(path string) []string
 	ClearDiagnostics(path string)
+	RelocateFilePath(oldPath, newPath string)
 	AggregateDiagnostics() []lsp.Diagnostic
 	Shutdown()
 }
@@ -92,7 +93,17 @@ func (c *Coordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 		return c.lsp.HandleMessage(msg)
 
 	// DAP messages
-	case dapMsg, dap.StoppedEventMsg, dap.ContinuedEventMsg, dap.TerminatedEventMsg,
+	case dapMsg:
+		inner, ok := m.msg.(tea.Msg)
+		if !ok || inner == nil {
+			return nil
+		}
+		// DAP traffic is wrapped while it crosses the async manager boundary.
+		// Update still needs the wrapper for the app-level debugger handling, but
+		// the coordinator must observe the inner event to keep its state current.
+		c.dap.HandleMessage(inner)
+		return nil
+	case dap.StoppedEventMsg, dap.ContinuedEventMsg, dap.TerminatedEventMsg,
 		dap.ExitedEventMsg, dap.OutputEventMsg, dap.BreakpointEventMsg:
 		return c.dap.HandleMessage(msg)
 

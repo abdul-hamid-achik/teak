@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
+	"teak/internal/overlay"
 	"teak/internal/plugin"
 	"teak/internal/text"
 )
@@ -163,6 +164,74 @@ end
 	}
 	if updated.pluginKeySequence != "" {
 		t.Fatalf("pluginKeySequence should reset after execution, got %q", updated.pluginKeySequence)
+	}
+}
+
+func TestPluginLeaderAbandonedSequenceReinsertsKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	pluginDir := filepath.Join(plugin.DefaultDir(), "sample")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initLua := `
+function setup()
+  keymap.set("n", "<leader>ap", function()
+    plugin_triggered = "autopairs"
+  end)
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+
+	model, err := NewModel("", t.TempDir(), cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	loadPluginsForTest(t, &model)
+	defer model.cleanup()
+	model.focus = FocusEditor
+
+	// Space starts the <leader> prefix and is consumed while the sequence
+	// is pending.
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
+	if updated.pluginKeySequence != "<leader>" {
+		t.Fatalf("pluginKeySequence after space = %q, want %q", updated.pluginKeySequence, "<leader>")
+	}
+
+	// 'x' continues no binding: the buffered space must be reinserted into
+	// the editor together with the 'x', not silently dropped.
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+	if updated.pluginKeySequence != "" {
+		t.Fatalf("pluginKeySequence after abandoned sequence = %q, want cleared", updated.pluginKeySequence)
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != " x" {
+		t.Fatalf("editor content after abandoned leader sequence = %q, want %q", got, " x")
+	}
+
+	// A completed sequence after a previous abandonment must still dispatch.
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: ' ', Text: " "}))
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'p', Text: "p"}))
+	p, err := updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() error = %v", err)
+	}
+	if got := p.State.GetGlobal("plugin_triggered").String(); got != "autopairs" {
+		t.Fatalf("plugin_triggered after completed sequence = %q, want %q", got, "autopairs")
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != " x" {
+		t.Fatalf("editor content after completed sequence = %q, want unchanged %q", got, " x")
 	}
 }
 
@@ -340,6 +409,11 @@ function setup()
   keymap.set("a", "ctrl+x", function()
     ui.hide_panel("tree")
   end)
+  keymap.set("a", "ctrl+u", function()
+    plugin_bufnr = ui.new_buffer()
+    buffer.set_text("PLUGIN_BUFFER_CONTENT")
+    editor.set_status("PLUGIN_BUFFER_" .. tostring(plugin_bufnr))
+  end)
 end
 `
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
@@ -395,6 +469,302 @@ end
 	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
 	if updated.showTree || updated.focus != FocusEditor {
 		t.Fatalf("hide_panel(tree) state = showTree:%v focus:%v", updated.showTree, updated.focus)
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'u', Mod: tea.ModCtrl}))
+	p, err := updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after ui.new_buffer: %v", err)
+	}
+	if got := p.State.GetGlobal("plugin_bufnr").String(); got != "2" {
+		t.Fatalf("ui.new_buffer() returned %q, want 2", got)
+	}
+	if len(updated.editors) != 2 || updated.activeTab != 1 {
+		t.Fatalf("ui.new_buffer() state = editors:%d active:%d, want 2/1", len(updated.editors), updated.activeTab)
+	}
+	if updated.status != "PLUGIN_BUFFER_2" {
+		t.Fatalf("status after ui.new_buffer() = %q, want PLUGIN_BUFFER_2", updated.status)
+	}
+	if got := updated.tabBar.Tabs[1].Label; got != "Untitled-1" {
+		t.Fatalf("ui.new_buffer() label = %q, want Untitled-1", got)
+	}
+	if got := updated.editors[0].Buffer.Content(); got != "" {
+		t.Fatalf("original buffer content = %q, want unchanged empty buffer", got)
+	}
+	if got := updated.editors[1].Buffer.Content(); got != "PLUGIN_BUFFER_CONTENT" {
+		t.Fatalf("new buffer content = %q, want plugin content", got)
+	}
+}
+
+func TestPluginUIConfirmResumesCallbackWithoutBlockingUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	pluginDir := filepath.Join(plugin.DefaultDir(), "sample")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initLua := `
+function setup()
+  keymap.set("a", "ctrl+c", function()
+    ui.confirm("Deploy changes?", {"Deploy", "Cancel"}, function(option, index, accepted)
+      confirm_result = option .. ":" .. tostring(index) .. ":" .. tostring(accepted)
+      buffer.set_text(confirm_result)
+    end)
+  end)
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	cfg.UI.ShowTree = false
+	model, err := NewModel("", rootDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	loadPluginsForTest(t, &model)
+	defer model.cleanup()
+	model.focus = FocusEditor
+
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	confirm, ok := updated.overlayStack.Top().(*overlay.Confirm)
+	if !ok || confirm == nil {
+		t.Fatalf("confirm overlay = %T, want *overlay.Confirm", updated.overlayStack.Top())
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEnter})
+	p, err := updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after confirm = %v", err)
+	}
+	if got := p.State.GetGlobal("confirm_result").String(); got != "Deploy:1:true" {
+		t.Fatalf("confirm_result after accept = %q, want Deploy:1:true", got)
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != "Deploy:1:true" {
+		t.Fatalf("buffer after confirm callback = %q, want callback result", got)
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	if updated.overlayStack.IsEmpty() {
+		t.Fatal("second confirm did not open")
+	}
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEscape})
+	p, err = updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after dismiss = %v", err)
+	}
+	if got := p.State.GetGlobal("confirm_result").String(); got != ":0:false" {
+		t.Fatalf("confirm_result after dismiss = %q, want :0:false", got)
+	}
+}
+
+func TestPluginUIInputResumesCallbackWithoutBlockingUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	pluginDir := filepath.Join(plugin.DefaultDir(), "sample")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initLua := `
+function setup()
+  keymap.set("a", "ctrl+i", function()
+    ui.input("Branch name", "feature/", function(value, accepted)
+      input_result = value .. ":" .. tostring(accepted)
+      buffer.set_text(input_result)
+    end)
+  end)
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	cfg.UI.ShowTree = false
+	model, err := NewModel("", rootDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	loadPluginsForTest(t, &model)
+	defer model.cleanup()
+	model.focus = FocusEditor
+
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'i', Mod: tea.ModCtrl}))
+	if _, ok := updated.overlayStack.Top().(*overlay.Input); !ok {
+		t.Fatalf("input overlay = %T, want *overlay.Input", updated.overlayStack.Top())
+	}
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEnter})
+	p, err := updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after input = %v", err)
+	}
+	if got := p.State.GetGlobal("input_result").String(); got != "feature/:true" {
+		t.Fatalf("input_result after accept = %q, want feature/:true", got)
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != "feature/:true" {
+		t.Fatalf("buffer after input callback = %q, want callback result", got)
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'i', Mod: tea.ModCtrl}))
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEscape})
+	p, err = updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after input dismiss = %v", err)
+	}
+	if got := p.State.GetGlobal("input_result").String(); got != ":false" {
+		t.Fatalf("input_result after dismiss = %q, want :false", got)
+	}
+}
+
+func TestPluginUISelectResumesCallbackWithoutBlockingUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	pluginDir := filepath.Join(plugin.DefaultDir(), "sample")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initLua := `
+function setup()
+  keymap.set("a", "ctrl+l", function()
+    ui.select("Choose target", {"one", "two"}, function(option, index, accepted)
+      select_result = option .. ":" .. tostring(index) .. ":" .. tostring(accepted)
+      buffer.set_text(select_result)
+    end)
+  end)
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	cfg.UI.ShowTree = false
+	model, err := NewModel("", rootDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	loadPluginsForTest(t, &model)
+	defer model.cleanup()
+	model.focus = FocusEditor
+
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'l', Mod: tea.ModCtrl}))
+	if _, ok := updated.overlayStack.Top().(*overlay.Picker); !ok {
+		t.Fatalf("selector overlay = %T, want *overlay.Picker", updated.overlayStack.Top())
+	}
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyDown})
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEnter})
+	p, err := updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after select = %v", err)
+	}
+	if got := p.State.GetGlobal("select_result").String(); got != "two:2:true" {
+		t.Fatalf("select_result after selection = %q, want two:2:true", got)
+	}
+	if got := updated.activeEditor().Buffer.Content(); got != "two:2:true" {
+		t.Fatalf("buffer after select callback = %q, want callback result", got)
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'l', Mod: tea.ModCtrl}))
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEscape})
+	p, err = updated.pluginMgr.GetPlugin("sample")
+	if err != nil {
+		t.Fatalf("GetPlugin() after select dismiss = %v", err)
+	}
+	if got := p.State.GetGlobal("select_result").String(); got != ":0:false" {
+		t.Fatalf("select_result after dismiss = %q, want :0:false", got)
+	}
+}
+
+func TestPluginUIFloatCreatesBoundedOverlayAndCloses(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	pluginDir := filepath.Join(plugin.DefaultDir(), "sample")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initLua := `
+function setup()
+  keymap.set("a", "ctrl+f", function()
+    float_id = ui.new_float({title = "Preview", content = "generated output", width = 40, height = 4})
+    editor.set_status("FLOAT_OPEN")
+  end)
+  autocmd.register("CursorMoved", function()
+    ui.close_float(float_id)
+    editor.set_status("FLOAT_CLOSED")
+  end)
+end
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.toml"), []byte("name = \"sample\"\nmain = \"init.lua\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(plugin.toml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "init.lua"), []byte(initLua), 0o644); err != nil {
+		t.Fatalf("WriteFile(init.lua) error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	cfg.UI.ShowTree = false
+	model, err := NewModel("", rootDir, cfg)
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	loadPluginsForTest(t, &model)
+	defer model.cleanup()
+	model.focus = FocusEditor
+
+	updated := updatePluginTest(t, model, tea.KeyPressMsg(tea.Key{Code: 'f', Mod: tea.ModCtrl}))
+	float, ok := updated.overlayStack.Top().(*overlay.Float)
+	if !ok || float == nil {
+		t.Fatalf("float overlay = %T, want *overlay.Float", updated.overlayStack.Top())
+	}
+	if float.Title != "Preview" || float.Content != "generated output" {
+		t.Fatalf("float = %#v, want bounded preview content", float)
+	}
+	if updated.status != "FLOAT_OPEN" {
+		t.Fatalf("status after float open = %q, want FLOAT_OPEN", updated.status)
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatal("Escape did not close plugin float")
+	}
+
+	updated = updatePluginTest(t, updated, tea.KeyPressMsg(tea.Key{Code: 'f', Mod: tea.ModCtrl}))
+	updated = updatePluginTest(t, updated, pluginEventMsg{Events: []plugin.EventContext{{Event: plugin.EventCursorMoved}}})
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatalf("ui.close_float did not remove plugin float: status=%q top=%T floats=%v", updated.status, updated.overlayStack.Top(), updated.pluginFloats)
+	}
+	if updated.status != "FLOAT_CLOSED" {
+		t.Fatalf("status after float close = %q, want FLOAT_CLOSED", updated.status)
 	}
 }
 

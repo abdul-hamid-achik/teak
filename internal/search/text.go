@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,9 +16,14 @@ import (
 
 const maxSearchLineBytes = 1<<20 + 1
 
-// maxTextSearchResults caps the number of results returned by either search
-// engine, so callers see identical bounds regardless of which one ran.
-const maxTextSearchResults = 100
+// MaxTextSearchResults is the hard upper bound for project text-search
+// results. Callers that expose a machine-readable response can use it to
+// explain when a result set reached the bounded limit.
+const MaxTextSearchResults = 100
+
+// Keep the internal name local to the search implementation and tests while
+// exposing the contract above to control-plane callers.
+const maxTextSearchResults = MaxTextSearchResults
 
 // commonSkipDirs are non-text directories both search engines skip
 // unconditionally, regardless of .gitignore contents. ripgrep respects
@@ -95,9 +101,10 @@ func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchO
 		}
 
 		name := info.Name()
+		isRoot := filepath.Clean(path) == filepath.Clean(rootDir)
 
 		// Skip dotfiles and directories
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") && !isRoot {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -106,9 +113,16 @@ func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchO
 
 		// Skip common non-text directories
 		if info.IsDir() {
-			if slices.Contains(commonSkipDirs, name) {
+			if !isRoot && slices.Contains(commonSkipDirs, name) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// filepath.Walk does not follow directory symlinks, but it can still
+		// encounter symlinks, devices, and named pipes. Searching only regular
+		// files prevents the fallback from blocking on a FIFO or reading an
+		// unrelated device when rg is unavailable.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 
@@ -117,8 +131,10 @@ func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchO
 			return nil
 		}
 
-		// Skip files without common text extensions
-		if !isTextFile(name) {
+		// Prefer the cheap extension allowlist, but probe unknown extensions by
+		// content so the fallback matches rg for project-specific files such as
+		// .svelte, .conf, and .inc. Secret env files remain excluded explicitly.
+		if !isSearchableFile(path, name) {
 			return nil
 		}
 
@@ -183,6 +199,11 @@ func searchFileContext(ctx context.Context, path, rootDir string, re *regexp.Reg
 			// matches already found in it rather than discarding them.
 			break
 		}
+		if strings.IndexByte(line, 0) >= 0 {
+			// A NUL byte is ripgrep's binary-file sentinel. Keep any earlier
+			// matches, but do not treat the remainder as source text.
+			break
+		}
 		loc := re.FindStringIndex(line)
 		if loc != nil {
 			preview := strings.TrimSpace(line)
@@ -199,6 +220,31 @@ func searchFileContext(ctx context.Context, path, rootDir string, re *regexp.Reg
 		return nil, err
 	}
 	return results, nil
+}
+
+const textProbeBytes = 8 * 1024
+
+func isSearchableFile(path, name string) bool {
+	if isTextFile(name) {
+		return true
+	}
+	if strings.EqualFold(filepath.Ext(name), ".env") {
+		return false
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, textProbeBytes)
+	n, err := f.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	buf = buf[:n]
+	return !slices.Contains(buf, byte(0)) && utf8.Valid(buf)
 }
 
 func isTextFile(name string) bool {

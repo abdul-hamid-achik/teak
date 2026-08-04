@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -34,6 +35,7 @@ var keymapAPIFunctions = map[string]lua.LGFunction{
 	"unset":     keymapUnset,
 	"get":       keymapGet,
 	"clear":     keymapClear,
+	"list":      keymapList,
 	"which_key": keymapWhichKey,
 }
 
@@ -101,11 +103,57 @@ func keymapClear(L *lua.LState) int {
 	return 0
 }
 
-// keymap.which_key(keys: string) -> description
+// keymap.list(mode?: string) -> table
+// Returns mapping metadata in stable mode/key order. The action itself is not
+// exposed because callbacks are state-owned Lua values and are not useful as
+// a portable introspection contract.
+func keymapList(L *lua.LState) int {
+	mode := ""
+	if L.GetTop() >= 1 {
+		mode = L.CheckString(1)
+	}
+
+	pluginKeymaps.mu.RLock()
+	stateBindings := pluginKeymaps.states[L]
+	modes := make([]string, 0, len(stateBindings))
+	for candidate := range stateBindings {
+		if mode == "" || candidate == mode {
+			modes = append(modes, candidate)
+		}
+	}
+	slices.Sort(modes)
+
+	result := L.NewTable()
+	for _, candidate := range modes {
+		keys := make([]string, 0, len(stateBindings[candidate]))
+		for boundKeys := range stateBindings[candidate] {
+			keys = append(keys, boundKeys)
+		}
+		slices.Sort(keys)
+		for _, boundKeys := range keys {
+			binding := stateBindings[candidate][boundKeys]
+			entry := L.NewTable()
+			L.SetField(entry, "mode", lua.LString(candidate))
+			L.SetField(entry, "keys", lua.LString(boundKeys))
+			L.SetField(entry, "desc", lua.LString(binding.description))
+			result.Append(entry)
+		}
+	}
+	pluginKeymaps.mu.RUnlock()
+
+	L.Push(result)
+	return 1
+}
+
+// keymap.which_key(keys: string, mode?: string) -> description
 func keymapWhichKey(L *lua.LState) int {
 	keys := L.CheckString(1)
+	mode := ""
+	if L.GetTop() >= 2 {
+		mode = L.CheckString(2)
+	}
 
-	desc := getKeybindingDescription(L, keys)
+	desc := getKeybindingDescription(L, mode, keys)
 	if desc == "" {
 		L.Push(lua.LNil)
 	} else {
@@ -209,7 +257,7 @@ func matchKeybinding(L *lua.LState, mode, keys string) (binding keymapBinding, e
 	return matchKeybindingLocked(pluginKeymaps.states[L], mode, keys)
 }
 
-func getKeybindingDescription(L *lua.LState, keys string) string {
+func getKeybindingDescription(L *lua.LState, mode, keys string) string {
 	pluginKeymaps.mu.RLock()
 	defer pluginKeymaps.mu.RUnlock()
 
@@ -217,8 +265,34 @@ func getKeybindingDescription(L *lua.LState, keys string) string {
 	if stateBindings == nil {
 		return ""
 	}
-	for _, modeBindings := range stateBindings {
-		if binding, ok := modeBindings[keys]; ok && binding.description != "" {
+	if mode != "" {
+		binding, exact, _ := matchKeybindingLocked(stateBindings, mode, keys)
+		if exact {
+			return binding.description
+		}
+		return ""
+	}
+
+	// Keep the legacy one-argument helper deterministic when several modes
+	// bind the same key. The editor mode and global fallback are the most
+	// useful defaults; callers that know the active mode should pass it.
+	modes := make([]string, 0, len(stateBindings))
+	if _, ok := stateBindings["n"]; ok {
+		modes = append(modes, "n")
+	}
+	if _, ok := stateBindings["a"]; ok {
+		modes = append(modes, "a")
+	}
+	otherModes := make([]string, 0, len(stateBindings))
+	for candidate := range stateBindings {
+		if candidate != "n" && candidate != "a" {
+			otherModes = append(otherModes, candidate)
+		}
+	}
+	slices.Sort(otherModes)
+	modes = append(modes, otherModes...)
+	for _, candidate := range modes {
+		if binding, ok := stateBindings[candidate][keys]; ok && binding.description != "" {
 			return binding.description
 		}
 	}

@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"teak/internal/toolpath"
 )
 
-const pollTimeout = 3 * time.Second
+const (
+	pollTimeout    = 3 * time.Second
+	maxOutputBytes = 64 << 10
+)
 
 // ProcessInfo holds resource usage for a monitored process.
 type ProcessInfo struct {
@@ -132,7 +137,20 @@ func (m *Monitor) Snapshot() map[int]ProcessInfo {
 	return out
 }
 
+// Current returns resource usage for the running Teak process when the
+// optional monitor executable is installed. It is intended for diagnostics
+// and headless performance reports, not for the interactive render path.
+func Current(ctx context.Context) (ProcessInfo, error) {
+	return pollProcess(ctx, os.Getpid())
+}
+
 func pollProcess(ctx context.Context, pid int) (ProcessInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if pid <= 0 {
+		return ProcessInfo{}, fmt.Errorf("monitor process pid must be positive")
+	}
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
 
@@ -140,8 +158,11 @@ func pollProcess(ctx context.Context, pid int) (ProcessInfo, error) {
 	if err != nil {
 		return ProcessInfo{}, err
 	}
-	out, err := cmd.Output()
+	out, stderr, err := toolpath.RunBounded(cmd, maxOutputBytes, maxOutputBytes)
 	if err != nil {
+		if detail := strings.TrimSpace(string(stderr)); detail != "" {
+			return ProcessInfo{}, fmt.Errorf("monitor process: %w: %s", err, detail)
+		}
 		return ProcessInfo{}, err
 	}
 

@@ -95,6 +95,39 @@ func TestModelReplaceFileProblemsPreservesOrderedPanelAndCounts(t *testing.T) {
 	}
 }
 
+func TestModelRelocateFilePathPreservesProblemsAndCounts(t *testing.T) {
+	m := New(ui.NordTheme(), "/test/root")
+	m.SetProblems([]Problem{
+		{FilePath: "/test/root/src/a.go", Line: 2, Severity: 2, Message: "warning"},
+		{FilePath: "/test/root/other.go", Line: 1, Severity: 1, Message: "error"},
+	})
+
+	m.RelocateFilePath("/test/root/src/a.go", "/test/root/dest/a.go")
+
+	if got, want := m.ProblemCount(), 2; got != want {
+		t.Fatalf("ProblemCount() = %d, want %d", got, want)
+	}
+	if got, want := m.ErrorCount(), 1; got != want {
+		t.Fatalf("ErrorCount() = %d, want %d", got, want)
+	}
+	if got, want := m.WarningCount(), 1; got != want {
+		t.Fatalf("WarningCount() = %d, want %d", got, want)
+	}
+	foundRelocated := false
+	for _, problem := range m.problems {
+		if problem.FilePath == "/test/root/dest/a.go" {
+			foundRelocated = true
+			break
+		}
+	}
+	if !foundRelocated {
+		t.Fatalf("relocated problems = %#v, want destination path", m.problems)
+	}
+	if len(m.groups) != 2 || m.groups[1].FilePath != "/test/root/other.go" {
+		t.Fatalf("relocated groups = %#v", m.groups)
+	}
+}
+
 func TestModelSelectAt(t *testing.T) {
 	tests := []struct {
 		name         string

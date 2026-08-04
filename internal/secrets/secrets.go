@@ -4,17 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"teak/internal/toolpath"
 )
 
 const (
-	agentDialTimeout = 200 * time.Millisecond
-	cliTimeout       = 5 * time.Second
+	agentDialTimeout    = 200 * time.Millisecond
+	agentRequestTimeout = time.Second
+	cliTimeout          = 5 * time.Second
+	maxAgentResponse    = 1 << 20
+	maxCLIOutput        = 1 << 20
 )
 
 // Resolver resolves secrets from TinyVault, trying the agent socket first
@@ -43,8 +48,10 @@ func (r *Resolver) Available() bool {
 // Get retrieves a single secret value.
 func (r *Resolver) Get(ctx context.Context, project, key string) (string, error) {
 	// Try agent socket first (prompt-free, fast)
-	if val, err := r.agentGet(project, key); err == nil {
+	if val, err := r.agentGet(ctx, project, key); err == nil {
 		return val, nil
+	} else if ctx != nil && ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 	// Fall back to CLI
 	return r.cliGet(ctx, project, key)
@@ -53,8 +60,10 @@ func (r *Resolver) Get(ctx context.Context, project, key string) (string, error)
 // GetAll retrieves all secrets for a project as a map.
 func (r *Resolver) GetAll(ctx context.Context, project string) (map[string]string, error) {
 	// Try agent socket first
-	if vals, err := r.agentGetAll(project); err == nil {
+	if vals, err := r.agentGetAll(ctx, project); err == nil {
 		return vals, nil
+	} else if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	// Fall back to CLI
 	return r.cliGetAll(ctx, project)
@@ -91,8 +100,29 @@ func (r *Resolver) agentSocketAvailable() bool {
 	return true
 }
 
-func (r *Resolver) agentGet(project, key string) (string, error) {
-	conn, err := net.DialTimeout("unix", r.agentSocketPath(), agentDialTimeout)
+func (r *Resolver) dialAgent(ctx context.Context) (net.Conn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, agentDialTimeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", r.agentSocketPath())
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(agentRequestTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (r *Resolver) agentGet(ctx context.Context, project, key string) (string, error) {
+	conn, err := r.dialAgent(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -107,7 +137,7 @@ func (r *Resolver) agentGet(project, key string) (string, error) {
 		Value string `json:"value"`
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxAgentResponse+1)).Decode(&resp); err != nil {
 		return "", err
 	}
 	if resp.Error != "" {
@@ -116,8 +146,8 @@ func (r *Resolver) agentGet(project, key string) (string, error) {
 	return resp.Value, nil
 }
 
-func (r *Resolver) agentGetAll(project string) (map[string]string, error) {
-	conn, err := net.DialTimeout("unix", r.agentSocketPath(), agentDialTimeout)
+func (r *Resolver) agentGetAll(ctx context.Context, project string) (map[string]string, error) {
+	conn, err := r.dialAgent(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +162,7 @@ func (r *Resolver) agentGetAll(project string) (map[string]string, error) {
 		Secrets map[string]string `json:"secrets"`
 		Error   string            `json:"error"`
 	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxAgentResponse+1)).Decode(&resp); err != nil {
 		return nil, err
 	}
 	if resp.Error != "" {
@@ -142,6 +172,9 @@ func (r *Resolver) agentGetAll(project string) (map[string]string, error) {
 }
 
 func (r *Resolver) cliGet(ctx context.Context, project, key string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
@@ -149,14 +182,20 @@ func (r *Resolver) cliGet(ctx context.Context, project, key string) (string, err
 	if err != nil {
 		return "", err
 	}
-	out, err := cmd.Output()
+	out, stderr, err := toolpath.RunBounded(cmd, maxCLIOutput, maxCLIOutput)
 	if err != nil {
+		if detail := strings.TrimSpace(string(stderr)); detail != "" {
+			return "", fmt.Errorf("tvault get: %w: %s", err, detail)
+		}
 		return "", fmt.Errorf("tvault get: %w", err)
 	}
 	return string(out), nil
 }
 
 func (r *Resolver) cliGetAll(ctx context.Context, project string) (map[string]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 
@@ -164,8 +203,11 @@ func (r *Resolver) cliGetAll(ctx context.Context, project string) (map[string]st
 	if err != nil {
 		return nil, err
 	}
-	out, err := cmd.Output()
+	out, stderr, err := toolpath.RunBounded(cmd, maxCLIOutput, maxCLIOutput)
 	if err != nil {
+		if detail := strings.TrimSpace(string(stderr)); detail != "" {
+			return nil, fmt.Errorf("tvault env: %w: %s", err, detail)
+		}
 		return nil, fmt.Errorf("tvault env: %w", err)
 	}
 	var env map[string]string

@@ -470,9 +470,10 @@ func TestSearchFileWithLongLine(t *testing.T) {
 
 func TestInvalidateSemanticIndex(t *testing.T) {
 	rootDir := t.TempDir()
-	vecgrepReady.Store(rootDir, true)
+	key := workspaceKey(rootDir)
+	vecgrepReady.Store(key, true)
 	t.Cleanup(func() {
-		vecgrepReady.Delete(rootDir)
+		vecgrepReady.Delete(key)
 	})
 
 	InvalidateSemanticIndex(rootDir)

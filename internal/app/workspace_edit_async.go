@@ -310,7 +310,7 @@ func prepareWorkspaceEdit(
 				inputBytes += int64(snapshot.Rope.Len())
 				doc.EditorID, doc.Version, doc.Source = snapshot.EditorID, snapshot.Version, snapshot.Rope
 				doc.buffer = text.NewBufferFromRope(snapshot.Rope)
-				doc.buffer.Cursor = snapshot.Cursor
+				doc.buffer.SetCursor(snapshot.Cursor)
 			} else {
 				if expectedVersion != nil {
 					return fmt.Errorf("cannot verify document version for unopened file %s", filepath.Base(path))

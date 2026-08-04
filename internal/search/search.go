@@ -54,16 +54,22 @@ type CloseSearchMsg struct{}
 // ToggleReplaceMsg is sent to toggle the replace input visibility.
 type ToggleReplaceMsg struct{}
 
-// ReplaceOneMsg requests replacing the first match from cursor.
+// ReplaceOneMsg requests replacing the first match from cursor in the active
+// file. Regex and CaseSensitive mirror the overlay's search options so the
+// replacement matches the same occurrences the search highlighted.
 type ReplaceOneMsg struct {
-	Query       string
-	Replacement string
+	Query         string
+	Replacement   string
+	Regex         bool
+	CaseSensitive bool
 }
 
-// ReplaceAllMsg requests replacing all matches.
+// ReplaceAllMsg requests replacing all matches in the active file.
 type ReplaceAllMsg struct {
-	Query       string
-	Replacement string
+	Query         string
+	Replacement   string
+	Regex         bool
+	CaseSensitive bool
 }
 
 // SearchIndexingMsg is sent when semantic search starts indexing.
@@ -118,7 +124,7 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 	)
 
 	ri := textinput.New()
-	ri.Placeholder = "Replace..."
+	ri.Placeholder = "Replace in current file..."
 	ri.CharLimit = 256
 	ri.SetWidth(50)
 
@@ -155,6 +161,11 @@ func (m Model) Query() string {
 // Replacement returns the current replacement text.
 func (m Model) Replacement() string {
 	return m.replaceInput.Value()
+}
+
+// Regex reports whether regex mode is active in the overlay.
+func (m Model) Regex() bool {
+	return m.regex
 }
 
 // SetSize sets the overlay dimensions.
@@ -204,7 +215,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				replacement := m.replaceInput.Value()
 				if query != "" {
 					return m, func() tea.Msg {
-						return ReplaceOneMsg{Query: query, Replacement: replacement}
+						return ReplaceOneMsg{Query: query, Replacement: replacement, Regex: m.regex}
 					}
 				}
 				return m, nil
@@ -226,7 +237,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				replacement := m.replaceInput.Value()
 				if query != "" {
 					return m, func() tea.Msg {
-						return ReplaceAllMsg{Query: query, Replacement: replacement}
+						return ReplaceAllMsg{Query: query, Replacement: replacement, Regex: m.regex}
 					}
 				}
 			}

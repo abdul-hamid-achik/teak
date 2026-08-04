@@ -116,3 +116,46 @@ end, { once = true })
 		t.Fatalf("last_relative = %q, want %q", got, "main.go")
 	}
 }
+
+func TestAutocmdRejectsUnknownEvent(t *testing.T) {
+	L := lua.NewState()
+	defer L.Close()
+	registerAutocmdAPI(L)
+	L.SetGlobal("autocmd", L.Get(-1))
+	L.Pop(1)
+
+	err := L.DoString(`
+local ok, err = pcall(function()
+  autocmd.register("TypoEvent", function() end)
+end)
+assert(not ok)
+assert(string.find(err, "unsupported autocmd event", 1, true) ~= nil)
+`)
+	if err != nil {
+		t.Fatalf("unknown event validation script failed: %v", err)
+	}
+}
+
+func TestAutocmdRejectsUnknownEventForLifecycleOperations(t *testing.T) {
+	L := lua.NewState()
+	defer L.Close()
+	registerAutocmdAPI(L)
+	L.SetGlobal("autocmd", L.Get(-1))
+	L.Pop(1)
+
+	err := L.DoString(`
+local function rejected(fn)
+  local ok, err = pcall(fn)
+  assert(not ok)
+  assert(string.find(err, "unsupported autocmd event", 1, true) ~= nil)
+end
+rejected(function() autocmd.unregister("TypoEvent") end)
+rejected(function() autocmd.clear("TypoEvent") end)
+rejected(function() autocmd.list("TypoEvent") end)
+rejected(function() autocmd.register("InsertEnter", function() end) end)
+rejected(function() autocmd.register("InsertLeave", function() end) end)
+`)
+	if err != nil {
+		t.Fatalf("unknown lifecycle event validation script failed: %v", err)
+	}
+}

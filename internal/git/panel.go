@@ -20,6 +20,10 @@ type RefreshMsg struct {
 	Branch  string
 	Entries []StatusEntry
 	Err     error
+	// Generation is set by app-level debounced refreshes. Zero means the
+	// refresh was requested by a direct panel action and is not subject to the
+	// app's latest-wins guard.
+	Generation int
 }
 
 type treeRowKind int

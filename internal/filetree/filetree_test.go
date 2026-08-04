@@ -185,6 +185,212 @@ func TestModelCreation(t *testing.T) {
 	// Entries is initialized by readDirEntries (may be empty slice)
 }
 
+func TestTreeVisibilityTogglesAndNameFilter(t *testing.T) {
+	model := NewEmpty(t.TempDir(), ui.DefaultTheme())
+	model.Width = 40
+	model.Height = 6
+	model.Entries = []Entry{
+		{Name: ".env", Path: "/workspace/.env"},
+		{Name: "ignored.log", Path: "/workspace/ignored.log", IsGitIgnored: true},
+		{
+			Name:     "src",
+			Path:     "/workspace/src",
+			IsDir:    true,
+			Expanded: true,
+			Children: []Entry{
+				{Name: "main.go", Path: "/workspace/src/main.go"},
+				{Name: ".secret.go", Path: "/workspace/src/.secret.go"},
+			},
+		},
+	}
+	model.invalidateFlatCache()
+
+	if !model.ShowHidden() || !model.ShowGitIgnored() {
+		t.Fatal("new trees should preserve the existing visible-by-default behavior")
+	}
+	if got := len(model.flatEntries()); got != 5 {
+		t.Fatalf("default visible entries = %d, want 5", got)
+	}
+	model.Cursor = 3 // main.go in the full flattened projection
+	selected := model.selectedPath()
+
+	model.ToggleShowHidden()
+	if got := model.selectedPath(); got != selected {
+		t.Fatalf("hidden toggle moved selection from %q to %q", selected, got)
+	}
+	if names := flatEntryNames(model.flatEntries()); containsString(names, ".env") || containsString(names, ".secret.go") {
+		t.Fatalf("hidden entries remained visible: %v", names)
+	}
+	model.ToggleShowGitIgnored()
+	if got := model.selectedPath(); got != selected {
+		t.Fatalf("ignored toggle moved selection from %q to %q", selected, got)
+	}
+	if names := flatEntryNames(model.flatEntries()); containsString(names, "ignored.log") {
+		t.Fatalf("ignored entries remained visible: %v", names)
+	}
+
+	model.SetFilter("MAIN")
+	filtered := model.flatEntries()
+	if len(filtered) != 2 || filtered[0].Name != "src" || filtered[1].Name != "main.go" {
+		t.Fatalf("filtered entries = %#v, want src/main.go", filtered)
+	}
+	model.StartFilter()
+	if model.EntryAtY(0) != nil {
+		t.Fatal("filter prompt row should not select a tree entry")
+	}
+	view := model.View()
+	if !strings.Contains(view, "/ MAIN_") {
+		t.Fatalf("filter prompt = %q, want query and caret", view)
+	}
+}
+
+func TestTreeFilterInputAndVisibilityKeys(t *testing.T) {
+	model := NewEmpty(t.TempDir(), ui.DefaultTheme())
+	model.Entries = []Entry{{Name: "main.go", Path: "/main.go"}, {Name: ".env", Path: "/.env"}}
+	model.Height = 4
+
+	updated, _ := model.Update(tea.KeyPressMsg{Text: "/"})
+	if !updated.FilterActive() {
+		t.Fatal("slash did not open the tree filter")
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "m"})
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "a"})
+	if updated.Filter() != "ma" {
+		t.Fatalf("filter = %q, want ma", updated.Filter())
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "backspace"})
+	if updated.Filter() != "m" {
+		t.Fatalf("filter after backspace = %q, want m", updated.Filter())
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "escape"})
+	if updated.FilterActive() || updated.Filter() != "" {
+		t.Fatalf("escape left filter state active=%v query=%q", updated.FilterActive(), updated.Filter())
+	}
+
+	if !updated.ShowHidden() || !updated.ShowGitIgnored() {
+		t.Fatal("visibility defaults changed unexpectedly")
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "alt+h"})
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "alt+i"})
+	if updated.ShowHidden() || updated.ShowGitIgnored() {
+		t.Fatalf("visibility keys did not toggle: hidden=%v ignored=%v", updated.ShowHidden(), updated.ShowGitIgnored())
+	}
+}
+
+func asyncFilterFixture(t *testing.T) Model {
+	t.Helper()
+	model := NewEmpty(t.TempDir(), ui.DefaultTheme())
+	model.Width = 40
+	model.Height = 8
+	model.Entries = []Entry{
+		{
+			Name:     "src",
+			Path:     "/workspace/src",
+			IsDir:    true,
+			Expanded: true,
+			Depth:    0,
+			Children: []Entry{
+				{Name: "main.go", Path: "/workspace/src/main.go", Depth: 1},
+				{Name: "readme.txt", Path: "/workspace/src/readme.txt", Depth: 1},
+			},
+		},
+		{Name: "README.md", Path: "/workspace/README.md", Depth: 0},
+	}
+	model.invalidateFlatCache()
+	_ = model.flatEntries() // populate the immutable source before typing
+	model.StartFilter()
+	return model
+}
+
+func TestTreeFilterInputBuildsProjectionAsynchronously(t *testing.T) {
+	model := asyncFilterFixture(t)
+	updated, cmd := model.Update(tea.KeyPressMsg{Text: "main"})
+	if cmd == nil {
+		t.Fatal("filter input returned no asynchronous command")
+	}
+	if !updated.FilterPending() {
+		t.Fatal("filter input did not mark the projection pending")
+	}
+	if got := len(updated.flatEntries()); got != 0 {
+		t.Fatalf("pending filter exposed %d stale entries, want zero", got)
+	}
+	if view := updated.View(); !strings.Contains(view, "Filtering...") {
+		t.Fatalf("pending filter view = %q, want visible progress status", view)
+	}
+
+	rawMsg := cmd()
+	msg, ok := rawMsg.(FilterReadyMsg)
+	if !ok {
+		t.Fatalf("filter command returned %T, want FilterReadyMsg", rawMsg)
+	}
+	updated, _ = updated.Update(msg)
+	if updated.FilterPending() {
+		t.Fatal("installed filter result remained pending")
+	}
+	if got := flatEntryNames(updated.flatEntries()); !strings.EqualFold(strings.Join(got, "/"), "src/main.go") {
+		t.Fatalf("filtered entries = %v, want src/main.go", got)
+	}
+}
+
+func TestTreeFilterDropsStaleProjectionResults(t *testing.T) {
+	model := asyncFilterFixture(t)
+	first, firstCmd := model.Update(tea.KeyPressMsg{Text: "m"})
+	second, secondCmd := first.Update(tea.KeyPressMsg{Text: "a"})
+	if firstCmd == nil || secondCmd == nil {
+		t.Fatal("filter input did not schedule both projections")
+	}
+
+	rawStale := firstCmd()
+	stale, ok := rawStale.(FilterReadyMsg)
+	if !ok {
+		t.Fatalf("first filter command returned %T, want FilterReadyMsg", rawStale)
+	}
+	second, _ = second.Update(stale)
+	if !second.FilterPending() {
+		t.Fatal("stale filter result cleared the current pending state")
+	}
+	if got := second.Filter(); got != "ma" {
+		t.Fatalf("stale filter changed query to %q, want ma", got)
+	}
+
+	rawCurrent := secondCmd()
+	current, ok := rawCurrent.(FilterReadyMsg)
+	if !ok {
+		t.Fatalf("second filter command returned %T, want FilterReadyMsg", rawCurrent)
+	}
+	second, _ = second.Update(current)
+	if got := flatEntryNames(second.flatEntries()); !strings.EqualFold(strings.Join(got, "/"), "src/main.go") {
+		t.Fatalf("current filtered entries = %v, want src/main.go", got)
+	}
+}
+
+func TestTreeFilterPreservesSelectionWhenResultArrives(t *testing.T) {
+	model := asyncFilterFixture(t)
+	model.Cursor = 0 // src remains visible because its child matches
+	updated, cmd := model.Update(tea.KeyPressMsg{Text: "main"})
+	updated, _ = updated.Update(cmd())
+	if got := updated.selectedPath(); got != "/workspace/src" {
+		t.Fatalf("selected path = %q, want /workspace/src", got)
+	}
+}
+
+func flatEntryNames(entries []Entry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	return names
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSetDiagnostics tests SetDiagnostics method
 func TestSetDiagnostics(t *testing.T) {
 	theme := ui.DefaultTheme()

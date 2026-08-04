@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -145,7 +146,8 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 			}
 			addr = listener.Addr().String()
 			args = addClientAddrArg(args, addr)
-			cmd = exec.Command(resolved, args...)
+			cmd = exec.CommandContext(context.Background(), resolved, args...)
+			toolpath.ConfigureCommand(cmd)
 			cmd.Dir = "."
 			if err := cmd.Start(); err != nil {
 				_ = listener.Close()
@@ -154,7 +156,7 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 			conn, err := waitForDial(listener, 10*time.Second)
 			_ = listener.Close()
 			if err != nil {
-				_ = cmd.Process.Kill()
+				_ = toolpath.TerminateCommand(cmd)
 				_ = cmd.Wait()
 				return nil, fmt.Errorf("delve did not dial client-addr %q: %w", addr, err)
 			}
@@ -165,7 +167,8 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 			if err != nil {
 				return nil, fmt.Errorf("listen on provided client-addr %q: %w", addr, err)
 			}
-			cmd = exec.Command(resolved, args...)
+			cmd = exec.CommandContext(context.Background(), resolved, args...)
+			toolpath.ConfigureCommand(cmd)
 			cmd.Dir = "."
 			if err := cmd.Start(); err != nil {
 				_ = listener.Close()
@@ -174,7 +177,7 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 			conn, err := waitForDial(listener, 10*time.Second)
 			_ = listener.Close()
 			if err != nil {
-				_ = cmd.Process.Kill()
+				_ = toolpath.TerminateCommand(cmd)
 				_ = cmd.Wait()
 				return nil, fmt.Errorf("delve did not dial client-addr %q: %w", addr, err)
 			}
@@ -182,7 +185,8 @@ func NewClient(command string, args []string, msgChan chan<- any) (*Client, erro
 			stdout = conn
 		}
 	} else {
-		cmd = exec.Command(resolved, args...)
+		cmd = exec.CommandContext(context.Background(), resolved, args...)
+		toolpath.ConfigureCommand(cmd)
 		cmd.Dir = "."
 		var err error
 		stdin, err = cmd.StdinPipe()
@@ -413,6 +417,7 @@ func (c *Client) Shutdown() {
 	c.shutdownOnce.Do(func() {
 		c.mu.Lock()
 		c.running = false
+		c.initialized = false
 		c.mu.Unlock()
 		c.stopEventDelivery()
 		go c.shutdownProcess()
@@ -449,6 +454,9 @@ func (c *Client) sendRequest(command string, args any, result *json.RawMessage) 
 func (c *Client) sendRequestContext(ctx context.Context, command string, args any, result *json.RawMessage) error {
 	seq := c.nextSeq()
 	c.mu.Lock()
+	if c.pending == nil {
+		c.pending = make(map[int]chan callResult)
+	}
 	ch := make(chan callResult, 1)
 	c.pending[seq] = ch
 	c.mu.Unlock()
@@ -478,6 +486,14 @@ func (c *Client) sendRequestContext(ctx context.Context, command string, args an
 		delete(c.pending, seq)
 		c.mu.Unlock()
 		return fmt.Errorf("DAP request %q: debug adapter exited", command)
+	case <-c.readDone:
+		// The transport can reach EOF while the adapter process remains alive.
+		// Treat that as terminal immediately instead of waiting for the request
+		// timeout or for a process reap that may never arrive.
+		c.mu.Lock()
+		delete(c.pending, seq)
+		c.mu.Unlock()
+		return fmt.Errorf("DAP request %q: DAP transport closed", command)
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, seq)
@@ -521,16 +537,23 @@ func (c *Client) send(msg any) error {
 
 func (c *Client) readLoop() {
 	defer func() {
+		c.markSessionInactive()
 		if c.readDone != nil {
 			close(c.readDone)
 		}
 	}()
-	reader := bufio.NewReader(c.stdout)
+	c.mu.Lock()
+	stdout := c.stdout
+	c.mu.Unlock()
+	if stdout == nil {
+		return
+	}
+	reader := bufio.NewReader(stdout)
 
 	for {
 		content, err := readDAPFrame(reader)
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			if !isExpectedDAPReadError(err) {
 				log.Error("dap: read frame error", "err", err)
 			}
 			return
@@ -538,6 +561,24 @@ func (c *Client) readLoop() {
 
 		c.handleMessage(content)
 	}
+}
+
+func isExpectedDAPReadError(err error) bool {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "file already closed") ||
+		strings.Contains(message, "use of closed network connection") ||
+		strings.Contains(message, "closed pipe") ||
+		strings.Contains(message, "broken pipe")
+}
+
+func (c *Client) markSessionInactive() {
+	c.mu.Lock()
+	c.running = false
+	c.initialized = false
+	c.mu.Unlock()
 }
 
 func (c *Client) reapProcess() {
@@ -579,7 +620,7 @@ func (c *Client) shutdownProcess() {
 		return
 	}
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = toolpath.TerminateCommand(cmd)
 	}
 	if !waitForDone(c.processDone, shutdownReapTimeout) {
 		log.Warn("dap: process did not exit after forced shutdown")
@@ -701,6 +742,12 @@ func (c *Client) handleMessage(data []byte) {
 }
 
 func (c *Client) handleEvent(event *Event) {
+	if event == nil {
+		return
+	}
+	if event.Event == "exited" || event.Event == "terminated" {
+		c.markSessionInactive()
+	}
 	if c.msgChan == nil {
 		return
 	}

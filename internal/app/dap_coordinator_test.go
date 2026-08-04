@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"teak/internal/dap"
+	"teak/internal/debugger"
 )
 
 // TestDAPCoordinatorCreation tests that the coordinator can be created
@@ -61,6 +62,9 @@ func TestDAPCoordinatorHandleContinued(t *testing.T) {
 func TestDAPCoordinatorHandleTerminated(t *testing.T) {
 	coord := NewDAPCoordinator(nil)
 	coord.state = dap.StateRunning
+	coord.SetStackFrames([]dap.StackFrame{{Id: 1, Name: "main"}})
+	coord.SetVariables([]dap.Variable{{Name: "x", Value: "1"}})
+	coord.AppendOutput("adapter output")
 
 	msg := dap.TerminatedEventMsg{}
 
@@ -72,12 +76,18 @@ func TestDAPCoordinatorHandleTerminated(t *testing.T) {
 	if coord.state != dap.StateInactive {
 		t.Errorf("expected state Inactive, got %v", coord.state)
 	}
+	if len(coord.GetStackFrames()) != 0 || len(coord.GetVariables()) != 0 || len(coord.GetOutputLog()) != 0 {
+		t.Fatalf("terminated session retained state: frames=%d variables=%d output=%d", len(coord.GetStackFrames()), len(coord.GetVariables()), len(coord.GetOutputLog()))
+	}
 }
 
 // TestDAPCoordinatorHandleExited tests exited event handling
 func TestDAPCoordinatorHandleExited(t *testing.T) {
 	coord := NewDAPCoordinator(nil)
 	coord.state = dap.StateRunning
+	coord.SetStackFrames([]dap.StackFrame{{Id: 1, Name: "main"}})
+	coord.SetVariables([]dap.Variable{{Name: "x", Value: "1"}})
+	coord.AppendOutput("adapter output")
 
 	msg := dap.ExitedEventMsg{
 		ExitCode: 0,
@@ -90,6 +100,9 @@ func TestDAPCoordinatorHandleExited(t *testing.T) {
 
 	if coord.state != dap.StateInactive {
 		t.Errorf("expected state Inactive, got %v", coord.state)
+	}
+	if len(coord.GetStackFrames()) != 0 || len(coord.GetVariables()) != 0 || len(coord.GetOutputLog()) != 0 {
+		t.Fatalf("exited session retained state: frames=%d variables=%d output=%d", len(coord.GetStackFrames()), len(coord.GetVariables()), len(coord.GetOutputLog()))
 	}
 }
 
@@ -209,6 +222,11 @@ func TestDAPCoordinatorSelectFrame(t *testing.T) {
 	if coord.currentFrame != 1 {
 		t.Errorf("expected currentFrame 1, got %d", coord.currentFrame)
 	}
+	if got, ok := cmd().(debugger.JumpToFrameMsg); !ok {
+		t.Fatalf("SelectFrame command returned %T, want debugger.JumpToFrameMsg", cmd())
+	} else if got.FilePath != "/test2.go" || got.Line != 19 {
+		t.Fatalf("jump message = %+v, want path /test2.go and 0-based line 19", got)
+	}
 }
 
 // TestDAPCoordinatorSelectFrameOutOfBounds tests frame selection with invalid index
@@ -253,6 +271,29 @@ func TestDAPCoordinatorGetVariables(t *testing.T) {
 	retrieved := coord.GetVariables()
 	if len(retrieved) != 1 {
 		t.Errorf("expected 1 variable, got %d", len(retrieved))
+	}
+}
+
+func TestDAPCoordinatorCopiesSlicesAtItsBoundary(t *testing.T) {
+	coord := NewDAPCoordinator(nil)
+	frames := []dap.StackFrame{{Id: 1, Name: "main"}}
+	vars := []dap.Variable{{Name: "x", Value: "1"}}
+
+	coord.SetStackFrames(frames)
+	coord.SetVariables(vars)
+	frames[0].Name = "caller mutation"
+	vars[0].Value = "caller mutation"
+
+	gotFrames := coord.GetStackFrames()
+	gotVars := coord.GetVariables()
+	gotFrames[0].Name = "getter mutation"
+	gotVars[0].Value = "getter mutation"
+
+	if got := coord.GetStackFrames()[0].Name; got != "main" {
+		t.Errorf("stack frame leaked through coordinator boundary: %q", got)
+	}
+	if got := coord.GetVariables()[0].Value; got != "1" {
+		t.Errorf("variable leaked through coordinator boundary: %q", got)
 	}
 }
 

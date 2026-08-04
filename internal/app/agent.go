@@ -79,11 +79,23 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 		m.agentPanel.AddSystemMessage("Mode changed to " + string(inner.ModeId))
 	case acp.AgentErrorMsg:
-		m.agentPanel.AddSystemMessage("Error: " + inner.Err.Error())
+		if inner.Err == nil {
+			m.agentPanel.AddSystemMessage("Error: unknown agent error")
+			m.status = "Error: unknown agent error"
+		} else {
+			message := "Error: " + inner.Err.Error()
+			m.agentPanel.AddSystemMessage(message)
+			m.status = message
+		}
 	case acp.AgentStartedMsg:
 		m.agentPanel.SetConnected(true)
 	case acp.AgentStoppedMsg:
 		m.agentPanel.SetConnected(false)
+		if inner.Err != nil {
+			message := "Agent stopped: " + inner.Err.Error()
+			m.agentPanel.AddSystemMessage(message)
+			m.status = message
+		}
 	case acp.FileReadRequestMsg:
 		return m.handleFileReadRequest(inner)
 	case agent.CancelRequestedMsg:
@@ -400,16 +412,15 @@ func (m Model) openAgentModelPicker() tea.Cmd {
 // openAgentFilePicker opens an overlay picker to tag a file.
 func (m Model) openAgentFilePicker() tea.Cmd {
 	if m.cachedFilesReady {
-		items := filesToAgentPickerItems(m.cachedFiles)
-		picker := overlay.NewPicker("Attach File", items, m.theme, "agent-file-picker")
+		picker := overlay.NewPicker("Attach File", nil, m.theme, "agent-file-picker")
 		m.overlayStack.Push(picker)
-		return nil
+		return tea.Batch(picker.Focus(), preparePickerItemsCmd(picker.InstanceID(), "agent-file-picker", m.cachedFiles, true))
 	}
 	// Trigger file scan; when FileListMsg arrives it will be handled
 	// For now, show empty picker — it will populate when files arrive
 	picker := overlay.NewPicker("Attach File (loading...)", nil, m.theme, "agent-file-picker")
 	m.overlayStack.Push(picker)
-	return quickOpenCmd(context.Background(), m.rootDir, m.fileListGeneration)
+	return tea.Batch(picker.Focus(), quickOpenCmd(context.Background(), m.rootDir, m.fileListGeneration))
 }
 
 // filesToAgentPickerItems converts file paths to picker items with agent-specific Value.

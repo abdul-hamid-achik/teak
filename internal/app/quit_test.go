@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"teak/internal/agent"
 )
 
 func TestQuitFilterRoutesExternalQuitThroughModel(t *testing.T) {
@@ -83,5 +84,37 @@ func TestFinalizeQuitWaitsForCleanupBeforeApprovingTerminalQuit(t *testing.T) {
 	quitMsg := quitCmd()
 	if _, ok := quitMsg.(tea.QuitMsg); !ok {
 		t.Fatalf("quit command returned %T, want tea.QuitMsg", quitMsg)
+	}
+}
+
+func TestFinalizeQuitMarksAgentDisconnectedBeforeCleanup(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.agentPanel.SetConnected(true)
+
+	shuttingDown, cleanupCmd := model.finalizeQuit()
+	if cleanupCmd == nil {
+		t.Fatal("finalizeQuit() did not schedule cleanup")
+	}
+	if got := shuttingDown.agentPanel.State(); got != agent.AgentDisconnected {
+		t.Fatalf("agent state during shutdown = %v, want disconnected", got)
+	}
+}
+
+func TestShutdownCompletionDoesNotMutateFinalUI(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model.status = "Shutting down…"
+	model.shutdownStarted = true
+
+	updatedAny, cmd := model.Update(shutdownCompleteMsg{})
+	updated := updatedAny.(Model)
+
+	if !updated.quitApproved {
+		t.Fatal("shutdown completion did not approve terminal quit")
+	}
+	if updated.status != "Shutting down…" {
+		t.Fatalf("shutdown completion changed final status to %q", updated.status)
+	}
+	if cmd == nil {
+		t.Fatal("shutdown completion did not request terminal quit")
 	}
 }
