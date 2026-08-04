@@ -12,6 +12,7 @@ import (
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/app"
 	"teak/internal/config"
+	"teak/internal/toolpath"
 )
 
 const developmentVersion = "dev"
@@ -27,6 +28,8 @@ Usage:
   teak [options] [path ...]
   teak [options] +<line> <file>
   teak [options] <file>:<line>[:<col>]
+  teak doctor [--json] [--root <directory>]
+  teak headless <context|project|buffer|search|codemap|exec|tools|health|serve|mcp|hitspec|git|session|lsp|dap|agent> [options]
 
 Arguments:
   path                 File or directory to open. Multiple files open as tabs.
@@ -36,6 +39,10 @@ Arguments:
 Options:
   -h, --help           Show this help and exit
   -v, --version        Print version and exit
+
+Commands:
+  doctor               Diagnose Teak, its configuration, and project tools
+  headless             Run machine-readable, non-interactive operations
 
 Examples:
   teak                         Open current directory
@@ -47,7 +54,28 @@ Examples:
 `
 
 func main() {
-	open, handled, err := handleCLI(os.Args[1:], os.Stdout, version)
+	args := os.Args[1:]
+	if isDoctorCommand(args) {
+		// Doctor remains responsible for reporting invalid configuration, but a
+		// valid [tools] section must be active before it probes anything.
+		_ = configureToolpathFromConfig()
+		if code := runDoctorCLI(args[1:], os.Stdout, os.Stderr, version); code != 0 {
+			os.Exit(code)
+		}
+		return
+	}
+	if isHeadlessCommand(args) {
+		// Headless control-plane calls use the same explicit tool paths as the
+		// interactive editor. Loading is best-effort here so `doctor` remains the
+		// canonical diagnostic for a malformed config.
+		_ = configureToolpathFromConfig()
+		if code := runHeadlessCLI(args[1:], os.Stdin, os.Stdout, os.Stderr); code != 0 {
+			os.Exit(code)
+		}
+		return
+	}
+
+	open, handled, err := handleCLI(args, os.Stdout, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(2)
@@ -90,6 +118,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// configureToolpathFromConfig installs user-declared absolute or relative
+// executable overrides after config validation. Missing paths are deliberately
+// left to toolpath/doctor so the user gets an actionable capability report.
+func configureToolpathFromConfig() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	toolpath.Configure(cfg.Tools)
+	return nil
 }
 
 // cliTarget is one path argument after location parsing (+line / path:line).
