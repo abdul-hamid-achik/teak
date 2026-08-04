@@ -43,10 +43,15 @@ func TestRopeConcurrentAccess(t *testing.T) {
 
 	runtime.ReadMemStats(&memStatsAfter)
 
-	// Memory should not have grown significantly (rope is immutable)
-	allocDelta := memStatsAfter.Alloc - memStatsBefore.Alloc
-	if allocDelta > 10*1024*1024 { // More than 10MB is suspicious
-		t.Errorf("memory grew by %d bytes, expected minimal growth", allocDelta)
+	// Memory should not have grown significantly (rope is immutable).
+	// Alloc legitimately drops when the GC runs between the two readings,
+	// so guard the unsigned subtraction against underflow — a shrunken
+	// heap is never a leak.
+	if memStatsAfter.Alloc > memStatsBefore.Alloc {
+		allocDelta := memStatsAfter.Alloc - memStatsBefore.Alloc
+		if allocDelta > 10*1024*1024 { // More than 10MB is suspicious
+			t.Errorf("memory grew by %d bytes, expected minimal growth", allocDelta)
+		}
 	}
 }
 
