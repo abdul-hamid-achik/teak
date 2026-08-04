@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"teak/internal/clipboard"
 	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
@@ -450,6 +452,10 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		// Autocomplete intercepts some keys when visible
 		if e.autocomplete.Visible {
 			switch msg.String() {
+			case "left", "right", "home", "end", "ctrl+home", "ctrl+end":
+				// Navigation moves the cursor away from the completion point,
+				// so the popup must not linger on stale suggestions.
+				e.autocomplete.Hide()
 			case "up":
 				e.autocomplete.MoveUp()
 				return e, nil
@@ -964,9 +970,44 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		if e.Highlighter != nil {
 			e.invalidateHighlightForLastChange()
 		}
+		e.refilterAutocomplete()
 		return e, tea.Batch(e.scheduleRetokenize(), e.TriggerCompletion())
 	}
 	return e, nil
+}
+
+// refilterAutocomplete narrows an open popup to what the user has actually
+// typed since the server answered, closing it when nothing matches. Without
+// this the popup kept showing items that no longer match the prefix and never
+// dismissed itself.
+func (e *Editor) refilterAutocomplete() {
+	if !e.autocomplete.Visible {
+		return
+	}
+	e.autocomplete.Filter(e.completionPrefix())
+}
+
+// completionPrefix returns the identifier prefix immediately before the
+// cursor, used to filter autocomplete items client-side.
+func (e Editor) completionPrefix() string {
+	buf := e.Buffer
+	if buf == nil {
+		return ""
+	}
+	line := buf.Line(buf.Cursor.Line)
+	col := buf.Cursor.Col
+	if col > len(line) {
+		col = len(line)
+	}
+	start := col
+	for start > 0 {
+		r, size := utf8.DecodeLastRune(line[:start])
+		if !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			break
+		}
+		start -= size
+	}
+	return string(line[start:col])
 }
 
 // invalidateHighlightForLastChange marks the highlight cache stale for the edit
@@ -1298,6 +1339,19 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 // View renders the editor content.
 func (e *Editor) View() string {
 	pluginHighlights := e.PluginHighlightRanges()
+	extra := append(e.diagnosticHighlights(), e.findMatchHighlights()...)
+	if len(extra) > 0 {
+		pluginHighlights = append(pluginHighlights, extra...)
+		sort.SliceStable(pluginHighlights, func(i, j int) bool {
+			if pluginHighlights[i].Line != pluginHighlights[j].Line {
+				return pluginHighlights[i].Line < pluginHighlights[j].Line
+			}
+			if pluginHighlights[i].StartCol != pluginHighlights[j].StartCol {
+				return pluginHighlights[i].StartCol < pluginHighlights[j].StartCol
+			}
+			return pluginHighlights[i].EndCol < pluginHighlights[j].EndCol
+		})
+	}
 	var view string
 	if e.Wrap != nil && e.Config.WordWrap {
 		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap, pluginHighlights)
@@ -1310,6 +1364,125 @@ func (e *Editor) View() string {
 		view = fv + "\n" + view
 	}
 	return view
+}
+
+// findMatchHighlights turns the visible find matches into highlight ranges so
+// the existing render pipeline paints them. The current match gets a distinct
+// style so the user can see where the next Enter will land.
+func (e Editor) findMatchHighlights() []HighlightRange {
+	if !e.find.Visible() || e.Buffer == nil || len(e.find.matches) == 0 {
+		return nil
+	}
+	startLine, endLine := e.visibleBufferLineRange()
+	if startLine > endLine {
+		return nil
+	}
+	current := e.find.CurrentMatchPosition()
+	var ranges []HighlightRange
+	for _, m := range e.find.matches {
+		if m.Start.Line < startLine {
+			continue
+		}
+		if m.Start.Line > endLine {
+			break
+		}
+		style := e.theme.FindMatch
+		if current != nil && current.Start == m.Start && current.End == m.End {
+			style = e.theme.FindMatchCurrent
+		}
+		ranges = append(ranges, HighlightRange{
+			Namespace: -1,
+			Line:      m.Start.Line,
+			StartCol:  m.Start.Col,
+			EndCol:    m.End.Col,
+			Style:     style,
+		})
+	}
+	return ranges
+}
+
+// diagnosticHighlights turns visible LSP diagnostics into underline highlight
+// ranges so errors and warnings are marked in the text itself, not just by a
+// colored gutter number. Multi-line diagnostics underline every covered line.
+func (e Editor) diagnosticHighlights() []HighlightRange {
+	if e.Buffer == nil || len(e.Diagnostics) == 0 {
+		return nil
+	}
+	startLine, endLine := e.visibleBufferLineRange()
+	if startLine > endLine {
+		return nil
+	}
+	var ranges []HighlightRange
+	for _, d := range e.Diagnostics {
+		if d.EndLine < startLine || d.StartLine > endLine {
+			continue
+		}
+		style := diagnosticStyle(e.theme, d.Severity)
+		first := max(d.StartLine, startLine)
+		last := min(d.EndLine, endLine)
+		for line := first; line <= last; line++ {
+			lineLen := len(e.Buffer.Line(line))
+			start := 0
+			if line == d.StartLine {
+				start = min(d.StartCol, lineLen)
+			}
+			end := lineLen
+			if line == d.EndLine {
+				end = min(d.EndCol, lineLen)
+			}
+			if end <= start {
+				continue
+			}
+			ranges = append(ranges, HighlightRange{
+				Namespace: -2,
+				Line:      line,
+				StartCol:  start,
+				EndCol:    end,
+				Style:     style,
+			})
+		}
+	}
+	return ranges
+}
+
+func diagnosticStyle(theme ui.Theme, severity int) lipgloss.Style {
+	switch severity {
+	case 1:
+		return theme.DiagError
+	case 2:
+		return theme.DiagWarning
+	case 3:
+		return theme.DiagInfo
+	default:
+		return theme.DiagHint
+	}
+}
+
+// visibleBufferLineRange returns the buffer line window currently on screen
+// for plain, wrapped, or folded rendering.
+func (e Editor) visibleBufferLineRange() (int, int) {
+	lineCount := e.Buffer.LineCount()
+	if lineCount == 0 {
+		return 0, -1
+	}
+	if e.Wrap != nil && e.Config.WordWrap {
+		start, end := e.Wrap.VisibleBufferRange(e.Viewport.WrapScrollY, max(1, e.Viewport.Height))
+		if start > end || start >= lineCount {
+			return 0, -1
+		}
+		return start, min(end, lineCount-1)
+	}
+	if len(e.Folds.Regions) > 0 {
+		start := e.Viewport.foldedScrollStart(&e.Folds, lineCount)
+		visible := e.Folds.VisibleLines(start, e.Viewport.Height, lineCount)
+		if len(visible) == 0 {
+			return 0, -1
+		}
+		return visible[0], visible[len(visible)-1]
+	}
+	start := min(e.Viewport.ScrollY, lineCount-1)
+	end := min(start+max(1, e.Viewport.Height)-1, lineCount-1)
+	return start, end
 }
 
 // effectiveGutterWidth computes the total gutter width matching what Render produces.

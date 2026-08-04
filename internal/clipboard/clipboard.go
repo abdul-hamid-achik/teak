@@ -2,6 +2,7 @@ package clipboard
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +21,11 @@ const (
 	// MaxClipboardBytes bounds clipboard values retained in memory and sent to
 	// external clipboard programs. It prevents a paste or selection from
 	// monopolizing the editor process.
-	MaxClipboardBytes     = 16 << 20
+	MaxClipboardBytes = 16 << 20
+	// MaxOSC52Bytes bounds payloads sent through the terminal clipboard. Terminals
+	// impose their own OSC 52 limits, so keep this conservative rather than
+	// streaming megabytes of escape data into the renderer.
+	MaxOSC52Bytes         = 1 << 20
 	internalClipboardMode = "internal"
 )
 
@@ -135,6 +140,33 @@ func Paste() (string, error) {
 
 func systemClipboardDisabled() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("TEAK_CLIPBOARD")), internalClipboardMode)
+}
+
+// OSC52CopySequence returns the escape sequence that stores text in the
+// terminal emulator's clipboard (OSC 52). This is the only copy path that
+// works over SSH, where the remote side has no OS clipboard tooling and the
+// local terminal is the thing with access to the user's clipboard.
+func OSC52CopySequence(text string) (string, error) {
+	if err := Validate(text); err != nil {
+		return "", err
+	}
+	if len(text) > MaxOSC52Bytes {
+		return "", fmt.Errorf("%w: %d bytes (OSC 52 limit %d)", ErrTooLarge, len(text), MaxOSC52Bytes)
+	}
+	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07", nil
+}
+
+// OSC52Available reports whether emitting OSC 52 makes sense for this
+// session: the user forced it, or this looks like an SSH session where the
+// OS clipboard candidates are expected to be missing.
+func OSC52Available() bool {
+	if systemClipboardDisabled() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEAK_OSC52")), "force") {
+		return true
+	}
+	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CLIENT") != ""
 }
 
 func clipboardCopyCommands(goos string, wayland bool) [][]string {

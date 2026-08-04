@@ -1836,7 +1836,16 @@ func (m Model) handleClipboardCopyPrepared(msg editor.ClipboardCopyPreparedMsg) 
 }
 
 func (m Model) handleClipboardCopyResult(msg editor.ClipboardCopyResultMsg) (tea.Model, tea.Cmd) {
-	if m.editorIndexForAsyncMessage(msg.EditorID) < 0 || msg.Err == nil {
+	if m.editorIndexForAsyncMessage(msg.EditorID) < 0 {
+		return m, nil
+	}
+	if msg.OSC52Sequence != "" {
+		// The OS tools are missing (typically over SSH), but the terminal on
+		// the other end owns the user's clipboard: hand it the payload.
+		m.status = "Copied to terminal clipboard (OSC 52)"
+		return m, tea.Printf("%s", msg.OSC52Sequence)
+	}
+	if msg.Err == nil {
 		return m, nil
 	}
 	if !msg.FallbackStored {

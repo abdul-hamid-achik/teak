@@ -54,10 +54,13 @@ type PastePreparedMsg struct {
 }
 
 // ClipboardCopyResultMsg reports whether the deferred OS integration worked.
-// The local fallback is already available regardless of Err.
+// The local fallback is already available regardless of Err. OSC52Sequence
+// carries a terminal-clipboard escape when that path succeeded instead of the
+// OS tools (typically over SSH).
 type ClipboardCopyResultMsg struct {
 	EditorID       uint64
 	FallbackStored bool
+	OSC52Sequence  string
 	Err            error
 }
 
@@ -65,8 +68,23 @@ func copyToClipboardCmd(editorID uint64, content string) tea.Cmd {
 	return func() tea.Msg {
 		// Store has already updated the in-process fallback in Update. Only the
 		// OS integration, which can block for up to its timeout, runs here.
-		return ClipboardCopyResultMsg{EditorID: editorID, FallbackStored: true, Err: clipboard.CopyToSystem(content)}
+		err := clipboard.CopyToSystem(content)
+		if seq, seqErr := osc52FallbackFor(err, content); seq != "" && seqErr == nil {
+			return ClipboardCopyResultMsg{EditorID: editorID, FallbackStored: true, OSC52Sequence: seq}
+		}
+		return ClipboardCopyResultMsg{EditorID: editorID, FallbackStored: true, Err: err}
 	}
+}
+
+// osc52FallbackFor returns an OSC 52 escape sequence when an OS clipboard
+// copy failed in a session where the terminal clipboard is the viable path
+// (SSH, or forced via TEAK_OSC52). Local desktop sessions keep the error so
+// the user sees the real failure.
+func osc52FallbackFor(copyErr error, content string) (string, error) {
+	if copyErr == nil || !clipboard.OSC52Available() {
+		return "", copyErr
+	}
+	return clipboard.OSC52CopySequence(content)
 }
 
 func clipboardCopyRejectedCmd(editorID uint64, err error) tea.Cmd {

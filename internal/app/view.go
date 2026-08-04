@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"teak/internal/editor"
 	"teak/internal/ui"
 )
 
@@ -494,8 +495,14 @@ func (m Model) renderStatusBar() string {
 		) + agentStatus
 	}
 
-	// Center: status message
+	// Center: status message; when idle, surface the diagnostic under the
+	// cursor so the common case does not require opening the problems panel.
 	center := m.status
+	if center == "" {
+		if ed := m.activeEditor(); ed != nil {
+			center = diagnosticMessageAtLine(ed.Diagnostics, ed.Buffer.Cursor.Line, m.width/2)
+		}
+	}
 
 	// Calculate padding
 	usedWidth := ansi.StringWidth(left) + ansi.StringWidth(right) + ansi.StringWidth(center)
@@ -512,6 +519,28 @@ func (m Model) renderStatusBar() string {
 	// Divider line above status bar
 	divider := m.theme.TreeBorder.Render(strings.Repeat("─", m.width))
 	return divider + "\n" + m.theme.StatusBar.Width(m.width).Render(bar)
+}
+
+// diagnosticMessageAtLine returns the first diagnostic message covering the
+// given line, rune-truncated to maxWidth, or "" when there is none.
+func diagnosticMessageAtLine(diags []editor.Diagnostic, line, maxWidth int) string {
+	for _, d := range diags {
+		if line < d.StartLine || line > d.EndLine {
+			continue
+		}
+		msg := strings.TrimSpace(d.Message)
+		if msg == "" {
+			continue
+		}
+		if maxWidth > 1 {
+			runes := []rune(msg)
+			if len(runes) > maxWidth {
+				msg = string(runes[:maxWidth-1]) + "…"
+			}
+		}
+		return msg
+	}
+	return ""
 }
 
 func (m Model) renderCompactStatusBar() string {

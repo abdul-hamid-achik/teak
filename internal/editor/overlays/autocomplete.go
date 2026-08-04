@@ -30,10 +30,11 @@ type AutocompleteEdit struct {
 
 // Autocomplete manages the autocomplete popup state.
 type Autocomplete struct {
-	Items   []AutocompleteItem
-	Cursor  int
-	Visible bool
-	theme   ui.Theme
+	Items    []AutocompleteItem
+	allItems []AutocompleteItem
+	Cursor   int
+	Visible  bool
+	theme    ui.Theme
 }
 
 const maxVisibleItems = 10
@@ -45,6 +46,7 @@ func NewAutocomplete(theme ui.Theme) Autocomplete {
 
 // Show displays the autocomplete popup with the given items.
 func (a *Autocomplete) Show(items []AutocompleteItem) {
+	a.allItems = items
 	a.Items = items
 	a.Cursor = 0
 	a.Visible = len(items) > 0
@@ -54,7 +56,39 @@ func (a *Autocomplete) Show(items []AutocompleteItem) {
 func (a *Autocomplete) Hide() {
 	a.Visible = false
 	a.Items = nil
+	a.allItems = nil
 	a.Cursor = 0
+}
+
+// Filter narrows the popup to items whose label starts with prefix
+// (case-insensitive), keeping the original list so later keystrokes can widen
+// the match again. An empty prefix restores the full list; a prefix that
+// matches nothing hides the popup instead of rendering an empty box.
+func (a *Autocomplete) Filter(prefix string) {
+	if !a.Visible {
+		return
+	}
+	source := a.allItems
+	if source == nil {
+		source = a.Items
+	}
+	if prefix == "" {
+		a.Items = source
+		a.Cursor = 0
+		return
+	}
+	p := strings.ToLower(prefix)
+	filtered := make([]AutocompleteItem, 0, len(source))
+	for _, item := range source {
+		if strings.HasPrefix(strings.ToLower(item.Label), p) {
+			filtered = append(filtered, item)
+		}
+	}
+	a.Items = filtered
+	a.Cursor = 0
+	if len(filtered) == 0 {
+		a.Hide()
+	}
 }
 
 // MoveUp moves the cursor up.

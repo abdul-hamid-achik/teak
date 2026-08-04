@@ -10,6 +10,7 @@ import (
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/config"
 	"teak/internal/editor"
+	"teak/internal/text"
 )
 
 func useViewTestZone(t *testing.T) {
@@ -76,6 +77,46 @@ func TestFindWidgetDoesNotClipStatusBar(t *testing.T) {
 	v = m.View()
 	if lines = strings.Split(v.Content, "\n"); len(lines) != m.height {
 		t.Fatalf("view = %d lines after closing find, want %d", len(lines), m.height)
+	}
+}
+
+func TestClipboardCopyResultEmitsOSC52(t *testing.T) {
+	m := newViewTestModel(t, false)
+	addDirtyEditor(t, &m, "a.txt", "x\n", "x\n")
+	editorID := m.activeEditor().ID()
+
+	updatedAny, cmd := m.handleClipboardCopyResult(editor.ClipboardCopyResultMsg{
+		EditorID:       editorID,
+		FallbackStored: true,
+		OSC52Sequence:  "\x1b]52;c;aG9sYQ==\x07",
+	})
+	m = updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("no emit command for the OSC 52 sequence")
+	}
+	if !strings.Contains(m.status, "OSC 52") {
+		t.Fatalf("status = %q, want the terminal-clipboard notice", m.status)
+	}
+}
+
+func TestStatusBarShowsDiagnosticUnderCursor(t *testing.T) {
+	m := newViewTestModel(t, false)
+	addDirtyEditor(t, &m, "main.go", "let x = 1\n", "let x = 1\n")
+	m.editors[m.activeTab].Diagnostics = []editor.Diagnostic{
+		{StartLine: 0, StartCol: 0, EndLine: 0, EndCol: 1, Severity: 1, Message: "undefined: x"},
+	}
+	m.editors[m.activeTab].Buffer.SetCursor(text.Position{Line: 0, Col: 0})
+
+	bar := m.renderStatusBar()
+	if !strings.Contains(bar, "undefined: x") {
+		t.Fatalf("status bar = %q, want the diagnostic under the cursor surfaced", bar)
+	}
+
+	// An explicit status message wins over the diagnostic echo.
+	m.status = "Saved"
+	bar = m.renderStatusBar()
+	if !strings.Contains(bar, "Saved") || strings.Contains(bar, "undefined: x") {
+		t.Fatalf("status bar = %q, want the explicit status to take precedence", bar)
 	}
 }
 

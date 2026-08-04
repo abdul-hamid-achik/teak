@@ -45,6 +45,8 @@ type themeStyles struct {
 	GutterActive       lipgloss.Style
 	Selection          lipgloss.Style
 	SecondarySelection lipgloss.Style
+	FindMatch          lipgloss.Style
+	FindMatchCurrent   lipgloss.Style
 	CursorLine         lipgloss.Style
 	StatusBar          lipgloss.Style
 	StatusText         lipgloss.Style
@@ -202,6 +204,12 @@ func defaultNordTheme() Theme {
 		SecondarySelection: lipgloss.NewStyle().
 			Background(Nord10).
 			Foreground(Nord6),
+		FindMatch: lipgloss.NewStyle().
+			Background(Nord3).
+			Foreground(Nord6),
+		FindMatchCurrent: lipgloss.NewStyle().
+			Background(Nord13).
+			Foreground(Nord0),
 		CursorLine: lipgloss.NewStyle().
 			Background(Nord1),
 		StatusBar: lipgloss.NewStyle().
@@ -466,6 +474,8 @@ func buildTheme(p palette) Theme {
 		GutterActive:        lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
 		Selection:           lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
 		SecondarySelection:  lipgloss.NewStyle().Background(p.bg3).Foreground(p.fg1),
+		FindMatch:           lipgloss.NewStyle().Background(p.bg3).Foreground(p.fg0),
+		FindMatchCurrent:    lipgloss.NewStyle().Background(p.yellow).Foreground(p.bg0),
 		CursorLine:          lipgloss.NewStyle().Background(p.bg1),
 		StatusBar:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
 		StatusText:          lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
