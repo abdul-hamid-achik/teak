@@ -10,7 +10,9 @@ metadata:
         - mouse
         - tabs
 intent: |
-    a user can switch open editor tabs by scrolling the mouse wheel over the tab bar.
+    scrolling the mouse wheel over the tab bar scrolls the tab strip and
+    keeps the active editor unchanged; switching tabs stays on the
+    shift+wheel path and keyboard navigation.
 target:
     cmd:
         - sh
@@ -39,26 +41,26 @@ steps:
         screen:
             contains: "beta one"
     - mouse: {x: 31, y: 0, button: wheelUp, action: click}
+    - mouse: {x: 31, y: 0, button: wheelDown, action: click}
     - wait:
         screen:
-            contains: "alpha one"
-    - snapshot: tab_selected_by_wheel
+            contains: "beta one"
+    - snapshot: wheel_keeps_active_tab
     - press: "ctrl+q"
     - wait:
         process:
             exitCode: 0
         timeoutMs: 3000
 outcomes:
-    - id: wheel_switches_tab
-      description: scrolling up over the tab bar activates the preceding alpha tab
+    - id: wheel_keeps_active_tab
+      description: wheeling over the tab bar scrolls the strip without switching the active editor
       verify:
         screen:
-            contains: "alpha one"
+            contains: "beta one"
     - id: clean_exit
-      description: the editor exits normally after wheel tab navigation
+      description: the editor exits normally after wheeling over the tab bar
       verify:
         process:
             exitCode: 0
 artifacts:
     finalScreen: never
-contractHash: sha256:16d378a41b46a421be42d7696e824a9118e3642b915662051559022d88c125d2

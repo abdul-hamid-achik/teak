@@ -18,7 +18,7 @@ target:
         - sh
         - -lc
         - >-
-          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT; export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; export XDG_STATE_HOME="$TMP/state"; CONFIG="$HOME/Library/Application Support/teak"; PROJECT="$TMP/project"; mkdir -p "$CONFIG" "$PROJECT"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.go"; "$ROOT/bin/teak" "$PROJECT/main.go"
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT; export HOME="$TMP/home"; export XDG_CONFIG_HOME="$HOME/.config"; export XDG_STATE_HOME="$TMP/state"; case "$(uname)" in Darwin) CONF_BASE="$HOME/Library/Application Support" ;; *) CONF_BASE="$HOME/.config"; if [ -n "$XDG_CONFIG_HOME" ]; then CONF_BASE="$XDG_CONFIG_HOME"; fi ;; esac; CONFIG="$CONF_BASE/teak"; PROJECT="$TMP/project"; mkdir -p "$CONFIG" "$PROJECT"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.go"; "$ROOT/bin/teak" "$PROJECT/main.go"
     cwd: "."
     timeoutMs: 15000
 terminal:
