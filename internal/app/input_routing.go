@@ -61,6 +61,10 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 		model, cmd := m.handleGoToLineInput(msg)
 		return model.(Model), cmd, true
 	}
+	if m.treeRenameMode || m.treeCopyMode || m.treeMoveMode {
+		model, cmd := m.handleTreeFileOperationInput(msg)
+		return model.(Model), cmd, true
+	}
 	if m.renameMode {
 		model, cmd := m.handleRenameInput(msg)
 		return model.(Model), cmd, true
@@ -156,6 +160,7 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 		}
 	} else {
 		m.pluginKeySequence = ""
+		m.pluginKeyBuffer = nil
 	}
 
 	gitInputFocused := m.focus == FocusGitPanel && (m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused())
@@ -175,6 +180,27 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 // routing have declined the key. It deliberately reports false for an unknown
 // key so the focused child receives it exactly once.
 func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	if m.showTree && m.focus == FocusTree && m.sidebarTab == SidebarFiles && !m.tree.FilterActive() {
+		switch msg.String() {
+		case "ctrl+h", "ctrl+.":
+			shown := m.tree.ToggleShowHidden()
+			if shown {
+				m.status = "Hidden files shown"
+			} else {
+				m.status = "Hidden files hidden"
+			}
+			return m, nil, true
+		case "ctrl+k":
+			shown := m.tree.ToggleShowGitIgnored()
+			if shown {
+				m.status = "Ignored files shown"
+			} else {
+				m.status = "Ignored files hidden"
+			}
+			return m, nil, true
+		}
+	}
+
 	// These chords are also bubbles textinput/textarea editing bindings. When a
 	// text field owns typing, they belong to it, not to the global shortcut.
 	switch msg.String() {
@@ -243,7 +269,12 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "ctrl+f":
 		if ed := m.activeEditor(); ed != nil {
-			ed.ShowFind()
+			if !ed.IsFindVisible() {
+				ed.ShowFind()
+				// The widget takes one text row; re-run the layout so the
+				// viewport shrinks instead of clipping the status bar.
+				m.relayout()
+			}
 		}
 		return m, nil, true
 	case "ctrl+h":
@@ -270,6 +301,10 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "f12":
 		model, cmd := m.requestDefinition()
 		return model, cmd, true
+	case "f2":
+		m.renameMode = true
+		m.renameInput = ""
+		return m, nil, true
 	case "ctrl+shift+[":
 		if ed := m.activeEditor(); ed != nil {
 			ed.Folds.Fold(ed.Buffer.Cursor.Line)
@@ -486,6 +521,11 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 	// Debugger and Agent already did this; the file tree and git panel did not,
 	// leaving keyboard-only users stuck there with no way out but Ctrl+B.
 	if kp, ok := msg.(tea.KeyPressMsg); ok && isEscapeKey(kp) {
+		if m.focus == FocusTree && m.tree.FilterActive() {
+			var cmd tea.Cmd
+			m.tree, cmd = m.tree.Update(kp)
+			return m, cmd, true
+		}
 		switch m.focus {
 		case FocusTree, FocusGitPanel:
 			m.setFocus(FocusEditor)
@@ -511,8 +551,24 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 			return m, nil, true
 		}
+		showHidden := m.tree.ShowHidden()
+		showGitIgnored := m.tree.ShowGitIgnored()
 		var cmd tea.Cmd
 		m.tree, cmd = m.tree.Update(msg)
+		if showHidden != m.tree.ShowHidden() {
+			if m.tree.ShowHidden() {
+				m.status = "Hidden files shown"
+			} else {
+				m.status = "Hidden files hidden"
+			}
+		}
+		if showGitIgnored != m.tree.ShowGitIgnored() {
+			if m.tree.ShowGitIgnored() {
+				m.status = "Ignored files shown"
+			} else {
+				m.status = "Ignored files hidden"
+			}
+		}
 		return m, cmd, true
 	}
 	if m.focus == FocusGitPanel {
@@ -550,8 +606,13 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 	}
 	prevVersion := ed.Buffer.Version()
 	prevCursor := ed.Buffer.Cursor
+	wasFindVisible := ed.IsFindVisible()
 	ed, cmd = ed.Update(msg)
 	m.setEditor(m.activeTab, ed)
+	if wasFindVisible && !ed.IsFindVisible() {
+		// The find widget's row is free again; give it back to the text.
+		m.relayout()
+	}
 
 	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)), true
 }

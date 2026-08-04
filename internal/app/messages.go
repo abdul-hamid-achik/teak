@@ -31,8 +31,9 @@ type treeRefreshResultMsg struct {
 // settingsSaveResultMsg returns Settings persistence to the root model. Values
 // are applied only after the write succeeds.
 type settingsSaveResultMsg struct {
-	Config config.Config
-	Err    error
+	Config  config.Config
+	Outcome config.SaveOutcome
+	Err     error
 }
 
 // settingsDiscardMsg is emitted only after the user confirms that edits made

@@ -296,6 +296,8 @@ func TestRopeSliceBounds(t *testing.T) {
 		{"empty range", 5, 5, ""},
 		{"end out of bounds clamped", 0, 100, "hello world"},
 		{"start out of bounds returns empty", 100, 110, ""},
+		{"negative start clamps to zero", -5, 5, "hello"},
+		{"negative end returns empty", -5, -1, ""},
 		{"start > end returns empty", 5, 0, ""},
 	}
 

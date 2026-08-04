@@ -18,6 +18,8 @@ type UndoStack struct {
 	redo              []undoEntry
 	lastTime          time.Time
 	lastWasCharInsert bool
+	lastCharInsertEnd Position
+	hasCharInsertEnd  bool
 }
 
 // NewUndoStack returns a new empty UndoStack.
@@ -31,7 +33,8 @@ func (u *UndoStack) Save(rope *Rope, cursor Position, isCharInsert bool) {
 	now := time.Now()
 
 	// auto-grouping: skip saving if this is a consecutive char insert within timeout
-	if isCharInsert && u.lastWasCharInsert && now.Sub(u.lastTime) < groupTimeout && len(u.undo) > 0 {
+	if isCharInsert && u.lastWasCharInsert && u.hasCharInsertEnd &&
+		u.lastCharInsertEnd == cursor && now.Sub(u.lastTime) < groupTimeout && len(u.undo) > 0 {
 		u.lastTime = now
 		// clear redo on new edit
 		u.redo = nil
@@ -46,6 +49,17 @@ func (u *UndoStack) Save(rope *Rope, cursor Position, isCharInsert bool) {
 	u.redo = nil
 	u.lastTime = now
 	u.lastWasCharInsert = isCharInsert
+	u.hasCharInsertEnd = false
+}
+
+// MarkCharInsertEnd records the cursor after a character insertion. The next
+// character can join the undo group only when it starts exactly there; moving
+// the cursor must create a new undo boundary even within the time window.
+func (u *UndoStack) MarkCharInsertEnd(cursor Position) {
+	if u.lastWasCharInsert {
+		u.lastCharInsertEnd = cursor
+		u.hasCharInsertEnd = true
+	}
 }
 
 // Undo returns the previous rope and cursor, pushing current state to redo.
@@ -59,6 +73,7 @@ func (u *UndoStack) Undo(currentRope *Rope, currentCursor Position) (*Rope, Posi
 	entry := u.undo[len(u.undo)-1]
 	u.undo = u.undo[:len(u.undo)-1]
 	u.lastWasCharInsert = false
+	u.hasCharInsertEnd = false
 	return entry.rope, entry.cursor, true
 }
 
@@ -73,6 +88,7 @@ func (u *UndoStack) Redo(currentRope *Rope, currentCursor Position) (*Rope, Posi
 	entry := u.redo[len(u.redo)-1]
 	u.redo = u.redo[:len(u.redo)-1]
 	u.lastWasCharInsert = false
+	u.hasCharInsertEnd = false
 	return entry.rope, entry.cursor, true
 }
 

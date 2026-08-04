@@ -33,6 +33,7 @@ type pendingSaveRequest struct {
 	PreviousPath       string
 	Snapshot           *text.Rope
 	SnapshotVersion    int
+	LineEnding         text.LineEnding
 	QueuedSnapshot     *text.Rope
 	QueuedVersion      int
 	QueuedPath         string
@@ -159,6 +160,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 	ed := m.editors[tabIndex]
 	snapshot := ed.Buffer.Rope()
 	version := ed.Buffer.Version()
+	ending := ed.Buffer.LineEnding()
 	diskExpectation := saveDiskExact
 	expectedDiskSnapshot := ed.Buffer.SavedRope()
 	if saveAs {
@@ -210,6 +212,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 		req.QueuedPath = queuedPath
 		req.QueuedSaveAs = queuedSaveAs
 		req.QueuedPreviousPath = queuedPreviousPath
+		req.LineEnding = ending
 		m.pendingSaves[requestID] = req
 		return nil
 	}
@@ -223,6 +226,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 		PreviousPath:                 previousPath,
 		Snapshot:                     snapshot,
 		SnapshotVersion:              version,
+		LineEnding:                   ending,
 		CloseAfter:                   closeAfter,
 		QuitAfter:                    quitAfter,
 		AuthorizedConflictGeneration: authorizedConflictGeneration,
@@ -246,6 +250,7 @@ func (m *Model) startSaveRequest(requestID int) tea.Cmd {
 	if req.Snapshot == nil {
 		req.Snapshot = m.editors[tabIndex].Buffer.Rope()
 		req.SnapshotVersion = m.editors[tabIndex].Buffer.Version()
+		req.LineEnding = m.editors[tabIndex].Buffer.LineEnding()
 		if req.EditorID == 0 {
 			req.EditorID = m.editors[tabIndex].ID()
 		}
@@ -260,7 +265,7 @@ func (m *Model) startSaveRequest(requestID int) tea.Cmd {
 	}
 
 	watcher := m.watcher
-	path, snapshot := req.Path, req.Snapshot
+	path, snapshot, ending := req.Path, req.Snapshot, req.LineEnding
 	expectation, expected := req.DiskExpectation, req.ExpectedDiskSnapshot
 	ctx := m.externalBackgroundContext()
 	return func() tea.Msg {
@@ -277,7 +282,7 @@ func (m *Model) startSaveRequest(requestID int) tea.Cmd {
 		if watcher != nil {
 			watcher.expectOwnWrite(path, snapshot)
 		}
-		if err := text.WriteRopeAtomically(path, snapshot); err != nil {
+		if err := text.WriteRopeAtomicallyWithLineEnding(path, snapshot, ending); err != nil {
 			if watcher != nil {
 				watcher.cancelOwnWrite(path, snapshot)
 			}
@@ -374,7 +379,14 @@ func compareSaveDestination(ctx context.Context, path string, expected *text.Rop
 	if err != nil {
 		return nil, false, err
 	}
-	return text.NewOwned(data), false, nil
+	// Buffer snapshots hold LF-normalized content; compare against the same
+	// convention so a CRLF file that still matches the save baseline is not
+	// reported as externally modified.
+	normalized, _ := text.NormalizeLineEndings(data)
+	if expected.EqualBytes(normalized) {
+		return nil, true, nil
+	}
+	return text.NewOwned(normalized), false, nil
 }
 
 func (m *Model) startQueuedSave(requestID int, req pendingSaveRequest) tea.Cmd {

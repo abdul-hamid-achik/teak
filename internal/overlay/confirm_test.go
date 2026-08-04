@@ -43,6 +43,71 @@ func TestConfirmInitialState(t *testing.T) {
 	}
 }
 
+func TestConfirmDigitAcceleratorsSelectButton(t *testing.T) {
+	c := newTestConfirm()
+
+	// "2" activates the second button.
+	o, cmd := c.Update(tea.KeyPressMsg{Text: "2"})
+	c = o.(*Confirm)
+	if !c.IsDismissed() {
+		t.Fatal("digit accelerator did not dismiss the dialog")
+	}
+	if cmd == nil {
+		t.Fatal("digit accelerator did not emit the button action")
+	}
+	action, ok := cmd().(ButtonAction)
+	if !ok || action.Label != "discard" {
+		t.Fatalf("digit accelerator action = %#v, want the discard button", action)
+	}
+}
+
+func TestConfirmDigitAcceleratorOutOfRangeIgnored(t *testing.T) {
+	c := newTestConfirm()
+
+	o, cmd := c.Update(tea.KeyPressMsg{Text: "9"})
+	c = o.(*Confirm)
+	if c.IsDismissed() {
+		t.Error("out-of-range digit should not dismiss the dialog")
+	}
+	if cmd != nil {
+		t.Error("out-of-range digit should not emit an action")
+	}
+}
+
+func TestConfirmYesNoAccelerators(t *testing.T) {
+	c := newTestConfirm()
+
+	// Buttons are Save / Discard / Cancel: "n" matches no button label, so it
+	// falls back to the last (cancel-style) button.
+	o, cmd := c.Update(tea.KeyPressMsg{Text: "n"})
+	c = o.(*Confirm)
+	if !c.IsDismissed() || cmd == nil {
+		t.Fatal("n accelerator did not activate the cancel fallback")
+	}
+	if action := cmd().(ButtonAction); action.Label != "cancel" {
+		t.Fatalf("n accelerator action = %#v, want the cancel fallback", action)
+	}
+
+	c2 := newTestConfirm()
+	o, cmd = c2.Update(tea.KeyPressMsg{Text: "s"})
+	c2 = o.(*Confirm)
+	if !c2.IsDismissed() || cmd == nil {
+		t.Fatal("first-letter accelerator did not match Save")
+	}
+	if action := cmd().(ButtonAction); action.Label != "save" {
+		t.Fatalf("s accelerator action = %#v, want the save button", action)
+	}
+}
+
+func TestConfirmZoneIDSupportsMoreThanTenButtons(t *testing.T) {
+	if got := confirmZoneID(0); got != "confirm-btn-0" {
+		t.Fatalf("confirmZoneID(0) = %q", got)
+	}
+	if got := confirmZoneID(12); got != "confirm-btn-12" {
+		t.Fatalf("confirmZoneID(12) = %q, want confirm-btn-12 (rune math breaks past 9)", got)
+	}
+}
+
 func TestConfirmDismissOnEscape(t *testing.T) {
 	c := newTestConfirm()
 	o, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -55,6 +120,22 @@ func TestConfirmDismissOnEscape(t *testing.T) {
 	}
 	if c.Result() != nil {
 		t.Error("result should be nil after escape dismiss")
+	}
+}
+
+func TestConfirmDismissActionEmitsCancellation(t *testing.T) {
+	c := newTestConfirm()
+	want := ButtonAction{Label: "dismissed"}
+	c.SetDismissAction(want)
+	o, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd == nil {
+		t.Fatal("dismiss action should emit a command")
+	}
+	if got := cmd(); got != want {
+		t.Fatalf("dismiss action = %#v, want %#v", got, want)
+	}
+	if got := o.(*Confirm).Result(); got != want {
+		t.Fatalf("dismiss result = %#v, want %#v", got, want)
 	}
 }
 

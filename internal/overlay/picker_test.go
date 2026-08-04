@@ -172,6 +172,129 @@ func TestPickerSetItems(t *testing.T) {
 	}
 }
 
+func TestPickerFilterInputBuildsProjectionAsynchronously(t *testing.T) {
+	p := newTestPicker()
+	_ = p.Focus()
+	o, cmd := p.Update(tea.KeyPressMsg{Text: "main"})
+	p = o.(*Picker)
+	if cmd == nil {
+		t.Fatal("filter input returned no asynchronous command")
+	}
+	if !p.FilterPending() {
+		t.Fatal("filter input did not mark the picker pending")
+	}
+	if got := p.FilteredCount(); got != 0 {
+		t.Fatalf("pending picker exposed %d stale results, want zero", got)
+	}
+
+	msg := pickerFilterMessage(t, cmd)
+	o, followup := p.Update(msg)
+	p = o.(*Picker)
+	if followup != nil {
+		t.Fatal("installing a picker projection returned an unexpected command")
+	}
+	if p.FilterPending() {
+		t.Fatal("installed picker projection remained pending")
+	}
+	if got := p.FilteredCount(); got != 1 {
+		t.Fatalf("filtered count = %d, want one match", got)
+	}
+}
+
+func TestPickerDropsStaleFilterProjection(t *testing.T) {
+	p := newTestPicker()
+	_ = p.Focus()
+	firstOverlay, firstCmd := p.Update(tea.KeyPressMsg{Text: "m"})
+	first := firstOverlay.(*Picker)
+	secondOverlay, secondCmd := first.Update(tea.KeyPressMsg{Text: "a"})
+	second := secondOverlay.(*Picker)
+	if firstCmd == nil || secondCmd == nil {
+		t.Fatal("picker did not schedule both filter projections")
+	}
+
+	stale := pickerFilterMessage(t, firstCmd)
+	updated, _ := second.Update(stale)
+	second = updated.(*Picker)
+	if !second.FilterPending() {
+		t.Fatal("stale picker projection cleared the current pending state")
+	}
+	if second.Query() != "ma" {
+		t.Fatalf("stale picker projection changed query to %q, want ma", second.Query())
+	}
+
+	current := pickerFilterMessage(t, secondCmd)
+	updated, _ = second.Update(current)
+	second = updated.(*Picker)
+	if second.FilterPending() {
+		t.Fatal("current picker projection remained pending")
+	}
+}
+
+func TestPickerSetItemsAsyncDoesNotRefilterInUpdate(t *testing.T) {
+	p := newTestPicker()
+	cmd := p.SetItemsAsync([]PickerItem{{Label: "alpha"}, {Label: "beta"}})
+	if cmd == nil || !p.FilterPending() {
+		t.Fatal("SetItemsAsync did not schedule a pending projection")
+	}
+	msg := pickerFilterMessage(t, cmd)
+	o, _ := p.Update(msg)
+	p = o.(*Picker)
+	if got := p.FilteredCount(); got != 2 {
+		t.Fatalf("async item projection count = %d, want 2", got)
+	}
+}
+
+func TestPickerEnterDuringPendingFilterSelectsWhenReady(t *testing.T) {
+	p := newTestPicker()
+	_ = p.Focus()
+	o, cmd := p.Update(tea.KeyPressMsg{Text: "main"})
+	p = o.(*Picker)
+	if cmd == nil {
+		t.Fatal("filter input returned no command")
+	}
+	o, followup := p.Update(keyEnter())
+	p = o.(*Picker)
+	if followup != nil {
+		t.Fatal("enter during pending filter should wait for the projection")
+	}
+
+	ready := pickerFilterMessage(t, cmd)
+	o, followup = p.Update(ready)
+	p = o.(*Picker)
+	if !p.IsDismissed() {
+		t.Fatal("pending enter did not dismiss the picker after a valid result")
+	}
+	if followup == nil {
+		t.Fatal("pending enter did not emit a selection after filtering")
+	}
+	selected, ok := followup().(PickerSelectMsg)
+	if !ok || selected.Item.Label != "main.go" {
+		t.Fatalf("pending enter selection = %#v, want main.go", selected)
+	}
+}
+
+func pickerFilterMessage(t *testing.T, cmd tea.Cmd) PickerFilterReadyMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil picker command")
+	}
+	switch msg := cmd().(type) {
+	case PickerFilterReadyMsg:
+		return msg
+	case tea.BatchMsg:
+		for _, child := range msg {
+			if child == nil {
+				continue
+			}
+			if ready, ok := child().(PickerFilterReadyMsg); ok {
+				return ready
+			}
+		}
+	}
+	t.Fatalf("picker command did not produce PickerFilterReadyMsg")
+	return PickerFilterReadyMsg{}
+}
+
 func TestPickerView(t *testing.T) {
 	p := newTestPicker()
 	p.SetSize(60, 30)

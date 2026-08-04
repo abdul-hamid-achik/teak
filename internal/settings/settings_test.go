@@ -514,6 +514,27 @@ func TestSettingsPreviewTOML(t *testing.T) {
 	}
 }
 
+func TestSettingToTOMLFormatsStringListsAsArrays(t *testing.T) {
+	model := &Model{}
+	tests := []struct {
+		name string
+		value []string
+		want string
+	}{
+		{"empty", nil, "extensions = []\n"},
+		{"one", []string{"go"}, "extensions = [\"go\"]\n"},
+		{"many", []string{"go", "rust"}, "extensions = [\"go\", \"rust\"]\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := model.settingToTOML(Setting{ID: "extensions", Type: TypeStringList, Value: tt.value})
+			if got != tt.want {
+				t.Errorf("settingToTOML() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSettingsWithEmptyConfigPath tests settings with empty config path
 func TestSettingsWithEmptyConfigPath(t *testing.T) {
 	theme := ui.DefaultTheme()

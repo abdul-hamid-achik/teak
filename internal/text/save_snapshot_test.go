@@ -50,6 +50,33 @@ func TestWriteRopeAtomicallyUsesUniqueTempAndPreservesPermissions(t *testing.T) 
 	}
 }
 
+func TestWriteRopeAtomicallyIfUnchangedRejectsReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "document.txt")
+	if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRopeAtomically(path, NewFromString("external")); err != nil {
+		t.Fatal(err)
+	}
+
+	err = WriteRopeAtomicallyIfUnchanged(path, expected, NewFromString("headless"))
+	if !errors.Is(err, ErrDestinationChanged) {
+		t.Fatalf("conditional write error = %v, want ErrDestinationChanged", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "external"; got != want {
+		t.Fatalf("content = %q, want external content preserved", got)
+	}
+}
+
 func TestMarkSavedSnapshotKeepsLaterEditsDirty(t *testing.T) {
 	buf := NewBufferFromBytes([]byte("before"))
 	buf.SelectAll()

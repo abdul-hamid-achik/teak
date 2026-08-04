@@ -177,6 +177,20 @@ func (m Model) View() tea.View {
 			Padding(0, 1).
 			Render(fmt.Sprintf("Rename Symbol: %s_", m.renameInput))
 		content = ui.RenderOverlay(content, renameBox, m.width, m.height)
+	} else if m.treeRenameMode || m.treeCopyMode || m.treeMoveMode {
+		prompt := "Move to workspace directory"
+		if m.treeRenameMode {
+			prompt = "Rename file or folder"
+		} else if m.treeCopyMode {
+			prompt = "Duplicate as"
+		}
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ui.Nord3).
+			Background(ui.Nord1).
+			Padding(0, 1).
+			Render(fmt.Sprintf("%s: %s_", prompt, m.treeEditInput))
+		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.newFileMode {
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -476,7 +490,7 @@ func (m Model) renderStatusBar() string {
 		agentStatus := m.agentIndicator()
 		right = m.theme.StatusText.Render(
 			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s%s ",
-				buf.Cursor.Line+1, buf.Cursor.Col+1, tabInfo, scrollPos, lspStatus+procStatus, problemsStatus),
+				buf.Cursor.Line+1, ed.StatusColumn(), tabInfo, scrollPos, lspStatus+procStatus, problemsStatus),
 		) + agentStatus
 	}
 
@@ -551,17 +565,24 @@ func (m Model) lspIndicator() string {
 	if buf.FilePath == "" {
 		return ""
 	}
-	name, running, ready := m.lspMgr.ServerStatus(buf.FilePath)
-	if name == "" {
+	health := m.lspMgr.ServerHealth(buf.FilePath)
+	if health.Name == "" {
 		return ""
 	}
-	if running && ready {
-		return "  " + name + " ●"
+	switch health.State {
+	case "ready":
+		return "  " + health.Name + " ●"
+	case "starting", "running":
+		return "  " + health.Name + " ◐"
+	case "retrying":
+		return "  " + health.Name + " retrying"
+	case "failed":
+		return "  " + health.Name + " failed"
+	case "stopped":
+		return "  " + health.Name + " stopped"
+	default:
+		return "  " + health.Name + " ○"
 	}
-	if running {
-		return "  " + name + " ◐"
-	}
-	return "  " + name + " ○"
 }
 
 func (m Model) procMonIndicator() string {

@@ -36,6 +36,8 @@ type Autocomplete struct {
 	theme   ui.Theme
 }
 
+const maxVisibleItems = 10
+
 // NewAutocomplete creates a new autocomplete popup.
 func NewAutocomplete(theme ui.Theme) Autocomplete {
 	return Autocomplete{theme: theme}
@@ -69,6 +71,13 @@ func (a *Autocomplete) MoveDown() {
 	}
 }
 
+func (a Autocomplete) visibleStart() int {
+	if len(a.Items) <= maxVisibleItems {
+		return 0
+	}
+	return min(max(0, a.Cursor-(maxVisibleItems-1)), len(a.Items)-maxVisibleItems)
+}
+
 // Selected returns the currently selected item, or nil.
 func (a *Autocomplete) Selected() *AutocompleteItem {
 	if !a.Visible || a.Cursor >= len(a.Items) {
@@ -80,11 +89,13 @@ func (a *Autocomplete) Selected() *AutocompleteItem {
 // SelectAt selects the item at the given index (relative to popup top).
 // Returns the selected item if valid, or nil.
 func (a *Autocomplete) SelectAt(idx int) *AutocompleteItem {
-	if !a.Visible || idx < 0 || idx >= len(a.Items) || idx >= 10 {
+	start := a.visibleStart()
+	absolute := start + idx
+	if !a.Visible || idx < 0 || idx >= maxVisibleItems || absolute >= len(a.Items) {
 		return nil
 	}
-	a.Cursor = idx
-	return &a.Items[idx]
+	a.Cursor = absolute
+	return &a.Items[absolute]
 }
 
 // View renders the autocomplete popup as a string.
@@ -93,9 +104,10 @@ func (a Autocomplete) View() string {
 		return ""
 	}
 
-	maxItems := min(10, len(a.Items))
+	start := a.visibleStart()
+	end := min(start+maxVisibleItems, len(a.Items))
 	maxWidth := 0
-	for i := range maxItems {
+	for i := start; i < end; i++ {
 		w := ansi.StringWidth(a.Items[i].Label)
 		if a.Items[i].Detail != "" {
 			w += ansi.StringWidth(a.Items[i].Detail) + 2
@@ -112,7 +124,7 @@ func (a Autocomplete) View() string {
 	}
 
 	var sb strings.Builder
-	for i := range maxItems {
+	for i := start; i < end; i++ {
 		item := a.Items[i]
 		line := ansi.Truncate(item.Label, maxWidth, "")
 		if item.Detail != "" {
@@ -131,7 +143,7 @@ func (a Autocomplete) View() string {
 		} else {
 			sb.WriteString(a.theme.AutocompleteItem.Render(line))
 		}
-		if i < maxItems-1 {
+		if i < end-1 {
 			sb.WriteByte('\n')
 		}
 	}

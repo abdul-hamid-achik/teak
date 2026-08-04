@@ -1,6 +1,7 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -170,5 +171,108 @@ func TestFindReplaceableTabSkipsDirtyPreview(t *testing.T) {
 
 	if got := model.findReplaceableTab(); got != -1 {
 		t.Fatalf("findReplaceableTab() = %d, want -1 for dirty preview", got)
+	}
+}
+
+func TestSearchReplaceRespectsRegexAndCaseOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		msg     any
+		want    string
+	}{
+		{
+			name:    "regex replace all",
+			content: "a1 a22 a333\n",
+			msg:     search.ReplaceAllMsg{Query: `\d+`, Replacement: "N", Regex: true},
+			want:    "aN aN aN\n",
+		},
+		{
+			name:    "regex off stays literal",
+			content: "x\\d+ y\\d+\n",
+			msg:     search.ReplaceAllMsg{Query: `\d+`, Replacement: "N"},
+			want:    "xN yN\n",
+		},
+		{
+			name:    "case-insensitive by default",
+			content: "Foo foo FOO\n",
+			msg:     search.ReplaceAllMsg{Query: "foo", Replacement: "x"},
+			want:    "x x x\n",
+		},
+		{
+			name:    "case-sensitive when requested",
+			content: "Foo foo FOO\n",
+			msg:     search.ReplaceAllMsg{Query: "foo", Replacement: "x", CaseSensitive: true},
+			want:    "Foo x FOO\n",
+		},
+		{
+			name:    "regex replace one from cursor",
+			content: "a1 b22 c333\n",
+			msg:     search.ReplaceOneMsg{Query: `\d+`, Replacement: "N", Regex: true},
+			want:    "aN b22 c333\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+			idx := addDirtyEditor(t, &model, "replace.txt", tt.content, tt.content)
+
+			updatedAny, cmd := model.Update(tt.msg)
+			updated := updatedAny.(Model)
+			if cmd == nil {
+				t.Fatal("replace did not schedule background preparation")
+			}
+			completedAny, _ := updated.Update(cmd())
+			completed := completedAny.(Model)
+			if got := completed.editors[idx].Buffer.Content(); got != tt.want {
+				t.Fatalf("buffer content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSearchReplaceInvalidRegexReportsErrorAndLeavesBuffer(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	idx := addDirtyEditor(t, &model, "replace.txt", "old old\n", "old old\n")
+
+	updatedAny, cmd := model.Update(search.ReplaceAllMsg{Query: "[", Replacement: "x", Regex: true})
+	updated := updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("invalid regex replace did not schedule preparation")
+	}
+	completedAny, _ := updated.Update(cmd())
+	completed := completedAny.(Model)
+	if got := completed.editors[idx].Buffer.Content(); got != "old old\n" {
+		t.Fatalf("invalid regex replace mutated buffer: %q", got)
+	}
+	if !strings.Contains(completed.status, "invalid pattern") {
+		t.Fatalf("status = %q, want invalid pattern error surfaced", completed.status)
+	}
+}
+
+func TestBoundedReplaceAllRegexBoundsAndZeroWidth(t *testing.T) {
+	re := regexp.MustCompile(`x`)
+	// Match-count bound: one match per character.
+	_, _, matches, ok := boundedReplaceAllRegexAtOffset(strings.Repeat("x", maxReplaceAllMatches+1), re, "y", 0)
+	if ok || matches != maxReplaceAllMatches+1 {
+		t.Fatalf("boundedReplaceAllRegexAtOffset = matches %d ok %t, want %d false", matches, ok, maxReplaceAllMatches+1)
+	}
+
+	// Growth bound: a zero-width match at every rune with a large replacement
+	// must terminate without producing an oversized result.
+	big := strings.Repeat("z", 1<<20)
+	reEmpty := regexp.MustCompile(`(?:)`)
+	if _, _, _, ok := boundedReplaceAllRegexAtOffset(strings.Repeat("a", 128), reEmpty, big, 0); ok {
+		t.Fatal("boundedReplaceAllRegexAtOffset accepted an oversized regex result")
+	}
+
+	// Zero-width matches still terminate and replace at each position.
+	result, _, count, ok := boundedReplaceAllRegexAtOffset("ab", reEmpty, "-", 0)
+	if !ok || count != 3 {
+		t.Fatalf("zero-width replace = result %q count %d ok %t, want 3 matches", result, count, ok)
+	}
+	if result != "-a-b-" {
+		t.Fatalf("zero-width replace result = %q, want %q", result, "-a-b-")
 	}
 }

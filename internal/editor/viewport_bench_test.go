@@ -2,6 +2,7 @@ package editor
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -252,11 +253,12 @@ func BenchmarkViewportRenderWithWrapDeepLongLineTokens(b *testing.B) {
 // Large file benchmarks
 
 func createLargeGoBuffer(lineCount int) *text.Buffer {
-	var content string
+	var content strings.Builder
+	content.Grow(lineCount * 96)
 	for i := 0; i < lineCount; i++ {
-		content += fmt.Sprintf("func testFunction%d() string {\n\treturn \"this is a test string for line %d with some content\"\n}\n\n", i, i)
+		_, _ = fmt.Fprintf(&content, "func testFunction%d() string {\n\treturn \"this is a test string for line %d with some content\"\n}\n\n", i, i)
 	}
-	return text.NewBufferFromBytes([]byte(content))
+	return text.NewBufferFromBytes([]byte(content.String()))
 }
 
 func BenchmarkLargeFile10KTokenizeFull(b *testing.B) {
@@ -274,12 +276,17 @@ func BenchmarkLargeFile10KTokenizeViewport(b *testing.B) {
 	theme := ui.NordTheme()
 	buf := createLargeGoBuffer(10000)
 	hl := highlight.New("test.go", theme)
+	ctx := context.Background()
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Simulate scrolling through the file
 		viewStart := (i * 100) % (buf.LineCount() - 100)
-		hl.TokenizeViewport(buf, viewStart, viewStart+24)
+		snapshot := highlight.CaptureViewport(buf.Rope(), viewStart, viewStart+24)
+		batch, complete := hl.TokenizeViewportSnapshotBatch(ctx, snapshot)
+		if !complete || len(batch.Lines) == 0 {
+			b.Fatal("expected a non-empty viewport token batch")
+		}
 	}
 }
 
@@ -288,22 +295,28 @@ func BenchmarkLargeFile10KScroll(b *testing.B) {
 	buf := createLargeGoBuffer(10000)
 	v := Viewport{Width: 80, Height: 24, ScrollY: 0}
 	hl := highlight.New("test.go", theme)
+	ctx := context.Background()
 
-	// Pre-tokenize and install the first viewport. TokenizeViewport only
-	// returns tokens; MergeLines is what actually installs them so hl.Line
-	// has something to return.
-	hl.MergeLines(hl.TokenizeViewport(buf, 0, 24))
+	// Pre-tokenize and install the first viewport through the same sparse batch
+	// path used by Editor's asynchronous tokenization command.
+	initial := highlight.CaptureViewport(buf.Rope(), 0, 24)
+	batch, complete := hl.TokenizeViewportSnapshotBatch(ctx, initial)
+	if !complete {
+		b.Fatal("initial viewport tokenization was canceled")
+	}
+	hl.MergeBatch(batch)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Simulate scrolling: real scrolling triggers a re-tokenize of the
-		// newly visible range and installs it before the next render, so do
-		// the same here instead of rendering forever against the first
-		// viewport's tokens.
 		start := (i * 10) % (buf.LineCount() - 24)
 		v.ScrollY = start
-		hl.MergeLines(hl.TokenizeViewport(buf, start, start+24))
+		snapshot := highlight.CaptureViewport(buf.Rope(), start, start+24)
+		batch, complete := hl.TokenizeViewportSnapshotBatch(ctx, snapshot)
+		if !complete {
+			b.Fatal("viewport tokenization was canceled")
+		}
+		hl.MergeBatch(batch)
 		_ = v.Render(buf, theme, hl, nil, nil)
 	}
 }
@@ -312,11 +325,17 @@ func BenchmarkLargeFile100KTokenizeViewport(b *testing.B) {
 	theme := ui.NordTheme()
 	buf := createLargeGoBuffer(100000) // ~100K lines, ~10MB
 	hl := highlight.New("test.go", theme)
+	ctx := context.Background()
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		viewStart := (i * 1000) % (buf.LineCount() - 100)
-		hl.TokenizeViewport(buf, viewStart, viewStart+24)
+		snapshot := highlight.CaptureViewport(buf.Rope(), viewStart, viewStart+24)
+		batch, complete := hl.TokenizeViewportSnapshotBatch(ctx, snapshot)
+		if !complete || len(batch.Lines) == 0 {
+			b.Fatal("expected a non-empty viewport token batch")
+		}
 	}
 }
 

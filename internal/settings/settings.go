@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -104,6 +105,15 @@ func GetCategories(cfg config.Config) []Category {
 					DefaultValue: true,
 					Category:     "editor",
 				},
+				{
+					ID:           "editor.scroll_margin",
+					Label:        "Scroll Margin",
+					Description:  "Rows kept visible above and below the cursor while scrolling",
+					Type:         TypeInt,
+					Value:        cfg.Editor.ScrollMargin,
+					DefaultValue: 2,
+					Category:     "editor",
+				},
 			},
 		},
 		{
@@ -126,6 +136,15 @@ func GetCategories(cfg config.Config) []Category {
 					Type:         TypeBool,
 					Value:        cfg.UI.ShowTree,
 					DefaultValue: true,
+					Category:     "ui",
+				},
+				{
+					ID:           "ui.tree_width",
+					Label:        "Tree Width",
+					Description:  "Sidebar width in columns (0 keeps the default)",
+					Type:         TypeInt,
+					Value:        cfg.UI.TreeWidth,
+					DefaultValue: 0,
 					Category:     "ui",
 				},
 			},
@@ -244,13 +263,28 @@ func (m *Model) ToggleBoolValue() {
 	}
 }
 
+// intSettingBounds returns the stepper range for an integer setting.
+func intSettingBounds(id string) (int, int) {
+	switch id {
+	case "editor.tab_size":
+		return 1, 8
+	case "editor.scroll_margin":
+		return 0, 50
+	case "ui.tree_width":
+		return 0, 120
+	default:
+		return 1, 100
+	}
+}
+
 // IncrementIntValue increments an integer setting value.
 func (m *Model) IncrementIntValue() {
 	setting := m.SelectedSetting()
 	if setting == nil || setting.Type != TypeInt {
 		return
 	}
-	if val, ok := setting.Value.(int); ok && (setting.ID != "editor.tab_size" || val < 8) {
+	_, maxVal := intSettingBounds(setting.ID)
+	if val, ok := setting.Value.(int); ok && val < maxVal {
 		setting.Value = val + 1
 		m.markDirty()
 	}
@@ -262,7 +296,8 @@ func (m *Model) DecrementIntValue() {
 	if setting == nil || setting.Type != TypeInt {
 		return
 	}
-	if val, ok := setting.Value.(int); ok && val > 1 {
+	minVal, _ := intSettingBounds(setting.ID)
+	if val, ok := setting.Value.(int); ok && val > minVal {
 		setting.Value = val - 1
 		m.markDirty()
 	}
@@ -412,6 +447,12 @@ func (m *Model) Config() (config.Config, error) {
 					return config.Config{}, fmt.Errorf("invalid word wrap setting")
 				}
 				cfg.Editor.WordWrap = value
+			case "editor.scroll_margin":
+				value, ok := setting.Value.(int)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid scroll margin setting")
+				}
+				cfg.Editor.ScrollMargin = value
 			case "ui.theme":
 				value, ok := setting.Value.(string)
 				if !ok {
@@ -424,6 +465,12 @@ func (m *Model) Config() (config.Config, error) {
 					return config.Config{}, fmt.Errorf("invalid show tree setting")
 				}
 				cfg.UI.ShowTree = value
+			case "ui.tree_width":
+				value, ok := setting.Value.(int)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid tree width setting")
+				}
+				cfg.UI.TreeWidth = value
 			}
 		}
 	}
@@ -687,7 +734,11 @@ func (m *Model) settingToTOML(setting Setting) string {
 		}
 	case TypeStringList:
 		if val, ok := setting.Value.([]string); ok {
-			return fmt.Sprintf("%s = [%q]\n", key, strings.Join(val, "\", \""))
+			quoted := make([]string, len(val))
+			for i, item := range val {
+				quoted[i] = strconv.Quote(item)
+			}
+			return fmt.Sprintf("%s = [%s]\n", key, strings.Join(quoted, ", "))
 		}
 	}
 	return ""

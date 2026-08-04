@@ -1,7 +1,10 @@
 package overlay
 
 import (
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -24,15 +27,16 @@ type Button struct {
 // Confirm is a modal dialog with a title, message, optional item list,
 // and a row of navigable buttons.
 type Confirm struct {
-	Title     string
-	Message   string
-	Items     []string
-	Buttons   []Button
-	theme     ui.Theme
-	cursor    int
-	dismissed bool
-	result    tea.Msg
-	width     int
+	Title         string
+	Message       string
+	Items         []string
+	Buttons       []Button
+	theme         ui.Theme
+	cursor        int
+	dismissed     bool
+	result        tea.Msg
+	dismissAction tea.Msg
+	width         int
 }
 
 // NewConfirm creates a confirm dialog. The first button is focused by default.
@@ -57,6 +61,20 @@ func (c *Confirm) Result() tea.Msg {
 	return c.result
 }
 
+// SetDismissAction supplies an optional message for Escape dismissal. Existing
+// callers leave it unset; async clients such as plugins can use it to observe
+// cancellation without blocking the UI while waiting for a response.
+func (c *Confirm) SetDismissAction(action tea.Msg) {
+	c.dismissAction = action
+}
+
+// DismissAction returns the optional message associated with Escape. App
+// owners can use it to release an asynchronous request when the whole overlay
+// stack is cleared before the user responds.
+func (c *Confirm) DismissAction() tea.Msg {
+	return c.dismissAction
+}
+
 // Update implements Overlay.
 func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -64,6 +82,11 @@ func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "escape":
 			c.dismissed = true
+			if c.dismissAction != nil {
+				c.result = c.dismissAction
+				action := c.dismissAction
+				return c, func() tea.Msg { return action }
+			}
 			return c, nil
 		case "left", "shift+tab":
 			if c.cursor > 0 {
@@ -80,6 +103,14 @@ func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 				c.dismissed = true
 				c.result = c.Buttons[c.cursor].Action
 				action := c.Buttons[c.cursor].Action
+				return c, func() tea.Msg { return action }
+			}
+			return c, nil
+		default:
+			if idx, ok := c.acceleratorIndex(msg.String()); ok {
+				c.dismissed = true
+				c.result = c.Buttons[idx].Action
+				action := c.Buttons[idx].Action
 				return c, func() tea.Msg { return action }
 			}
 			return c, nil
@@ -179,5 +210,46 @@ func (c *Confirm) CapturesInput() bool {
 }
 
 func confirmZoneID(idx int) string {
-	return "confirm-btn-" + string(rune('0'+idx))
+	return "confirm-btn-" + strconv.Itoa(idx)
+}
+
+// acceleratorIndex maps a single keypress to a button without arrow-key
+// navigation: digits pick by position (1-based, 0 selects the tenth), "y"
+// prefers an affirmative label and falls back to the first button, "n"
+// prefers a negative one and falls back to the last, and any other letter
+// matches the first button whose label starts with it.
+func (c *Confirm) acceleratorIndex(key string) (int, bool) {
+	if len(c.Buttons) == 0 || len(key) != 1 {
+		return 0, false
+	}
+	r := rune(key[0])
+	if r >= '1' && r <= '9' {
+		idx := int(r - '1')
+		if idx < len(c.Buttons) {
+			return idx, true
+		}
+		return 0, false
+	}
+	if r == '0' {
+		if len(c.Buttons) > 9 {
+			return 9, true
+		}
+		return 0, false
+	}
+	lower := unicode.ToLower(r)
+	for i, btn := range c.Buttons {
+		if btn.Label == "" {
+			continue
+		}
+		if first, _ := utf8.DecodeRuneInString(btn.Label); unicode.ToLower(first) == lower {
+			return i, true
+		}
+	}
+	switch lower {
+	case 'y':
+		return 0, true
+	case 'n':
+		return len(c.Buttons) - 1, true
+	}
+	return 0, false
 }

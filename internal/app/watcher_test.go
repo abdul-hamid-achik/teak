@@ -175,6 +175,33 @@ func TestWatcherAttributesMatchingExpectedWriteWithoutPublishingIt(t *testing.T)
 	}
 }
 
+func TestWatcherMarksAtomicReplacementAsOwnWriteCandidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.go")
+	snapshot := text.NewFromString("saved by teak\n")
+	fw := &fileWatcher{
+		ctx:                 context.Background(),
+		msgChan:             make(chan tea.Msg, 2),
+		openFiles:           map[string]struct{}{path: {}},
+		pendingFileChanges:  make(map[string]FileChangedMsg),
+		ownWrites:           make(map[string]ownWriteExpectation),
+		queued:              make(map[string]struct{}),
+		scanAgain:           make(map[string]struct{}),
+		scanQueue:           make(chan string, 1),
+		watchControlPending: make(map[string]watchControlAction),
+		watchControlWake:    make(chan struct{}, 1),
+	}
+	fw.expectOwnWrite(path, snapshot)
+	fw.processEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove}, time.Now())
+
+	change, ok := fw.popPendingFileChange()
+	if !ok {
+		t.Fatal("atomic replacement did not publish a file change candidate")
+	}
+	if !change.Missing || !change.OwnWriteCandidate || change.OwnWriteSnapshot != snapshot {
+		t.Fatalf("change = %#v, want own-write missing candidate", change)
+	}
+}
+
 func TestWatcherPendingSnapshotBudgetDegradesToAsyncReread(t *testing.T) {
 	fw := &fileWatcher{
 		msgChan:            make(chan tea.Msg, 1),
@@ -717,6 +744,41 @@ func TestFileWatcher_RespectsMaxWatchLimit(t *testing.T) {
 			t.Fatalf("recursive background scan did not reach its expected limit: watches=%d limited=%v", fw.watchedCount(), fw.watchLimitReached())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestFileWatcher_LimitReachedPublishesMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, dir := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, dir), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	fw, err := newFileWatcherWithMaxWatches(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("newFileWatcherWithMaxWatches: %v", err)
+	}
+	defer fw.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		select {
+		case msg := <-fw.msgChan:
+			if _, ok := msg.(watcherLimitMsg); ok {
+				return
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("no watcherLimitMsg published after watch budget was exhausted")
+		}
+	}
+}
+
+func TestWatcherLimitMsgSetsStatus(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	model = updateInputRoutingModel(t, model, watcherLimitMsg{})
+	if model.status == "" {
+		t.Fatal("watcherLimitMsg did not surface a status message")
 	}
 }
 

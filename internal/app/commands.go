@@ -61,13 +61,17 @@ type CloseTabMsg struct {
 
 // FileLoadedMsg is sent when an async file read completes.
 type FileLoadedMsg struct {
-	Path      string
-	Data      []byte
-	Snapshot  *text.Rope // production loads prepare this off the UI goroutine; Data is legacy/test fallback
-	EditorID  uint64     // stable target identity; never an editor slice index
-	RequestID uint64     // monotonically increasing request identity
-	TabIndex  int        // legacy test-only fallback, ignored for identified requests
-	ForceNew  bool       // skip replaceable tab logic
+	Path       string
+	Data       []byte
+	Snapshot   *text.Rope // production loads prepare this off the UI goroutine; Data is legacy/test fallback
+	LineEnding text.LineEnding
+	// RecoveredDirty marks crash-recovery installs: the content comes from a
+	// recovery record, not from disk, so the buffer must surface as unsaved.
+	RecoveredDirty bool
+	EditorID       uint64 // stable target identity; never an editor slice index
+	RequestID      uint64 // monotonically increasing request identity
+	TabIndex       int    // legacy test-only fallback, ignored for identified requests
+	ForceNew       bool   // skip replaceable tab logic
 }
 
 // FileLoadErrorMsg is sent when an async file read fails.
@@ -156,7 +160,10 @@ func loadFileCmd(ctx context.Context, path string, editorID, requestID uint64, f
 			return FileLoadErrorMsg{Path: path, EditorID: editorID, RequestID: requestID, Err: err}
 		}
 		// readEditorFile returned a fresh allocation owned by this command.
-		return FileLoadedMsg{Path: path, Snapshot: text.NewOwned(data), EditorID: editorID, RequestID: requestID, ForceNew: forceNew}
+		// Normalize CRLF off the UI goroutine; the buffer keeps LF content and
+		// remembers the original convention for save.
+		normalized, ending := text.NormalizeLineEndings(data)
+		return FileLoadedMsg{Path: path, Snapshot: text.NewOwned(normalized), LineEnding: ending, EditorID: editorID, RequestID: requestID, ForceNew: forceNew}
 	}
 }
 

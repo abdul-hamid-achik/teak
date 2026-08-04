@@ -359,6 +359,113 @@ func TestDebuggerBreakpointViewWithEmptyPath(t *testing.T) {
 	}
 }
 
+func TestDebuggerStateClearsSessionDataAndExpansion(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetState(dap.StateStopped)
+	model.SetStackFrames([]dap.StackFrame{{Name: "main"}})
+	model.SetVariables([]dap.Variable{{Name: "root", VariablesReference: 7}})
+	model.SetExpandedVariables(7, []dap.Variable{{Name: "child"}})
+
+	if !model.IsExpanded(7) {
+		t.Fatal("expected variable reference to be expanded")
+	}
+	if needsFetch := model.ToggleExpand(7); needsFetch {
+		t.Fatal("collapsing an expanded variable should not request a fetch")
+	}
+	if model.IsExpanded(7) {
+		t.Fatal("variable should be collapsed")
+	}
+	if needsFetch := model.ToggleExpand(7); !needsFetch {
+		t.Fatal("expanding a missing variable should request a fetch")
+	}
+
+	model.SetState(dap.StateInactive)
+	if model.State() != dap.StateInactive || len(model.stackFrames) != 0 || len(model.variables) != 0 || len(model.expandedVars) != 0 {
+		t.Fatalf("inactive state retained session data: state=%v frames=%d vars=%d expanded=%d", model.State(), len(model.stackFrames), len(model.variables), len(model.expandedVars))
+	}
+}
+
+func TestDebuggerScrollAndStackFrameHitTesting(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	frames := make([]dap.StackFrame, 10)
+	for i := range frames {
+		frames[i] = dap.StackFrame{Name: "frame", Line: i + 1}
+	}
+	model.SetStackFrames(frames)
+	if got := model.StackFrameAtY(5); got != -1 {
+		t.Fatalf("inactive StackFrameAtY() = %d, want -1", got)
+	}
+
+	model.SetState(dap.StateStopped)
+	for _, tc := range []struct {
+		name string
+		y    int
+		want int
+	}{
+		{name: "header", y: 4, want: -1},
+		{name: "first row", y: 5, want: 0},
+		{name: "last visible row", y: 12, want: 7},
+		{name: "after visible rows", y: 13, want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := model.StackFrameAtY(tc.y); got != tc.want {
+				t.Fatalf("StackFrameAtY(%d) = %d, want %d", tc.y, got, tc.want)
+			}
+		})
+	}
+
+	model.ScrollDown(99)
+	if got := model.StackFrameAtY(5); got != 2 {
+		t.Fatalf("scrolled StackFrameAtY(5) = %d, want 2", got)
+	}
+	model.ScrollDown(1)
+	if got := model.scrollY; got != 2 {
+		t.Fatalf("ScrollDown beyond max = %d, want 2", got)
+	}
+	model.ScrollUp(99)
+	if got := model.scrollY; got != 0 {
+		t.Fatalf("ScrollUp beyond zero = %d, want 0", got)
+	}
+}
+
+func TestDebuggerViewAndStatusAcrossStates(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	if view := model.View(); !containsString(view, "No active debug session") {
+		t.Fatalf("inactive view = %q, want inactive prompt", view)
+	}
+	if got := model.Status(); got != "" {
+		t.Fatalf("inactive Status() = %q, want empty", got)
+	}
+
+	model.SetState(dap.StateRunning)
+	if view := model.View(); !containsString(view, "▶ c") || !containsString(view, "⏹ q") {
+		t.Fatalf("running view = %q, want controls", view)
+	}
+	if got := model.Status(); got != "Debugging" {
+		t.Fatalf("running Status() = %q, want Debugging", got)
+	}
+
+	model.SetStackFrames([]dap.StackFrame{{Name: "main", Source: dap.Source{Name: "main.go", Path: "/tmp/main.go"}, Line: 8}})
+	model.SetVariables([]dap.Variable{{Name: "value", Value: "42", Type: "int"}})
+	model.SetBreakpoints([]Breakpoint{{FilePath: "/tmp/main.go", Line: 7, Enabled: true, Verified: true}})
+	model.AppendOutput("hello")
+	model.SetState(dap.StateStopped)
+	view := model.View()
+	for _, want := range []string{"Call Stack", "Variables", "Breakpoints", "Output"} {
+		if !containsString(view, want) {
+			t.Errorf("stopped view missing %q: %q", want, view)
+		}
+	}
+	if got := model.Status(); got != "Stopped at main.go:8" {
+		t.Fatalf("stopped Status() = %q, want frame location", got)
+	}
+
+	model.SetState(dap.StatePaused)
+	if got := model.Status(); got != "Paused at main.go:8" {
+		t.Fatalf("paused Status() = %q, want frame location", got)
+	}
+}
+
 // TestDebuggerBreakpointViewOrderPreservation tests BreakpointView preserves order
 func TestDebuggerBreakpointViewOrderPreservation(t *testing.T) {
 	theme := ui.DefaultTheme()

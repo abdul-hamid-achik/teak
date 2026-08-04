@@ -29,6 +29,21 @@ func TestTypingGroupsIntoOneUndo(t *testing.T) {
 	}
 }
 
+func TestTypingAfterCursorMoveStartsNewUndoGroup(t *testing.T) {
+	buf := NewBuffer()
+	buf.InsertAtCursor([]byte("a"))
+	buf.MoveCursor(DirLeft)
+	buf.InsertAtCursor([]byte("b"))
+
+	if got := buf.Rope().String(); got != "ba" {
+		t.Fatalf("content after moved insertion = %q, want %q", got, "ba")
+	}
+	buf.Undo()
+	if got := buf.Rope().String(); got != "a" {
+		t.Fatalf("one undo after cursor move = %q, want %q", got, "a")
+	}
+}
+
 func TestNewlineEndsTheUndoGroup(t *testing.T) {
 	buf := NewBufferFromBytes(nil)
 

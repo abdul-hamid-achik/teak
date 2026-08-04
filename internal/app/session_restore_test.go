@@ -85,6 +85,110 @@ func TestSessionRestoreCommandFiltersTabsAndRemapsState(t *testing.T) {
 	}
 }
 
+func TestSessionRestoreReportsAndRetainsSkippedTabs(t *testing.T) {
+	root := t.TempDir()
+	kept := filepath.Join(root, "kept.go")
+	if err := os.WriteFile(kept, []byte("package p\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := session.TabState{FilePath: filepath.Join(root, "missing.go"), CursorLine: 3, Pinned: true}
+
+	oldLoad := loadSessionForRestore
+	loadSessionForRestore = func(context.Context, string) (session.State, error) {
+		return session.State{RootDir: root, ActiveTab: 0, Tabs: []session.TabState{
+			missing,
+			{FilePath: kept},
+		}}, nil
+	}
+	defer func() { loadSessionForRestore = oldLoad }()
+
+	cfg := config.DefaultConfig()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+	result := sessionRestoreCmd(m.sessionRestoreCtx, m.sessionRestoreGeneration, root)()
+	msg, ok := result.(sessionRestoreResultMsg)
+	if !ok {
+		t.Fatalf("session restore returned %T", result)
+	}
+	if len(msg.Skipped) != 1 || msg.Skipped[0].FilePath != missing.FilePath {
+		t.Fatalf("skipped tabs = %+v, want the missing tab reported", msg.Skipped)
+	}
+
+	updated, _ := m.Update(result)
+	m = updated.(Model)
+	if len(m.sessionUnrestoredTabs) != 1 {
+		t.Fatalf("sessionUnrestoredTabs = %+v, want the skipped tab retained", m.sessionUnrestoredTabs)
+	}
+
+	// The next session snapshot must keep the unrestorable tab instead of
+	// silently rewriting it out of the session file.
+	state, okSnap := m.sessionSnapshot()
+	if !okSnap {
+		t.Fatal("session snapshot disabled")
+	}
+	found := false
+	for _, tab := range state.Tabs {
+		if tab.FilePath == missing.FilePath && tab.CursorLine == 3 && tab.Pinned {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("snapshot tabs = %+v, want the skipped tab preserved", state.Tabs)
+	}
+}
+
+func TestSessionRestoreSnapshotDropsSkippedTabOnceReopened(t *testing.T) {
+	root := t.TempDir()
+	reopened := filepath.Join(root, "back.go")
+	if err := os.WriteFile(reopened, []byte("package p\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+	m.sessionUnrestoredTabs = []session.TabState{{FilePath: reopened}}
+	m.editors = nil
+	m.tabBar.Tabs = nil
+
+	opened, _ := m.openFilePinned(reopened)
+	m = opened.(Model)
+
+	state, okSnap := m.sessionSnapshot()
+	if !okSnap {
+		t.Fatal("session snapshot disabled")
+	}
+	count := 0
+	for _, tab := range state.Tabs {
+		if tab.FilePath == reopened {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("snapshot contains the reopened path %d times, want exactly 1", count)
+	}
+}
+
+func TestApplySessionRestoreSurfacesLoadFailure(t *testing.T) {
+	cfg := config.DefaultConfig()
+	m, err := NewModel("", t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	m.applySessionRestore(sessionRestoreResultMsg{Generation: m.sessionRestoreGeneration, Err: errors.New("session.json: corrupt")})
+	if m.status == "" {
+		t.Fatal("failed session restore did not surface a status message")
+	}
+}
+
 func TestSessionRestoreMapsSavedWorkspaceAliasToCurrentRootSpelling(t *testing.T) {
 	physicalRoot := t.TempDir()
 	currentRoot := filepath.Join(t.TempDir(), "workspace")
@@ -264,7 +368,7 @@ func TestReadSessionRestoreFilesLimitsAggregateBytesAndTabCount(t *testing.T) {
 		{FilePath: filepath.Join(root, "second.go")},
 		{FilePath: filepath.Join(root, "third.go")},
 	}}
-	filtered, files, err := readSessionRestoreFiles(context.Background(), pinned, root, state, 5)
+	filtered, files, _, err := readSessionRestoreFiles(context.Background(), pinned, root, state, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +398,7 @@ func TestReadSessionRestoreFilesLimitsAggregateBytesAndTabCount(t *testing.T) {
 		}
 		tabs = append(tabs, session.TabState{FilePath: name})
 	}
-	filtered, files, err = readSessionRestoreFiles(context.Background(), pinned, root, session.State{RootDir: root, Tabs: tabs}, 1)
+	filtered, files, _, err = readSessionRestoreFiles(context.Background(), pinned, root, session.State{RootDir: root, Tabs: tabs}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +529,7 @@ func readPinnedSessionRestoreForTest(t *testing.T, root string, state session.St
 		t.Fatal(err)
 	}
 	defer func() { _ = pinned.Close() }()
-	filtered, files, err := readSessionRestoreFiles(context.Background(), pinned, root, state, maxStartupSessionBytes)
+	filtered, files, _, err := readSessionRestoreFiles(context.Background(), pinned, root, state, maxStartupSessionBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

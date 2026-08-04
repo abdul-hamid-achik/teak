@@ -615,3 +615,147 @@ func TestBufferMultiSelectionEmptySelections(t *testing.T) {
 		t.Errorf("got %q, want %q", b.Content(), "helXlo")
 	}
 }
+
+func TestBufferBackspaceWithMultipleCollapsedCursors(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abcdef"))
+
+	b.Selections = NewSelections(Position{0, 2})
+	b.Selections.Add(Selection{Anchor: Position{0, 5}, Head: Position{0, 5}})
+
+	b.Backspace()
+
+	if b.Content() != "acdf" {
+		t.Fatalf("got %q, want %q", b.Content(), "acdf")
+	}
+	all := b.Selections.All()
+	if len(all) != 2 {
+		t.Fatalf("cursor count = %d, want 2", len(all))
+	}
+	if all[0].Head != (Position{0, 1}) {
+		t.Errorf("first cursor = %v, want {0 1}", all[0].Head)
+	}
+	if all[1].Head != (Position{0, 3}) {
+		t.Errorf("second cursor = %v, want {0 3}", all[1].Head)
+	}
+	if b.LastChange() != nil {
+		t.Errorf("LastChange() = %#v, want nil for multi-cursor edit", b.LastChange())
+	}
+
+	// A follow-up multi-cursor edit must land at the rebased positions, not
+	// at the stale offsets recorded before the backspace.
+	b.InsertAtCursor([]byte("X"))
+	if b.Content() != "aXcdXf" {
+		t.Fatalf("after insert got %q, want %q", b.Content(), "aXcdXf")
+	}
+}
+
+func TestBufferDeleteWithMultipleCollapsedCursors(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abcdef"))
+
+	b.Selections = NewSelections(Position{0, 1})
+	b.Selections.Add(Selection{Anchor: Position{0, 4}, Head: Position{0, 4}})
+
+	b.Delete()
+
+	if b.Content() != "acdf" {
+		t.Fatalf("got %q, want %q", b.Content(), "acdf")
+	}
+	all := b.Selections.All()
+	if len(all) != 2 {
+		t.Fatalf("cursor count = %d, want 2", len(all))
+	}
+	if all[0].Head != (Position{0, 1}) {
+		t.Errorf("first cursor = %v, want {0 1}", all[0].Head)
+	}
+	if all[1].Head != (Position{0, 3}) {
+		t.Errorf("second cursor = %v, want {0 3}", all[1].Head)
+	}
+
+	b.InsertAtCursor([]byte("X"))
+	if b.Content() != "aXcdXf" {
+		t.Fatalf("after insert got %q, want %q", b.Content(), "aXcdXf")
+	}
+}
+
+func TestBufferBackspaceMultiCursorJoinsLines(t *testing.T) {
+	b := NewBufferFromBytes([]byte("ab\ncd\nef"))
+
+	// Cursors at the start of lines 1 and 2: backspace removes the preceding
+	// newline, joining each line with the previous one.
+	b.Selections = NewSelections(Position{1, 0})
+	b.Selections.Add(Selection{Anchor: Position{2, 0}, Head: Position{2, 0}})
+
+	b.Backspace()
+
+	if b.Content() != "abcdef" {
+		t.Fatalf("got %q, want %q", b.Content(), "abcdef")
+	}
+	all := b.Selections.All()
+	if all[0].Head != (Position{0, 2}) {
+		t.Errorf("first cursor = %v, want {0 2}", all[0].Head)
+	}
+	if all[1].Head != (Position{0, 4}) {
+		t.Errorf("second cursor = %v, want {0 4}", all[1].Head)
+	}
+}
+
+func TestBufferBackspaceMultiCursorAtDocumentStart(t *testing.T) {
+	b := NewBufferFromBytes([]byte("ab\ncd"))
+
+	b.Selections = NewSelections(Position{0, 0})
+	b.Selections.Add(Selection{Anchor: Position{1, 1}, Head: Position{1, 1}})
+
+	b.Backspace()
+
+	if b.Content() != "ab\nd" {
+		t.Fatalf("got %q, want %q", b.Content(), "ab\nd")
+	}
+	all := b.Selections.All()
+	if all[0].Head != (Position{0, 0}) {
+		t.Errorf("first cursor = %v, want {0 0}", all[0].Head)
+	}
+	if all[1].Head != (Position{1, 0}) {
+		t.Errorf("second cursor = %v, want {1 0}", all[1].Head)
+	}
+}
+
+func TestBufferBackspaceMultiCursorRemovesWholeRunes(t *testing.T) {
+	b := NewBufferFromBytes([]byte("xé zé"))
+
+	// Cursors just after each multibyte é.
+	b.Selections = NewSelections(Position{0, 3})
+	b.Selections.Add(Selection{Anchor: Position{0, 7}, Head: Position{0, 7}})
+
+	b.Backspace()
+
+	if b.Content() != "x z" {
+		t.Fatalf("got %q, want %q", b.Content(), "x z")
+	}
+	all := b.Selections.All()
+	if all[0].Head != (Position{0, 1}) {
+		t.Errorf("first cursor = %v, want {0 1}", all[0].Head)
+	}
+	if all[1].Head != (Position{0, 3}) {
+		t.Errorf("second cursor = %v, want {0 3}", all[1].Head)
+	}
+}
+
+func TestBufferDeleteMultiCursorAtDocumentEnd(t *testing.T) {
+	b := NewBufferFromBytes([]byte("ab\ncd"))
+
+	b.Selections = NewSelections(Position{0, 1})
+	b.Selections.Add(Selection{Anchor: Position{1, 2}, Head: Position{1, 2}})
+
+	b.Delete()
+
+	if b.Content() != "a\ncd" {
+		t.Fatalf("got %q, want %q", b.Content(), "a\ncd")
+	}
+	all := b.Selections.All()
+	if all[0].Head != (Position{0, 1}) {
+		t.Errorf("first cursor = %v, want {0 1}", all[0].Head)
+	}
+	if all[1].Head != (Position{1, 2}) {
+		t.Errorf("second cursor = %v, want {1 2}", all[1].Head)
+	}
+}

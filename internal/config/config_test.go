@@ -14,6 +14,13 @@ func TestSaveToWritesValidatedPrivateAtomicConfig(t *testing.T) {
 	cfg.Editor.TabSize = 2
 	cfg.Editor.WordWrap = true
 	cfg.UI.ShowTree = false
+	cfg.Tools = map[string]string{"codemap": "/opt/tools/codemap", "gopls": "/opt/tools/gopls"}
+	cfg.LSP = []LSPConfig{{
+		Extensions: []string{".go"},
+		Command:    "gopls",
+		LanguageID: "go",
+		Env:        map[string]string{"GOWORK": "off"},
+	}}
 
 	if err := SaveTo(path, cfg); err != nil {
 		t.Fatalf("SaveTo() error = %v", err)
@@ -37,6 +44,12 @@ func TestSaveToWritesValidatedPrivateAtomicConfig(t *testing.T) {
 	}
 	if got.Editor.TabSize != 2 || !got.Editor.WordWrap || got.UI.ShowTree {
 		t.Errorf("saved config = %+v, want edited values", got)
+	}
+	if len(got.LSP) != 1 || got.LSP[0].Env["GOWORK"] != "off" {
+		t.Errorf("saved LSP environment = %#v, want GOWORK=off", got.LSP)
+	}
+	if got.Tools["codemap"] != "/opt/tools/codemap" || got.Tools["gopls"] != "/opt/tools/gopls" {
+		t.Errorf("saved tool overrides = %#v, want codemap and gopls paths", got.Tools)
 	}
 }
 
@@ -152,6 +165,7 @@ extensions = [".zig"]
 command = "zls"
 args = []
 language_id = "zig"
+env = { TEAK_FIXTURE_MODE = "1" }
 `
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -193,6 +207,9 @@ language_id = "zig"
 	if cfg.LSP[0].Command != "zls" {
 		t.Errorf("LSP command = %q, want %q", cfg.LSP[0].Command, "zls")
 	}
+	if cfg.LSP[0].Env["TEAK_FIXTURE_MODE"] != "1" {
+		t.Fatalf("LSP environment = %#v, want TEAK_FIXTURE_MODE=1", cfg.LSP[0].Env)
+	}
 }
 
 func TestMergePartialOverride(t *testing.T) {
@@ -220,6 +237,23 @@ func TestMergePartialOverride(t *testing.T) {
 	}
 }
 
+func TestMergeToolOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	user := userConfig{Tools: map[string]string{
+		"codemap": "/custom/bin/codemap",
+		"gopls":   "/custom/bin/gopls",
+	}}
+	merge(&cfg, &user)
+
+	if len(cfg.Tools) != 2 || cfg.Tools["codemap"] != "/custom/bin/codemap" || cfg.Tools["gopls"] != "/custom/bin/gopls" {
+		t.Fatalf("merged tool overrides = %#v, want both configured paths", cfg.Tools)
+	}
+	user.Tools["codemap"] = "/mutated-after-merge"
+	if cfg.Tools["codemap"] != "/custom/bin/codemap" {
+		t.Fatalf("merge retained caller-owned tool map: %#v", cfg.Tools)
+	}
+}
+
 func TestDefaultConfigAgentDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	if !cfg.Agent.Enabled {
@@ -231,17 +265,22 @@ func TestDefaultConfigAgentDefaults(t *testing.T) {
 	if len(cfg.Agent.Args) != 1 || cfg.Agent.Args[0] != "acp" {
 		t.Errorf("Agent.Args = %v, want [acp]", cfg.Agent.Args)
 	}
+	if cfg.Agent.Sandbox != "auto" {
+		t.Errorf("Agent.Sandbox = %q, want auto", cfg.Agent.Sandbox)
+	}
 }
 
 func TestMergeAgentConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	enabled := false
 	cmd := "custom-agent"
+	sandbox := "required"
 	user := userConfig{
 		Agent: &userAgentConfig{
 			Enabled: &enabled,
 			Command: &cmd,
 			Args:    []string{"--verbose"},
+			Sandbox: &sandbox,
 		},
 	}
 	merge(&cfg, &user)
@@ -254,6 +293,9 @@ func TestMergeAgentConfig(t *testing.T) {
 	}
 	if len(cfg.Agent.Args) != 1 || cfg.Agent.Args[0] != "--verbose" {
 		t.Errorf("Agent.Args = %v, want [--verbose]", cfg.Agent.Args)
+	}
+	if cfg.Agent.Sandbox != "required" {
+		t.Errorf("Agent.Sandbox = %q, want required", cfg.Agent.Sandbox)
 	}
 }
 

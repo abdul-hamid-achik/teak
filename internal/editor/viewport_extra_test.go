@@ -1,8 +1,10 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
+	"teak/internal/highlight"
 	"teak/internal/text"
 	"teak/internal/ui"
 )
@@ -149,6 +151,46 @@ func TestViewportRenderEmptyBuffer(t *testing.T) {
 	result := v.Render(buf, theme, nil, nil, nil)
 	if result == "" {
 		t.Error("should render something even for empty buffer")
+	}
+}
+
+func TestViewportRenderLineCacheInvalidatesWithRopeVersion(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("a long logical line"))
+	v := Viewport{Width: 20, Height: 4}
+
+	first := v.renderLine(buf, 0)
+	second := v.renderLine(buf, 0)
+	if len(first) == 0 || &first[0] != &second[0] {
+		t.Fatal("renderLine() did not reuse the immutable line for the same buffer version")
+	}
+
+	buf.SetCursor(text.Position{Line: 0, Col: len(first)})
+	buf.InsertAtCursor([]byte("!"))
+	updated := v.renderLine(buf, 0)
+	if got, want := string(updated), "a long logical line!"; got != want {
+		t.Fatalf("renderLine() after edit = %q, want %q", got, want)
+	}
+	if &first[0] == &updated[0] {
+		t.Fatal("renderLine() reused a line from an older rope version")
+	}
+}
+
+func TestViewportWrapRenderOutputStaysViewportBoundedForLongLine(t *testing.T) {
+	line := strings.Repeat("identifier ", 25_000) + "\t你"
+	buf := text.NewBufferFromBytes([]byte(line))
+	theme := ui.DefaultTheme()
+	hl := highlight.New("test.go", theme)
+	hl.Tokenize(buf.Bytes())
+	v := Viewport{Width: 90, Height: 24}
+	wrap := NewWrapLayoutWithTabSize(buf.Line, buf.LineCount(), 80, 4)
+	v.WrapScrollY = wrap.LineRows(0) - v.Height
+
+	// Warm the one-line and segment caches before measuring the rendered frame.
+	_ = v.RenderWithWrap(buf, theme, hl, nil, nil, wrap)
+	rendered := v.RenderWithWrap(buf, theme, hl, nil, nil, wrap)
+	t.Logf("wrapped viewport output bytes=%d", len(rendered))
+	if len(rendered) > 128*1024 {
+		t.Fatalf("wrapped viewport output = %d bytes, want a viewport-sized result", len(rendered))
 	}
 }
 

@@ -22,6 +22,20 @@ func TestTriggerCompletionOnIdentifier(t *testing.T) {
 	}
 }
 
+func TestTriggerCompletionAfterMultibyteIdentifier(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("é"))
+	buf.Cursor.Line = 0
+	buf.Cursor.Col = len("é")
+	buf.FilePath = "test.go"
+
+	ed := New(buf, ui.DefaultTheme(), Config{})
+	ed.HasLSP = true
+
+	if cmd := ed.TriggerCompletion(); cmd == nil {
+		t.Fatal("TriggerCompletion should recognize the rune before a UTF-8 cursor")
+	}
+}
+
 func TestTriggerCompletionOnDot(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("fmt."))
 	buf.Cursor.Line = 0

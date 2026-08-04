@@ -77,6 +77,29 @@ func pendingRequestIDForPath(model Model, path string) int {
 	return 0
 }
 
+func TestSaveFlowPreservesCRLFLineEndings(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	// Disk holds Windows line endings; the buffer loads normalized to LF and
+	// the user edits within that view.
+	idx := addDirtyEditor(t, &model, "crlf.txt", "line1\r\nline2\r\n", "line1X\nline2\n")
+	path := model.editors[idx].Buffer.FilePath
+
+	if model.editors[idx].Buffer.LineEnding() != text.CRLF {
+		t.Fatalf("LineEnding() = %v, want CRLF for a CRLF file", model.editors[idx].Buffer.LineEnding())
+	}
+
+	cmd := model.beginSaveForTab(idx, false, false)
+	requireFileSavedMsg(t, cmd)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(data) != "line1X\r\nline2\r\n" {
+		t.Fatalf("saved bytes = %q, want CRLF restored around the edit", data)
+	}
+}
+
 func requireFileSavedMsg(t *testing.T, cmd tea.Cmd) FileSavedMsg {
 	t.Helper()
 	if cmd == nil {

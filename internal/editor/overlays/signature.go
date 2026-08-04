@@ -68,7 +68,7 @@ func (s SignatureHelp) View() string {
 	label := activeSig.Label
 
 	// Highlight active parameter
-	if s.Help.ActiveParameter < len(activeSig.Parameters) {
+	if s.Help.ActiveParameter >= 0 && s.Help.ActiveParameter < len(activeSig.Parameters) {
 		param := activeSig.Parameters[s.Help.ActiveParameter]
 		// Simple highlighting: wrap parameter in brackets
 		label = strings.Replace(label, param.Label, "["+param.Label+"]", 1)
@@ -110,7 +110,11 @@ func truncateCells(value string, width int) string {
 
 // UpdateActiveParameter updates the active parameter index.
 func (s *SignatureHelp) UpdateActiveParameter(idx int) {
-	if s.Help != nil {
-		s.Help.ActiveParameter = idx
+	if s.Help == nil {
+		return
 	}
+	if idx < 0 {
+		idx = 0
+	}
+	s.Help.ActiveParameter = idx
 }

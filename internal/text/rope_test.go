@@ -389,6 +389,20 @@ func TestByteAtNilRope(t *testing.T) {
 	}
 }
 
+func TestRopeRuneAccessAvoidsLineMaterialization(t *testing.T) {
+	rope := NewFromString(strings.Repeat("x", maxLeaf-1) + "é😀z")
+	start := maxLeaf - 1
+	if got, size, ok := rope.RuneAt(start); !ok || got != 'é' || size != len("é") {
+		t.Fatalf("RuneAt(%d) = %q, %d, %v; want é, 2, true", start, got, size, ok)
+	}
+	if got, size, ok := rope.RuneBefore(start + len("é")); !ok || got != 'é' || size != len("é") {
+		t.Fatalf("RuneBefore(%d) = %q, %d, %v; want é, 2, true", start+len("é"), got, size, ok)
+	}
+	if got, size, ok := rope.RuneAt(start + len("é")); !ok || got != '😀' || size != len("😀") {
+		t.Fatalf("RuneAt after boundary = %q, %d, %v; want 😀, 4, true", got, size, ok)
+	}
+}
+
 func TestByteAtLargeRope(t *testing.T) {
 	// Test with a multi-node rope
 	large := strings.Repeat("abcdefghij", 100)

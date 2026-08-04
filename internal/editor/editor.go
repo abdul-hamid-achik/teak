@@ -2,11 +2,13 @@ package editor
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"strings"
 	"teak/internal/clipboard"
 	"teak/internal/editor/overlays"
 	"teak/internal/highlight"
@@ -32,6 +34,12 @@ const (
 	initialHighlightPrefixBytes = 64 << 10
 	maxFullHighlightBytes       = 8 << 20
 	maxFullHighlightLines       = 250_000
+	// Interactive edits use a viewport pass sooner than initial loading. A full
+	// Chroma pass is correct but can create hundreds of MiB of temporary data
+	// for an otherwise ordinary multi-thousand-line file; off-screen ranges are
+	// refreshed on demand when the viewport reaches them.
+	maxInteractiveHighlightBytes = 1 << 20
+	maxInteractiveHighlightLines = 8_000
 	// asyncPasteThresholdBytes keeps terminal bracketed pastes and OS clipboard
 	// results large enough to affect a frame out of Update. The hard 16 MiB
 	// limit remains owned by clipboard.MaxClipboardBytes.
@@ -76,11 +84,13 @@ type MultilineEditLimitMsg struct {
 // RetokenizeMsg triggers syntax re-tokenization after edits or scrolls.
 //
 // Performance Strategy:
-//   - Edit-triggered (ViewportOnly=false): Full file tokenization
-//     Needed because edits can change highlighting anywhere in the file.
+//   - Edit-triggered (ViewportOnly=false): Full file tokenization for small
+//     documents, or a viewport-only pass for large interactive documents. The
+//     latter keeps the current screen responsive; off-screen ranges are
+//     refreshed when they become visible.
 //   - Scroll-triggered (ViewportOnly=true): Viewport-only tokenization
-//     Provides 145x speedup for large files. Only tokenizes visible region
-//     plus a 200-line margin for multi-line construct context.
+//     provides 145x speedup for large files. Only the visible region plus a
+//     margin for multi-line construct context is materialized.
 //
 // Debouncing:
 //   - Edit-triggered: 150ms debounce (scheduleRetokenize)
@@ -110,6 +120,8 @@ type Editor struct {
 	HasLSP                  bool
 	TriggerCharacters       []string    // from LSP server capabilities
 	DebugGutter             *GutterOpts // set by app when debugging
+	PluginHighlights        map[int][]HighlightRange
+	PluginHighlightVersion  int
 	Folds                   FoldState   // code folding state
 	Wrap                    *WrapLayout // word wrap layout (nil when disabled)
 	lastVersion             int
@@ -156,19 +168,21 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 	}
 
 	return Editor{
-		id:            nextEditorID.Add(1),
-		Buffer:        buf,
-		Viewport:      Viewport{TabSize: cfg.TabSize},
-		Config:        cfg,
-		theme:         theme,
-		Highlighter:   hl,
-		autocomplete:  overlays.NewAutocomplete(theme),
-		hover:         overlays.NewHover(theme),
-		signatureHelp: overlays.NewSignatureHelp(theme),
-		contextMenu:   NewContextMenu(theme),
-		find:          NewFindModel(theme),
-		lastVersion:   -1,
-		tokenizer:     &tokenizeScheduler{},
+		id:                     nextEditorID.Add(1),
+		Buffer:                 buf,
+		Viewport:               Viewport{TabSize: cfg.TabSize},
+		Config:                 cfg,
+		theme:                  theme,
+		Highlighter:            hl,
+		PluginHighlights:       make(map[int][]HighlightRange),
+		PluginHighlightVersion: -1,
+		autocomplete:           overlays.NewAutocomplete(theme),
+		hover:                  overlays.NewHover(theme),
+		signatureHelp:          overlays.NewSignatureHelp(theme),
+		contextMenu:            NewContextMenu(theme),
+		find:                   NewFindModel(theme),
+		lastVersion:            -1,
+		tokenizer:              &tokenizeScheduler{},
 	}
 }
 
@@ -206,6 +220,10 @@ func (e *Editor) ScheduleInitialTokenize() tea.Cmd {
 
 func shouldUseSparseHighlight(rope *text.Rope) bool {
 	return rope != nil && (rope.Len() > maxFullHighlightBytes || rope.LineCount() > maxFullHighlightLines)
+}
+
+func shouldUseInteractiveSparseHighlight(rope *text.Rope) bool {
+	return rope != nil && (rope.Len() > maxInteractiveHighlightBytes || rope.LineCount() > maxInteractiveHighlightLines)
 }
 
 func tokenizeViewportCmd(ctx context.Context, hl *highlight.Highlighter, snapshot highlight.ViewportSnapshot, editorID uint64, version int, generation uint64) tea.Cmd {
@@ -533,7 +551,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			snapshot := highlight.CaptureViewport(e.Buffer.Rope(), viewStart, viewEnd)
 			return e, tokenizeViewportCmd(ctx, hl, snapshot, editorID, version, generation)
 		}
-		if shouldUseSparseHighlight(e.Buffer.Rope()) {
+		if shouldUseSparseHighlight(e.Buffer.Rope()) || shouldUseInteractiveSparseHighlight(e.Buffer.Rope()) {
 			ctx, generation := e.beginViewportTokenize()
 			viewStart, viewEnd := e.visibleTokenRange()
 			snapshot := highlight.CaptureViewport(e.Buffer.Rope(), viewStart, viewEnd)
@@ -739,8 +757,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.moveCursorByWrappedRows(-e.Viewport.Height)
 		} else {
 			target := max(0, e.Buffer.Cursor.Line-e.Viewport.Height)
-			e.Buffer.Cursor.Line = target
-			e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+			e.Buffer.SetCursor(text.Position{
+				Line: target,
+				Col:  min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target)),
+			})
 		}
 		e.Buffer.ClearSelection()
 		if e.Wrap == nil || !e.Config.WordWrap {
@@ -756,8 +776,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		} else {
 			maxLine := e.Buffer.LineCount() - 1
 			target := min(maxLine, e.Buffer.Cursor.Line+e.Viewport.Height)
-			e.Buffer.Cursor.Line = target
-			e.Buffer.Cursor.Col = min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target))
+			e.Buffer.SetCursor(text.Position{
+				Line: target,
+				Col:  min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target)),
+			})
 		}
 		e.Buffer.ClearSelection()
 		if e.Wrap == nil || !e.Config.WordWrap {
@@ -977,16 +999,13 @@ func (e Editor) TriggerCompletion() tea.Cmd {
 		return nil
 	}
 
-	// Get the character before cursor
-	prevCol := e.Buffer.Cursor.Col - 1
-	if prevCol < 0 {
-		return nil
-	}
-	ch := rune(line[prevCol])
+	// Decode the rune before the cursor. Cursor.Col is a UTF-8 byte offset,
+	// so indexing line[Col-1] would inspect a continuation byte for a
+	// multibyte rune.
+	ch, _ := utf8.DecodeLastRune(line[:e.Buffer.Cursor.Col])
 
-	// Trigger on identifier characters (a-z, A-Z, 0-9, _)
-	if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-		(ch >= '0' && ch <= '9') || ch == '_' {
+	// Trigger on identifier characters, including non-ASCII letters/digits.
+	if unicode.IsLetter(ch) || unicode.IsDigit(ch) || ch == '_' {
 		return func() tea.Msg { return RequestCompletionCmd{} }
 	}
 
@@ -1010,6 +1029,15 @@ func (e Editor) TriggerCompletion() tea.Cmd {
 
 func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 	m := msg.Mouse()
+
+	// While the find widget is open it owns the first view row; map mouse
+	// coordinates into the text area below it.
+	if e.find.Visible() {
+		m.Y--
+		if m.Y < 0 {
+			return e, nil
+		}
+	}
 
 	// Left-click dismisses context menu
 	if e.contextMenu.Visible && m.Button == tea.MouseLeft {
@@ -1094,6 +1122,11 @@ func (e Editor) handleMouseMotion(msg tea.MouseMotionMsg) (Editor, tea.Cmd) {
 	m := msg.Mouse()
 	if e.Viewport.Height <= 0 || e.Viewport.Width <= 0 {
 		return e, nil
+	}
+	// While the find widget is open it owns the first view row; map motion
+	// coordinates into the text area below it.
+	if e.find.Visible() {
+		m.Y--
 	}
 
 	// Terminals report motion coordinates outside the widget while a button is
@@ -1264,13 +1297,14 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 
 // View renders the editor content.
 func (e *Editor) View() string {
+	pluginHighlights := e.PluginHighlightRanges()
 	var view string
 	if e.Wrap != nil && e.Config.WordWrap {
-		view = e.Viewport.RenderWithWrap(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap)
+		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap, pluginHighlights)
 	} else if len(e.Folds.Regions) > 0 {
-		view = e.Viewport.RenderWithFolds(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds)
+		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds, pluginHighlights)
 	} else {
-		view = e.Viewport.Render(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter)
+		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, pluginHighlights)
 	}
 	if fv := e.find.View(); fv != "" {
 		view = fv + "\n" + view
@@ -1309,8 +1343,30 @@ func (e Editor) screenToBuffer(screenX, screenY int) text.Position {
 	return e.Viewport.ScreenToBufferPosition(screenX, screenY, e.Buffer, gw, e.visibleLinesForClick())
 }
 
-// CursorPosition returns the screen position for the cursor.
+// StatusColumn returns the 1-based display column of the cursor for status
+// reporting. Buffer columns are byte offsets, so multibyte characters and
+// tab expansion must be converted before the number is shown to the user.
+func (e Editor) StatusColumn() int {
+	lineContent := e.Buffer.Line(e.Buffer.Cursor.Line)
+	col := e.Buffer.Cursor.Col
+	if col > len(lineContent) {
+		col = len(lineContent)
+	}
+	return displayColumn(lineContent, col, e.Viewport.tabSize()) + 1
+}
+
+// CursorPosition returns the screen position of the cursor within the editor
+// view. While the find widget is open it occupies the first view row, so all
+// text rows shift down by one.
 func (e Editor) CursorPosition() (int, int) {
+	x, y := e.cursorPositionInText()
+	if e.find.Visible() {
+		y++
+	}
+	return x, y
+}
+
+func (e Editor) cursorPositionInText() (int, int) {
 	gw := e.effectiveGutterWidth()
 	lineContent := e.Buffer.Line(e.Buffer.Cursor.Line)
 	col := e.Buffer.Cursor.Col
@@ -1348,17 +1404,18 @@ func (e *Editor) EnsureCursorVisible() {
 		return
 	}
 
+	margin := clampScrollMargin(e.Config.ScrollMargin, e.Viewport.Height)
 	textWidth := e.currentGutterMetrics().textWidth(e.Viewport.Width)
 	if e.Wrap != nil && e.Config.WordWrap {
 		e.Viewport.ScrollX = 0
 		line := e.Buffer.Line(e.Buffer.Cursor.Line)
 		wrapRow, _ := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
 		cursorVisualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow
-		if cursorVisualRow < e.Viewport.WrapScrollY {
-			e.Viewport.WrapScrollY = cursorVisualRow
+		if cursorVisualRow < e.Viewport.WrapScrollY+margin {
+			e.Viewport.WrapScrollY = max(0, cursorVisualRow-margin)
 		}
-		if cursorVisualRow >= e.Viewport.WrapScrollY+max(1, e.Viewport.Height) {
-			e.Viewport.WrapScrollY = cursorVisualRow - max(1, e.Viewport.Height) + 1
+		if cursorVisualRow >= e.Viewport.WrapScrollY+max(1, e.Viewport.Height)-margin {
+			e.Viewport.WrapScrollY = max(0, cursorVisualRow-max(1, e.Viewport.Height)+margin+1)
 		}
 		e.Viewport.wrapScrollY(e.Wrap)
 		return
@@ -1370,7 +1427,7 @@ func (e *Editor) EnsureCursorVisible() {
 	if e.Folds.HasCollapsedRegions() {
 		folds = &e.Folds
 	}
-	e.Viewport.ensureCursorVisibleWithFolds(e.Buffer, e.Buffer.Cursor, textWidth, folds)
+	e.Viewport.ensureCursorVisibleWithFolds(e.Buffer, e.Buffer.Cursor, textWidth, folds, margin)
 }
 
 // ShowAutocomplete displays completion items.
@@ -1462,7 +1519,9 @@ func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
 	if item.HasEdit && e.completionEditIsApplicable(item.Edit) {
 		start := text.Position{Line: item.Edit.StartLine, Col: item.Edit.StartCol}
 		end := text.Position{Line: item.Edit.EndLine, Col: item.Edit.EndCol}
+		startOffset := e.Buffer.Rope().PositionToOffset(start)
 		e.Buffer.ReplaceRange(start, end, []byte(item.InsertText))
+		e.Buffer.SetCursor(e.Buffer.Rope().OffsetToPosition(startOffset + len(item.InsertText)))
 	} else {
 		e.Buffer.InsertAtCursor([]byte(item.InsertText))
 	}
@@ -1527,7 +1586,7 @@ func (e *Editor) UpdateFind(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	e.find, cmd = e.find.Update(msg, e.Buffer)
 	if m := e.find.CurrentMatchPosition(); m != nil {
-		e.Buffer.Cursor = m.Start
+		e.Buffer.SetCursor(m.Start)
 		e.EnsureCursorVisible()
 	}
 	return cmd

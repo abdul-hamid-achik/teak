@@ -45,6 +45,40 @@ func newViewTestModel(t *testing.T, showTree bool) Model {
 	return m
 }
 
+func TestFindWidgetDoesNotClipStatusBar(t *testing.T) {
+	m := newViewTestModel(t, false)
+	baseEditorHeight := m.activeEditor().Viewport.Height
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+	m = updated.(Model)
+	if ed := m.activeEditor(); ed == nil || !ed.IsFindVisible() {
+		t.Fatal("ctrl+f did not open the find widget")
+	}
+
+	v := m.View()
+	lines := strings.Split(v.Content, "\n")
+	if len(lines) != m.height {
+		t.Fatalf("view = %d lines with the find widget open, want exactly %d (the status bar must not be clipped)", len(lines), m.height)
+	}
+	if got := m.activeEditor().Viewport.Height; got != baseEditorHeight-1 {
+		t.Fatalf("editor viewport height with find open = %d, want %d", got, baseEditorHeight-1)
+	}
+
+	// Closing the widget restores the full text area.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(Model)
+	if ed := m.activeEditor(); ed.IsFindVisible() {
+		t.Fatal("escape did not close the find widget")
+	}
+	if got := m.activeEditor().Viewport.Height; got != baseEditorHeight {
+		t.Fatalf("editor viewport height after closing find = %d, want %d", got, baseEditorHeight)
+	}
+	v = m.View()
+	if lines = strings.Split(v.Content, "\n"); len(lines) != m.height {
+		t.Fatalf("view = %d lines after closing find, want %d", len(lines), m.height)
+	}
+}
+
 func TestModelViewZeroSize(t *testing.T) {
 	v := (Model{}).View()
 

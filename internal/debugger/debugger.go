@@ -5,9 +5,30 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/dap"
 	"teak/internal/ui"
 )
+
+// DebugControl identifies a clickable debugger control button.
+type DebugControl string
+
+const (
+	DebugStart   DebugControl = "start"
+	DebugContinue DebugControl = "continue"
+	DebugNext     DebugControl = "next"
+	DebugStepIn   DebugControl = "stepin"
+	DebugStepOut  DebugControl = "stepout"
+	DebugStop     DebugControl = "stop"
+)
+
+func controlZoneID(c DebugControl) string {
+	return "debug-ctl-" + string(c)
+}
+
+func breakpointZoneID(idx int) string {
+	return fmt.Sprintf("debug-bp-%d", idx)
+}
 
 // JumpToFrameMsg is emitted when the user clicks a stack frame.
 type JumpToFrameMsg struct {
@@ -230,7 +251,7 @@ func (m *Model) renderInactive() string {
 	sb.WriteString(m.theme.Gutter.Render("  No active debug session"))
 	sb.WriteString("\n\n")
 
-	sb.WriteString(m.theme.GitActionButton.Render(" ▶ Start Debugging (F5) "))
+	sb.WriteString(zone.Mark(controlZoneID(DebugStart), m.theme.GitActionButton.Render(" ▶ Start Debugging (F5) ")))
 	sb.WriteString("\n\n")
 
 	sb.WriteString(m.theme.Gutter.Render("  Press F5 or use Command Palette"))
@@ -252,20 +273,53 @@ func (m *Model) renderControls() string {
 	}
 
 	controls := []string{
-		m.renderControlButton("▶", "Continue", "c"),
-		m.renderControlButton("⏭", "Next", "n"),
-		m.renderControlButton("⤵", "Step In", "i"),
-		m.renderControlButton("⤴", "Step Out", "o"),
-		m.renderControlButton("⏹", "Stop", "q"),
+		m.renderControlButton("▶", "Continue", "c", DebugContinue),
+		m.renderControlButton("⏭", "Next", "n", DebugNext),
+		m.renderControlButton("⤵", "Step In", "i", DebugStepIn),
+		m.renderControlButton("⤴", "Step Out", "o", DebugStepOut),
+		m.renderControlButton("⏹", "Stop", "q", DebugStop),
 	}
 
 	return strings.Join(controls, " ")
 }
 
-// renderControlButton renders a single control button.
-func (m *Model) renderControlButton(icon, label, shortcut string) string {
+// renderControlButton renders a single control button wrapped in a mouse zone.
+func (m *Model) renderControlButton(icon, label, shortcut string, control DebugControl) string {
 	style := m.theme.GitActionButton
-	return style.Render(fmt.Sprintf("%s %s", icon, shortcut))
+	return zone.Mark(controlZoneID(control), style.Render(fmt.Sprintf("%s %s", icon, shortcut)))
+}
+
+// ClickedControl reports which control a left click hit, if any. The message
+// coordinates must be in the frame space the panel was rendered into.
+func (m *Model) ClickedControl(msg tea.MouseClickMsg) (DebugControl, bool) {
+	if msg.Mouse().Button != tea.MouseLeft {
+		return "", false
+	}
+	for _, c := range []DebugControl{DebugStart, DebugContinue, DebugNext, DebugStepIn, DebugStepOut, DebugStop} {
+		if zone.Get(controlZoneID(c)).InBounds(msg) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// Breakpoints returns the panel's breakpoint list.
+func (m *Model) Breakpoints() []Breakpoint {
+	return m.breakpoints
+}
+
+// ClickedBreakpoint reports the index of the breakpoint row a left click hit,
+// or -1 when none matched.
+func (m *Model) ClickedBreakpoint(msg tea.MouseClickMsg) int {
+	if msg.Mouse().Button != tea.MouseLeft {
+		return -1
+	}
+	for i := range m.breakpoints {
+		if zone.Get(breakpointZoneID(i)).InBounds(msg) {
+			return i
+		}
+	}
+	return -1
 }
 
 // renderStackTrace renders the call stack.
@@ -393,7 +447,7 @@ func (m *Model) BreakpointView() string {
 	sb.WriteString(m.theme.GitSectionHeader.Render("Breakpoints"))
 	sb.WriteString("\n")
 
-	for _, bp := range m.breakpoints {
+	for i, bp := range m.breakpoints {
 		icon := "○"
 		if bp.Verified {
 			icon = "●"
@@ -409,7 +463,7 @@ func (m *Model) BreakpointView() string {
 		}
 
 		line := fmt.Sprintf("  %s %s:%d", status, path, bp.Line+1) // display as 1-based
-		sb.WriteString(m.theme.TreeEntry.Render(line))
+		sb.WriteString(zone.Mark(breakpointZoneID(i), m.theme.TreeEntry.Render(line)))
 		sb.WriteString("\n")
 	}
 

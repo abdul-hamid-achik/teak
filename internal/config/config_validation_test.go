@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,22 @@ func TestValidateTheme(t *testing.T) {
 		if !hasErr && !isValid && tt.theme != "" {
 			t.Errorf("Theme=%q: expected error for unknown theme", tt.theme)
 		}
+	}
+}
+
+func TestValidateAgentSandbox(t *testing.T) {
+	for _, mode := range []string{"", "off", "auto", "required"} {
+		cfg := DefaultConfig()
+		cfg.Agent.Sandbox = mode
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("sandbox mode %q rejected: %v", mode, err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.Agent.Sandbox = "unsafe"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "agent.sandbox") {
+		t.Fatalf("invalid sandbox mode error = %v, want agent.sandbox validation", err)
 	}
 }
 
@@ -372,6 +389,7 @@ func TestConfigRejectsUnsafeTimerAndProcessConfiguration(t *testing.T) {
 		return LSPConfig{
 			Extensions: []string{extension},
 			Command:    "test-lsp",
+			LanguageID: "test",
 		}
 	}
 
@@ -407,7 +425,7 @@ func TestConfigRejectsUnsafeTimerAndProcessConfiguration(t *testing.T) {
 				for i := range extensions {
 					extensions[i] = ".x" + string(rune('a'+i%26))
 				}
-				cfg.LSP = []LSPConfig{{Extensions: extensions, Command: "test-lsp"}}
+				cfg.LSP = []LSPConfig{{Extensions: extensions, Command: "test-lsp", LanguageID: "test"}}
 			},
 			wantErr: "extensions exceeds",
 		},
@@ -437,11 +455,33 @@ func TestConfigRejectsUnsafeTimerAndProcessConfiguration(t *testing.T) {
 					cfg.LSP[i] = LSPConfig{
 						Extensions: []string{".lang" + string(rune('a'+i))},
 						Command:    "test-lsp",
+						LanguageID: "test",
 						Args:       args,
 					}
 				}
 			},
 			wantErr: "total lsp args",
+		},
+		{
+			name: "language server environment names cannot contain separators",
+			mutate: func(cfg *Config) {
+				server := validLSP(".env")
+				server.Env = map[string]string{"BAD=NAME": "1"}
+				cfg.LSP = []LSPConfig{server}
+			},
+			wantErr: "lsp[0].env",
+		},
+		{
+			name: "language server environment count is bounded",
+			mutate: func(cfg *Config) {
+				server := validLSP(".env")
+				server.Env = make(map[string]string, maxLSPEnvEntries+1)
+				for i := 0; i < maxLSPEnvEntries+1; i++ {
+					server.Env[fmt.Sprintf("TEAK_ENV_%d", i)] = "1"
+				}
+				cfg.LSP = []LSPConfig{server}
+			},
+			wantErr: "env exceeds",
 		},
 		{
 			name: "aggregate string data is bounded before config encoding",
@@ -504,9 +544,23 @@ func TestConfigLSPValidation(t *testing.T) {
 					{
 						Extensions: []string{".go"},
 						Command:    "gopls",
+						LanguageID: "go",
 					},
 				},
 			},
+		},
+		{
+			name: "LSP with empty language id",
+			cfg: Config{
+				Editor: EditorConfig{TabSize: 4},
+				LSP: []LSPConfig{
+					{
+						Extensions: []string{".go"},
+						Command:    "gopls",
+					},
+				},
+			},
+			wantErr: true,
 		},
 		{
 			name: "LSP with no extensions",
@@ -571,6 +625,32 @@ func TestConfigValidateAllFields(t *testing.T) {
 	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("Validate() returned error: %v", err)
+	}
+}
+
+func TestToolOverrideValidation(t *testing.T) {
+	valid := DefaultConfig()
+	valid.Tools = map[string]string{
+		"codemap": "/opt/teak/bin/codemap",
+		"gopls":   "/opt/teak/bin/gopls",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid tool overrides rejected: %v", err)
+	}
+
+	for name, tools := range map[string]map[string]string{
+		"empty tool name":     {"": "/opt/codemap"},
+		"path-like tool name": {"../codemap": "/opt/codemap"},
+		"empty path":          {"codemap": "   "},
+		"nul path":            {"codemap": "/opt/codemap\x00fixture"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Tools = tools
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("tool override validation succeeded, want error")
+			}
+		})
 	}
 }
 

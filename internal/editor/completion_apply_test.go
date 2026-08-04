@@ -36,6 +36,9 @@ func TestApplyCompletionReplacesTypedPrefix(t *testing.T) {
 	if got, want := string(e.Buffer.Line(0)), "fmt"; got != want {
 		t.Errorf("line = %q, want %q", got, want)
 	}
+	if got, want := e.Buffer.Cursor, (text.Position{Line: 0, Col: 3}); got != want {
+		t.Errorf("cursor = %v, want %v after accepting completion", got, want)
+	}
 }
 
 func TestApplyCompletionWithoutEditInsertsAtCursor(t *testing.T) {

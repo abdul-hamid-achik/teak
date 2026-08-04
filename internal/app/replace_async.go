@@ -1,12 +1,14 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"regexp"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/editor"
+	"teak/internal/search"
 	"teak/internal/text"
 )
 
@@ -24,6 +26,7 @@ type replacePreparation struct {
 	Query       string
 	Replacement string
 	All         bool
+	Opts        search.SearchOpts
 }
 
 type replacePreparedMsg struct {
@@ -35,7 +38,7 @@ type replacePreparedMsg struct {
 	Err         error
 }
 
-func (m *Model) startSearchReplace(query, replacement string, all bool) tea.Cmd {
+func (m *Model) startSearchReplace(query, replacement string, all bool, opts search.SearchOpts) tea.Cmd {
 	ed := m.activeEditor()
 	if ed == nil || ed.Buffer == nil || query == "" {
 		return nil
@@ -59,6 +62,7 @@ func (m *Model) startSearchReplace(query, replacement string, all bool) tea.Cmd 
 		Query:       query,
 		Replacement: replacement,
 		All:         all,
+		Opts:        opts,
 	}
 	return prepareReplaceCmd(ctx, preparation)
 }
@@ -72,14 +76,23 @@ func prepareReplaceCmd(ctx context.Context, preparation replacePreparation) tea.
 		if err := ctx.Err(); err != nil {
 			return replacePreparedMsg{Preparation: preparation, Err: err}
 		}
+		pattern, err := search.CompilePattern(preparation.Query, preparation.Opts)
+		if err != nil {
+			return replacePreparedMsg{Preparation: preparation, Err: err}
+		}
+		content := string(data)
 
 		if preparation.All {
 			cursorOffset := preparation.Source.PositionToOffset(preparation.Cursor)
-			replaced, mappedCursor, matches, ok := boundedReplaceAllAtOffset(
-				string(data),
-				preparation.Query,
-				preparation.Replacement,
-				cursorOffset,
+			replacement := preparation.Replacement
+			if !preparation.Opts.Regex {
+				// regexp.ExpandString interprets $-references. Escape them for
+				// literal replacement mode so replacing text with "$1" remains
+				// literal, while regex mode retains capture expansion.
+				replacement = strings.ReplaceAll(replacement, "$", "$$")
+			}
+			replaced, mappedCursor, matches, ok := boundedReplaceAllRegexAtOffset(
+				content, pattern, replacement, cursorOffset,
 			)
 			if !ok {
 				return replacePreparedMsg{Preparation: preparation, Matches: matches, LimitHit: true}
@@ -97,23 +110,33 @@ func prepareReplaceCmd(ctx context.Context, preparation replacePreparation) tea.
 			}
 		}
 
-		query := []byte(preparation.Query)
 		cursorOffset := preparation.Source.PositionToOffset(preparation.Cursor)
-		matchOffset := bytes.Index(data[cursorOffset:], query)
-		if matchOffset < 0 {
-			matchOffset = bytes.Index(data[:cursorOffset], query)
-			if matchOffset < 0 {
+		cursorOffset = min(max(0, cursorOffset), len(content))
+		match := pattern.FindStringSubmatchIndex(content[cursorOffset:])
+		if match == nil {
+			match = pattern.FindStringSubmatchIndex(content[:cursorOffset])
+			if match == nil {
 				return replacePreparedMsg{Preparation: preparation}
 			}
 		} else {
-			matchOffset += cursorOffset
+			for index := range match {
+				if match[index] >= 0 {
+					match[index] += cursorOffset
+				}
+			}
+		}
+		matchOffset := match[0]
+		matchEnd := match[1]
+		replacement := preparation.Replacement
+		if preparation.Opts.Regex {
+			replacement = string(pattern.ExpandString(nil, replacement, content, match))
 		}
 		if err := ctx.Err(); err != nil {
 			return replacePreparedMsg{Preparation: preparation, Err: err}
 		}
-		result := preparation.Source.Delete(matchOffset, len(query)).
-			Insert(matchOffset, []byte(preparation.Replacement))
-		cursor := result.OffsetToPosition(matchOffset + len(preparation.Replacement))
+		result := preparation.Source.Delete(matchOffset, matchEnd-matchOffset).
+			Insert(matchOffset, []byte(replacement))
+		cursor := result.OffsetToPosition(matchOffset + len(replacement))
 		return replacePreparedMsg{
 			Preparation: preparation,
 			Result:      result,
@@ -121,6 +144,59 @@ func prepareReplaceCmd(ctx context.Context, preparation replacePreparation) tea.
 			Matches:     1,
 		}
 	}
+}
+
+// boundedReplaceAllRegexAtOffset replaces at most maxReplaceAllMatches
+// non-overlapping regexp matches and caps the resulting document before it is
+// materialized. It also maps an original byte offset through replacements so
+// the editor can restore the cursor after an asynchronous edit.
+func boundedReplaceAllRegexAtOffset(content string, pattern *regexp.Regexp, replacement string, originalOffset int) (result string, mappedOffset, matches int, ok bool) {
+	if pattern == nil {
+		return "", 0, 0, false
+	}
+	originalOffset = min(max(0, originalOffset), len(content))
+	locations := pattern.FindAllStringSubmatchIndex(content, maxReplaceAllMatches+1)
+	matches = len(locations)
+	if matches > maxReplaceAllMatches {
+		return "", 0, matches, false
+	}
+
+	var builder strings.Builder
+	last := 0
+	mapped := false
+	for _, location := range locations {
+		if len(location) < 2 {
+			continue
+		}
+		start, end := location[0], location[1]
+		expanded := pattern.ExpandString(nil, replacement, content, location)
+		pending := start - last + len(expanded)
+		if pending > maxReplaceResultBytes || builder.Len() > maxReplaceResultBytes-pending {
+			return "", 0, matches, false
+		}
+		beforeMatch := builder.Len() + start - last
+		if !mapped {
+			switch {
+			case originalOffset <= start:
+				mappedOffset = builder.Len() + originalOffset - last
+				mapped = true
+			case originalOffset < end:
+				mappedOffset = beforeMatch + min(originalOffset-start, len(expanded))
+				mapped = true
+			}
+		}
+		builder.WriteString(content[last:start])
+		_, _ = builder.Write(expanded)
+		last = end
+	}
+	if builder.Len() > maxReplaceResultBytes-len(content[last:]) {
+		return "", 0, matches, false
+	}
+	builder.WriteString(content[last:])
+	if !mapped {
+		mappedOffset = builder.Len() - (len(content) - originalOffset)
+	}
+	return builder.String(), mappedOffset, matches, true
 }
 
 func (m Model) handleReplacePrepared(msg replacePreparedMsg) (tea.Model, tea.Cmd) {

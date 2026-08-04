@@ -31,18 +31,29 @@ func (v *Viewport) EnsureCursorVisible(cursor text.Position, lineCount int) {
 }
 
 func (v *Viewport) ensureCursorVisible(buf *text.Buffer, cursor text.Position, textWidth int) {
-	v.ensureCursorVisibleWithFolds(buf, cursor, textWidth, nil)
+	v.ensureCursorVisibleWithFolds(buf, cursor, textWidth, nil, 0)
+}
+
+// clampScrollMargin confines a configured margin so it can never consume the
+// whole viewport: at most half the height minus one row.
+func clampScrollMargin(margin, height int) int {
+	if margin < 0 {
+		return 0
+	}
+	return min(margin, max(0, height/2-1))
 }
 
 // ensureCursorVisibleWithFolds scrolls the cursor into view. When folds is
 // non-nil, ScrollY counts visual rows rather than buffer lines, so the cursor's
-// buffer line must be converted before it is compared or assigned.
+// buffer line must be converted before it is compared or assigned. Margin
+// keeps the cursor at least that many rows from the viewport edges.
 //
 // Comparing a buffer line against a fold-aware ScrollY made the two disagree by
 // however many lines were hidden: after collapsing a region, one arrow key
 // pushed ScrollY far past the end of the collapsed document and the viewport
 // rendered blank, with no way back except scrolling manually.
-func (v *Viewport) ensureCursorVisibleWithFolds(buf *text.Buffer, cursor text.Position, textWidth int, folds *FoldState) {
+func (v *Viewport) ensureCursorVisibleWithFolds(buf *text.Buffer, cursor text.Position, textWidth int, folds *FoldState, margin int) {
+	margin = clampScrollMargin(margin, v.Height)
 	scrollLine := cursor.Line
 	maxScroll := -1
 	if folds != nil {
@@ -51,11 +62,11 @@ func (v *Viewport) ensureCursorVisibleWithFolds(buf *text.Buffer, cursor text.Po
 		maxScroll = max(folds.TotalVisibleLines(totalLines)-v.Height, 0)
 	}
 
-	if scrollLine < v.ScrollY {
-		v.ScrollY = scrollLine
+	if scrollLine < v.ScrollY+margin {
+		v.ScrollY = scrollLine - margin
 	}
-	if scrollLine >= v.ScrollY+v.Height {
-		v.ScrollY = scrollLine - v.Height + 1
+	if scrollLine >= v.ScrollY+v.Height-margin {
+		v.ScrollY = scrollLine - v.Height + margin + 1
 	}
 	if maxScroll >= 0 && v.ScrollY > maxScroll {
 		v.ScrollY = maxScroll

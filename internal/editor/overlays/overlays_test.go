@@ -1,9 +1,11 @@
 package overlays
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -111,6 +113,34 @@ func TestAutocompleteMoveDown(t *testing.T) {
 	ac.MoveDown()
 	if ac.Cursor != 2 {
 		t.Errorf("expected Cursor 2, got %d", ac.Cursor)
+	}
+}
+
+func TestAutocompleteScrollsToKeepSelectedItemVisible(t *testing.T) {
+	ac := NewAutocomplete(ui.DefaultTheme())
+	items := make([]AutocompleteItem, 20)
+	for i := range items {
+		items[i] = AutocompleteItem{Label: fmt.Sprintf("item-%02d", i), InsertText: "x"}
+	}
+	ac.Show(items)
+	for i := 0; i < 15; i++ {
+		ac.MoveDown()
+	}
+
+	if got, want := ac.visibleStart(), 6; got != want {
+		t.Fatalf("visibleStart() = %d, want %d", got, want)
+	}
+	view := ansi.Strip(ac.View())
+	if !strings.Contains(view, "item-15") {
+		t.Fatalf("selected item is missing from popup: %q", view)
+	}
+	if strings.Contains(view, "item-00") {
+		t.Fatalf("popup still renders items before visible window: %q", view)
+	}
+
+	selected := ac.SelectAt(0)
+	if selected == nil || selected.Label != "item-06" {
+		t.Fatalf("SelectAt(0) = %#v, want item-06 at visible window start", selected)
 	}
 }
 
@@ -558,6 +588,36 @@ func TestSignatureHelpViewActiveParameter(t *testing.T) {
 	view := s.View()
 	if view == "" {
 		t.Error("expected non-empty view")
+	}
+}
+
+func TestSignatureHelpViewNegativeActiveParameterDoesNotPanic(t *testing.T) {
+	s := NewSignatureHelp(ui.DefaultTheme())
+	s.Show(&SignatureData{
+		Signatures: []SignatureInfo{{
+			Label:      "f(a)",
+			Parameters: []ParameterInfo{{Label: "a"}},
+		}},
+		ActiveParameter: -1,
+	})
+
+	if got := s.View(); got == "" {
+		t.Fatal("expected visible signature help")
+	}
+}
+
+func TestSignatureHelpUpdateActiveParameterClampsToActiveSignature(t *testing.T) {
+	s := NewSignatureHelp(ui.DefaultTheme())
+	s.Show(&SignatureData{
+		Signatures: []SignatureInfo{{
+			Label:      "f(a)",
+			Parameters: []ParameterInfo{{Label: "a"}},
+		}},
+	})
+
+	s.UpdateActiveParameter(-1)
+	if got := s.Help.ActiveParameter; got != 0 {
+		t.Fatalf("negative parameter index was not clamped: got %d", got)
 	}
 }
 

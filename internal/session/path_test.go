@@ -64,6 +64,47 @@ func TestPathForRootIsPerWorkspaceUnderSessions(t *testing.T) {
 	}
 }
 
+func TestPathForRootCanonicalizesSymlinkAliases(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	realRoot := filepath.Join(stateHome, "project")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(stateHome, "project-link")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if realPath, aliasPath := PathForRoot(realRoot), PathForRoot(alias); realPath != aliasPath {
+		t.Fatalf("PathForRoot(real) = %q, alias = %q; want one durable workspace identity", realPath, aliasPath)
+	}
+}
+
+func TestLoadContextForRootFallsBackToLegacyWorkspaceKey(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "project")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "project-link")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "state"))
+	state := State{Version: 1, RootDir: alias, ActiveTab: 0, Tabs: []TabState{{FilePath: "main.go"}}}
+	legacyPath := filepath.Join(StateHome(), "sessions", legacyRootKey(alias), "session.json")
+	if err := saveToPath(state, legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadContextForRoot(context.Background(), alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RootDir != alias || len(loaded.Tabs) != 1 {
+		t.Fatalf("LoadContextForRoot(real root) = %#v, want legacy session", loaded)
+	}
+}
+
 func TestSaveAndLoadArePerWorkspace(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", xdg)

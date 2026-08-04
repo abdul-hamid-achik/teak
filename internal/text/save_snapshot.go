@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -12,6 +13,10 @@ import (
 // write bit is clear. It is distinguished from other save failures so callers
 // can offer to override rather than only reporting the error.
 var ErrDestinationReadOnly = errors.New("destination is read-only")
+
+// ErrDestinationChanged reports that a conditional save observed a different
+// filesystem object than the one captured by its caller.
+var ErrDestinationChanged = errors.New("destination changed")
 
 // resolveSaveDestination follows a symbolic link to the file it points at, so a
 // save replaces the target rather than the link.
@@ -52,12 +57,38 @@ func resolveSaveDestination(path string) (string, error) {
 // state. Callers can therefore run it from an async command and reconcile the
 // saved snapshot on the UI goroutine when it completes.
 func WriteRopeAtomically(path string, rope *Rope) (retErr error) {
+	return writeRopeAtomically(path, nil, rope, LF)
+}
+
+// WriteRopeAtomicallyWithLineEnding persists a normalized LF rope while
+// restoring the document's original newline convention. Ropes always hold LF
+// content; writing a CRLF file back as LF would silently convert every user's
+// Windows-checked-out file on the first save.
+func WriteRopeAtomicallyWithLineEnding(path string, rope *Rope, ending LineEnding) (retErr error) {
+	return writeRopeAtomically(path, nil, rope, ending)
+}
+
+// WriteRopeAtomicallyIfUnchanged is the compare-and-swap variant used by
+// headless optimistic writes. It rechecks the destination identity immediately
+// before replacement and refuses to overwrite a destination that an external
+// process has already swapped out.
+func WriteRopeAtomicallyIfUnchanged(path string, expected os.FileInfo, rope *Rope) (retErr error) {
+	if expected == nil {
+		return fmt.Errorf("write rope atomically if unchanged: nil destination identity")
+	}
+	return writeRopeAtomically(path, expected, rope, LF)
+}
+
+func writeRopeAtomically(path string, expected os.FileInfo, rope *Rope, ending LineEnding) (retErr error) {
 	if rope == nil {
 		return fmt.Errorf("write rope atomically: nil rope")
 	}
 
 	path, err := resolveSaveDestination(path)
 	if err != nil {
+		return err
+	}
+	if err := ensureDestinationUnchanged(path, expected); err != nil {
 		return err
 	}
 
@@ -98,7 +129,11 @@ func WriteRopeAtomically(path string, rope *Rope) (retErr error) {
 		}
 	}
 	writer := bufio.NewWriterSize(tmp, 64<<10)
-	if _, err := rope.WriteTo(writer); err != nil {
+	var target io.Writer = writer
+	if ending == CRLF {
+		target = newCRLFWriter(writer)
+	}
+	if _, err := rope.WriteTo(target); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
@@ -113,6 +148,9 @@ func WriteRopeAtomically(path string, rope *Rope) (retErr error) {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
+	if err := ensureDestinationUnchanged(path, expected); err != nil {
+		return err
+	}
 	if err := replaceFileAtomically(tmpPath, path); err != nil {
 		return fmt.Errorf("rename temp file: %w", err)
 	}
@@ -123,6 +161,23 @@ func WriteRopeAtomically(path string, rope *Rope) (retErr error) {
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
+	}
+	return nil
+}
+
+func ensureDestinationUnchanged(path string, expected os.FileInfo) error {
+	if expected == nil {
+		return nil
+	}
+	current, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: destination disappeared", ErrDestinationChanged)
+		}
+		return fmt.Errorf("inspect destination identity: %w", err)
+	}
+	if !os.SameFile(expected, current) {
+		return fmt.Errorf("%w: destination was replaced", ErrDestinationChanged)
 	}
 	return nil
 }

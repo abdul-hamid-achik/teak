@@ -49,13 +49,27 @@ type FileChangedMsg struct {
 	Path        string
 	Data        []byte     // legacy input; converted by a background command
 	Snapshot    *text.Rope // prepared off Update by the production watcher
-	Observation uint64     // watcher order; zero is reserved for direct/test messages
-	NeedsRead   bool       // aggregate-budget fallback: re-read asynchronously
+	LineEnding  text.LineEnding
+	Observation uint64 // watcher order; zero is reserved for direct/test messages
+	NeedsRead   bool   // aggregate-budget fallback: re-read asynchronously
 	// RequiresConflict marks an unattributed watcher observation that began no
 	// later than a completed save. A watermark is ordering evidence, not proof
 	// that the event belongs to Teak's own bytes, so this observation must not
 	// be discarded or auto-reloaded into a now-clean buffer.
 	RequiresConflict bool
+	// OwnWriteCandidate marks a remove/rename observation that may be the first
+	// half of Teak's own atomic replacement. The model delays its re-read long
+	// enough for the replacement create event, then distinguishes matching
+	// saved bytes from a genuine external change.
+	OwnWriteCandidate bool
+	// OwnWriteSnapshot is the immutable snapshot recorded before the save. It
+	// stays in-process only and is used by the async re-read worker to compare
+	// bytes without materializing a document inside Update.
+	OwnWriteSnapshot *text.Rope
+	// OwnWriteVerified means the async re-read found exactly the bytes from the
+	// save snapshot. It lets the final apply boundary bypass the save watermark
+	// without weakening watermark handling for unattributed events.
+	OwnWriteVerified bool
 	// Missing reports that the watched path was removed or renamed. It is kept
 	// separate from NeedsRead so the UI can distinguish a failed re-read from a
 	// confirmed disappearance and choose the appropriate conflict workflow.
@@ -68,6 +82,11 @@ type TreeChangedMsg struct {
 }
 
 type watcherFileChangeWakeMsg struct{}
+
+// watcherLimitMsg tells the UI that the watch budget is exhausted. Past this
+// point external-change detection silently degrades for unwatched paths, so
+// the user needs a visible warning instead of a log line.
+type watcherLimitMsg struct{}
 
 type ownWriteExpectation struct {
 	snapshot *text.Rope
@@ -109,6 +128,7 @@ type fileWatcher struct {
 	pendingMu          sync.Mutex
 	pendingFileChanges map[string]FileChangedMsg
 	pendingChangeBytes int
+	debounceMu         sync.Mutex
 
 	// File contents are read on this dedicated worker, never on the fsnotify
 	// event reader.  A path has at most one queued read; a newer observation
@@ -541,6 +561,12 @@ func (fw *fileWatcher) reconcileFileWatches() {
 }
 
 func (fw *fileWatcher) pruneDebounceEntries(now time.Time) {
+	fw.debounceMu.Lock()
+	defer fw.debounceMu.Unlock()
+	fw.pruneDebounceEntriesLocked(now)
+}
+
+func (fw *fileWatcher) pruneDebounceEntriesLocked(now time.Time) {
 	for path, last := range fw.debounce {
 		if now.Sub(last) > debounceRetention {
 			delete(fw.debounce, path)
@@ -571,11 +597,14 @@ func (fw *fileWatcher) processEvent(event fsnotify.Event, now time.Time) {
 	if mutatesOpen {
 		observation := fw.observation.Add(1)
 		if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+			expected, ownWrite := fw.expectedOwnWrite(path, now)
 			fw.publish(FileChangedMsg{
-				Path:        path,
-				Observation: observation,
-				NeedsRead:   true,
-				Missing:     true,
+				Path:              path,
+				Observation:       observation,
+				Missing:           true,
+				NeedsRead:         true,
+				OwnWriteCandidate: ownWrite,
+				OwnWriteSnapshot:  expected,
 			})
 			// A direct file watch vanishes on atomic replacement. Drop it on the
 			// control worker and rescan the parent so a parent watch is installed
@@ -605,13 +634,15 @@ func (fw *fileWatcher) processEvent(event fsnotify.Event, now time.Time) {
 }
 
 func (fw *fileWatcher) publishDebouncedTreeChange(dir, key string, now time.Time) {
+	fw.debounceMu.Lock()
+	defer fw.debounceMu.Unlock()
 	if fw.debounce == nil {
 		fw.debounce = make(map[string]time.Time)
 	}
 	if last, ok := fw.debounce[key]; ok && now.Sub(last) < debounceWindow {
 		return
 	}
-	fw.pruneDebounceEntries(now)
+	fw.pruneDebounceEntriesLocked(now)
 	fw.debounce[key] = now
 	fw.publish(TreeChangedMsg{Dir: dir})
 }
@@ -727,12 +758,16 @@ func (fw *fileWatcher) fileReadLoop() {
 				})
 				continue
 			}
-			if fw.matchesExpectedOwnWrite(path, data, fw.clockNow()) {
+			// Compare against the LF-normalized bytes: buffer snapshots hold
+			// normalized content, so a CRLF file Teak just saved would
+			// otherwise register as an external change.
+			normalized, ending := text.NormalizeLineEndings(data)
+			if fw.matchesExpectedOwnWrite(path, normalized, fw.clockNow()) {
 				continue
 			}
 			// The worker owns data from readEditorFile until this message is
 			// published, so the immutable snapshot can take it directly.
-			fw.publish(FileChangedMsg{Path: path, Snapshot: text.NewOwned(data), Observation: observation})
+			fw.publish(FileChangedMsg{Path: path, Snapshot: text.NewOwned(normalized), LineEnding: ending, Observation: observation})
 		}
 	}
 }
@@ -894,6 +929,20 @@ func (fw *fileWatcher) matchesExpectedOwnWrite(path string, data []byte, now tim
 	return ok && expected.snapshot != nil && expected.snapshot.EqualBytes(data)
 }
 
+func (fw *fileWatcher) expectedOwnWrite(path string, now time.Time) (*text.Rope, bool) {
+	if fw == nil {
+		return nil, false
+	}
+	fw.ownWriteMu.Lock()
+	defer fw.ownWriteMu.Unlock()
+	fw.pruneOwnWritesLocked(now)
+	expected, ok := fw.ownWrites[filepath.Clean(path)]
+	if !ok || expected.snapshot == nil {
+		return nil, false
+	}
+	return expected.snapshot, true
+}
+
 func (fw *fileWatcher) pruneOwnWritesLocked(now time.Time) {
 	for path, expected := range fw.ownWrites {
 		if !expected.expires.After(now) {
@@ -982,8 +1031,11 @@ func (fw *fileWatcher) addWatch(path string) bool {
 		return false
 	}
 	if fw.maxWatches > 0 && len(fw.watched)+len(fw.watching) >= fw.maxWatches {
-		fw.markLimitReachedLocked()
+		firstHit := fw.markLimitReachedLocked()
 		fw.mu.Unlock()
+		if firstHit {
+			fw.publish(watcherLimitMsg{})
+		}
 		return false
 	}
 	fw.watching[clean] = struct{}{}
@@ -1006,8 +1058,11 @@ func (fw *fileWatcher) addWatch(path string) bool {
 			return false
 		}
 		if isWatchLimitError(err) {
-			fw.markLimitReachedLocked()
+			firstHit := fw.markLimitReachedLocked()
 			fw.mu.Unlock()
+			if firstHit {
+				fw.publish(watcherLimitMsg{})
+			}
 			return false
 		}
 		fw.mu.Unlock()
@@ -1055,12 +1110,16 @@ func (fw *fileWatcher) removeWatch(path string) {
 	}
 }
 
-func (fw *fileWatcher) markLimitReachedLocked() {
+// markLimitReachedLocked records that the watch budget is exhausted and
+// reports whether this call observed the transition, so callers can publish
+// exactly one UI notification per watcher.
+func (fw *fileWatcher) markLimitReachedLocked() bool {
 	if fw.limitReached {
-		return
+		return false
 	}
 	fw.limitReached = true
 	log.Warn("file watcher limit reached", "root", fw.rootDir, "limit", fw.maxWatches)
+	return true
 }
 
 func (fw *fileWatcher) isWatched(path string) bool {

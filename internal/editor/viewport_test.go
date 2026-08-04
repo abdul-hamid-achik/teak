@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"teak/internal/highlight"
 	"teak/internal/text"
@@ -310,6 +311,62 @@ func TestRenderTokenByteRangeWithIndexedStartsPreservesDeepStyle(t *testing.T) {
 	if want := bold.Render("XY"); got != want {
 		t.Fatalf("indexed token rendering = %q, want %q", got, want)
 	}
+}
+
+func TestStyleRenderPairForThemeRows(t *testing.T) {
+	for name, style := range map[string]lipgloss.Style{
+		"editor":      ui.DefaultTheme().Editor,
+		"cursor line": ui.DefaultTheme().CursorLine,
+	} {
+		_, _, ok := styleRenderPair(style)
+		if !ok {
+			t.Fatalf("styleRenderPair(%s) did not recognize a theme row style", name)
+		}
+	}
+}
+
+func TestWrappedTokenFastPathMatchesLegacyCells(t *testing.T) {
+	theme := ui.DefaultTheme()
+	hl := highlight.New("test.go", theme)
+	line := "func main() {\treturn \"value\" }"
+	buf := text.NewBufferFromBytes([]byte(line))
+	hl.Tokenize(buf.Bytes())
+	v := Viewport{TabSize: 4}
+	tokens := hl.Line(0)
+	starts := tokenByteStarts(tokens)
+
+	for _, isCursorLine := range []bool{false, true} {
+		name := "editor"
+		baseStyle := theme.Editor
+		if isCursorLine {
+			name = "cursor"
+			baseStyle = theme.CursorLine
+		}
+		t.Run(name, func(t *testing.T) {
+			basePair, backgroundPair := v.wrapStylePairFor(theme, isCursorLine)
+			got, gotDisplay := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(line, tokens, starts, 0, len(line), 0, baseStyle, 4, basePair, backgroundPair)
+			want, wantDisplay := renderTokenByteRangeWithTabsAtDisplayIndexedLegacy(line, tokens, starts, 0, len(line), 0, baseStyle, 4)
+			if gotDisplay != wantDisplay {
+				t.Fatalf("display end = %d, want %d", gotDisplay, wantDisplay)
+			}
+			gotCells := styledCells(got, gotDisplay)
+			wantCells := styledCells(want, wantDisplay)
+			if len(gotCells) != len(wantCells) {
+				t.Fatalf("cell count = %d, want %d\n got %q\nwant %q", len(gotCells), len(wantCells), got, want)
+			}
+			for i := range gotCells {
+				if !gotCells[i].Equal(&wantCells[i]) {
+					t.Fatalf("cell %d differs: got %#v, want %#v\n got %q\nwant %q", i, gotCells[i], wantCells[i], got, want)
+				}
+			}
+		})
+	}
+}
+
+func styledCells(rendered string, width int) []uv.Cell {
+	buffer := uv.NewScreenBuffer(width, 1)
+	uv.NewStyledString(rendered).Draw(buffer, uv.Rect(0, 0, width, 1))
+	return buffer.Lines[0]
 }
 
 func TestViewportCachesWrappedTokenStartsByBufferVersion(t *testing.T) {

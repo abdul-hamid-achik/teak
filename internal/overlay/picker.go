@@ -1,8 +1,11 @@
 package overlay
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -27,26 +30,59 @@ type PickerSelectMsg struct {
 // PickerCloseMsg is emitted when the user dismisses the picker.
 type PickerCloseMsg struct{}
 
+// PickerFilterReadyMsg contains a projection built from an immutable picker
+// item slice. ZoneID, query and generation prevent a slower result from
+// replacing a newer query or a different picker after the overlay changed.
+type PickerFilterReadyMsg struct {
+	InstanceID uint64
+	ZoneID     string
+	Generation uint64
+	Query      string
+	Matches    []PickerMatch
+	Err        error
+}
+
+// PickerItemsReadyMsg carries an item list prepared away from the Bubble Tea
+// update loop. The picker will schedule its query projection after installing
+// the immutable slice.
+type PickerItemsReadyMsg struct {
+	InstanceID uint64
+	ZoneID     string
+	Items      []PickerItem
+	Err        error
+}
+
+// PickerMatch is one item that matched the current picker query.
+type PickerMatch struct {
+	Item  PickerItem
+	Score int
+}
+
 // Picker is a fuzzy-filterable list overlay with a text input, scrollable
 // results, and keyboard/mouse navigation. It implements the Overlay interface.
 type Picker struct {
-	input     textinput.Model
-	items     []PickerItem
-	filtered  []scoredItem
-	cursor    int
-	scrollY   int
-	theme     ui.Theme
-	width     int
-	maxHeight int
-	dismissed bool
-	title     string
-	zoneID    string // unique prefix for mouse zones
+	input            textinput.Model
+	items            []PickerItem
+	filtered         []scoredItem
+	cursor           int
+	scrollY          int
+	theme            ui.Theme
+	width            int
+	maxHeight        int
+	dismissed        bool
+	title            string
+	zoneID           string // unique prefix for mouse zones
+	filterPending    bool
+	filterGeneration uint64
+	filterCancel     context.CancelFunc
+	instanceID       uint64
+	pendingSelect    bool
+	dismissAction    tea.Msg
 }
 
-type scoredItem struct {
-	item  PickerItem
-	score int
-}
+type scoredItem = PickerMatch
+
+var pickerInstanceSequence uint64
 
 // NewPicker creates a picker overlay.
 // zoneID should be unique per picker instance to avoid zone collisions.
@@ -56,13 +92,14 @@ func NewPicker(title string, items []PickerItem, theme ui.Theme, zoneID string) 
 	ti.CharLimit = 128
 
 	p := &Picker{
-		input:     ti,
-		items:     items,
-		theme:     theme,
-		width:     60,
-		maxHeight: 20,
-		title:     title,
-		zoneID:    zoneID,
+		input:      ti,
+		items:      items,
+		theme:      theme,
+		width:      60,
+		maxHeight:  20,
+		title:      title,
+		zoneID:     zoneID,
+		instanceID: atomic.AddUint64(&pickerInstanceSequence, 1),
 	}
 	p.refilter()
 	return p
@@ -82,8 +119,19 @@ func (p *Picker) SetSize(w, h int) {
 
 // SetItems replaces the item list and refilters.
 func (p *Picker) SetItems(items []PickerItem) {
+	p.cancelFilter()
+	p.pendingSelect = false
 	p.items = items
 	p.refilter()
+}
+
+// SetItemsAsync replaces the item list and builds the current query
+// projection in a cancellable command. It is intended for large result sets
+// arriving from filesystem scans or other background operations.
+func (p *Picker) SetItemsAsync(items []PickerItem) tea.Cmd {
+	p.cancelFilter()
+	p.items = items
+	return p.scheduleFilter()
 }
 
 // ZoneID identifies the picker instance for callers that need to route an
@@ -92,17 +140,39 @@ func (p *Picker) ZoneID() string {
 	return p.zoneID
 }
 
+// InstanceID identifies this concrete picker instance so a result from a
+// dismissed picker cannot populate a newer picker with the same zone.
+func (p *Picker) InstanceID() uint64 { return p.instanceID }
+
+// SetDismissAction supplies an optional message for Escape dismissal. It is
+// useful for asynchronous owners such as plugin selectors that must resume a
+// callback with an explicit cancellation result.
+func (p *Picker) SetDismissAction(action tea.Msg) { p.dismissAction = action }
+
+// DismissAction returns the message associated with Escape, if any.
+func (p *Picker) DismissAction() tea.Msg { return p.dismissAction }
+
 // Update implements Overlay.
 func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
+			p.cancelFilter()
+			p.pendingSelect = false
 			p.dismissed = true
+			if p.dismissAction != nil {
+				action := p.dismissAction
+				return p, func() tea.Msg { return action }
+			}
 			return p, func() tea.Msg { return PickerCloseMsg{} }
 		case "enter":
+			if p.filterPending {
+				p.pendingSelect = true
+				return p, nil
+			}
 			if len(p.filtered) > 0 && p.cursor < len(p.filtered) {
-				item := p.filtered[p.cursor].item
+				item := p.filtered[p.cursor].Item
 				p.dismissed = true
 				return p, func() tea.Msg { return PickerSelectMsg{Item: item} }
 			}
@@ -139,12 +209,15 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		if p.filterPending {
+			return p, nil
+		}
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
 			start, end := p.visibleRange()
 			for i := start; i < end; i++ {
 				if zone.Get(p.itemZoneID(i)).InBounds(msg) {
-					item := p.filtered[i].item
+					item := p.filtered[i].Item
 					p.dismissed = true
 					return p, func() tea.Msg { return PickerSelectMsg{Item: item} }
 				}
@@ -153,6 +226,9 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		return p, nil
 
 	case tea.MouseWheelMsg:
+		if p.filterPending {
+			return p, nil
+		}
 		mouse := msg.Mouse()
 		switch mouse.Button {
 		case tea.MouseWheelUp:
@@ -171,6 +247,16 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 			}
 		}
 		return p, nil
+	case PickerFilterReadyMsg:
+		return p, p.handleFilterReady(msg)
+	case PickerItemsReadyMsg:
+		if msg.InstanceID != p.instanceID || msg.ZoneID != p.zoneID {
+			return p, nil
+		}
+		if msg.Err != nil {
+			return p, nil
+		}
+		return p, p.SetItemsAsync(msg.Items)
 	}
 
 	// Forward to text input
@@ -178,7 +264,8 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	var cmd tea.Cmd
 	p.input, cmd = p.input.Update(msg)
 	if p.input.Value() != prevVal {
-		p.refilter()
+		p.pendingSelect = false
+		return p, tea.Batch(cmd, p.scheduleFilter())
 	}
 	return p, cmd
 }
@@ -222,11 +309,11 @@ func (p *Picker) View() string {
 
 	for i := startIdx; i < endIdx; i++ {
 		si := p.filtered[i]
-		label := truncStr(si.item.Label, contentWidth)
-		if si.item.Description != "" {
+		label := truncStr(si.Item.Label, contentWidth)
+		if si.Item.Description != "" {
 			descWidth := contentWidth - lipgloss.Width(label) - 2
 			if descWidth > 4 {
-				label += "  " + descStyle.Render(truncStr(si.item.Description, descWidth))
+				label += "  " + descStyle.Render(truncStr(si.Item.Description, descWidth))
 			}
 		}
 
@@ -239,7 +326,11 @@ func (p *Picker) View() string {
 		sb.WriteString(rendered)
 	}
 
-	if len(p.filtered) == 0 {
+	if p.filterPending {
+		sb.WriteByte('\n')
+		status := lipgloss.NewStyle().Foreground(ui.Nord3)
+		sb.WriteString(status.Render("  Filtering..."))
+	} else if len(p.filtered) == 0 {
 		sb.WriteByte('\n')
 		noMatch := lipgloss.NewStyle().Foreground(ui.Nord3)
 		sb.WriteString(noMatch.Render("  No matches"))
@@ -275,8 +366,15 @@ func (p *Picker) CapturesInput() bool {
 
 // FilteredCount returns the number of items after filtering.
 func (p *Picker) FilteredCount() int {
+	if p.filterPending {
+		return 0
+	}
 	return len(p.filtered)
 }
+
+// FilterPending reports whether the current query is waiting for an
+// asynchronous projection.
+func (p *Picker) FilterPending() bool { return p.filterPending }
 
 // Cursor returns the current cursor position.
 func (p *Picker) Cursor() int {
@@ -289,6 +387,7 @@ func (p *Picker) Query() string {
 }
 
 func (p *Picker) refilter() {
+	p.filterPending = false
 	query := p.input.Value()
 	// Keep the backing array between keystrokes. A project picker commonly
 	// contains tens of thousands of files, and dropping this slice used to
@@ -299,22 +398,119 @@ func (p *Picker) refilter() {
 
 	if query == "" {
 		for _, item := range p.items {
-			p.filtered = append(p.filtered, scoredItem{item: item, score: 0})
+			p.filtered = append(p.filtered, scoredItem{Item: item, Score: 0})
 		}
 	} else {
 		for _, item := range p.items {
 			score, matched := FuzzyMatch(query, item.Label)
 			if matched {
-				p.filtered = append(p.filtered, scoredItem{item: item, score: score})
+				p.filtered = append(p.filtered, scoredItem{Item: item, Score: score})
 			}
 		}
 		sort.Slice(p.filtered, func(i, j int) bool {
-			return p.filtered[i].score > p.filtered[j].score
+			return p.filtered[i].Score > p.filtered[j].Score
 		})
 	}
 
 	p.cursor = 0
 	p.scrollY = 0
+}
+
+func (p *Picker) scheduleFilter() tea.Cmd {
+	p.cancelFilter()
+	p.filterGeneration++
+	generation := p.filterGeneration
+	query := p.input.Value()
+	items := p.items
+	ctx, cancel := context.WithCancel(context.Background())
+	p.filterCancel = cancel
+	p.filterPending = true
+	p.cursor = 0
+	p.scrollY = 0
+	return func() tea.Msg {
+		matches, err := filterItemsContext(ctx, items, query)
+		return PickerFilterReadyMsg{
+			InstanceID: p.instanceID,
+			ZoneID:     p.zoneID,
+			Generation: generation,
+			Query:      query,
+			Matches:    matches,
+			Err:        err,
+		}
+	}
+}
+
+func (p *Picker) handleFilterReady(msg PickerFilterReadyMsg) tea.Cmd {
+	if !p.filterPending || msg.InstanceID != p.instanceID || msg.ZoneID != p.zoneID || msg.Generation != p.filterGeneration || msg.Query != p.input.Value() {
+		return nil
+	}
+	p.filterCancel = nil
+	p.filterPending = false
+	if msg.Err != nil {
+		if errors.Is(msg.Err, context.Canceled) {
+			return nil
+		}
+		p.filtered = nil
+		p.pendingSelect = false
+		return nil
+	}
+	p.filtered = msg.Matches
+	p.cursor = 0
+	p.scrollY = 0
+	if p.pendingSelect {
+		p.pendingSelect = false
+		if len(p.filtered) > 0 {
+			item := p.filtered[0].Item
+			p.dismissed = true
+			return func() tea.Msg { return PickerSelectMsg{Item: item} }
+		}
+	}
+	return nil
+}
+
+func (p *Picker) cancelFilter() {
+	if p.filterCancel != nil {
+		p.filterCancel()
+		p.filterCancel = nil
+	}
+	p.filterPending = false
+	p.filterGeneration++
+}
+
+func filterItemsContext(ctx context.Context, items []PickerItem, query string) ([]PickerMatch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	matches := make([]PickerMatch, 0, len(items))
+	if query == "" {
+		for i, item := range items {
+			if i%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			matches = append(matches, PickerMatch{Item: item})
+		}
+		return matches, ctx.Err()
+	}
+	for i, item := range items {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		score, matched := FuzzyMatch(query, item.Label)
+		if matched {
+			matches = append(matches, PickerMatch{Item: item, Score: score})
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Score > matches[j].Score
+	})
+	return matches, nil
 }
 
 func (p *Picker) visibleCount() int {
@@ -330,6 +526,9 @@ func (p *Picker) visibleCount() int {
 }
 
 func (p *Picker) visibleRange() (start, end int) {
+	if p.filterPending {
+		return 0, 0
+	}
 	start = max(0, min(p.scrollY, len(p.filtered)))
 	end = min(len(p.filtered), start+p.visibleCount())
 	return start, end

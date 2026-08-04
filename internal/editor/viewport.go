@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"image/color"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -49,12 +50,35 @@ type Viewport struct {
 	wrapTokenCacheCount   int
 	wrapTokenCacheStarts  []int
 
+	wrapStyleCacheValid bool
+	wrapStyleCacheTheme ui.Theme
+	wrapEditorPair      wrapStylePair
+	wrapCursorPair      wrapStylePair
+	wrapEditorBgPair    wrapStylePair
+	wrapCursorBgPair    wrapStylePair
+
 	bracketCacheRope    *text.Rope
 	bracketCacheVersion int
 	bracketCacheCursor  text.Position
 	bracketCachePos1    text.Position
 	bracketCachePos2    text.Position
 	bracketCacheFound   bool
+
+	// The rope intentionally returns a fresh slice for each Line call. Wrapped
+	// rendering may show many rows from one very long logical line, and the
+	// viewport is often rendered repeatedly without a buffer change. Retain
+	// only that one immutable line so a large line is not copied once per frame.
+	renderLineCacheRope    *text.Rope
+	renderLineCacheVersion int
+	renderLineCacheLine    int
+	renderLineCache        []byte
+	renderLineCacheContent string
+}
+
+type wrapStylePair struct {
+	prefix string
+	suffix string
+	valid  bool
 }
 
 // selectionByteRange is a half-open byte range within one buffer line.
@@ -107,6 +131,26 @@ func (v *Viewport) tabSize() int {
 	return normalizeTabSize(v.TabSize)
 }
 
+func (v *Viewport) wrapStylePairFor(theme ui.Theme, isCursorLine bool) (*wrapStylePair, *wrapStylePair) {
+	if !v.wrapStyleCacheValid || v.wrapStyleCacheTheme != theme {
+		v.wrapStyleCacheTheme = theme
+		v.wrapEditorPair = newWrapStylePair(theme.Editor)
+		v.wrapCursorPair = newWrapStylePair(theme.CursorLine)
+		v.wrapEditorBgPair = newWrapStylePair(lipgloss.NewStyle().Background(theme.Editor.GetBackground()))
+		v.wrapCursorBgPair = newWrapStylePair(lipgloss.NewStyle().Background(theme.CursorLine.GetBackground()))
+		v.wrapStyleCacheValid = true
+	}
+	if isCursorLine {
+		return &v.wrapCursorPair, &v.wrapCursorBgPair
+	}
+	return &v.wrapEditorPair, &v.wrapEditorBgPair
+}
+
+func newWrapStylePair(style lipgloss.Style) wrapStylePair {
+	prefix, suffix, valid := styleRenderPair(style)
+	return wrapStylePair{prefix: prefix, suffix: suffix, valid: valid}
+}
+
 func (v *Viewport) wrapScrollY(wrap *WrapLayout) int {
 	if wrap == nil {
 		return 0
@@ -135,13 +179,59 @@ func (v *Viewport) wrapTokenStarts(line, version int, tokens []highlight.StyledT
 	return v.wrapTokenCacheStarts
 }
 
+// renderLine returns an immutable rope line and reuses the last line fetched
+// for this viewport when the buffer identity is unchanged. Rope edits always
+// produce a new root, while version covers snapshot replacements that may be
+// represented by a different buffer state with the same logical line number.
+func (v *Viewport) renderLine(buf *text.Buffer, line int) []byte {
+	if buf == nil {
+		return nil
+	}
+	rope := buf.Rope()
+	version := buf.Version()
+	if v.renderLineCacheRope == rope &&
+		v.renderLineCacheVersion == version &&
+		v.renderLineCacheLine == line {
+		return v.renderLineCache
+	}
+	lineBytes := buf.Line(line)
+	v.renderLineCacheRope = rope
+	v.renderLineCacheVersion = version
+	v.renderLineCacheLine = line
+	v.renderLineCache = lineBytes
+	v.renderLineCacheContent = ""
+	return lineBytes
+}
+
+// renderLineContent is the string form used by token rendering. Keeping it
+// beside the byte slice avoids converting a long immutable rope line on every
+// frame after renderLine has already made the safe one-line cache hit.
+func (v *Viewport) renderLineContent(buf *text.Buffer, line int) ([]byte, string) {
+	lineBytes := v.renderLine(buf, line)
+	if v.renderLineCacheContent == "" && len(lineBytes) > 0 {
+		v.renderLineCacheContent = string(lineBytes)
+	}
+	return lineBytes, v.renderLineCacheContent
+}
+
 // Render renders the visible portion of the buffer with gutter, syntax highlighting, and diagnostics.
 func (v *Viewport) Render(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts) string {
-	return v.RenderWithFolds(buf, theme, hl, diagnostics, gutterOpts, nil)
+	return v.RenderWithFoldsHighlights(buf, theme, hl, diagnostics, gutterOpts, nil, nil)
+}
+
+// RenderHighlights renders a viewport with optional plugin highlight ranges.
+func (v *Viewport) RenderHighlights(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, pluginHighlights []HighlightRange) string {
+	return v.RenderWithFoldsHighlights(buf, theme, hl, diagnostics, gutterOpts, nil, pluginHighlights)
 }
 
 // RenderWithFolds renders the visible portion of the buffer with optional code folding.
 func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, folds *FoldState) string {
+	return v.RenderWithFoldsHighlights(buf, theme, hl, diagnostics, gutterOpts, folds, nil)
+}
+
+// RenderWithFoldsHighlights renders the visible portion of the buffer with
+// optional code folding and bounded plugin highlight ranges.
+func (v *Viewport) RenderWithFoldsHighlights(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, folds *FoldState, pluginHighlights []HighlightRange) string {
 	// Compute visible lines accounting for folds
 	var visibleLines []int
 	totalVisibleLines := buf.LineCount()
@@ -181,6 +271,7 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 	selectionIterator := newSelectionRangeIterator(buf.Selections)
 
 	var sb strings.Builder
+	sb.Grow(max(0, v.Height*(textWidth+v.GutterWidth+16)))
 	for i := range v.Height {
 		var line int
 		if len(visibleLines) > 0 && i < len(visibleLines) {
@@ -200,9 +291,9 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 		sb.WriteByte(' ') // padding between gutter and text
 		// text content
 		if line < buf.LineCount() {
-			lineBytes := buf.Line(line)
-			lineContent := string(lineBytes)
+			lineBytes, lineContent := v.renderLineContent(buf, line)
 			lineLen := len(lineBytes)
+			lineHighlights := pluginHighlightRangesForLine(pluginHighlights, line, lineLen)
 
 			// Check for ALL selections on this line
 			selectionRanges := selectionIterator.Ranges(line, lineLen)
@@ -216,12 +307,20 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 
 			if hasSelection {
 				sb.WriteString(v.renderLineWithMultipleSelectionsTabs(lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
-			} else if len(tokens) > 0 {
-				rendered := v.renderLineWithTokens(tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
+			} else if len(lineHighlights) > 0 {
+				rendered := v.renderLineWithHighlights(lineContent, tokens, lineHighlights, line == buf.Cursor.Line, textWidth, theme)
 				if hasBracketMatch {
 					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
 				}
 				sb.WriteString(rendered)
+			} else if len(tokens) > 0 {
+				if hasBracketMatch {
+					rendered := v.renderLineWithTokens(tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
+					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
+					sb.WriteString(rendered)
+				} else {
+					v.renderLineWithTokensInto(&sb, tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
+				}
 			} else {
 				// plain text rendering
 				displayed := applyScrollX(expandTabsForDisplay(lineBytes, v.tabSize()), v.ScrollX)
@@ -253,8 +352,90 @@ func (v *Viewport) RenderWithFolds(buf *text.Buffer, theme ui.Theme, hl *highlig
 	return sb.String()
 }
 
+func pluginHighlightRangesForLine(ranges []HighlightRange, line, lineLen int) []HighlightRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	var selected []HighlightRange
+	for _, highlight := range ranges {
+		if highlight.Line != line {
+			continue
+		}
+		start := max(0, min(highlight.StartCol, lineLen))
+		end := max(start, min(highlight.EndCol, lineLen))
+		if start >= end {
+			continue
+		}
+		highlight.StartCol = start
+		highlight.EndCol = end
+		selected = append(selected, highlight)
+	}
+	return selected
+}
+
+func inheritedPluginHighlightStyle(style, base lipgloss.Style) lipgloss.Style {
+	if _, noForeground := style.GetForeground().(lipgloss.NoColor); noForeground {
+		if foreground := base.GetForeground(); foreground != nil {
+			style = style.Foreground(foreground)
+		}
+	}
+	if _, noBackground := style.GetBackground().(lipgloss.NoColor); noBackground {
+		if background := base.GetBackground(); background != nil {
+			style = style.Background(background)
+		}
+	}
+	return style
+}
+
+func (v *Viewport) renderLineWithHighlights(lineContent string, tokens []highlight.StyledToken, ranges []HighlightRange, isCursorLine bool, textWidth int, theme ui.Theme) string {
+	baseStyle := theme.Editor
+	if isCursorLine {
+		baseStyle = theme.CursorLine
+	}
+	lineBytes := []byte(lineContent)
+	visibleStart := byteColumnAtDisplay(lineBytes, v.ScrollX, v.tabSize())
+	visibleEnd := byteColumnAtDisplay(lineBytes, v.ScrollX+textWidth, v.tabSize())
+	tokenStarts := tokenByteStarts(tokens)
+	var sb strings.Builder
+	pos := visibleStart
+	displayPos := displayColumn(lineBytes, visibleStart, v.tabSize())
+	for _, highlight := range ranges {
+		start := max(pos, min(highlight.StartCol, visibleEnd))
+		end := max(start, min(highlight.EndCol, visibleEnd))
+		if start >= end {
+			continue
+		}
+		if pos < start {
+			rendered, nextDisplay := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, start, displayPos, baseStyle, v.tabSize())
+			sb.WriteString(rendered)
+			displayPos = nextDisplay
+		}
+		style := inheritedPluginHighlightStyle(highlight.Style, baseStyle)
+		rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, start, end, displayPos, style, v.tabSize())
+		sb.WriteString(rendered)
+		displayPos = nextDisplay
+		pos = end
+	}
+	if pos < visibleEnd {
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, visibleEnd, displayPos, baseStyle, v.tabSize())
+		sb.WriteString(rendered)
+	}
+	truncated := ansi.Truncate(sb.String(), textWidth, "")
+	padLen := max(0, textWidth-ansi.StringWidth(truncated))
+	if padLen > 0 {
+		truncated += baseStyle.Render(getSpaces(padLen))
+	}
+	return truncated
+}
+
 // RenderWithWrap renders the viewport with word wrap enabled.
 func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, wrap *WrapLayout) string {
+	return v.RenderWithWrapHighlights(buf, theme, hl, diagnostics, gutterOpts, wrap, nil)
+}
+
+// RenderWithWrapHighlights renders word-wrapped content with optional plugin
+// highlight ranges.
+func (v *Viewport) RenderWithWrapHighlights(buf *text.Buffer, theme ui.Theme, hl *highlight.Highlighter, diagnostics []Diagnostic, gutterOpts *GutterOpts, wrap *WrapLayout, pluginHighlights []HighlightRange) string {
 	metrics := computeGutterMetrics(buf.LineCount(), gutterOpts, false)
 	v.GutterWidth = metrics.totalWidth()
 	baseWidth := metrics.lineNumberWidth
@@ -303,6 +484,7 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 	var lineContent string
 	var lineTokens []highlight.StyledToken
 	var lineTokenStarts []int
+	var lineHighlights []HighlightRange
 	selectionIterator := newSelectionRangeIterator(buf.Selections)
 	loadedSelectionLine := -1
 	var lineSelectionRanges []selectionByteRange
@@ -323,14 +505,14 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 			sb.WriteByte(' ')
 
 			if loadedLine != bufLine {
-				lineBytes = buf.Line(bufLine)
-				lineContent = string(lineBytes)
+				lineBytes, lineContent = v.renderLineContent(buf, bufLine)
 				lineTokens = nil
 				lineTokenStarts = nil
 				if hl != nil {
 					lineTokens = hl.Line(bufLine)
 					lineTokenStarts = v.wrapTokenStarts(bufLine, buf.Version(), lineTokens)
 				}
+				lineHighlights = pluginHighlightRangesForLine(pluginHighlights, bufLine, len(lineContent))
 				loadedLine = bufLine
 			}
 			if loadedSelectionLine != bufLine {
@@ -342,8 +524,13 @@ func (v *Viewport) RenderWithWrap(buf *text.Buffer, theme ui.Theme, hl *highligh
 				segmentStart, segmentEnd, segmentDisplayStart = 0, 0, 0
 			}
 
-			// Selections take precedence over syntax highlighting, matching regular rendering.
-			rendered := v.renderWrapSegmentWithSelections(theme, lineTokens, lineTokenStarts, bufLine == buf.Cursor.Line, lineContent, lineSelectionRanges, segmentStart, segmentEnd, segmentDisplayStart)
+			// Selections take precedence over plugin and syntax highlighting.
+			var rendered string
+			if len(lineSelectionRanges) > 0 {
+				rendered = v.renderWrapSegmentWithSelections(theme, lineTokens, lineTokenStarts, bufLine == buf.Cursor.Line, lineContent, lineSelectionRanges, segmentStart, segmentEnd, segmentDisplayStart)
+			} else {
+				rendered = v.renderWrapSegmentWithHighlights(theme, lineTokens, lineTokenStarts, bufLine == buf.Cursor.Line, lineContent, lineHighlights, segmentStart, segmentEnd, segmentDisplayStart)
+			}
 			rendered = ansi.Truncate(rendered, textWidth, "")
 			padLen := max(0, textWidth-ansi.StringWidth(rendered))
 
@@ -400,9 +587,13 @@ func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, tokens []high
 		baseStyle = theme.CursorLine
 		selectionStyle = theme.Selection
 	}
+	var basePair, backgroundPair *wrapStylePair
+	if len(tokens) > 0 {
+		basePair, backgroundPair = v.wrapStylePairFor(theme, isCursorLine)
+	}
 
 	if !hasOverlap {
-		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, segmentStart, segmentEnd, segmentDisplayStart, baseStyle, v.tabSize())
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, segmentStart, segmentEnd, segmentDisplayStart, baseStyle, v.tabSize(), basePair, backgroundPair)
 		return rendered
 	}
 
@@ -416,7 +607,7 @@ func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, tokens []high
 			continue
 		}
 		if pos < start {
-			rendered, nextDisplay := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, start, displayPos, baseStyle, v.tabSize())
+			rendered, nextDisplay := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, pos, start, displayPos, baseStyle, v.tabSize(), basePair, backgroundPair)
 			sb.WriteString(rendered)
 			displayPos = nextDisplay
 		}
@@ -426,7 +617,50 @@ func (v *Viewport) renderWrapSegmentWithSelections(theme ui.Theme, tokens []high
 		pos = end
 	}
 	if pos < segmentEnd {
-		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent, tokens, tokenStarts, pos, segmentEnd, displayPos, baseStyle, v.tabSize())
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, pos, segmentEnd, displayPos, baseStyle, v.tabSize(), basePair, backgroundPair)
+		sb.WriteString(rendered)
+	}
+	return sb.String()
+}
+
+func (v *Viewport) renderWrapSegmentWithHighlights(theme ui.Theme, tokens []highlight.StyledToken, tokenStarts []int, isCursorLine bool, lineContent string, ranges []HighlightRange, segmentStart, segmentEnd, segmentDisplayStart int) string {
+	baseStyle := theme.Editor
+	if isCursorLine {
+		baseStyle = theme.CursorLine
+	}
+	var basePair, backgroundPair *wrapStylePair
+	if len(tokens) > 0 {
+		// Reuse the same stable SGR pairs as the selection path. Rebuilding
+		// them for every wrapped row calls lipgloss several times per frame,
+		// even though the theme and cursor-line state have not changed.
+		basePair, backgroundPair = v.wrapStylePairFor(theme, isCursorLine)
+	}
+	if len(ranges) == 0 {
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, segmentStart, segmentEnd, segmentDisplayStart, baseStyle, v.tabSize(), basePair, backgroundPair)
+		return rendered
+	}
+	var sb strings.Builder
+	pos := segmentStart
+	displayPos := segmentDisplayStart
+	for _, highlight := range ranges {
+		start := max(pos, max(segmentStart, highlight.StartCol))
+		end := min(segmentEnd, highlight.EndCol)
+		if start >= end {
+			continue
+		}
+		if pos < start {
+			rendered, nextDisplay := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, pos, start, displayPos, baseStyle, v.tabSize(), basePair, backgroundPair)
+			sb.WriteString(rendered)
+			displayPos = nextDisplay
+		}
+		style := inheritedPluginHighlightStyle(highlight.Style, baseStyle)
+		rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, start, end, displayPos, style, v.tabSize())
+		sb.WriteString(rendered)
+		displayPos = nextDisplay
+		pos = end
+	}
+	if pos < segmentEnd {
+		rendered, _ := renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, pos, segmentEnd, displayPos, baseStyle, v.tabSize(), basePair, backgroundPair)
 		sb.WriteString(rendered)
 	}
 	return sb.String()
@@ -543,6 +777,10 @@ func tokenByteStarts(tokens []highlight.StyledToken) []int {
 }
 
 func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []highlight.StyledToken, tokenStarts []int, start, end, displayStart int, baseStyle lipgloss.Style, tabSize int) (string, int) {
+	return renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent, tokens, tokenStarts, start, end, displayStart, baseStyle, tabSize, nil, nil)
+}
+
+func renderTokenByteRangeWithTabsAtDisplayIndexedWithPairs(lineContent string, tokens []highlight.StyledToken, tokenStarts []int, start, end, displayStart int, baseStyle lipgloss.Style, tabSize int, basePair, backgroundPair *wrapStylePair) (string, int) {
 	start = max(0, min(start, len(lineContent)))
 	end = max(start, min(end, len(lineContent)))
 	if start == end {
@@ -552,6 +790,179 @@ func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []h
 		return renderStyledByteRangeWithTabsAtDisplay(lineContent, start, end, displayStart, baseStyle, tabSize)
 	}
 
+	// Word-wrap normally renders a syntax token with the row's background.
+	// Calling lipgloss Style.Render for every token is disproportionately
+	// expensive, though: the token style is already cached and the row style
+	// only needs to be reopened after each token's reset sequence. The fast
+	// path emits that row SGR pair once and keeps the old implementation for
+	// token styles that carry their own background.
+	baseBackground := baseStyle.GetBackground()
+	if _, noBackground := baseBackground.(lipgloss.NoColor); !noBackground {
+		if compatible, needsBackgroundOverride := tokenRangeBackgroundCompatible(tokens, tokenStarts, start, end, baseBackground); compatible {
+			return renderTokenByteRangeWithTabsAtDisplayIndexedFast(lineContent, tokens, tokenStarts, start, end, displayStart, baseStyle, tabSize, needsBackgroundOverride, basePair, backgroundPair)
+		}
+	}
+
+	return renderTokenByteRangeWithTabsAtDisplayIndexedLegacy(lineContent, tokens, tokenStarts, start, end, displayStart, baseStyle, tabSize)
+}
+
+// tokenRangeBackgroundCompatible reports whether all syntax tokens intersecting
+// a range either leave the row background alone or already use the same one.
+// Punctuation tokens may inherit the editor style, so checking only for
+// NoColor would unnecessarily send most ordinary lines through the slow path.
+func tokenRangeBackgroundCompatible(tokens []highlight.StyledToken, tokenStarts []int, start, end int, baseBackground color.Color) (bool, bool) {
+	needsBackgroundOverride := false
+	tokenIndex := 0
+	tokenStart := 0
+	hasStarts := len(tokenStarts) == len(tokens)
+	if hasStarts {
+		tokenIndex = sort.Search(len(tokens), func(i int) bool {
+			return tokenStarts[i]+len(tokens[i].Text) > start
+		})
+		if tokenIndex >= len(tokens) {
+			return true, false
+		}
+		tokenStart = tokenStarts[tokenIndex]
+	}
+	for i := tokenIndex; i < len(tokens); i++ {
+		token := tokens[i]
+		if !hasStarts && i > 0 {
+			tokenStart += len(tokens[i-1].Text)
+		}
+		tokenEnd := tokenStart + len(token.Text)
+		if tokenEnd <= start {
+			if hasStarts {
+				tokenStart = tokenEnd
+			}
+			continue
+		}
+		if tokenStart >= end {
+			break
+		}
+		tokenBackground := token.Style.GetBackground()
+		if _, noBackground := tokenBackground.(lipgloss.NoColor); !noBackground && !sameColor(tokenBackground, baseBackground) && !token.FastSGR {
+			return false, false
+		}
+		if _, noBackground := tokenBackground.(lipgloss.NoColor); !noBackground && !sameColor(tokenBackground, baseBackground) {
+			needsBackgroundOverride = true
+		}
+		if hasStarts {
+			tokenStart = tokenEnd
+		}
+	}
+	return true, needsBackgroundOverride
+}
+
+func sameColor(a, b color.Color) bool {
+	ar, ag, ab, aa := a.RGBA()
+	br, bg, bb, ba := b.RGBA()
+	return ar == br && ag == bg && ab == bb && aa == ba
+}
+
+// renderTokenByteRangeWithTabsAtDisplayIndexedFast is the wrapped-rendering
+// path for ordinary syntax tokens. It writes token SGRs directly and reopens
+// the row style around each token, which preserves the background after a
+// token's reset while avoiding one lipgloss pipeline per token.
+func renderTokenByteRangeWithTabsAtDisplayIndexedFast(lineContent string, tokens []highlight.StyledToken, tokenStarts []int, start, end, displayStart int, baseStyle lipgloss.Style, tabSize int, needsBackgroundOverride bool, basePair, backgroundPair *wrapStylePair) (string, int) {
+	if basePair == nil {
+		pair := newWrapStylePair(baseStyle)
+		basePair = &pair
+	}
+	if !basePair.valid {
+		// Theme row styles are deliberately simple, but if a caller supplies a
+		// transforming or layout style, preserve the old exact behavior.
+		return renderTokenByteRangeWithTabsAtDisplayIndexedLegacy(lineContent, tokens, tokenStarts, start, end, displayStart, baseStyle, tabSize)
+	}
+	baseBackground := baseStyle.GetBackground()
+	var backgroundPrefix string
+	if needsBackgroundOverride {
+		if backgroundPair == nil {
+			pair := newWrapStylePair(lipgloss.NewStyle().Background(baseBackground))
+			backgroundPair = &pair
+		}
+		if !backgroundPair.valid {
+			return renderTokenByteRangeWithTabsAtDisplayIndexedLegacy(lineContent, tokens, tokenStarts, start, end, displayStart, baseStyle, tabSize)
+		}
+		backgroundPrefix = backgroundPair.prefix
+	}
+	basePrefix, baseSuffix := basePair.prefix, basePair.suffix
+
+	var sb strings.Builder
+	// The source bytes are a useful lower bound; ANSI prefixes add a small
+	// amount per token but avoiding an exact calculation keeps this helper
+	// allocation-free beyond its output buffer.
+	sb.Grow(end - start)
+	pos := start
+	displayPos := displayStart
+	tokenIndex := 0
+	tokenStart := 0
+	if len(tokenStarts) == len(tokens) {
+		tokenIndex = sort.Search(len(tokens), func(i int) bool {
+			return tokenStarts[i]+len(tokens[i].Text) > start
+		})
+		if tokenIndex >= len(tokens) {
+			if pos < end {
+				return renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, end, displayPos, baseStyle, tabSize)
+			}
+			return "", displayPos
+		}
+		tokenStart = tokenStarts[tokenIndex]
+	}
+	for ; tokenIndex < len(tokens); tokenIndex++ {
+		token := tokens[tokenIndex]
+		tokenEnd := tokenStart + len(token.Text)
+		if tokenEnd <= start {
+			tokenStart = tokenEnd
+			continue
+		}
+		if tokenStart >= end {
+			break
+		}
+
+		overlapStart := max(start, tokenStart)
+		overlapEnd := min(end, tokenEnd)
+		if pos < overlapStart {
+			displayPos = writeWrappedPlainRange(&sb, basePrefix, baseSuffix, lineContent, pos, overlapStart, displayPos, tabSize)
+		}
+		if overlapStart < overlapEnd {
+			expanded, nextDisplay := expandTabsAtDisplayColumnWithEnd(
+				lineContent[max(0, min(overlapStart, len(lineContent))):max(0, min(overlapEnd, len(lineContent)))],
+				displayPos,
+				tabSize,
+			)
+			sb.WriteString(basePrefix)
+			tokenBackground := token.Style.GetBackground()
+			if token.FastSGR {
+				if _, noBackground := tokenBackground.(lipgloss.NoColor); noBackground || sameColor(tokenBackground, baseBackground) {
+					token.WriteTo(&sb, expanded)
+				} else {
+					// The token already has constant SGR pieces. Reopen the row
+					// background after its prefix so inherited editor backgrounds
+					// are replaced by the active cursor-line background.
+					sb.WriteString(token.Prefix)
+					sb.WriteString(backgroundPrefix)
+					sb.WriteString(expanded)
+					sb.WriteString(token.Suffix)
+				}
+			} else {
+				token.WriteTo(&sb, expanded)
+			}
+			sb.WriteString(baseSuffix)
+			displayPos = nextDisplay
+			pos = overlapEnd
+		}
+		tokenStart = tokenEnd
+	}
+	if pos < end {
+		displayPos = writeWrappedPlainRange(&sb, basePrefix, baseSuffix, lineContent, pos, end, displayPos, tabSize)
+	}
+	return sb.String(), displayPos
+}
+
+// renderTokenByteRangeWithTabsAtDisplayIndexedLegacy keeps the pre-optimized
+// implementation available for styles that cannot be represented as a stable
+// prefix/suffix pair.
+func renderTokenByteRangeWithTabsAtDisplayIndexedLegacy(lineContent string, tokens []highlight.StyledToken, tokenStarts []int, start, end, displayStart int, baseStyle lipgloss.Style, tabSize int) (string, int) {
 	var sb strings.Builder
 	pos := start
 	displayPos := displayStart
@@ -563,8 +974,7 @@ func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []h
 		})
 		if tokenIndex >= len(tokens) {
 			if pos < end {
-				rendered, nextDisplay := renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, end, displayPos, baseStyle, tabSize)
-				return rendered, nextDisplay
+				return renderStyledByteRangeWithTabsAtDisplay(lineContent, pos, end, displayPos, baseStyle, tabSize)
 			}
 			return "", displayPos
 		}
@@ -590,8 +1000,6 @@ func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []h
 		}
 		if overlapStart < overlapEnd {
 			if _, noBackground := baseStyle.GetBackground().(lipgloss.NoColor); noBackground {
-				// No background override, so the token's precomputed escape
-				// sequences describe this render exactly.
 				expanded, nextDisplay := expandTabsAtDisplayColumnWithEnd(
 					lineContent[max(0, min(overlapStart, len(lineContent))):max(0, min(overlapEnd, len(lineContent)))],
 					displayPos, tabSize)
@@ -613,6 +1021,36 @@ func renderTokenByteRangeWithTabsAtDisplayIndexed(lineContent string, tokens []h
 		displayPos = nextDisplay
 	}
 	return sb.String(), displayPos
+}
+
+// writeWrappedPlainRange writes an unhighlighted range with the row style.
+// The caller has already validated that the style has a stable SGR pair.
+func writeWrappedPlainRange(sb *strings.Builder, prefix, suffix, lineContent string, start, end, displayStart, tabSize int) int {
+	expanded, displayEnd := expandTabsAtDisplayColumnWithEnd(lineContent[start:end], displayStart, tabSize)
+	sb.WriteString(prefix)
+	sb.WriteString(expanded)
+	sb.WriteString(suffix)
+	return displayEnd
+}
+
+// styleRenderPair extracts the constant SGR wrapper from a simple row style.
+// It intentionally rejects text-dependent styles so callers can fall back to
+// lipgloss's full renderer without a visual regression.
+func styleRenderPair(style lipgloss.Style) (string, string, bool) {
+	const sentinel = "\x00\x01teak-viewport-style\x01\x00"
+	rendered := style.Render(sentinel)
+	marker := strings.Index(rendered, sentinel)
+	if marker < 0 {
+		return "", "", false
+	}
+	prefix := rendered[:marker]
+	suffix := rendered[marker+len(sentinel):]
+	for _, probe := range []string{"", "a", "hello world"} {
+		if prefix+probe+suffix != style.Render(probe) {
+			return "", "", false
+		}
+	}
+	return prefix, suffix, true
 }
 
 func renderStyledByteRangeWithTabsAtDisplay(lineContent string, start, end, displayStart int, style lipgloss.Style, tabSize int) (string, int) {
@@ -747,6 +1185,11 @@ func replaceAtDisplayCol(s string, targetCol int, oldChar, replacement string) s
 // renderLineWithTokens renders a line using syntax-highlighted tokens.
 func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursorLine bool, textWidth int, theme ui.Theme) string {
 	var sb strings.Builder
+	v.renderLineWithTokensInto(&sb, tokens, isCursorLine, textWidth, theme)
+	return sb.String()
+}
+
+func (v *Viewport) renderLineWithTokensInto(sb *strings.Builder, tokens []highlight.StyledToken, isCursorLine bool, textWidth int, theme ui.Theme) {
 	widthLeft := textWidth
 	scrollRemaining := v.ScrollX
 
@@ -794,7 +1237,7 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 			// frame, so the slower path here costs little.
 			sb.WriteString(tok.Style.Background(ui.Nord1).Render(text))
 		} else {
-			sb.WriteString(tok.Render(text))
+			tok.WriteTo(sb, text)
 		}
 		widthLeft -= textW
 	}
@@ -807,8 +1250,6 @@ func (v *Viewport) renderLineWithTokens(tokens []highlight.StyledToken, isCursor
 		}
 		sb.WriteString(baseStyle.Render(getSpaces(widthLeft)))
 	}
-
-	return sb.String()
 }
 
 // selectionRange returns the byte range of a single selection overlapping a line.

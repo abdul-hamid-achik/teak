@@ -110,7 +110,7 @@ func TestBufferLoadRopeSnapshotSharesPreparedDocumentAndResetsState(t *testing.T
 	prepared := NewFromString("after\nsnapshot")
 	beforeVersion := b.Version()
 
-	b.LoadRopeSnapshot(prepared)
+	b.LoadRopeSnapshot(prepared, LF)
 
 	if b.Rope() != prepared {
 		t.Fatal("LoadRopeSnapshot materialized the prepared immutable rope")
@@ -145,6 +145,19 @@ func TestBufferSelection(t *testing.T) {
 	}
 	if b.Selections == nil || b.Selections.Count() == 0 || !b.Selections.Primary().IsEmpty() {
 		t.Error("selection should be empty after delete")
+	}
+}
+
+func TestReplacingSelectionIsOneUndoOperation(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abc"))
+	b.SetSelection(Position{Line: 0, Col: 1}, Position{Line: 0, Col: 2})
+	b.InsertAtCursor([]byte("X"))
+	if got := b.Rope().String(); got != "aXc" {
+		t.Fatalf("replacement = %q, want %q", got, "aXc")
+	}
+	b.Undo()
+	if got := b.Rope().String(); got != "abc" {
+		t.Fatalf("one undo restored %q, want original %q", got, "abc")
 	}
 }
 
@@ -309,5 +322,20 @@ func TestBufferMoveCursor(t *testing.T) {
 	b.MoveCursor(DirUp)
 	if b.Cursor != (Position{1, 0}) {
 		t.Errorf("after up: %v", b.Cursor)
+	}
+}
+
+func TestBufferMoveCursorCollapsesPrimarySelection(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abcde"))
+	b.SetSelection(Position{Line: 0, Col: 1}, Position{Line: 0, Col: 3})
+
+	b.MoveCursor(DirRight)
+	b.InsertAtCursor([]byte("X"))
+
+	if got, want := b.Content(), "abcdXe"; got != want {
+		t.Fatalf("insert after moving past a selection = %q, want %q", got, want)
+	}
+	if got := b.Selections.Primary(); !got.IsEmpty() || got.Head != (Position{Line: 0, Col: 5}) {
+		t.Fatalf("primary selection after movement/insertion = %#v, want collapsed at col 5", got)
 	}
 }

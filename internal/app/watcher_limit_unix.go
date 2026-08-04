@@ -25,5 +25,8 @@ func defaultMaxWatches() int {
 }
 
 func isWatchLimitError(err error) bool {
-	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
+	// Linux inotify reports an exhausted fs.inotify.max_user_watches as
+	// ENOSPC; without it the limit stays invisible on the platform where it
+	// is hit most often.
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOSPC)
 }

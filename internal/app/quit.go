@@ -80,6 +80,11 @@ func (m Model) finalizeQuit() (Model, tea.Cmd) {
 	}
 	m.shutdownStarted = true
 	m.status = "Shutting down…"
+	// Stop rendering an active spinner while asynchronous teardown is still
+	// producing the final terminal frame. The ACP manager is stopped by the
+	// cleanup command below, so the panel must not advertise a live session
+	// during that interval.
+	m.agentPanel.SetConnected(false)
 	// A final snapshot must be ordered after an active autosave. Replacing the
 	// queued snapshot here makes shutdown latest-wins, so an older writer can
 	// never overwrite the state captured at exit. session.Save has no
@@ -90,9 +95,10 @@ func (m Model) finalizeQuit() (Model, tea.Cmd) {
 	if state, ok := m.sessionSnapshot(); ok {
 		if m.sessionSaves.inFlight {
 			m.sessionSaves.queued = &state
+			m.sessionSaves.queuedRecovery = m.recoveryPreps()
 			return m, nil
 		}
-		return m.startSessionSave(state)
+		return m.startSessionSave(state, m.recoveryPreps())
 	}
 	return m, m.shutdownCmd()
 }

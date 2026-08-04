@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"unicode/utf8"
 )
 
 const maxLeaf = 512
@@ -413,19 +414,18 @@ func (r *Rope) appendPrefixLines(buf *[]byte, maxLines, maxBytes int, lines *int
 
 // Slice returns a new Rope containing bytes [start, end).
 func (r *Rope) Slice(start, end int) *Rope {
-	if r == nil || start >= end || start >= r.len {
+	if r == nil {
 		return newLeaf(nil)
 	}
-	if end > r.len {
-		end = r.len
+	start = max(start, 0)
+	end = min(max(end, 0), r.len)
+	if start >= end || start >= r.len {
+		return newLeaf(nil)
 	}
-	if start <= 0 && end >= r.len {
+	if start == 0 && end >= r.len {
 		return r
 	}
 	if r.isLeaf() {
-		if start < 0 {
-			start = 0
-		}
 		return newLeaf(r.value[start:end])
 	}
 	ll := r.left.len
@@ -564,7 +564,7 @@ func (r *Rope) LineLen(line int) int {
 // PositionToOffset converts a Position to a byte offset.
 func (r *Rope) PositionToOffset(pos Position) ByteOffset {
 	lineStart := r.LineStart(pos.Line)
-	col := min(pos.Col, r.LineLen(pos.Line))
+	col := max(0, min(pos.Col, r.LineLen(pos.Line)))
 	return lineStart + col
 }
 
@@ -640,4 +640,42 @@ func (r *Rope) ByteAtSafe(offset int) (byte, bool) {
 		return 0, false
 	}
 	return r.ByteAt(offset), true
+}
+
+// RuneAt decodes the UTF-8 rune beginning at offset without materializing its
+// containing line. At most four bytes are read from the persistent tree.
+func (r *Rope) RuneAt(offset int) (rune, int, bool) {
+	if r == nil || offset < 0 || offset >= r.len {
+		return 0, 0, false
+	}
+	var buf [utf8.UTFMax]byte
+	n := 0
+	for n < len(buf) && offset+n < r.len {
+		buf[n] = r.ByteAt(offset + n)
+		n++
+	}
+	runeValue, size := utf8.DecodeRune(buf[:n])
+	return runeValue, size, true
+}
+
+// RuneBefore decodes the UTF-8 rune immediately before offset without
+// materializing the containing line. It expects offset to be a UTF-8 boundary,
+// as all Buffer cursor columns are; malformed input is reported as one byte.
+func (r *Rope) RuneBefore(offset int) (rune, int, bool) {
+	if r == nil || offset <= 0 || offset > r.len {
+		return 0, 0, false
+	}
+	start := offset - 1
+	for start > 0 && offset-start < utf8.UTFMax {
+		b := r.ByteAt(start)
+		if b&0xc0 != 0x80 {
+			break
+		}
+		start--
+	}
+	runeValue, size, ok := r.RuneAt(start)
+	if !ok || start+size != offset {
+		return utf8.RuneError, 1, true
+	}
+	return runeValue, size, true
 }

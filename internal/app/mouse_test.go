@@ -53,7 +53,7 @@ func TestMouseLayoutClassifiesApplicationSurfaces(t *testing.T) {
 			showTree: true,
 			x:        25,
 			y:        8,
-			want:     mouseChrome,
+			want:     mouseSidebarDivider,
 			wantX:    25,
 			wantY:    8,
 		},
@@ -205,17 +205,71 @@ func TestStatusBarClickDoesNotMoveEditorCursor(t *testing.T) {
 	}
 }
 
-func TestMouseWheelOverTabBarChangesActiveTab(t *testing.T) {
+func TestMouseWheelOverTabBarScrollsStrip(t *testing.T) {
 	m := newViewTestModel(t, false)
 	addDirtyEditor(t, &m, "second.go", "package second\n", "package second\n")
 	m.activeTab = 0
 	m.tabBar.SetActive(0)
 	m.relayout()
 
+	// Plain wheel scrolls the tab strip; the active tab stays put.
 	updatedModel, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, X: 2, Y: 0}))
 	updated := updatedModel.(Model)
+	if updated.activeTab != 0 {
+		t.Fatalf("active tab = %d, want unchanged 0 (plain wheel scrolls the strip)", updated.activeTab)
+	}
+
+	// Shift+wheel preserves the previous tab-cycling behavior.
+	updatedModel, _ = updated.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, Mod: tea.ModShift, X: 2, Y: 0}))
+	updated = updatedModel.(Model)
 	if updated.activeTab != 1 || updated.tabBar.ActiveIdx != 1 {
-		t.Fatalf("active tab = %d / %d, want 1", updated.activeTab, updated.tabBar.ActiveIdx)
+		t.Fatalf("active tab = %d / %d, want 1 with shift+wheel", updated.activeTab, updated.tabBar.ActiveIdx)
+	}
+}
+
+func TestSidebarDividerDragResizesAndPersists(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := newViewTestModel(t, true)
+	m.width = 120
+	m.height = 30
+	m.relayout()
+
+	baseWidth := m.treeWidth()
+	dividerX := baseWidth // the divider sits at the sidebar's right edge
+
+	// Click the divider to start the drag.
+	updatedModel, _ := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: dividerX, Y: 5}))
+	m = updatedModel.(Model)
+	if !m.sidebarDragging {
+		t.Fatal("clicking the sidebar divider did not start a resize drag")
+	}
+
+	// Drag 10 columns to the right.
+	updatedModel, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{Button: tea.MouseLeft, X: dividerX + 10, Y: 5}))
+	m = updatedModel.(Model)
+	if got := m.treeWidth(); got != baseWidth+10 {
+		t.Fatalf("tree width mid-drag = %d, want %d", got, baseWidth+10)
+	}
+	if m.appCfg.UI.TreeWidth != baseWidth+10 {
+		t.Fatalf("ui.tree_width mid-drag = %d, want %d", m.appCfg.UI.TreeWidth, baseWidth+10)
+	}
+
+	// Release ends the drag and persists the width.
+	updatedModel, cmd := m.Update(tea.MouseReleaseMsg(tea.Mouse{Button: tea.MouseLeft, X: dividerX + 10, Y: 5}))
+	m = updatedModel.(Model)
+	if m.sidebarDragging {
+		t.Fatal("releasing the mouse did not end the sidebar drag")
+	}
+	if cmd == nil {
+		t.Fatal("releasing the sidebar drag did not schedule a config save")
+	}
+	msg := cmd()
+	result, ok := msg.(settingsSaveResultMsg)
+	if !ok || result.Err != nil {
+		t.Fatalf("sidebar width save = %#v, want a successful settingsSaveResultMsg", msg)
+	}
+	if result.Config.UI.TreeWidth != baseWidth+10 {
+		t.Fatalf("persisted tree width = %d, want %d", result.Config.UI.TreeWidth, baseWidth+10)
 	}
 }
 

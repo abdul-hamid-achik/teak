@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -382,9 +383,10 @@ func TestTabBarViewDiagnosticError(t *testing.T) {
 	tabBar.Width = 80
 
 	view := tabBar.View()
-	// Error indicator should be shown
-	if !strings.Contains(view, "●") {
-		t.Error("expected error indicator in view")
+	// Errors get their own glyph so a clean file with errors is not mistaken
+	// for a dirty one.
+	if !strings.Contains(view, "✗") {
+		t.Error("expected the error indicator glyph in view")
 	}
 }
 
@@ -395,9 +397,63 @@ func TestTabBarViewDiagnosticWarning(t *testing.T) {
 	tabBar.Width = 80
 
 	view := tabBar.View()
-	// Warning indicator should be shown
-	if !strings.Contains(view, "●") {
-		t.Error("expected warning indicator in view")
+	if !strings.Contains(view, "▲") {
+		t.Error("expected the warning indicator glyph in view")
+	}
+}
+
+func TestTabBarLabelsDistinguishDirtyFromDiagnostics(t *testing.T) {
+	tests := []struct {
+		name    string
+		tab     Tab
+		prefixes []string
+	}{
+		{"dirty only", Tab{Label: "a.go", Dirty: true}, []string{"●"}},
+		{"error only", Tab{Label: "a.go", DiagSeverity: 1}, []string{"✗"}},
+		{"warning only", Tab{Label: "a.go", DiagSeverity: 2}, []string{"▲"}},
+		{"dirty and error", Tab{Label: "a.go", Dirty: true, DiagSeverity: 1}, []string{"●", "✗"}},
+		{"clean", Tab{Label: "a.go"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			label := tabLabelText(tt.tab)
+			for _, glyph := range []string{"●", "✗", "▲"} {
+				want := false
+				for _, p := range tt.prefixes {
+					if p == glyph {
+						want = true
+					}
+				}
+				if got := strings.Contains(label, glyph); got != want {
+					t.Errorf("tabLabelText(%+v) = %q, glyph %q present=%v want %v", tt.tab, label, glyph, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestTabBarScrollByMovesAndClamps(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	for i := 0; i < 10; i++ {
+		tabBar.AddTab(fmt.Sprintf("file%d.go", i), fmt.Sprintf("/f%d.go", i))
+	}
+	tabBar.Width = 200
+	tabBar.SetActive(5)
+
+	tabBar.ScrollBy(3)
+	if tabBar.ScrollIdx != 3 {
+		t.Fatalf("ScrollIdx after +3 = %d, want 3", tabBar.ScrollIdx)
+	}
+	tabBar.ScrollBy(-100)
+	if tabBar.ScrollIdx != 0 {
+		t.Fatalf("ScrollIdx after large negative scroll = %d, want 0", tabBar.ScrollIdx)
+	}
+
+	// Scrolling toward the end clamps at the last tab when it stays visible.
+	tabBar.SetActive(9)
+	tabBar.ScrollBy(100)
+	if tabBar.ScrollIdx != 9 {
+		t.Fatalf("ScrollIdx after large positive scroll = %d, want 9", tabBar.ScrollIdx)
 	}
 }
 

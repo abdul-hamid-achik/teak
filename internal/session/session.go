@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"teak/internal/atomicfile"
@@ -19,6 +20,8 @@ const (
 	maxSessionTabs      = 10_000
 	maxSessionPathBytes = 32 << 10
 	maxSessionVersion   = 1_000_000
+	maxSessionNameBytes = 128
+	maxHealthIssues     = 1_000
 )
 
 // writeSessionData is a narrow test seam for simulating a failure before the
@@ -45,6 +48,24 @@ type State struct {
 	RootDir   string     `json:"root_dir"`
 	ActiveTab int        `json:"active_tab"`
 	Tabs      []TabState `json:"tabs"`
+}
+
+// TabHealth describes why a saved tab can no longer be restored cleanly.
+type TabHealth struct {
+	FilePath string `json:"file_path"`
+	State    string `json:"state"`
+}
+
+// NamedHealth is a bounded, read-only assessment of a named session.
+// "stale" means at least one tab is missing, inaccessible, or outside the
+// workspace; "invalid" means the session file itself cannot be loaded.
+type NamedHealth struct {
+	Name   string      `json:"name"`
+	Path   string      `json:"path"`
+	State  string      `json:"state"`
+	Tabs   int         `json:"tabs"`
+	Issues []TabHealth `json:"issues,omitempty"`
+	Detail string      `json:"detail,omitempty"`
 }
 
 // StateHome returns the Teak state directory following the XDG Base Directory
@@ -87,15 +108,286 @@ func Path() string {
 	return LegacyPath()
 }
 
+// NamedPath returns the path for a user-named session in one workspace. Names
+// are deliberately a single safe path component so a headless caller cannot
+// turn session management into arbitrary file access.
+func NamedPath(rootDir, name string) (string, error) {
+	name, err := normalizeName(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(StateHome(), "sessions", rootKey(rootDir), "named", name+".json"), nil
+}
+
+func legacyNamedPath(rootDir, name string) (string, error) {
+	name, err := normalizeName(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(StateHome(), "sessions", legacyRootKey(rootDir), "named", name+".json"), nil
+}
+
+// SaveNamed stores a validated workspace session under name.
+func SaveNamed(state State, name string) error {
+	path, err := NamedPath(state.RootDir, name)
+	if err != nil {
+		return err
+	}
+	return saveToPath(state, path)
+}
+
+// LoadNamed loads a named session and verifies that it belongs to rootDir.
+func LoadNamed(ctx context.Context, rootDir, name string) (State, error) {
+	path, err := NamedPath(rootDir, name)
+	if err != nil {
+		return State{}, err
+	}
+	state, err := loadFromPathContext(ctx, path)
+	if os.IsNotExist(err) {
+		legacyPath, legacyErr := legacyNamedPath(rootDir, name)
+		if legacyErr != nil {
+			return State{}, legacyErr
+		}
+		if legacyPath != path {
+			state, err = loadFromPathContext(ctx, legacyPath)
+		}
+	}
+	if err != nil {
+		return State{}, err
+	}
+	if !rootsMatch(state.RootDir, rootDir) {
+		return State{}, fmt.Errorf("named session belongs to a different workspace")
+	}
+	return state, nil
+}
+
+// ListNamed returns the safe names stored for rootDir. Symlinks and malformed
+// filenames are ignored rather than followed or exposed as paths.
+func ListNamed(rootDir string) ([]string, error) {
+	dirs := []string{
+		filepath.Join(StateHome(), "sessions", rootKey(rootDir), "named"),
+		filepath.Join(StateHome(), "sessions", legacyRootKey(rootDir), "named"),
+	}
+	namesByName := make(map[string]struct{})
+	for index, dir := range dirs {
+		if index == 1 && dir == dirs[0] {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
+				continue
+			}
+			name := strings.TrimSuffix(entry.Name(), ".json")
+			if filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			if _, err := normalizeName(name); err != nil {
+				continue
+			}
+			namesByName[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(namesByName))
+	for name := range namesByName {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+// CheckNamed reports whether a named session can be restored in rootDir. It
+// never mutates the session or the workspace and bounds the returned issue
+// collection even when a user-controlled session contains many tabs.
+func CheckNamed(ctx context.Context, rootDir, name string) (NamedHealth, error) {
+	path, err := NamedPath(rootDir, name)
+	if err != nil {
+		return NamedHealth{}, err
+	}
+	health := NamedHealth{Name: name, Path: path, State: "missing"}
+	state, err := LoadNamed(ctx, rootDir, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			health.Detail = "no saved session"
+			return health, nil
+		}
+		health.State = "invalid"
+		health.Detail = err.Error()
+		return health, nil
+	}
+	health.Tabs = len(state.Tabs)
+	for _, tab := range state.Tabs {
+		if err := ctx.Err(); err != nil {
+			return NamedHealth{}, err
+		}
+		status := inspectTabPath(ctx, rootDir, tab.FilePath)
+		if status == "present" {
+			continue
+		}
+		if len(health.Issues) < maxHealthIssues {
+			health.Issues = append(health.Issues, TabHealth{FilePath: tab.FilePath, State: status})
+		}
+	}
+	if len(health.Issues) == 0 {
+		health.State = "healthy"
+	} else {
+		health.State = "stale"
+	}
+	return health, nil
+}
+
+// CheckNamedAll assesses every safe regular named session for rootDir in
+// deterministic name order.
+func CheckNamedAll(ctx context.Context, rootDir string) ([]NamedHealth, error) {
+	names, err := ListNamed(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	health := make([]NamedHealth, 0, len(names))
+	for _, name := range names {
+		entry, err := CheckNamed(ctx, rootDir, name)
+		if err != nil {
+			return nil, err
+		}
+		health = append(health, entry)
+	}
+	return health, nil
+}
+
+// RemoveNamed removes one validated named session. It refuses symlinks and
+// non-regular files so cleanup cannot follow an attacker-controlled path.
+// Missing files are treated as success to make explicit cleanup idempotent.
+func RemoveNamed(rootDir, name string) error {
+	path, err := NamedPath(rootDir, name)
+	if err != nil {
+		return err
+	}
+	legacyPath, err := legacyNamedPath(rootDir, name)
+	if err != nil {
+		return err
+	}
+	paths := []string{path}
+	if legacyPath != path {
+		paths = append(paths, legacyPath)
+	}
+	for _, candidate := range paths {
+		info, err := os.Lstat(candidate)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("named session path is not a regular file")
+		}
+		if err := os.Remove(candidate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func inspectTabPath(ctx context.Context, rootDir, filePath string) string {
+	if err := ctx.Err(); err != nil {
+		return "unavailable"
+	}
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "unavailable"
+	}
+	target := filePath
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(rootAbs, target)
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return "unavailable"
+	}
+	if !pathWithin(rootAbs, targetAbs) {
+		return "outside"
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "unavailable"
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "missing"
+		}
+		return "unavailable"
+	}
+	if !pathWithin(resolvedRoot, resolvedTarget) {
+		return "outside"
+	}
+	info, err := os.Stat(resolvedTarget)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "missing"
+		}
+		return "unavailable"
+	}
+	if !info.Mode().IsRegular() {
+		return "unavailable"
+	}
+	return "present"
+}
+
+func pathWithin(root, target string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func normalizeName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || len(name) > maxSessionNameBytes ||
+		strings.ContainsAny(name, `/\\`) || filepath.Base(name) != name {
+		return "", fmt.Errorf("invalid session name %q", name)
+	}
+	return name, nil
+}
+
 // rootKey returns a stable filesystem-safe key for a workspace root.
 func rootKey(rootDir string) string {
-	abs := rootDir
-	if cleaned, err := filepath.Abs(rootDir); err == nil {
-		abs = cleaned
-	}
-	abs = filepath.Clean(abs)
+	abs := canonicalRootPath(rootDir)
 	sum := sha256.Sum256([]byte(abs))
 	return hex.EncodeToString(sum[:])
+}
+
+// legacyRootKey reproduces the pre-canonicalization workspace key so state
+// written by older Teak versions remains discoverable during migration.
+func legacyRootKey(rootDir string) string {
+	abs, err := filepath.Abs(rootDir)
+	if err != nil {
+		abs = filepath.Clean(rootDir)
+	} else {
+		abs = filepath.Clean(abs)
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return hex.EncodeToString(sum[:])
+}
+
+// canonicalRootPath keeps session identity consistent when the same project
+// is opened through a symlink and through its real filesystem path. If the
+// root does not exist yet, retain an absolute lexical fallback so callers can
+// still derive a deterministic path before creating it.
+func canonicalRootPath(rootDir string) string {
+	abs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return filepath.Clean(rootDir)
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return abs
 }
 
 // Save writes the session state to the per-workspace path for state.RootDir.
@@ -134,6 +426,16 @@ func LoadContextForRoot(ctx context.Context, rootDir string) (State, error) {
 	}
 	if !os.IsNotExist(err) {
 		return state, err
+	}
+	legacyPath := filepath.Join(StateHome(), "sessions", legacyRootKey(rootDir), "session.json")
+	if legacyPath != path {
+		state, legacyErr := loadFromPathContext(ctx, legacyPath)
+		if legacyErr == nil {
+			return state, nil
+		}
+		if !os.IsNotExist(legacyErr) {
+			return State{}, legacyErr
+		}
 	}
 	legacy, legErr := loadFromPathContext(ctx, LegacyPath())
 	if legErr != nil {

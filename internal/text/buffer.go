@@ -52,6 +52,7 @@ type Buffer struct {
 	savedRope  *Rope
 	version    int
 	lastChange *EditChange // incremental change from last edit, nil if unknown
+	lineEnding LineEnding  // newline convention of the loaded file; content is always LF
 }
 
 // NewBuffer creates an empty buffer.
@@ -106,6 +107,9 @@ func NewBufferFromFile(path string) (*Buffer, error) {
 	if int64(len(data)) > MaxBufferFileBytes {
 		return nil, ErrBufferFileTooLarge
 	}
+	// Normalize CRLF to LF so edits cannot orphan CR bytes mid-line; the
+	// original convention is remembered and restored on save.
+	data, ending := NormalizeLineEndings(data)
 	// io.ReadAll returned this allocation exclusively for this buffer. Transfer
 	// it into the immutable rope instead of immediately making a second copy.
 	r := NewOwned(data)
@@ -115,6 +119,7 @@ func NewBufferFromFile(path string) (*Buffer, error) {
 		undo:       NewUndoStack(),
 		FilePath:   path,
 		savedRope:  r,
+		lineEnding: ending,
 	}, nil
 }
 
@@ -131,16 +136,27 @@ func (b *Buffer) LoadContent(data []byte) {
 // would silently corrupt a document on its next save.
 func (b *Buffer) LoadContentWithTabSize(data []byte, tabSize int) {
 	_ = tabSize
-	b.LoadRopeSnapshot(New(data))
+	normalized, ending := NormalizeLineEndings(data)
+	b.lineEnding = ending
+	b.LoadRopeSnapshot(New(normalized), ending)
+}
+
+// LineEnding reports the newline convention the buffer was loaded with. Saves
+// restore it; buffer content itself is always LF-terminated.
+func (b *Buffer) LineEnding() LineEnding {
+	return b.lineEnding
 }
 
 // LoadRopeSnapshot installs a document prepared by a background loader without
 // flattening or copying it on the UI goroutine. A load establishes a new clean
-// save baseline and clears edit, selection, and undo state.
-func (b *Buffer) LoadRopeSnapshot(rope *Rope) {
+// save baseline and clears edit, selection, and undo state. The line ending is
+// supplied by the loader, which saw the raw file bytes; the snapshot itself is
+// already LF-normalized.
+func (b *Buffer) LoadRopeSnapshot(rope *Rope, ending LineEnding) {
 	if rope == nil {
 		rope = NewFromString("")
 	}
+	b.lineEnding = ending
 	b.rope = rope
 	b.savedRope = rope
 	if b.Selections == nil {
@@ -150,7 +166,7 @@ func (b *Buffer) LoadRopeSnapshot(rope *Rope) {
 		b.Selections.primary = 0
 		b.Selections.dirty = false
 	}
-	b.Cursor = Position{}
+	b.SetCursor(Position{})
 	b.undo = NewUndoStack()
 	b.dirty = false
 	b.version++
@@ -182,8 +198,8 @@ func (b *Buffer) ReplaceRopeSnapshot(rope *Rope, cursor Position) {
 	}
 	b.undo.Save(b.rope, b.Cursor, false)
 	b.rope = rope
-	b.Cursor = cursor
 	b.Selections = NewSelections(cursor)
+	b.SetCursor(cursor)
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil
@@ -220,6 +236,13 @@ func (b *Buffer) Dirty() bool {
 	return b.dirty
 }
 
+// MarkDirty flags the buffer as having unsaved changes without editing it.
+// Crash recovery uses it to restore buffers that were dirty when the previous
+// session died: their content matches the recovery record, not the disk.
+func (b *Buffer) MarkDirty() {
+	b.dirty = true
+}
+
 // LineCount returns the number of lines.
 func (b *Buffer) LineCount() int {
 	return b.rope.LineCount()
@@ -254,17 +277,17 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		if !sel.IsEmpty() {
 			// Selection replace
 			start, end := sel.Ordered()
-			b.DeleteSelection()
+			startOff := b.rope.PositionToOffset(start)
+			endOff := b.rope.PositionToOffset(end)
 			b.undo.Save(b.rope, b.Cursor, false)
-			offset := b.rope.PositionToOffset(b.Cursor)
-			b.rope = b.rope.Insert(offset, text)
+			b.rope = b.rope.Delete(startOff, endOff-startOff)
+			b.rope = b.rope.Insert(startOff, text)
 			b.dirty = true
 			b.version++
-			b.Cursor = b.rope.OffsetToPosition(offset + len(text))
 			// Replacing a selection collapses it, so the primary selection must
 			// follow the cursor. Leaving it behind made the next keystroke
 			// record its position from a stale selection.
-			b.Selections.selections[b.Selections.primary] = Selection{Anchor: b.Cursor, Head: b.Cursor}
+			b.SetCursor(b.rope.OffsetToPosition(startOff + len(text)))
 			b.lastChange = &EditChange{
 				StartLine: start.Line, StartCol: start.Col,
 				EndLine: end.Line, EndCol: end.Col,
@@ -291,8 +314,8 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		b.rope = b.rope.Insert(offset, text)
 		b.dirty = true
 		b.version++
-		b.Cursor = b.rope.OffsetToPosition(offset + len(text))
-		b.Selections.selections[0] = Selection{Anchor: b.Cursor, Head: b.Cursor}
+		b.SetCursor(b.rope.OffsetToPosition(offset + len(text)))
+		b.undo.MarkCharInsertEnd(b.Cursor)
 		b.lastChange = &EditChange{
 			StartLine: origin.Line, StartCol: origin.Col,
 			EndLine: origin.Line, EndCol: origin.Col,
@@ -375,7 +398,9 @@ func (b *Buffer) DedentLine(tabSize int) {
 	b.rope = b.rope.Delete(lineStart, n)
 	b.dirty = true
 	b.version++
-	b.Cursor.Col = max(0, b.Cursor.Col-n)
+	cursor := b.Cursor
+	cursor.Col = max(0, cursor.Col-n)
+	b.SetCursor(cursor)
 	b.lastChange = &EditChange{
 		StartLine: b.Cursor.Line, StartCol: 0,
 		EndLine: b.Cursor.Line, EndCol: n,
@@ -387,6 +412,14 @@ func (b *Buffer) DedentLine(tabSize int) {
 func (b *Buffer) Backspace() {
 	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
+		return
+	}
+	if b.Selections != nil && b.Selections.Count() > 1 {
+		if b.allSelectionsEmpty() {
+			b.deleteAtCursors(true)
+		} else {
+			b.DeleteSelection()
+		}
 		return
 	}
 	offset := b.rope.PositionToOffset(b.Cursor)
@@ -411,11 +444,10 @@ func (b *Buffer) Backspace() {
 	b.rope = b.rope.Delete(offset-delLen, delLen)
 	b.dirty = true
 	b.version++
-	b.Cursor = b.rope.OffsetToPosition(offset - delLen)
 	// Backspace and Delete both branch on whether the primary selection is
 	// empty, so leaving a stale one behind makes a later press delete a range
 	// the user is no longer on.
-	b.syncPrimarySelection()
+	b.SetCursor(b.rope.OffsetToPosition(offset - delLen))
 	b.lastChange = &EditChange{
 		StartLine: b.Cursor.Line, StartCol: b.Cursor.Col,
 		EndLine: endPos.Line, EndCol: endPos.Col,
@@ -427,6 +459,14 @@ func (b *Buffer) Backspace() {
 func (b *Buffer) Delete() {
 	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
+		return
+	}
+	if b.Selections != nil && b.Selections.Count() > 1 {
+		if b.allSelectionsEmpty() {
+			b.deleteAtCursors(false)
+		} else {
+			b.DeleteSelection()
+		}
 		return
 	}
 	offset := b.rope.PositionToOffset(b.Cursor)
@@ -448,11 +488,99 @@ func (b *Buffer) Delete() {
 	b.rope = b.rope.Delete(offset, delLen)
 	b.dirty = true
 	b.version++
+	// Delete leaves the cursor at the same byte offset. Reconcile the primary
+	// selection nevertheless: callers may have moved the cursor through a
+	// compatibility path that did not call SetCursor.
+	b.SetCursor(b.Cursor)
 	b.lastChange = &EditChange{
 		StartLine: startPos.Line, StartCol: startPos.Col,
 		EndLine: endPos.Line, EndCol: endPos.Col,
 		Text: "",
 	}
+}
+
+// allSelectionsEmpty reports whether every selection is a collapsed cursor.
+func (b *Buffer) allSelectionsEmpty() bool {
+	for _, sel := range b.Selections.selections {
+		if !sel.IsEmpty() {
+			return false
+		}
+	}
+	return true
+}
+
+// deleteAtCursors applies Backspace (backward=true) or Delete (backward=false)
+// once at every collapsed cursor. Each deletion shifts every following cursor,
+// so edits are applied end-to-start against the original rope and all
+// selections are rebased into the final document; editing only the primary
+// cursor used to strand the remaining selections at stale offsets, corrupting
+// the next multi-cursor edit.
+func (b *Buffer) deleteAtCursors(backward bool) {
+	b.Selections.Normalize()
+	type delRange struct {
+		start int
+		end   int
+	}
+	ranges := make([]delRange, 0, len(b.Selections.selections))
+	for _, sel := range b.Selections.selections {
+		offset := b.rope.PositionToOffset(sel.Head)
+		if backward {
+			if offset == 0 {
+				ranges = append(ranges, delRange{start: offset, end: offset})
+				continue
+			}
+			delLen := 1
+			if sel.Head.Col > 0 {
+				lineContent := b.rope.Line(sel.Head.Line)
+				if sel.Head.Col <= len(lineContent) {
+					if _, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col]); size > 0 {
+						delLen = size
+					}
+				}
+			}
+			ranges = append(ranges, delRange{start: offset - delLen, end: offset})
+			continue
+		}
+		if offset >= b.rope.Len() {
+			ranges = append(ranges, delRange{start: offset, end: offset})
+			continue
+		}
+		delLen := 1
+		lineContent := b.rope.Line(sel.Head.Line)
+		if sel.Head.Col < len(lineContent) {
+			if _, size := utf8.DecodeRune(lineContent[sel.Head.Col:]); size > 0 {
+				delLen = size
+			}
+		}
+		ranges = append(ranges, delRange{start: offset, end: offset + delLen})
+	}
+
+	primary := b.Selections.primary
+	b.undo.Save(b.rope, b.Cursor, false)
+
+	// Apply from end to beginning so every range stays relative to the
+	// original rope.
+	for i := len(ranges) - 1; i >= 0; i-- {
+		if r := ranges[i]; r.end > r.start {
+			b.rope = b.rope.Delete(r.start, r.end-r.start)
+		}
+	}
+
+	// Rebase each cursor: it lands at its range start, shifted left by every
+	// deletion that happened before it.
+	shift := 0
+	rebased := make([]Selection, len(ranges))
+	for i, r := range ranges {
+		pos := b.rope.OffsetToPosition(r.start + shift)
+		rebased[i] = Selection{Anchor: pos, Head: pos}
+		shift -= r.end - r.start
+	}
+	b.Selections = &Selections{selections: rebased, primary: primary}
+	b.Cursor = b.Selections.PrimaryCursor()
+	b.dirty = true
+	b.version++
+	// Multi-cursor edits require a full-sync fallback for LSP.
+	b.lastChange = nil
 }
 
 // DeleteSelection removes all active selections.
@@ -479,10 +607,8 @@ func (b *Buffer) DeleteSelection() {
 		b.rope = b.rope.Delete(startOff, n)
 		b.dirty = true
 		b.version++
-		b.Cursor = start
+		b.SetCursor(start)
 		b.Selections.Clear()
-		// Collapse the remaining selection to cursor
-		b.Selections.selections[0] = Selection{Anchor: b.Cursor, Head: b.Cursor}
 		b.lastChange = &EditChange{
 			StartLine: start.Line, StartCol: start.Col,
 			EndLine: end.Line, EndCol: end.Col,
@@ -553,9 +679,18 @@ func (b *Buffer) DeleteSelection() {
 // SetCursor sets the cursor position and updates the primary selection.
 func (b *Buffer) SetCursor(pos Position) {
 	b.Cursor = pos
-	if b.Selections != nil {
-		b.Selections.selections[b.Selections.primary] = Selection{Anchor: pos, Head: pos}
+	if b.Selections == nil {
+		b.Selections = NewSelections(pos)
+		return
 	}
+	if len(b.Selections.selections) == 0 {
+		b.Selections = NewSelections(pos)
+		return
+	}
+	if b.Selections.primary < 0 || b.Selections.primary >= len(b.Selections.selections) {
+		b.Selections.primary = 0
+	}
+	b.Selections.selections[b.Selections.primary] = Selection{Anchor: pos, Head: pos}
 }
 
 // ClampPosition returns pos confined to the current content: a line inside the
@@ -584,29 +719,69 @@ func (b *Buffer) ClampPosition(pos Position) Position {
 // keystroke resolves the stale offset, teleporting the cursor. Call this after
 // any such rewrite.
 func (b *Buffer) ClampCursor() {
-	b.Cursor = b.ClampPosition(b.Cursor)
 	if b.Selections == nil {
+		// A compatibility caller may have cleared the public selection field
+		// before asking us to repair a position. Rebuild the canonical single
+		// selection as well; leaving it nil would make the next edit dereference
+		// a missing selection set.
+		b.SetCursor(b.ClampPosition(b.Cursor))
 		return
 	}
+	b.Cursor = b.ClampPosition(b.Cursor)
 	for i, sel := range b.Selections.selections {
 		b.Selections.selections[i] = Selection{
 			Anchor: b.ClampPosition(sel.Anchor),
 			Head:   b.ClampPosition(sel.Head),
 		}
 	}
+	// Cursor is the primary selection head. Preserve the anchor for a single
+	// selection while repairing its head if a legacy caller assigned Cursor
+	// directly; multi-cursor state keeps its own primary head as the projection.
+	if b.Selections.Count() == 1 {
+		b.Selections.selections[b.Selections.primary].Head = b.Cursor
+	} else {
+		b.Cursor = b.Selections.PrimaryCursor()
+	}
 }
 
 // ReplaceRange replaces text between start and end positions with newText.
 func (b *Buffer) ReplaceRange(start, end Position, newText []byte) {
+	oldRope := b.rope
 	startOff := b.rope.PositionToOffset(start)
 	endOff := b.rope.PositionToOffset(end)
 	n := endOff - startOff
+	oldCursor := b.Cursor
+	oldSelections := []Selection(nil)
+	primary := 0
+	if b.Selections != nil {
+		oldSelections = append(oldSelections, b.Selections.selections...)
+		primary = b.Selections.PrimaryIndex()
+	}
 	b.undo.Save(b.rope, b.Cursor, false)
 	if n > 0 {
 		b.rope = b.rope.Delete(startOff, n)
 	}
 	if len(newText) > 0 {
 		b.rope = b.rope.Insert(startOff, newText)
+	}
+	// ReplaceRange is used by completion, formatting, plugins, and workspace
+	// edits. Those callers can replace text before the cursor without changing
+	// the cursor explicitly. Rebase every position against the same edit so a
+	// later Backspace/Delete cannot consult coordinates from the old rope.
+	b.Cursor = mapPositionAfterReplace(oldRope, b.rope, oldCursor, startOff, endOff, len(newText))
+	if len(oldSelections) == 0 {
+		b.Selections = NewSelections(b.Cursor)
+	} else {
+		mapped := make([]Selection, len(oldSelections))
+		for i, selection := range oldSelections {
+			mapped[i] = Selection{
+				Anchor: mapPositionAfterReplace(oldRope, b.rope, selection.Anchor, startOff, endOff, len(newText)),
+				Head:   mapPositionAfterReplace(oldRope, b.rope, selection.Head, startOff, endOff, len(newText)),
+			}
+		}
+		b.Selections = &Selections{selections: mapped, primary: primary, dirty: true}
+		b.Selections.Normalize()
+		b.Cursor = b.Selections.PrimaryCursor()
 	}
 	b.dirty = true
 	b.version++
@@ -617,14 +792,33 @@ func (b *Buffer) ReplaceRange(start, end Position, newText []byte) {
 	}
 }
 
+// mapPositionAfterReplace maps a position from oldRope to the document after
+// replacing [startOff,endOff) with newLen bytes. Positions inside the replaced
+// range resolve to the end of the replacement, which is the useful cursor
+// position for a completion or an external edit that swallowed a selection.
+func mapPositionAfterReplace(oldRope, newRope *Rope, pos Position, startOff, endOff, newLen int) Position {
+	off := oldRope.PositionToOffset(pos)
+	switch {
+	case off < startOff:
+		// unchanged
+	case off >= endOff:
+		off += newLen - (endOff - startOff)
+	default:
+		off = startOff + newLen
+	}
+	return newRope.OffsetToPosition(off)
+}
+
 // MoveCursor moves the cursor in the given direction.
 func (b *Buffer) MoveCursor(dir Direction) {
 	switch dir {
 	case DirLeft:
 		if b.Cursor.Col > 0 {
-			lineContent := b.rope.Line(b.Cursor.Line)
-			_, size := utf8.DecodeLastRune(lineContent[:b.Cursor.Col])
-			b.Cursor.Col -= size
+			offset := b.rope.PositionToOffset(b.Cursor)
+			_, size, ok := b.rope.RuneBefore(offset)
+			if ok {
+				b.Cursor.Col -= size
+			}
 		} else if b.Cursor.Line > 0 {
 			b.Cursor.Line--
 			b.Cursor.Col = b.rope.LineLen(b.Cursor.Line)
@@ -632,9 +826,11 @@ func (b *Buffer) MoveCursor(dir Direction) {
 	case DirRight:
 		lineLen := b.rope.LineLen(b.Cursor.Line)
 		if b.Cursor.Col < lineLen {
-			lineContent := b.rope.Line(b.Cursor.Line)
-			_, size := utf8.DecodeRune(lineContent[b.Cursor.Col:])
-			b.Cursor.Col += size
+			offset := b.rope.PositionToOffset(b.Cursor)
+			_, size, ok := b.rope.RuneAt(offset)
+			if ok {
+				b.Cursor.Col += size
+			}
 		} else if b.Cursor.Line < b.rope.LineCount()-1 {
 			b.Cursor.Line++
 			b.Cursor.Col = 0
@@ -650,16 +846,22 @@ func (b *Buffer) MoveCursor(dir Direction) {
 			b.Cursor.Col = min(b.Cursor.Col, b.rope.LineLen(b.Cursor.Line))
 		}
 	}
+	// Keep the primary selection aligned with the cursor. Normal movement is
+	// allowed to collapse a selection; shift-movement saves the anchor and
+	// restores it in ExtendSelection after this method returns.
+	b.syncPrimarySelection()
 }
 
 // SetSelection sets the selection anchored at the anchor, with head as the cursor.
 func (b *Buffer) SetSelection(anchor, head Position) {
-	if b.Selections == nil {
+	if b.Selections == nil || len(b.Selections.selections) == 0 {
 		b.Selections = NewSelections(anchor)
-	} else {
-		b.Selections.selections[b.Selections.primary] = Selection{Anchor: anchor, Head: head}
-		b.Selections.Clear() // Ensure only one selection
 	}
+	if b.Selections.primary < 0 || b.Selections.primary >= len(b.Selections.selections) {
+		b.Selections.primary = 0
+	}
+	b.Selections.selections[b.Selections.primary] = Selection{Anchor: anchor, Head: head}
+	b.Selections.Clear() // Ensure only one selection
 	b.Cursor = head
 }
 
@@ -683,12 +885,16 @@ func (b *Buffer) ClearSelection() {
 
 // CursorToLineStart moves the cursor to the beginning of the current line.
 func (b *Buffer) CursorToLineStart() {
-	b.Cursor.Col = 0
+	cursor := b.Cursor
+	cursor.Col = 0
+	b.SetCursor(cursor)
 }
 
 // CursorToLineEnd moves the cursor to the end of the current line.
 func (b *Buffer) CursorToLineEnd() {
-	b.Cursor.Col = b.rope.LineLen(b.Cursor.Line)
+	cursor := b.Cursor
+	cursor.Col = b.rope.LineLen(cursor.Line)
+	b.SetCursor(cursor)
 }
 
 // MoveCursors moves all cursors in the given direction.
@@ -795,7 +1001,7 @@ func (b *Buffer) Save() error {
 // It writes to a temporary file first, then renames it to the target path.
 func (b *Buffer) SaveAs(path string) error {
 	snapshot := b.rope
-	if err := WriteRopeAtomically(path, snapshot); err != nil {
+	if err := WriteRopeAtomicallyWithLineEnding(path, snapshot, b.lineEnding); err != nil {
 		return err
 	}
 	b.MarkSavedSnapshot(path, snapshot)
@@ -882,6 +1088,7 @@ func trimLeadingWhitespace(b []byte) []byte {
 
 // MoveCursorWordLeft moves the cursor to the start of the previous word.
 func (b *Buffer) MoveCursorWordLeft() {
+	defer b.syncPrimarySelection()
 	line := b.rope.Line(b.Cursor.Line)
 	col := b.Cursor.Col
 
@@ -921,6 +1128,7 @@ func (b *Buffer) MoveCursorWordLeft() {
 
 // MoveCursorWordRight moves the cursor to the start of the next word.
 func (b *Buffer) MoveCursorWordRight() {
+	defer b.syncPrimarySelection()
 	line := b.rope.Line(b.Cursor.Line)
 	col := b.Cursor.Col
 	lineLen := len(line)
@@ -981,7 +1189,7 @@ func (b *Buffer) DeleteWord() {
 	saved := b.Cursor
 	b.MoveCursorWordRight()
 	endPos := b.Cursor
-	b.Cursor = saved
+	b.SetCursor(saved)
 	if saved == endPos {
 		return
 	}
@@ -1008,13 +1216,13 @@ func (b *Buffer) SelectAll() {
 
 // CursorToDocStart moves the cursor to the beginning of the document.
 func (b *Buffer) CursorToDocStart() {
-	b.Cursor = Position{0, 0}
+	b.SetCursor(Position{0, 0})
 }
 
 // CursorToDocEnd moves the cursor to the end of the document.
 func (b *Buffer) CursorToDocEnd() {
 	lastLine := b.rope.LineCount() - 1
-	b.Cursor = Position{lastLine, b.rope.LineLen(lastLine)}
+	b.SetCursor(Position{lastLine, b.rope.LineLen(lastLine)})
 }
 
 // ExtendSelection calls move and extends the selection from the current anchor.
@@ -1178,6 +1386,7 @@ func (b *Buffer) AddCursorAbove() {
 		}
 	}
 	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 }
 
 // AddCursorBelow adds a cursor on the line below each selection.
@@ -1197,6 +1406,7 @@ func (b *Buffer) AddCursorBelow() {
 		}
 	}
 	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 }
 
 // SplitSelectionIntoLines splits the current selection into multiple selections,
@@ -1290,6 +1500,50 @@ func (b *Buffer) SelectLine() {
 	}
 }
 
+// lineColDelta describes a column-level edit on one line: delta bytes were
+// inserted (positive) or deleted (negative) starting at col.
+type lineColDelta struct {
+	col   int
+	delta int
+}
+
+// rebasePositionsForLineEdits shifts the cursor and every selection through
+// column-level edits applied to lines startLine..startLine+len(deltas)-1.
+// Positions at or before the edit column keep their place, positions inside a
+// deleted range collapse onto the edit column, and everything else is clamped
+// to the new line length. Structural line edits used to skip this
+// reconciliation, leaving the cursor past the end of a shortened line or
+// pointing at shifted text.
+func (b *Buffer) rebasePositionsForLineEdits(startLine int, deltas []lineColDelta) {
+	adjust := func(pos Position) Position {
+		idx := pos.Line - startLine
+		if idx < 0 || idx >= len(deltas) {
+			return pos
+		}
+		edit := deltas[idx]
+		if edit.delta == 0 || pos.Col <= edit.col {
+			return pos
+		}
+		col := pos.Col + edit.delta
+		if col < edit.col {
+			col = edit.col
+		}
+		if lineLen := len(b.rope.Line(pos.Line)); col > lineLen {
+			col = lineLen
+		}
+		return Position{Line: pos.Line, Col: col}
+	}
+	b.Cursor = adjust(b.Cursor)
+	if b.Selections == nil {
+		return
+	}
+	rebased := make([]Selection, len(b.Selections.selections))
+	for i, sel := range b.Selections.selections {
+		rebased[i] = Selection{Anchor: adjust(sel.Anchor), Head: adjust(sel.Head)}
+	}
+	b.Selections = &Selections{selections: rebased, primary: b.Selections.primary}
+}
+
 // ToggleLineComment toggles a line comment prefix on the current line or selection range.
 func (b *Buffer) ToggleLineComment(prefix string) {
 	if prefix == "" {
@@ -1322,6 +1576,7 @@ func (b *Buffer) ToggleLineComment(prefix string) {
 	}
 
 	b.undo.Save(b.rope, b.Cursor, false)
+	deltas := make([]lineColDelta, endLine-startLine+1)
 
 	if allCommented {
 		// Uncomment: remove prefix in reverse order
@@ -1338,6 +1593,7 @@ func (b *Buffer) ToggleLineComment(prefix string) {
 				removeLen++
 			}
 			b.rope = b.rope.Delete(lineStart+idx, removeLen)
+			deltas[line-startLine] = lineColDelta{col: idx, delta: -removeLen}
 		}
 	} else {
 		// Comment: find min indent, insert prefix at that column in reverse order
@@ -1358,8 +1614,10 @@ func (b *Buffer) ToggleLineComment(prefix string) {
 		for line := endLine; line >= startLine; line-- {
 			lineStart := b.rope.LineStart(line)
 			b.rope = b.rope.Insert(lineStart+minIndent, []byte(commentPrefix))
+			deltas[line-startLine] = lineColDelta{col: minIndent, delta: len(commentPrefix)}
 		}
 	}
+	b.rebasePositionsForLineEdits(startLine, deltas)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // multi-line structural edit; use full-sync fallback
@@ -1394,7 +1652,9 @@ func (b *Buffer) MoveLineUp() {
 	b.rope = b.rope.Delete(aboveStart, aboveLen)
 	b.rope = b.rope.Insert(aboveStart, curContent)
 
-	b.Cursor.Line--
+	cursor := b.Cursor
+	cursor.Line--
+	b.SetCursor(cursor)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // line swap is non-local for incremental sync
@@ -1424,7 +1684,9 @@ func (b *Buffer) MoveLineDown() {
 	b.rope = b.rope.Delete(curStart, curLen)
 	b.rope = b.rope.Insert(curStart, belowContent)
 
-	b.Cursor.Line++
+	cursor := b.Cursor
+	cursor.Line++
+	b.SetCursor(cursor)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // line swap is non-local for incremental sync
@@ -1438,7 +1700,9 @@ func (b *Buffer) DuplicateLineDown() {
 	// Insert newline + copy after the current line
 	insert := append([]byte{'\n'}, content...)
 	b.rope = b.rope.Insert(lineStart+len(content), insert)
-	b.Cursor.Line++
+	cursor := b.Cursor
+	cursor.Line++
+	b.SetCursor(cursor)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // line duplicate is non-local for incremental sync
@@ -1470,12 +1734,16 @@ func (b *Buffer) DeleteLine() {
 	} else if b.Cursor.Line > 0 {
 		// Last line: delete preceding newline + content
 		b.rope = b.rope.Delete(lineStart-1, lineLen+1)
-		b.Cursor.Line--
+		cursor := b.Cursor
+		cursor.Line--
+		b.SetCursor(cursor)
 	} else {
 		// Only line: replace with empty
 		b.rope = b.rope.Delete(lineStart, lineLen)
 	}
-	b.Cursor.Col = min(b.Cursor.Col, b.rope.LineLen(b.Cursor.Line))
+	cursor := b.Cursor
+	cursor.Col = min(cursor.Col, b.rope.LineLen(cursor.Line))
+	b.SetCursor(cursor)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // complex operation, fall back to full sync
@@ -1500,6 +1768,11 @@ func (b *Buffer) IndentLines(tabSize int) {
 		lineStart := b.rope.LineStart(line)
 		b.rope = b.rope.Insert(lineStart, indent)
 	}
+	deltas := make([]lineColDelta, endLine-startLine+1)
+	for i := range deltas {
+		deltas[i] = lineColDelta{col: 0, delta: len(indent)}
+	}
+	b.rebasePositionsForLineEdits(startLine, deltas)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // multi-line indent: fall back to full sync
@@ -1519,14 +1792,17 @@ func (b *Buffer) DedentLines(tabSize int) {
 	}
 
 	b.undo.Save(b.rope, b.Cursor, false)
+	deltas := make([]lineColDelta, endLine-startLine+1)
 	for line := endLine; line >= startLine; line-- {
 		content := b.rope.Line(line)
 		n := Dedent(content, tabSize)
 		if n > 0 {
 			lineStart := b.rope.LineStart(line)
 			b.rope = b.rope.Delete(lineStart, n)
+			deltas[line-startLine] = lineColDelta{col: 0, delta: -n}
 		}
 	}
+	b.rebasePositionsForLineEdits(startLine, deltas)
 	b.dirty = true
 	b.version++
 	b.lastChange = nil // multi-line dedent: fall back to full sync

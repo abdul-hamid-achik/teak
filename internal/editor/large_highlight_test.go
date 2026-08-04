@@ -33,6 +33,43 @@ func TestLargeInitialTokenizationUsesSparseViewportBatch(t *testing.T) {
 	}
 }
 
+func TestLargeEditRetokenizationUsesSparseViewportBatch(t *testing.T) {
+	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("var value = 42\n"), maxInteractiveHighlightLines+1))
+	buf.FilePath = "large.go"
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.Viewport.Height = 24
+
+	updated, cmd := ed.Update(RetokenizeMsg{
+		EditorID: ed.ID(),
+		Version:  buf.Version(),
+	})
+	if cmd == nil {
+		t.Fatal("expected bounded edit tokenization command")
+	}
+	msg, ok := cmd().(TokenizeCompleteMsg)
+	if !ok {
+		t.Fatalf("command result = %T, want TokenizeCompleteMsg", msg)
+	}
+	if !msg.Partial {
+		t.Fatal("large edit scheduled a full tokenization")
+	}
+	if msg.EditorID != updated.ID() || msg.Version != buf.Version() || msg.Generation == 0 {
+		t.Fatalf("tokenization message = %#v, want current editor/version/generation", msg)
+	}
+	if len(msg.Batch.Lines) > 500 {
+		t.Fatalf("edit batch contains %d lines, want only viewport and margin", len(msg.Batch.Lines))
+	}
+	updated, _ = updated.Update(msg)
+	viewStart, viewEnd := updated.visibleTokenRange()
+	if !updated.Highlighter.CoversRange(viewStart, viewEnd) {
+		t.Fatalf("accepted edit batch did not cover visible range [%d,%d)", viewStart, viewEnd)
+	}
+	updated.Viewport.ScrollY = maxInteractiveHighlightLines
+	if !updated.needsRetokenize() {
+		t.Fatal("off-screen range was reported covered before its on-demand refresh")
+	}
+}
+
 func TestViewportCoverageDoesNotHideUnmaterializedCaptureGap(t *testing.T) {
 	buf := text.NewBufferFromBytes(bytes.Repeat([]byte("var value = 42\n"), 1_000))
 	buf.FilePath = "large.go"

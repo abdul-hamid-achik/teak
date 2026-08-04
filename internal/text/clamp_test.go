@@ -71,3 +71,68 @@ func TestClampCursorOnEmptyBuffer(t *testing.T) {
 		t.Errorf("cursor = %+v, want %+v", got, want)
 	}
 }
+
+func TestClampCursorRepairsNilSelections(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("hello\nworld"))
+	buf.Selections = nil
+	buf.Cursor = Position{Line: 99, Col: 99}
+
+	buf.ClampCursor()
+
+	if buf.Selections == nil || buf.Selections.Count() != 1 {
+		t.Fatalf("selections = %#v, want one repaired selection", buf.Selections)
+	}
+	if got, want := buf.Selections.PrimaryCursor(), (Position{Line: 1, Col: 5}); got != want {
+		t.Fatalf("primary cursor = %+v, want %+v", got, want)
+	}
+	if buf.Cursor != buf.Selections.PrimaryCursor() {
+		t.Fatalf("cursor = %+v and primary cursor = %+v drifted", buf.Cursor, buf.Selections.PrimaryCursor())
+	}
+}
+
+func TestReplaceRangeRebasesCursorAndSelections(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("zero\none\ntwo\nthree"))
+	buf.SetSelection(Position{Line: 2, Col: 1}, Position{Line: 3, Col: 2})
+
+	buf.ReplaceRange(Position{Line: 0, Col: 0}, Position{Line: 0, Col: 4}, []byte("header\n"))
+
+	if got, want := buf.Cursor, (Position{Line: 4, Col: 2}); got != want {
+		t.Errorf("cursor = %+v, want %+v after inserting a line before it", got, want)
+	}
+	if got, want := buf.Selections.Primary(), (Selection{
+		Anchor: Position{Line: 3, Col: 1},
+		Head:   Position{Line: 4, Col: 2},
+	}); got != want {
+		t.Errorf("primary selection = %+v, want %+v after rebasing", got, want)
+	}
+}
+
+func TestReplaceRangeMapsPositionsInsideReplacedRangeToReplacementEnd(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("before target after"))
+	buf.SetSelection(Position{Line: 0, Col: 8}, Position{Line: 0, Col: 12})
+
+	buf.ReplaceRange(Position{Line: 0, Col: 7}, Position{Line: 0, Col: 13}, []byte("new"))
+
+	if got, want := buf.Cursor, (Position{Line: 0, Col: 10}); got != want {
+		t.Errorf("cursor = %+v, want %+v at replacement end", got, want)
+	}
+	if got, want := buf.Selections.Primary(), (Selection{
+		Anchor: Position{Line: 0, Col: 10},
+		Head:   Position{Line: 0, Col: 10},
+	}); got != want {
+		t.Errorf("primary selection = %+v, want collapsed replacement end %+v", got, want)
+	}
+}
+
+func TestDuplicateLineUpKeepsCursorAndPrimarySelectionInSync(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("first\nsecond"))
+	buf.SetCursor(Position{Line: 1, Col: 3})
+	buf.DuplicateLineUp()
+
+	if got, want := buf.Cursor, (Position{Line: 1, Col: 3}); got != want {
+		t.Errorf("cursor = %+v, want %+v on duplicated line", got, want)
+	}
+	if got, want := buf.Selections.PrimaryCursor(), buf.Cursor; got != want {
+		t.Errorf("primary cursor = %+v, cursor = %+v; duplicate left selection stale", got, want)
+	}
+}

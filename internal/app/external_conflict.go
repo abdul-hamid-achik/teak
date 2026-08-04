@@ -71,19 +71,28 @@ func prepareExternalFileChangedCmd(msg FileChangedMsg, ctx context.Context) tea.
 			}
 		}
 		var snapshot *text.Rope
+		var ending text.LineEnding
 		if needsRead {
 			// This branch read a fresh allocation itself. Legacy FileChangedMsg
 			// Data stays defensive because its sender may retain the slice.
-			snapshot = text.NewOwned(data)
+			normalized, detected := text.NormalizeLineEndings(data)
+			snapshot = text.NewOwned(normalized)
+			ending = detected
 		} else {
-			snapshot = text.New(data)
+			normalized, detected := text.NormalizeLineEndings(data)
+			snapshot = text.New(normalized)
+			ending = detected
 		}
 		return FileChangedMsg{
-			Path:             path,
-			Snapshot:         snapshot,
-			Observation:      observation,
-			Missing:          msg.Missing,
-			RequiresConflict: msg.RequiresConflict,
+			Path:              path,
+			Snapshot:          snapshot,
+			LineEnding:        ending,
+			Observation:       observation,
+			Missing:           msg.Missing,
+			RequiresConflict:  msg.RequiresConflict,
+			OwnWriteCandidate: msg.OwnWriteCandidate,
+			OwnWriteSnapshot:  msg.OwnWriteSnapshot,
+			OwnWriteVerified:  msg.OwnWriteVerified,
 		}
 	}
 }
@@ -257,9 +266,10 @@ func prepareExternalConflictReloadCmd(
 				BaseVersion: baseVersion, BaseRope: baseRope, Err: err,
 			}
 		}
+		normalized, _ := text.NormalizeLineEndings(data)
 		return externalConflictReloadPreparedMsg{
 			Path: path, Generation: generation, EditorID: editorID,
-			BaseVersion: baseVersion, BaseRope: baseRope, Snapshot: text.NewOwned(data),
+			BaseVersion: baseVersion, BaseRope: baseRope, Snapshot: text.NewOwned(normalized),
 		}
 	}
 }
@@ -343,7 +353,7 @@ func (m Model) applyExternalSnapshot(path string, snapshot *text.Rope, clean boo
 		prevCursor := m.editors[i].Buffer.Cursor
 		m.editors[i].InvalidateClipboardPaste()
 		if clean {
-			m.editors[i].Buffer.LoadRopeSnapshot(snapshot)
+			m.editors[i].Buffer.LoadRopeSnapshot(snapshot, m.editors[i].Buffer.LineEnding())
 		} else {
 			m.editors[i].Buffer.ReplaceRopeSnapshot(snapshot, text.Position{})
 		}

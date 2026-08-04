@@ -3,31 +3,40 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"teak/internal/config"
+	"teak/internal/dap"
 	"teak/internal/lsp"
+	"teak/internal/overlay"
 	"teak/internal/text"
 )
 
 // TestAppSaveOperations tests save-related functionality
 func TestAppSaveOperations(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "save.txt", "disk\n", "local edits\n")
+	path := model.editors[0].Buffer.FilePath
 
-	root := t.TempDir()
-	model, err := NewModel("", root, cfg)
+	saved := requireFileSavedMsg(t, model.beginSaveForTab(0, false, false))
+	updatedAny, _ := model.Update(saved)
+	updated := updatedAny.(Model)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
+		t.Fatalf("os.ReadFile() error = %v", err)
 	}
-	defer model.cleanup()
-
-	// Test beginSaveForTab - just verify it doesn't panic
-	// The actual save logic is tested in save_flow_test.go
-	cmd := model.beginSaveForTab(0, false, false)
-	// Command may be nil or non-nil depending on state
-	_ = cmd
+	if got := string(data); got != "local edits\n" {
+		t.Fatalf("saved bytes = %q, want local edits", got)
+	}
+	if updated.editors[0].Buffer.Dirty() || updated.tabBar.Tabs[0].Dirty {
+		t.Fatal("successful save left the buffer or tab dirty")
+	}
+	if updated.status != "Saved "+path {
+		t.Fatalf("save status = %q", updated.status)
+	}
 }
 
 // TestAppCloseTabOperations tests tab closing functionality
@@ -167,11 +176,40 @@ func TestAppDAPMessageHandling(t *testing.T) {
 	}
 	defer model.cleanup()
 
-	// Test handleDAPMsg - should not panic
-	// Actual DAP messages would be tested in integration tests
+	pausedAny, pausedCmd := model.routeDAPMsg(dapMsg{
+		msg: dap.StoppedEventMsg{Reason: "breakpoint"},
+	})
+	paused := pausedAny.(Model)
+	if pausedCmd == nil {
+		t.Fatal("stopped DAP event did not schedule state refresh/listener")
+	}
+	if got := paused.debuggerPanel.State(); got != dap.StatePaused {
+		t.Fatalf("debugger UI state after stop = %v, want paused", got)
+	}
+	if got := paused.coordinator.GetDAPCoordinator().GetState(); got != dap.StatePaused {
+		t.Fatalf("DAP coordinator state after stop = %v, want paused", got)
+	}
+	if paused.status != "Stopped: breakpoint" {
+		t.Fatalf("stop status = %q", paused.status)
+	}
+
+	runningAny, runningCmd := paused.routeDAPMsg(dapMsg{msg: dap.ContinuedEventMsg{}})
+	running := runningAny.(Model)
+	if runningCmd == nil {
+		t.Fatal("continued DAP event did not keep the listener alive")
+	}
+	if got := running.debuggerPanel.State(); got != dap.StateRunning {
+		t.Fatalf("debugger UI state after continue = %v, want running", got)
+	}
+	if got := running.coordinator.GetDAPCoordinator().GetState(); got != dap.StateRunning {
+		t.Fatalf("DAP coordinator state after continue = %v, want running", got)
+	}
+	if running.status != "Debugging" {
+		t.Fatalf("continue status = %q", running.status)
+	}
 }
 
-// TestAppDeleteConfirmHandling tests delete confirmation
+// TestAppDeleteConfirmHandling tests delete confirmation routing through Update.
 func TestAppDeleteConfirmHandling(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Session.Enabled = false
@@ -184,18 +222,32 @@ func TestAppDeleteConfirmHandling(t *testing.T) {
 	}
 	defer model.cleanup()
 
-	// Set up delete confirmation state
-	model.deleteConfirm = true
+	// Set up delete confirmation state.
 	testFile := filepath.Join(root, "test.txt")
-	model.deleteTarget = testFile
-
-	// Create a test file
 	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
+	model.deleteConfirm = true
+	model.deleteTarget = testFile
 
-	// Test handleDeleteConfirm with 'y' key
-	// This would be tested through the Update method
+	// Confirm deletion via Update; the command performs filesystem work.
+	updatedAny, cmd := model.Update(tea.KeyPressMsg{Text: "y"})
+	updated := updatedAny.(Model)
+	if updated.deleteConfirm || updated.deleteTarget != "" {
+		t.Fatalf("delete prompt not reset: confirm=%v target=%q", updated.deleteConfirm, updated.deleteTarget)
+	}
+	if cmd == nil {
+		t.Fatal("confirming delete did not schedule a filesystem command")
+	}
+
+	completed := completeTreeAction(t, updated, cmd)
+	if _, err := os.Lstat(testFile); !os.IsNotExist(err) {
+		t.Fatalf("deleted file still exists: %v", err)
+	}
+	// Sanity: completing the command should keep the prompt dismissed.
+	if completed.deleteConfirm || completed.deleteTarget != "" {
+		t.Fatalf("delete prompt revived after completion: confirm=%v target=%q", completed.deleteConfirm, completed.deleteTarget)
+	}
 }
 
 // TestAppDiagnosticsHandling tests diagnostic message handling
@@ -216,26 +268,60 @@ func TestAppDiagnosticsHandling(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
+	model.activeEditor().Buffer.FilePath = testFile
+	model.tabBar.Tabs[model.activeTab].FilePath = testFile
 
-	// Test handleDiagnostics - verify it doesn't panic
 	msg := lsp.DiagnosticsMsg{
 		URI: lsp.FileURI(testFile),
 		Diagnostics: []lsp.Diagnostic{
 			{
+				Range:    lsp.DiagRange{Start: lsp.DiagPosition{Line: 1, Character: 2}, End: lsp.DiagPosition{Line: 1, Character: 5}},
 				Severity: 1,
 				Message:  "test error",
 			},
 		},
 	}
-	_, cmd := model.handleDiagnostics(msg)
-	// Command may be returned for async processing
-	_ = cmd
+	updatedAny, cmd := model.routeLSPMsg(lspMsg{msg: msg})
+	model = updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("LSP route did not schedule the listener continuation")
+	}
+	if got := model.activeEditor().Diagnostics; len(got) != 1 || got[0].Message != "test error" || got[0].StartLine != 1 || got[0].StartCol != 2 {
+		t.Fatalf("editor diagnostics = %#v, want the received diagnostic", got)
+	}
+	if got := model.fileDiagnostics[testFile]; got != 1 {
+		t.Fatalf("file diagnostic severity = %d, want error severity 1", got)
+	}
+	if got := model.treeDiagnostics[testFile]; got != 1 {
+		t.Fatalf("tree diagnostic severity = %d, want error severity 1", got)
+	}
 
 	// Verify diagnostics stored in coordinator
 	lspCoord := model.coordinator.GetLSPCoordinator()
 	storedDiags := lspCoord.GetDiagnostics(testFile)
-	// Diagnostics should be stored
-	_ = storedDiags
+	if len(storedDiags) != 1 || storedDiags[0].Message != "test error" {
+		t.Fatalf("coordinator diagnostics = %#v, want the received diagnostic", storedDiags)
+	}
+
+	stale := msg
+	stale.HasVersion = true
+	stale.Version = model.activeEditor().Buffer.Version() + 1
+	stale.Diagnostics[0].Message = "stale error"
+	model.handleDiagnostics(stale)
+	if got := model.activeEditor().Diagnostics[0].Message; got != "test error" {
+		t.Fatalf("stale diagnostics replaced current editor state with %q", got)
+	}
+
+	model.handleDiagnostics(lsp.DiagnosticsMsg{URI: lsp.FileURI(testFile)})
+	if len(model.activeEditor().Diagnostics) != 0 {
+		t.Fatalf("cleared diagnostics remained on editor: %#v", model.activeEditor().Diagnostics)
+	}
+	if _, ok := model.fileDiagnostics[testFile]; ok {
+		t.Fatal("cleared diagnostics remained in file index")
+	}
+	if len(model.coordinator.GetLSPCoordinator().GetDiagnostics(testFile)) != 0 {
+		t.Fatal("cleared diagnostics remained in coordinator")
+	}
 }
 
 // TestAppDiffLoadedHandling tests diff loaded message handling
@@ -256,31 +342,27 @@ func TestAppDiffLoadedHandling(t *testing.T) {
 
 // TestAppExternalFileChange tests external file change handling
 func TestAppExternalFileChange(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "test.txt", "initial", "initial")
+	path := model.editors[0].Buffer.FilePath
+	updatedAny, cmd := model.Update(FileChangedMsg{
+		Path:     path,
+		Snapshot: text.NewFromString("updated externally"),
+	})
+	updated := updatedAny.(Model)
 
-	root := t.TempDir()
-	model, err := NewModel("", root, cfg)
-	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
+	if cmd == nil {
+		t.Fatal("external file change did not schedule derived-state refresh")
 	}
-	defer model.cleanup()
-
-	// Create and open a file
-	testFile := filepath.Join(root, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+	if got := updated.editors[0].Buffer.Content(); got != "updated externally" {
+		t.Fatalf("external reload content = %q, want %q", got, "updated externally")
 	}
-
-	model2, err := NewModel(testFile, root, cfg)
-	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
+	if updated.editors[0].Buffer.Dirty() {
+		t.Fatal("clean buffer reloaded from disk became dirty")
 	}
-	defer model2.cleanup()
-
-	// Test handleExternalFileChange
-	// This would be called when file watcher detects changes
+	if got := updated.status; got != "Reloaded: test.txt (external change)" {
+		t.Fatalf("external reload status = %q", got)
+	}
 }
 
 // TestAppDebugState tests debug state fetching
@@ -336,8 +418,14 @@ func TestAppFormattingDocumentState(t *testing.T) {
 	}
 	defer model.cleanup()
 
-	// Test ensureFormattingDocumentState
-	// This is called during save operations
+	// The formatting path must remain safe when no language server is available;
+	// the save flow falls back to a regular write instead of claiming formatting.
+	model.activeEditor().Buffer.FilePath = filepath.Join(t.TempDir(), "plain.txt")
+	model.tabBar.Tabs[model.activeTab].FilePath = model.activeEditor().Buffer.FilePath
+	model.lspMgr = nil
+	if cmd := model.requestFormatting(model.activeEditor().Buffer.FilePath, model.activeEditor().Config, 1); cmd != nil {
+		t.Fatal("formatting without an LSP client should be a no-op")
+	}
 }
 
 // TestAppFormatResultNote tests formatting result note generation
@@ -671,18 +759,78 @@ func TestAppCycleAgentMode(t *testing.T) {
 
 // TestAppHandleAgentEnter tests handling agent enter key
 func TestAppHandleAgentEnter(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
-
-	model, err := NewModel("", ".", cfg)
-	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
+	setInput := func(t *testing.T, model Model, value string) Model {
+		t.Helper()
+		model.showAgent = true
+		model.focus = FocusAgent
+		model.width, model.height = 100, 30
+		model.agentPanel.SetSize(80, 20)
+		model.agentPanel.SetConnected(true)
+		if cmd := model.agentPanel.Focus(); cmd != nil {
+			_ = cmd
+		}
+		for _, r := range value {
+			updatedAny, _ := model.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+			model = updatedAny.(Model)
+		}
+		return model
 	}
-	defer model.cleanup()
 
-	// Test handleAgentEnter
-	// This would be called when user presses enter in agent panel
+	t.Run("help command is handled by the panel", func(t *testing.T) {
+		model := setInput(t, newTestModel(t), "/help")
+		updatedAny, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		updated := updatedAny.(Model)
+		if cmd != nil || updated.agentPanel.InputValue() != "" {
+			t.Fatalf("help command state input=%q cmd=%v", updated.agentPanel.InputValue(), cmd != nil)
+		}
+		if rendered := updated.agentPanel.View(); !strings.Contains(rendered, "Commands: /model") {
+			t.Fatalf("help command was not rendered in agent panel: %q", rendered)
+		}
+	})
+
+	t.Run("clear command removes chat history", func(t *testing.T) {
+		model := newTestModel(t)
+		model.agentPanel.SetSize(80, 20)
+		model.agentPanel.SetConnected(true)
+		model.agentPanel.AddSystemMessage("old history")
+		model = setInput(t, model, "/clear")
+		updatedAny, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		updated := updatedAny.(Model)
+		if cmd != nil || updated.agentPanel.InputValue() != "" {
+			t.Fatalf("clear command state input=%q cmd=%v", updated.agentPanel.InputValue(), cmd != nil)
+		}
+		if rendered := updated.agentPanel.View(); strings.Contains(rendered, "old history") {
+			t.Fatalf("clear command left old history in panel: %q", rendered)
+		}
+	})
+
+	t.Run("at command opens the file picker", func(t *testing.T) {
+		model := newTestModel(t)
+		model.cachedFilesReady = true
+		model.cachedFiles = []string{"main.go"}
+		model = setInput(t, model, "@")
+		updatedAny, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		updated := updatedAny.(Model)
+		if cmd == nil || updated.overlayStack.IsEmpty() {
+			t.Fatal("@ command did not open and schedule the agent file picker")
+		}
+		picker, ok := updated.overlayStack.Top().(*overlay.Picker)
+		if !ok || picker.ZoneID() != "agent-file-picker" {
+			t.Fatalf("agent file picker = %T/%q", updated.overlayStack.Top(), picker.ZoneID())
+		}
+	})
+
+	t.Run("normal text never leaks into the editor", func(t *testing.T) {
+		model := setInput(t, newTestModel(t), "hello agent")
+		updatedAny, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		updated := updatedAny.(Model)
+		if updated.activeEditor().Buffer.Content() != "" {
+			t.Fatalf("agent prompt leaked into editor: %q", updated.activeEditor().Buffer.Content())
+		}
+		if updated.agentPanel.InputValue() != "" {
+			t.Fatalf("submitted prompt remained in input: %q", updated.agentPanel.InputValue())
+		}
+	})
 }
 
 // TestAppHandleACPMsg tests handling ACP messages
@@ -723,33 +871,31 @@ func TestAppFilesToAgentPickerItems(t *testing.T) {
 
 // TestAppCancelQuitAfterSaves tests canceling quit after saves
 func TestAppCancelQuitAfterSaves(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
-
-	model, err := NewModel("", ".", cfg)
-	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
-	}
-	defer model.cleanup()
-
-	// Test cancelQuitAfterSaves
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	model.pendingSaves[1] = pendingSaveRequest{QuitAfter: true}
+	model.pendingSaves[2] = pendingSaveRequest{QuitAfter: false}
 	model.cancelQuitAfterSaves()
-	// Just verify it doesn't panic
+	if model.pendingSaves[1].QuitAfter {
+		t.Fatal("cancelQuitAfterSaves left quit-after flag set")
+	}
+	if model.pendingSaves[2].QuitAfter {
+		t.Fatal("cancelQuitAfterSaves changed an ordinary save")
+	}
 }
 
 // TestAppCompleteSaveRequest tests completing save requests
 func TestAppCompleteSaveRequest(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
-
-	model, err := NewModel("", ".", cfg)
-	if err != nil {
-		t.Fatalf("NewModel failed: %v", err)
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	want := pendingSaveRequest{Path: "main.go", QuitAfter: true}
+	model.pendingSaves[17] = want
+	got, ok := model.completeSaveRequest(17)
+	if !ok || got != want {
+		t.Fatalf("completeSaveRequest() = %#v, %v; want %#v, true", got, ok, want)
 	}
-	defer model.cleanup()
-
-	// Test completeSaveRequest
-	// This is called when save operation completes
+	if _, exists := model.pendingSaves[17]; exists {
+		t.Fatal("completed save request remained in pending map")
+	}
+	if _, ok := model.completeSaveRequest(17); ok {
+		t.Fatal("unknown save request reported as completed")
+	}
 }

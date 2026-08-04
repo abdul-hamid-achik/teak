@@ -89,7 +89,8 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"Ctrl+F", "Text search"},
 			{"Ctrl+H", "Find and replace"},
-			{"Ctrl+Shift+F", "Semantic search"},
+			{"Ctrl+Shift+F", "Text search"},
+			{"Tab in search", "Toggle text / semantic search"},
 			{"F3 / Shift+F3", "Next / previous result"},
 		},
 	},
@@ -100,6 +101,7 @@ var helpGroups = []bindingGroup{
 			{"Alt+K", "Show hover"},
 			{"Ctrl+K", "Code actions"},
 			{"F12", "Go to definition"},
+			{"F2", "Rename symbol"},
 			{"Ctrl+Shift+O", "Document symbols"},
 			{"Ctrl+Alt+F", "Format document"},
 		},
@@ -117,6 +119,9 @@ var helpGroups = []bindingGroup{
 		title: "Panels",
 		bindings: []keybinding{
 			{"Ctrl+B", "Toggle file tree"},
+			{"/ (file tree)", "Filter project files"},
+			{"Ctrl+H (file tree)", "Toggle hidden files"},
+			{"Ctrl+K (file tree)", "Toggle ignored files"},
 			{"Ctrl+\\", "Toggle editor split"},
 			{"Ctrl+Shift+\\", "Close editor split"},
 			{"F6", "Switch split pane focus"},

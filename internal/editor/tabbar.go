@@ -185,10 +185,19 @@ func tabNaturalWidth(tab Tab) int {
 }
 
 func tabLabelText(tab Tab) string {
-	if tab.DiagSeverity == 1 || tab.DiagSeverity == 2 || tab.Dirty {
-		return "● " + tab.Label
+	// Dirty and diagnostics use distinct glyphs: a shared marker made a dirty
+	// file with errors indistinguishable from a clean file with errors.
+	var prefix strings.Builder
+	if tab.Dirty {
+		prefix.WriteString("● ")
 	}
-	return tab.Label
+	switch tab.DiagSeverity {
+	case 1:
+		prefix.WriteString("✗ ")
+	case 2:
+		prefix.WriteString("▲ ")
+	}
+	return prefix.String() + tab.Label
 }
 
 // truncateTabLabel truncates on rune boundaries and measures terminal cells,
@@ -220,13 +229,24 @@ func truncateTabLabel(label string, width int) string {
 }
 
 func styleTabLabel(tab Tab, label string) string {
-	if tab.DiagSeverity == 1 && strings.HasPrefix(label, "● ") {
-		return lipgloss.NewStyle().Foreground(ui.Nord11).Render("●") + " " + strings.TrimPrefix(label, "● ")
+	var sb strings.Builder
+	rest := label
+	if tab.Dirty && strings.HasPrefix(rest, "● ") {
+		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord12).Render("●"))
+		sb.WriteString(" ")
+		rest = strings.TrimPrefix(rest, "● ")
 	}
-	if tab.DiagSeverity == 2 && strings.HasPrefix(label, "● ") {
-		return lipgloss.NewStyle().Foreground(ui.Nord13).Render("●") + " " + strings.TrimPrefix(label, "● ")
+	if tab.DiagSeverity == 1 && strings.HasPrefix(rest, "✗ ") {
+		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord11).Render("✗"))
+		sb.WriteString(" ")
+		rest = strings.TrimPrefix(rest, "✗ ")
+	} else if tab.DiagSeverity == 2 && strings.HasPrefix(rest, "▲ ") {
+		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord13).Render("▲"))
+		sb.WriteString(" ")
+		rest = strings.TrimPrefix(rest, "▲ ")
 	}
-	return label
+	sb.WriteString(rest)
+	return sb.String()
 }
 
 // View renders the visible tab window. It never exceeds Width and uses the

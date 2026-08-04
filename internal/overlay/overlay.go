@@ -97,6 +97,22 @@ func (s *Stack) CapturesInput() bool {
 }
 
 // Clear removes all overlays from the stack.
-func (s *Stack) Clear() {
+func (s *Stack) Clear() []Overlay {
+	removed := s.layers
 	s.layers = nil
+	return removed
+}
+
+// Remove removes the first exact overlay instance from the stack.
+func (s *Stack) Remove(target Overlay) bool {
+	for i, layer := range s.layers {
+		if layer != target {
+			continue
+		}
+		copy(s.layers[i:], s.layers[i+1:])
+		s.layers[len(s.layers)-1] = nil
+		s.layers = s.layers[:len(s.layers)-1]
+		return true
+	}
+	return false
 }

@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"teak/internal/config"
 	"teak/internal/git"
 	"teak/internal/overlay"
 	"teak/internal/search"
@@ -14,11 +15,19 @@ import (
 type mouseSurface uint8
 
 const (
+	// Sidebar resize bounds: narrow enough to leave editor room on small
+	// terminals, wide enough that long paths stay readable.
+	minTreeWidth = 12
+	maxTreeWidth = 80
+)
+
+const (
 	mouseOutside mouseSurface = iota
 	mouseChrome
 	mouseStatus
 	mouseSidebarTabs
 	mouseSidebarBody
+	mouseSidebarDivider
 	mouseEditorTabs
 	mouseEditorBody
 	mouseAgentBody
@@ -169,7 +178,7 @@ func (l mouseLayout) hit(x, y int) (mouseSurface, mousePoint) {
 	case l.sidebarBody.contains(x, y):
 		return mouseSidebarBody, l.sidebarBody.local(x, y)
 	case l.sidebarDivider.contains(x, y):
-		return mouseChrome, point
+		return mouseSidebarDivider, point
 	case l.editorTabs.contains(x, y):
 		return mouseEditorTabs, l.editorTabs.local(x, y)
 	case l.editorPaneB.contains(x, y):
@@ -190,6 +199,9 @@ func mouseAt(mouse tea.Mouse, point mousePoint) tea.Mouse {
 func (m Model) passiveModalVisible() bool {
 	return m.goToLineMode ||
 		m.renameMode ||
+		m.treeRenameMode ||
+		m.treeCopyMode ||
+		m.treeMoveMode ||
 		m.newFileMode ||
 		m.newFolderMode ||
 		m.deleteConfirm ||
@@ -223,7 +235,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			replacement := m.searchM.Replacement()
 			if query != "" {
 				return m, func() tea.Msg {
-					return search.ReplaceOneMsg{Query: query, Replacement: replacement}
+					return search.ReplaceOneMsg{Query: query, Replacement: replacement, Regex: m.searchM.Regex()}
 				}
 			}
 			return m, nil
@@ -233,7 +245,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			replacement := m.searchM.Replacement()
 			if query != "" {
 				return m, func() tea.Msg {
-					return search.ReplaceAllMsg{Query: query, Replacement: replacement}
+					return search.ReplaceAllMsg{Query: query, Replacement: replacement, Regex: m.searchM.Regex()}
 				}
 			}
 			return m, nil
@@ -376,6 +388,15 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			return m.updateProblems(tea.MouseClickMsg(mouseAt(mouse, local)))
 		case SidebarDebugger:
 			m.setFocus(FocusDebugger)
+			// Control buttons and breakpoint rows are mouse zones resolved in
+			// frame coordinates, so check them before translating the click
+			// into sidebar-local space.
+			if control, ok := m.debuggerPanel.ClickedControl(msg); ok {
+				return m.handleDebuggerControl(control)
+			}
+			if bpIdx := m.debuggerPanel.ClickedBreakpoint(msg); bpIdx >= 0 {
+				return m.jumpToBreakpoint(bpIdx)
+			}
 			return m.updateDebugger(tea.MouseClickMsg(mouseAt(mouse, local)))
 		default:
 			m.setFocus(FocusTree)
@@ -387,6 +408,17 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			m.tree, cmd = m.tree.Update(adjusted)
 			return m, cmd
 		}
+
+	case mouseSidebarDivider:
+		if mouse.Button != tea.MouseLeft {
+			return m, nil
+		}
+		// Start a sidebar resize drag; motion events apply deltas until the
+		// button is released, which persists the new width.
+		m.sidebarDragging = true
+		m.sidebarDragStartX = mouse.X
+		m.sidebarDragStartWidth = m.treeWidth()
+		return m, nil
 
 	case mouseEditorTabs:
 		m.setFocus(FocusEditor)
@@ -408,6 +440,23 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	// Continue a sidebar resize drag over any surface: the pointer routinely
+	// leaves the 1-column divider mid-drag.
+	if m.sidebarDragging {
+		width := m.sidebarDragStartWidth + (msg.Mouse().X - m.sidebarDragStartX)
+		if width < minTreeWidth {
+			width = minTreeWidth
+		}
+		if width > maxTreeWidth {
+			width = maxTreeWidth
+		}
+		if width != m.appCfg.UI.TreeWidth {
+			m.appCfg.UI.TreeWidth = width
+			m.relayout()
+		}
+		return m, nil
+	}
+
 	// A drag cannot continue underneath a surface that owns input. This asked
 	// the same question as editorInputCaptured but spelled the list out again,
 	// so a modal added to one and not the other would silently keep dragging
@@ -438,6 +487,16 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.sidebarDragging {
+		m.sidebarDragging = false
+		// The width already shaped the layout during the drag; persist it so
+		// the next session starts with the same sidebar.
+		cfg := m.appCfg
+		return m, func() tea.Msg {
+			outcome, err := config.SaveToWithOutcome(config.ConfigPath(), cfg)
+			return settingsSaveResultMsg{Config: cfg, Outcome: outcome, Err: err}
+		}
+	}
 	if m.editorInputCaptured() {
 		m.cancelActiveEditorDrag()
 	}
@@ -524,17 +583,26 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		if len(m.tabBar.Tabs) == 0 {
 			return m, nil
 		}
-		next := m.activeTab
 		switch mouse.Button {
 		case tea.MouseWheelUp:
-			next = max(0, next-1)
+			if mouse.Mod&tea.ModShift != 0 {
+				// Shift keeps the pre-existing "cycle tabs" behavior for
+				// muscle memory; plain wheel scrolls the strip itself.
+				m.activateTab(max(0, m.activeTab-1))
+				return m, nil
+			}
+			m.tabBar.ScrollBy(-3)
+			return m, nil
 		case tea.MouseWheelDown:
-			next = min(len(m.tabBar.Tabs)-1, next+1)
+			if mouse.Mod&tea.ModShift != 0 {
+				m.activateTab(min(len(m.tabBar.Tabs)-1, m.activeTab+1))
+				return m, nil
+			}
+			m.tabBar.ScrollBy(3)
+			return m, nil
 		default:
 			return m, nil
 		}
-		m.activateTab(next)
-		return m, nil
 
 	case mouseAgentBody:
 		adjusted := tea.MouseWheelMsg(mouseAt(mouse, local))

@@ -127,3 +127,78 @@ func TestConsecutiveEditsRecordConsistentRanges(t *testing.T) {
 		t.Errorf("LastChange().StartCol = %d, want %d — where 'Y' was actually inserted", got, want)
 	}
 }
+
+func TestCursorMutatorsKeepPrimarySelectionSynchronized(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor Position
+		mutate func(*Buffer)
+	}{
+		{name: "delete", cursor: Position{Line: 1, Col: 2}, mutate: func(b *Buffer) { b.Delete() }},
+		{name: "dedent line", cursor: Position{Line: 0, Col: 4}, mutate: func(b *Buffer) { b.DedentLine(4) }},
+		{name: "line start", cursor: Position{Line: 1, Col: 4}, mutate: func(b *Buffer) { b.CursorToLineStart() }},
+		{name: "line end", cursor: Position{Line: 1, Col: 0}, mutate: func(b *Buffer) { b.CursorToLineEnd() }},
+		{name: "document start", cursor: Position{Line: 2, Col: 3}, mutate: func(b *Buffer) { b.CursorToDocStart() }},
+		{name: "document end", cursor: Position{Line: 0, Col: 0}, mutate: func(b *Buffer) { b.CursorToDocEnd() }},
+		{name: "word left", cursor: Position{Line: 0, Col: 10}, mutate: func(b *Buffer) { b.MoveCursorWordLeft() }},
+		{name: "word right", cursor: Position{Line: 0, Col: 2}, mutate: func(b *Buffer) { b.MoveCursorWordRight() }},
+		{name: "delete word", cursor: Position{Line: 0, Col: 2}, mutate: func(b *Buffer) { b.DeleteWord() }},
+		{name: "move line up", cursor: Position{Line: 1, Col: 2}, mutate: func(b *Buffer) { b.MoveLineUp() }},
+		{name: "move line down", cursor: Position{Line: 0, Col: 2}, mutate: func(b *Buffer) { b.MoveLineDown() }},
+		{name: "duplicate line down", cursor: Position{Line: 0, Col: 2}, mutate: func(b *Buffer) { b.DuplicateLineDown() }},
+		{name: "delete line", cursor: Position{Line: 1, Col: 2}, mutate: func(b *Buffer) { b.DeleteLine() }},
+		{name: "add cursor above", cursor: Position{Line: 1, Col: 2}, mutate: func(b *Buffer) { b.AddCursorAbove() }},
+		{name: "add cursor below", cursor: Position{Line: 0, Col: 2}, mutate: func(b *Buffer) { b.AddCursorBelow() }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := NewBufferFromBytes([]byte("  alpha beta\n  gamma delta\n  omega\n"))
+			// Exercise the compatibility shape that caused the original bug: a
+			// caller changed Cursor without updating the selection set.
+			buf.Cursor = tc.cursor
+			tc.mutate(buf)
+
+			if buf.Selections == nil || buf.Selections.Count() == 0 {
+				t.Fatal("mutator removed all selections")
+			}
+			if got, want := buf.Selections.PrimaryCursor(), buf.Cursor; got != want {
+				t.Errorf("primary cursor = %+v, Buffer.Cursor = %+v; invariant was broken", got, want)
+			}
+		})
+	}
+}
+
+func TestSetCursorRepairsEmptySelectionContainer(t *testing.T) {
+	buf := NewBuffer()
+	buf.Selections = &Selections{}
+	want := Position{Line: 0, Col: 0}
+	buf.SetCursor(want)
+
+	if got := buf.Selections.PrimaryCursor(); got != want {
+		t.Fatalf("primary cursor = %+v, want %+v", got, want)
+	}
+}
+
+func TestSetSelectionRepairsNilSelectionContainer(t *testing.T) {
+	for name, selections := range map[string]*Selections{
+		"nil":   nil,
+		"empty": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			buf := NewBufferFromBytes([]byte("abcdef"))
+			buf.Selections = selections
+			anchor := Position{Line: 0, Col: 1}
+			head := Position{Line: 0, Col: 4}
+
+			buf.SetSelection(anchor, head)
+
+			if got := buf.Selections.Primary(); got != (Selection{Anchor: anchor, Head: head}) {
+				t.Fatalf("primary selection = %+v, want anchor/head %+v/%+v", got, anchor, head)
+			}
+			if buf.Cursor != head {
+				t.Fatalf("cursor = %+v, want %+v", buf.Cursor, head)
+			}
+		})
+	}
+}

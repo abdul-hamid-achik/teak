@@ -23,9 +23,11 @@ type externalReadState struct {
 }
 
 type externalFileReadPreparedMsg struct {
-	Change   FileChangedMsg
-	Snapshot *text.Rope
-	Err      error
+	Change        FileChangedMsg
+	Snapshot      *text.Rope
+	LineEnding    text.LineEnding
+	Err           error
+	OwnWriteMatch bool
 }
 
 func (m *Model) externalBackgroundContext() context.Context {
@@ -96,8 +98,15 @@ func (m *Model) startNextExternalFileRead() tea.Cmd {
 			result := externalFileReadPreparedMsg{Change: change, Err: err}
 			if err == nil {
 				// The serialized reader transfers its freshly-read bytes directly
-				// to the immutable snapshot.
-				result.Snapshot = text.NewOwned(data)
+				// to the immutable snapshot. Normalize CRLF first: buffer
+				// snapshots are LF-only, and the own-write comparison below
+				// matches against a normalized saved snapshot.
+				normalized, ending := text.NormalizeLineEndings(data)
+				result.Snapshot = text.NewOwned(normalized)
+				result.LineEnding = ending
+				if change.OwnWriteSnapshot != nil {
+					result.OwnWriteMatch = change.OwnWriteSnapshot.EqualBytes(normalized)
+				}
 			}
 			return result
 		}
@@ -123,6 +132,14 @@ func (m Model) handleExternalFileReadPrepared(msg externalFileReadPreparedMsg) (
 	}
 
 	change := msg.Change
+	if msg.OwnWriteMatch {
+		// An atomic save can report Remove/Rename before Create. Once the
+		// delayed re-read proves that disk contains the exact bytes Teak wrote,
+		// this observation is not an external conflict even though its watcher
+		// order is newer than the save watermark.
+		change.RequiresConflict = false
+		change.OwnWriteVerified = true
+	}
 	if change.Observation != 0 {
 		// Ordering can advance while the serialized read is blocked. Recheck at
 		// completion so an older result (including an unreadable one) cannot
@@ -131,7 +148,7 @@ func (m Model) handleExternalFileReadPrepared(msg externalFileReadPreparedMsg) (
 		if change.Observation <= m.externalChangeObserved[path] {
 			return m, m.startNextExternalFileRead()
 		}
-		if change.Observation <= m.lastSaveWatcherWatermarks[path] {
+		if !msg.OwnWriteMatch && change.Observation <= m.lastSaveWatcherWatermarks[path] {
 			change.RequiresConflict = true
 		}
 	}
@@ -140,6 +157,7 @@ func (m Model) handleExternalFileReadPrepared(msg externalFileReadPreparedMsg) (
 	switch {
 	case msg.Err == nil:
 		change.Snapshot = msg.Snapshot
+		change.LineEnding = msg.LineEnding
 		change.NeedsRead = false
 		change.Missing = false
 		updated, cmd := m.applyPreparedExternalFileChange(change)
