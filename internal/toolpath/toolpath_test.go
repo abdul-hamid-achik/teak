@@ -492,7 +492,10 @@ func TestVersionProbeCancelsShimProcessGroup(t *testing.T) {
 	}
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "codemap")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\n(sleep 30) &\nwhile :; do :; done\n"), 0o755); err != nil {
+	// Absolute sleep path: these tests run with an empty PATH, and a bare
+	// "sleep" would fail to resolve on some platforms, collapsing the shim's
+	// background work into an instant and voiding what the test measures.
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n(/bin/sleep 30) &\nwhile :; do :; done\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	r := newTestResolver(t, dir, map[string]string{"codemap": shim})
@@ -515,7 +518,10 @@ func TestCommandCancelsShimProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "descendant-survived")
 	shim := filepath.Join(dir, "codemap")
-	script := "#!/bin/sh\n(sleep 0.3; : > " + marker + ") &\nwhile :; do :; done\n"
+	// Absolute sleep path: these tests run with an empty PATH, and a bare
+	// "sleep" would fail to resolve on some platforms, collapsing the shim's
+	// background work into an instant and voiding what the test measures.
+	script := "#!/bin/sh\n(/bin/sleep 0.3; : > " + marker + ") &\nwhile :; do :; done\n"
 	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

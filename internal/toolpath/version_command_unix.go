@@ -5,6 +5,7 @@ package toolpath
 import (
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // configureCommandProcess isolates a command in its own process group so a
@@ -16,6 +17,18 @@ func configureCommandProcess(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		pgid := cmd.Process.Pid
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			return err
+		}
+		// A descendant forked between signal delivery and the direct process's
+		// death joins the group after the kill was dispatched and escapes it;
+		// sweep the group once more after a brief grace period. Reproduced on
+		// Linux where the shim's first fork landed in exactly that window.
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}()
+		return nil
 	}
 }
