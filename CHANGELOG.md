@@ -4,6 +4,38 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+### 2026-08 Codebase Audit — Fix Clusters
+
+A read-only multi-agent audit of the editor landed fixes in four clusters.
+
+#### Data Integrity (P0)
+- Watcher watch-limit errors surface in the status bar; Linux `ENOSPC` is treated as a watch-limit error.
+- Crash recovery persists dirty and untitled buffers and restores them as dirty tabs; cleared on clean exit.
+- CRLF is normalized to LF in memory and restored on save across load, save, external-change, and session paths.
+- Multi-cursor backspace/delete edit every cursor and rebase the rest; indent/dedent/comment-toggle rebase cursor and selections.
+- Replace honors regex/case options; session restore surfaces and retains tabs it cannot read.
+- Settings save patches managed keys in place, keeping comments and unknown sections.
+
+#### Visible Feedback (P1)
+- Find-widget matches are highlighted in the text; the current match gets a distinct style.
+- LSP diagnostics underline their ranges in the text; the first diagnostic under the cursor echoes in the status bar.
+- Autocomplete filters items as you type, closes when nothing matches, and dismisses on navigation.
+- Clipboard copy falls back to OSC 52 over SSH (or `TEAK_OSC52=force`).
+
+#### UX Polish (P2)
+- Full command palette: format, go-to-definition, rename, code actions, hover, symbols, splits, folds, tab/problem navigation, and Restart Language Server.
+- Hover popup wraps long lines and dismisses when the cursor leaves the anchor.
+- A crashed language server restarts automatically (with a restart cap) and re-sends open documents.
+- `editor.scroll_margin` (default 2) keeps the cursor off viewport edges; status bar shows the display column.
+- Confirm dialogs gain digit/y/n accelerators; tab-bar wheel scrolls the strip; sidebar divider is draggable and persists `ui.tree_width`.
+- Debugger control buttons and breakpoint rows are clickable; unknown `config.toml` keys are reported at startup.
+
+#### Headless Server Mode
+- New `teak headless` REST server (LSP, DAP, codemap, semantic search, MCP, project flows) plus `teak doctor` and the workspace health dashboard, with cancellation, quotas, and write-lock handling.
+
+#### Known Issues
+- Agent panel on Linux: the ACP agent connects but the TUI exits early under a Linux PTY, so the three `tui_agent_*` glyphrun specs fail there. They are excluded from Linux runs (CI and Taskfile gates) until root-caused; they pass on macOS.
+
 ### Performance Improvements
 
 #### File Tree Rendering
