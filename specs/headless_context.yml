@@ -16,7 +16,7 @@ target:
         - sh
         - -lc
         - >-
-          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); PROJECT="$TMP/project"; mkdir -p "$PROJECT"; python3 -c "import os,sys; root=sys.argv[1]; [open(os.path.join(root, f'entry-{i:04d}'),'w').close() for i in range(2005)]" "$PROJECT"; JSON=$("$ROOT/bin/teak" headless context --json --root "$PROJECT"); python3 -c "import json,sys; p=json.loads(sys.argv[1]); entries=p['entries']; assert p['truncated'] is True and len(entries)==2000 and entries[0]['name']=='entry-0000' and entries[-1]['name']=='entry-1999'" "$JSON"; printf '%s\nHEADLESS_CONTEXT_BOUNDED_JSON_OK\n' "$JSON"
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); PROJECT="$TMP/project"; mkdir -p "$PROJECT"; python3 -c "import os,sys; root=sys.argv[1]; [open(os.path.join(root, f'entry-{i:04d}'),'w').close() for i in range(2005)]" "$PROJECT"; JSON=$("$ROOT/bin/teak" headless context --json --root "$PROJECT"); printf '%s' "$JSON" | python3 -c "import json,sys; p=json.load(sys.stdin); entries=p['entries']; assert p['truncated'] is True and len(entries)==2000 and entries[0]['name']=='entry-0000' and entries[-1]['name']=='entry-1999'"; printf '%s\nHEADLESS_CONTEXT_BOUNDED_JSON_OK\n' "$JSON"
     cwd: "."
     timeoutMs: 15000
 terminal:
