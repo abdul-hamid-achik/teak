@@ -267,13 +267,17 @@ type modelState struct {
 	gitContextEntry           *git.StatusEntry                // entry right-clicked in git panel
 	gitContextStaged          bool                            // whether the right-clicked entry is in staged section
 	gitContextPath            string                          // path of right-clicked entry (file or dir)
-	unsavedConfirm            *overlay.Confirm                // unsaved changes dialog shown on quit
-	quitApproved              bool                            // allows the terminal tea.QuitMsg through QuitFilter
-	shutdownStarted           bool                            // cleanup runs asynchronously before terminal quit
-	sessionSaves              sessionSaveState                // one in-flight disk write plus a latest-wins snapshot
-	sessionSaver              func(session.State) error       // session.Save in production; replaceable by tests
-	overlayStack              overlay.Stack                   // stack for picker overlays (quick open, command palette)
-	healthDashboard           *healthDashboardOverlay         // read-only workspace health overlay
+	pendingTreeContextMenu    bool                            // a right click waiting for the latest async tree projection
+	pendingTreeContextX       int
+	pendingTreeContextScreenY int
+	pendingTreeContextTreeY   int
+	unsavedConfirm            *overlay.Confirm          // unsaved changes dialog shown on quit
+	quitApproved              bool                      // allows the terminal tea.QuitMsg through QuitFilter
+	shutdownStarted           bool                      // cleanup runs asynchronously before terminal quit
+	sessionSaves              sessionSaveState          // one in-flight disk write plus a latest-wins snapshot
+	sessionSaver              func(session.State) error // session.Save in production; replaceable by tests
+	overlayStack              overlay.Stack             // stack for picker overlays (quick open, command palette)
+	healthDashboard           *healthDashboardOverlay   // read-only workspace health overlay
 	healthDashboardGeneration uint64
 	healthDashboardCancel     context.CancelFunc
 	healthDashboardRunner     healthDashboardRunner         // testable command boundary
@@ -1708,6 +1712,14 @@ func (m Model) handleDirExpanded(msg filetree.DirExpandedMsg) (tea.Model, tea.Cm
 func (m Model) handleTreeFilterReady(msg filetree.FilterReadyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.tree, cmd = m.tree.Update(msg)
+	if m.pendingTreeContextMenu && !m.tree.FilterPending() {
+		x := m.pendingTreeContextX
+		screenY := m.pendingTreeContextScreenY
+		treeY := m.pendingTreeContextTreeY
+		m.pendingTreeContextMenu = false
+		updated, menuCmd := m.showTreeContextMenu(x, screenY, treeY)
+		return updated, tea.Batch(cmd, menuCmd)
+	}
 	return m, cmd
 }
 
@@ -5068,6 +5080,15 @@ func (m Model) handleRenameInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) showTreeContextMenu(x, screenY, treeY int) (tea.Model, tea.Cmd) {
+	if m.tree.FilterPending() {
+		m.pendingTreeContextMenu = true
+		m.pendingTreeContextX = x
+		m.pendingTreeContextScreenY = screenY
+		m.pendingTreeContextTreeY = treeY
+		return m, nil
+	}
+	m.pendingTreeContextMenu = false
+
 	// Get the entry at the clicked position from the tree
 	entry := m.tree.EntryAtY(treeY)
 

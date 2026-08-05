@@ -38,14 +38,22 @@ type DirExpandedMsg struct {
 	Err      error
 }
 
-// FilterReadyMsg contains a projection built from an immutable flattened tree
-// snapshot. Generation is checked before installation so a slower query can
-// never replace a newer one typed by the user.
+// FilterReadyMsg contains a visible projection built from an immutable entry
+// root. Despite its historical name, it also carries projections requested by
+// expansion and visibility changes. Every part of the captured view state is
+// checked before installation, so stale background work cannot replace a newer
+// tree.
 type FilterReadyMsg struct {
-	Generation uint64
-	Filter     string
-	Entries    []Entry
-	Err        error
+	Generation        uint64
+	EntriesGeneration uint64
+	ShowHidden        bool
+	ShowGitIgnored    bool
+	Filter            string
+	Source            []Entry
+	Entries           []Entry
+	SelectedIndex     int
+	SelectionFound    bool
+	Err               error
 }
 
 // RefreshResult is an immutable directory-tree snapshot built away from the
@@ -170,12 +178,28 @@ func (m *Model) ToggleShowHidden() bool {
 	return m.showHidden
 }
 
+// ToggleShowHiddenAsync changes hidden-entry visibility and prepares the new
+// flattened projection outside Bubble Tea's update loop.
+func (m *Model) ToggleShowHiddenAsync() (bool, tea.Cmd) {
+	selected := m.selectedPathCached()
+	m.showHidden = !m.showHidden
+	return m.showHidden, m.startProjection(selected, true)
+}
+
 // ToggleShowGitIgnored changes ignored-entry visibility and keeps the cursor
 // within the newly visible projection of the tree.
 func (m *Model) ToggleShowGitIgnored() bool {
 	m.showGitIgnored = !m.showGitIgnored
 	m.invalidateProjectionPreservingSelection()
 	return m.showGitIgnored
+}
+
+// ToggleShowGitIgnoredAsync changes ignored-entry visibility and prepares the
+// new flattened projection outside Bubble Tea's update loop.
+func (m *Model) ToggleShowGitIgnoredAsync() (bool, tea.Cmd) {
+	selected := m.selectedPathCached()
+	m.showGitIgnored = !m.showGitIgnored
+	return m.showGitIgnored, m.startProjection(selected, true)
 }
 
 // SetShowHidden explicitly configures hidden-entry visibility. It is used when
@@ -672,18 +696,21 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 	}
 
-	flat := m.flatEntries()
 	switch msg.String() {
 	case "/", "slash":
 		m.filterActive = true
 		m.ensureCursorVisible()
 		return m, nil
 	case "alt+h", "ctrl+h", "ctrl+.":
-		m.ToggleShowHidden()
-		return m, nil
+		_, cmd := m.ToggleShowHiddenAsync()
+		return m, cmd
 	case "alt+i", "ctrl+shift+h", "ctrl+shift+.", "ctrl+k":
-		m.ToggleShowGitIgnored()
-		return m, nil
+		_, cmd := m.ToggleShowGitIgnoredAsync()
+		return m, cmd
+	}
+
+	flat := m.flatEntries()
+	switch msg.String() {
 	case "up":
 		if m.Cursor > 0 {
 			m.Cursor--
@@ -766,17 +793,19 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleDirExpanded(msg DirExpandedMsg) (Model, tea.Cmd) {
+	selected := m.selectedPathCached()
 	if entries, found := applyDirectoryLoadResult(m.Entries, msg.Path, msg.Children, msg.Err); found {
 		m.Entries = entries
 		m.entriesGeneration++
+		return m, m.startProjection(selected, true)
 	}
-	m.invalidateFlatCache()
-	m.ensureCursorVisible()
 	return m, nil
 }
 
 func (m Model) handleFilterReady(msg FilterReadyMsg) (Model, tea.Cmd) {
-	if !m.filterPending || msg.Generation != m.filterGeneration || msg.Filter != m.filter {
+	if !m.filterPending || msg.Generation != m.filterGeneration ||
+		msg.EntriesGeneration != m.entriesGeneration || msg.ShowHidden != m.showHidden ||
+		msg.ShowGitIgnored != m.showGitIgnored || msg.Filter != m.filter {
 		return m, nil
 	}
 	m.filterCancel = nil
@@ -792,10 +821,17 @@ func (m Model) handleFilterReady(msg FilterReadyMsg) (Model, tea.Cmd) {
 		m.sharedFlatCache = &flatEntryCache{}
 	}
 	m.cachedFlat = msg.Entries
+	m.sharedFlatCache.source = msg.Source
 	m.sharedFlatCache.entries = msg.Entries
-	m.restoreSelection(m.pendingSelection)
+	if msg.SelectionFound {
+		m.Cursor = msg.SelectedIndex
+	} else if len(msg.Entries) == 0 {
+		m.Cursor = 0
+	} else if m.Cursor >= len(msg.Entries) {
+		m.Cursor = len(msg.Entries) - 1
+	}
 	m.pendingSelection = ""
-	m.ensureCursorVisible()
+	m.ensureCursorVisibleForLength(len(msg.Entries))
 	return m, nil
 }
 
@@ -817,22 +853,24 @@ func (m Model) EntryAtY(y int) *Entry {
 
 // ToggleEntry toggles the expand state of a directory entry by path.
 func (m *Model) ToggleEntry(path string) (Model, tea.Cmd) {
-	updated, cmd := m.toggleDir(path)
-	updated.ensureCursorVisible()
-	return updated, cmd
+	return m.toggleDir(path)
 }
 
 // toggleDir toggles a directory's expanded state.
 // If expanding and children aren't loaded, starts an async read.
 func (m *Model) toggleDir(path string) (Model, tea.Cmd) {
+	selected := m.selectedPathCached()
 	entries, cmd, found := toggleEntries(m.Entries, m.Root, path, m.gitignorePatterns)
-	if found {
-		m.Entries = entries
-		m.entriesGeneration++
+	if !found {
+		return *m, cmd
 	}
-	m.invalidateFlatCache()
-	m.ensureCursorVisible()
-	return *m, cmd
+	m.Entries = entries
+	m.entriesGeneration++
+	projectionCmd := m.startProjection(selected, true)
+	if cmd == nil {
+		return *m, projectionCmd
+	}
+	return *m, tea.Batch(cmd, projectionCmd)
 }
 
 func toggleEntries(entries []Entry, rootDir, path string, gitignorePatterns []string) ([]Entry, tea.Cmd, bool) {
@@ -1063,36 +1101,86 @@ func (m *Model) setFilterForInput(filter string) tea.Cmd {
 	if m.filter == filter && m.filterPending {
 		return nil
 	}
-	selected := m.pendingSelection
-	if selected == "" {
-		selected = m.selectedPath()
+	selected := m.selectedPathCached()
+	m.filter = filter
+	return m.startProjection(selected, false)
+}
+
+// startProjection captures the persistent entry root and schedules all work
+// proportional to the visible tree as a command. Filter-only changes can reuse
+// the immutable visibility-aware source; structural and visibility changes
+// request a rebuild.
+func (m *Model) startProjection(selected string, rebuildSource bool) tea.Cmd {
+	var source []Entry
+	if !rebuildSource && m.sharedFlatCache != nil {
+		source = m.sharedFlatCache.source
 	}
 	m.cancelFilter()
-	m.filter = filter
-	m.invalidateProjectionCache()
-	if filter == "" {
-		m.filterPending = false
-		m.pendingSelection = ""
-		m.restoreSelection(selected)
-		m.ensureCursorVisible()
-		return nil
-	}
-	source := m.baseFlatEntries()
 	m.filterGeneration++
 	generation := m.filterGeneration
 	ctx, cancel := context.WithCancel(context.Background())
 	m.filterCancel = cancel
 	m.filterPending = true
 	m.pendingSelection = selected
+	m.cachedFlat = nil
+	if m.sharedFlatCache == nil {
+		m.sharedFlatCache = &flatEntryCache{}
+	}
+	m.sharedFlatCache.entries = nil
+	if rebuildSource {
+		m.sharedFlatCache.source = nil
+	}
+
+	entries := m.Entries
+	entriesGeneration := m.entriesGeneration
+	showHidden := m.showHidden
+	showGitIgnored := m.showGitIgnored
+	filter := m.filter
 	return func() tea.Msg {
-		entries, err := filterFlatEntriesContext(ctx, source, filter)
+		projectionSource := source
+		if projectionSource == nil {
+			visited := 0
+			if err := flattenVisibleEntriesContext(ctx, entries, 0, showHidden, showGitIgnored, &visited, &projectionSource); err != nil {
+				return FilterReadyMsg{
+					Generation: generation, EntriesGeneration: entriesGeneration,
+					ShowHidden: showHidden, ShowGitIgnored: showGitIgnored, Filter: filter, Err: err,
+				}
+			}
+			if projectionSource == nil {
+				projectionSource = make([]Entry, 0)
+			}
+		}
+		projection := projectionSource
+		var err error
+		if filter != "" {
+			projection, err = filterFlatEntriesContext(ctx, projectionSource, filter)
+		}
+		selectedIndex, selectionFound := projectionIndexContext(ctx, projection, selected)
+		if err == nil {
+			err = ctx.Err()
+		}
 		return FilterReadyMsg{
-			Generation: generation,
-			Filter:     filter,
-			Entries:    entries,
-			Err:        err,
+			Generation: generation, EntriesGeneration: entriesGeneration,
+			ShowHidden: showHidden, ShowGitIgnored: showGitIgnored, Filter: filter,
+			Source: projectionSource, Entries: projection,
+			SelectedIndex: selectedIndex, SelectionFound: selectionFound, Err: err,
 		}
 	}
+}
+
+func projectionIndexContext(ctx context.Context, entries []Entry, path string) (int, bool) {
+	if path == "" {
+		return 0, false
+	}
+	for index, entry := range entries {
+		if index%256 == 0 && ctx.Err() != nil {
+			return 0, false
+		}
+		if entry.Path == path {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 func (m *Model) cancelFilter() {
@@ -1452,9 +1540,13 @@ func (m Model) View() string {
 			continue
 		}
 		if m.filterPending && i == offset {
+			label := "  Updating tree..."
+			if m.filter != "" {
+				label = "  Filtering..."
+			}
 			status := m.cachedStyles.base.Background(m.cachedStyles.entryBg).
 				Foreground(ui.Nord3).
-				Render("  Filtering...")
+				Render(label)
 			sb.WriteString(ansi.Truncate(status, m.Width, ""))
 			continue
 		}

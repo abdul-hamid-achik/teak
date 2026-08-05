@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -448,11 +449,7 @@ func TestRefreshDirPreservesExpandedState(t *testing.T) {
 		t.Fatal("expected directory expansion command")
 	}
 
-	expanded, followup := model.Update(cmd())
-	if followup != nil {
-		t.Fatal("expected nil follow-up command after handling directory expansion")
-	}
-	model = expanded
+	model = runFiletreeCommands(model, cmd)
 
 	if !model.Entries[0].Expanded {
 		t.Fatal("expected directory to be expanded before refresh")
@@ -531,7 +528,7 @@ func TestApplyRefreshDoesNotUndoExpansionMadeWhileRefreshRuns(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected asynchronous expansion command")
 	}
-	model, _ = expanded.Update(cmd())
+	model = runFiletreeCommands(expanded, cmd)
 	if !model.Entries[0].Expanded || len(model.Entries[0].Children) != 1 {
 		t.Fatal("setup did not expand nested directory")
 	}
@@ -564,8 +561,8 @@ func TestSnapshotForRefreshSharesPersistentEntries(t *testing.T) {
 	}
 
 	updated, cmd := model.ToggleEntry(dir)
-	if cmd != nil {
-		t.Fatal("loaded directory expansion unexpectedly scheduled a read")
+	if cmd == nil {
+		t.Fatal("loaded directory expansion did not schedule its projection")
 	}
 	if !updated.Entries[0].Expanded {
 		t.Fatal("updated tree did not expand the directory")
@@ -587,8 +584,8 @@ func TestDirectoryLoadResultUsesCopyOnWrite(t *testing.T) {
 	child := Entry{Name: "child.go", Path: filepath.Join(dir, "child.go")}
 
 	updated, cmd := model.Update(DirExpandedMsg{Path: dir, Children: []Entry{child}})
-	if cmd != nil {
-		t.Fatal("directory result scheduled an unexpected command")
+	if cmd == nil {
+		t.Fatal("directory result did not schedule its projection")
 	}
 	if updated.Entries[0].Loading || len(updated.Entries[0].Children) != 1 {
 		t.Fatalf("updated directory = %#v, want completed child load", updated.Entries[0])
@@ -598,6 +595,110 @@ func TestDirectoryLoadResultUsesCopyOnWrite(t *testing.T) {
 	}
 	if &updated.Entries[0] == &snapshot.Entries[0] {
 		t.Fatal("directory result reused the mutated entry slice")
+	}
+}
+
+func TestLoadedDirectoryExpansionProjectsAsynchronously(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	model := NewEmpty(root, ui.DefaultTheme())
+	model.Height = 10
+	model.Entries = []Entry{{
+		Name:     "nested",
+		Path:     dir,
+		IsDir:    true,
+		Children: []Entry{{Name: "child.go", Path: filepath.Join(dir, "child.go")}},
+	}}
+	_ = model.flatEntries()
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("loaded expansion returned no projection command")
+	}
+	if got := len(updated.flatEntries()); got != 0 {
+		t.Fatalf("pending expansion exposed %d stale rows", got)
+	}
+	projected, _ := updated.Update(cmd())
+	if got := len(projected.flatEntries()); got != 2 {
+		t.Fatalf("expanded projection rows = %d, want 2", got)
+	}
+}
+
+func runFiletreeCommands(model Model, cmds ...tea.Cmd) Model {
+	queue := append([]tea.Cmd(nil), cmds...)
+	for len(queue) > 0 {
+		cmd := queue[0]
+		queue = queue[1:]
+		if cmd == nil {
+			continue
+		}
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			queue = append(queue, batch...)
+			continue
+		}
+		var followup tea.Cmd
+		model, followup = model.Update(msg)
+		if followup != nil {
+			queue = append(queue, followup)
+		}
+	}
+	return model
+}
+
+func TestVisibilityToggleProjectsAsynchronously(t *testing.T) {
+	model := NewEmpty(t.TempDir(), ui.DefaultTheme())
+	model.Height = 10
+	model.Entries = []Entry{
+		{Name: ".hidden.go", Path: "/workspace/.hidden.go"},
+		{Name: "visible.go", Path: "/workspace/visible.go"},
+	}
+	_ = model.flatEntries()
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Text: "alt+h"})
+	if cmd == nil {
+		t.Fatal("visibility toggle returned no projection command")
+	}
+	if got := len(updated.flatEntries()); got != 0 {
+		t.Fatalf("pending visibility projection exposed %d stale rows", got)
+	}
+	projected, _ := updated.Update(cmd())
+	if names := flatEntryNames(projected.flatEntries()); !reflect.DeepEqual(names, []string{"visible.go"}) {
+		t.Fatalf("visible projection = %v, want visible.go", names)
+	}
+}
+
+func TestExpansionDropsStaleProjectionResults(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	model := NewEmpty(root, ui.DefaultTheme())
+	model.Height = 10
+	model.Entries = []Entry{{
+		Name: "nested", Path: dir, IsDir: true,
+		Children: []Entry{{Name: "child.go", Path: filepath.Join(dir, "child.go")}},
+	}}
+	_ = model.flatEntries()
+
+	expanded, expandCmd := model.ToggleEntry(dir)
+	collapsed, collapseCmd := expanded.ToggleEntry(dir)
+	if expandCmd == nil || collapseCmd == nil {
+		t.Fatal("both expansion changes must schedule projections")
+	}
+	stale, ok := expandCmd().(FilterReadyMsg)
+	if !ok {
+		t.Fatalf("expansion command returned an unexpected message")
+	}
+	collapsed, _ = collapsed.Update(stale)
+	if !collapsed.FilterPending() {
+		t.Fatal("stale expansion projection cleared the current pending state")
+	}
+	current, ok := collapseCmd().(FilterReadyMsg)
+	if !ok {
+		t.Fatalf("collapse command returned an unexpected message")
+	}
+	collapsed, _ = collapsed.Update(current)
+	if got := len(collapsed.flatEntries()); got != 1 {
+		t.Fatalf("collapsed projection rows = %d, want 1", got)
 	}
 }
 

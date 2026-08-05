@@ -4,6 +4,22 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.16] - 2026-08-05
+
+### Responsive File-Tree Interaction
+
+- Expansion, collapse, asynchronous child installation, and hidden/ignored
+  visibility toggles now flatten and filter persistent tree roots in
+  cancellable commands instead of Bubble Tea's `Update()` loop.
+- Prepared projections are bound to the entry revision, visibility flags,
+  filter text, and generation. Installation transfers both caches and a
+  precomputed selection index without traversing the tree; stale results are
+  discarded.
+- A context-menu click received during projection is replayed against the new
+  rows, so rapid visibility toggles cannot accidentally open the workspace
+  root menu. On an Apple M5, dispatching a 100,000-entry visibility projection
+  takes about 53 ns; applying it takes about 159–182 ns with zero allocations.
+
 ## [0.10.15] - 2026-08-05
 
 ### Persistent File-Tree Refresh

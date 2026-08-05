@@ -164,11 +164,7 @@ func TestHandleTreeChangePreservesExpandedTreeState(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected directory expansion command")
 	}
-	expandedTree, followup := model.tree.Update(cmd())
-	if followup != nil {
-		t.Fatal("expected nil follow-up command after handling directory expansion")
-	}
-	model.tree = expandedTree
+	model = runWorkspaceEditCommands(t, model, cmd)
 
 	updatedModel, _ := model.handleTreeChange(TreeChangedMsg{Dir: tmpDir})
 	updated := updatedModel.(Model)

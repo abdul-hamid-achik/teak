@@ -183,21 +183,21 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.showTree && m.focus == FocusTree && m.sidebarTab == SidebarFiles && !m.tree.FilterActive() {
 		switch msg.String() {
 		case "ctrl+h", "ctrl+.":
-			shown := m.tree.ToggleShowHidden()
+			shown, cmd := m.tree.ToggleShowHiddenAsync()
 			if shown {
 				m.status = "Hidden files shown"
 			} else {
 				m.status = "Hidden files hidden"
 			}
-			return m, nil, true
+			return m, cmd, true
 		case "ctrl+k":
-			shown := m.tree.ToggleShowGitIgnored()
+			shown, cmd := m.tree.ToggleShowGitIgnoredAsync()
 			if shown {
 				m.status = "Ignored files shown"
 			} else {
 				m.status = "Ignored files hidden"
 			}
-			return m, nil, true
+			return m, cmd, true
 		}
 	}
 

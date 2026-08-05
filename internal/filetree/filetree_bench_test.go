@@ -14,6 +14,7 @@ var (
 	benchmarkTreeSnapshot Model
 	benchmarkTreeEntries  []Entry
 	benchmarkApplyResult  bool
+	benchmarkTreeCmd      tea.Cmd
 )
 
 // createTestTree creates a file tree model with a specified number of entries
@@ -212,6 +213,37 @@ func BenchmarkFileTreeApplyPreparedRefresh100000(b *testing.B) {
 	}
 	if !benchmarkApplyResult || len(benchmarkTreeSnapshot.sharedFlatCache.entries) != len(model.Entries) {
 		b.Fatal("apply benchmark did not install the prepared projection")
+	}
+}
+
+func BenchmarkFileTreeVisibilityProjectionDispatch100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		_, benchmarkTreeCmd = candidate.ToggleShowHiddenAsync()
+	}
+	if benchmarkTreeCmd == nil {
+		b.Fatal("visibility dispatch did not schedule a projection")
+	}
+}
+
+func BenchmarkFileTreeApplyInteractiveProjection100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	_, cmd := model.ToggleShowHiddenAsync()
+	msg, ok := cmd().(FilterReadyMsg)
+	if !ok {
+		b.Fatal("visibility projection returned an unexpected message")
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		benchmarkTreeSnapshot, _ = candidate.Update(msg)
+	}
+	if benchmarkTreeSnapshot.FilterPending() {
+		b.Fatal("interactive projection benchmark did not install its result")
 	}
 }
 

@@ -2,11 +2,13 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/editor"
+	"teak/internal/filetree"
 	"teak/internal/git"
 	"teak/internal/text"
 )
@@ -431,6 +433,34 @@ func TestTreeContextMenuUsesAbsoluteScreenRow(t *testing.T) {
 	}
 	if got := updated.treeContextMenu.Y; got != 2 {
 		t.Errorf("tree context menu Y = %d, want absolute screen row 2", got)
+	}
+}
+
+func TestTreeContextMenuWaitsForPendingProjection(t *testing.T) {
+	m := newViewTestModel(t, true)
+	m.tree = filetree.NewEmpty(m.rootDir, m.theme)
+	m.tree.SetSize(24, 10)
+	m.tree.Entries = []filetree.Entry{
+		{Name: ".hidden", Path: filepath.Join(m.rootDir, ".hidden")},
+		{Name: "rename-me.txt", Path: filepath.Join(m.rootDir, "rename-me.txt")},
+	}
+	_ = m.tree.View()
+	_, projectionCmd := m.tree.ToggleShowHiddenAsync()
+
+	pendingAny, _ := m.showTreeContextMenu(5, 2, 0)
+	pending := pendingAny.(Model)
+	if pending.treeContextMenu.Visible {
+		t.Fatal("tree context menu opened against a stale pending projection")
+	}
+
+	ready, ok := projectionCmd().(filetree.FilterReadyMsg)
+	if !ok {
+		t.Fatal("visibility projection returned an unexpected message")
+	}
+	resolvedAny, _ := pending.handleTreeFilterReady(ready)
+	resolved := resolvedAny.(Model)
+	if !resolved.treeContextMenu.Visible || !strings.Contains(resolved.treeContextMenu.View(), "Rename...") {
+		t.Fatal("queued tree context menu did not open against the prepared projection")
 	}
 }
 
