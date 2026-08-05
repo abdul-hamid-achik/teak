@@ -58,7 +58,7 @@ func TestRecoverySkipsEmptyAndOversizedRecords(t *testing.T) {
 	root := t.TempDir()
 	records := []RecoveryRecord{
 		{FilePath: "/tmp/empty", Content: nil},
-		{FilePath: "/tmp/huge", Content: make([]byte, maxRecoveryRecordBytes+1)},
+		{FilePath: "/tmp/huge", Content: make([]byte, MaxRecoveryRecordBytes+1)},
 		{FilePath: "/tmp/kept", Content: []byte("kept")},
 	}
 	if err := SaveRecovery(root, records); err != nil {
@@ -70,6 +70,31 @@ func TestRecoverySkipsEmptyAndOversizedRecords(t *testing.T) {
 	}
 	if len(loaded) != 1 || loaded[0].FilePath != "/tmp/kept" {
 		t.Fatalf("loaded = %+v, want only the bounded record", loaded)
+	}
+}
+
+func TestBoundedRecoveryRecordsEnforcesAggregateBudget(t *testing.T) {
+	content := make([]byte, MaxRecoveryRecordBytes)
+	count := MaxRecoveryContentBytes/MaxRecoveryRecordBytes + 1
+	records := make([]RecoveryRecord, count)
+	for i := range records {
+		records[i] = RecoveryRecord{FilePath: "/tmp/file", Content: content}
+	}
+
+	bounded := boundedRecoveryRecords(records)
+	if got, want := len(bounded), MaxRecoveryContentBytes/MaxRecoveryRecordBytes; got != want {
+		t.Fatalf("bounded records = %d, want %d", got, want)
+	}
+}
+
+func TestBoundedRecoveryRecordsEnforcesRecordLimit(t *testing.T) {
+	records := make([]RecoveryRecord, MaxRecoveryRecords+1)
+	for i := range records {
+		records[i] = RecoveryRecord{FilePath: "/tmp/file", Content: []byte("x")}
+	}
+
+	if got := len(boundedRecoveryRecords(records)); got != MaxRecoveryRecords {
+		t.Fatalf("bounded records = %d, want %d", got, MaxRecoveryRecords)
 	}
 }
 
@@ -101,5 +126,24 @@ func TestRecoveryLoadCorruptFile(t *testing.T) {
 	}
 	if len(loaded) != 0 {
 		t.Fatalf("loaded %d records from corrupt file, want 0", len(loaded))
+	}
+}
+
+func TestRecoveryLoadRejectsOversizedFileBeforeReading(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := SaveRecovery(root, []RecoveryRecord{{FilePath: "/tmp/a", Content: []byte("x")}}); err != nil {
+		t.Fatalf("SaveRecovery: %v", err)
+	}
+	if err := os.Truncate(RecoveryPath(root), maxRecoveryFileBytes+1); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	loaded, err := LoadRecovery(root)
+	if err != nil {
+		t.Fatalf("LoadRecovery: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("loaded %d records from oversized file, want 0", len(loaded))
 	}
 }

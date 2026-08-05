@@ -816,19 +816,27 @@ func (m Model) recoveryPreps() []recoveryPrep {
 		return nil
 	}
 	var preps []recoveryPrep
+	total := 0
 	for _, ed := range m.editors {
+		if len(preps) >= session.MaxRecoveryRecords {
+			break
+		}
 		buf := ed.Buffer
 		if buf == nil || buf.Rope() == nil {
 			continue
 		}
+		size := buf.Rope().Len()
+		if size == 0 || size > session.MaxRecoveryRecordBytes || size > session.MaxRecoveryContentBytes-total {
+			continue
+		}
 		if buf.FilePath == "" {
-			if buf.Rope().Len() > 0 {
-				preps = append(preps, recoveryPrep{Untitled: true, CRLF: buf.LineEnding() == text.CRLF, Rope: buf.Rope()})
-			}
+			preps = append(preps, recoveryPrep{Untitled: true, CRLF: buf.LineEnding() == text.CRLF, Rope: buf.Rope()})
+			total += size
 			continue
 		}
 		if buf.Dirty() {
 			preps = append(preps, recoveryPrep{FilePath: buf.FilePath, CRLF: buf.LineEnding() == text.CRLF, Rope: buf.Rope()})
+			total += size
 		}
 	}
 	return preps
@@ -842,8 +850,16 @@ func writeRecoveryRecords(rootDir string, preps []recoveryPrep) error {
 	}
 	records := make([]session.RecoveryRecord, 0, len(preps))
 	now := time.Now()
+	total := 0
 	for _, prep := range preps {
+		if len(records) >= session.MaxRecoveryRecords {
+			break
+		}
 		if prep.Rope == nil {
+			continue
+		}
+		size := prep.Rope.Len()
+		if size == 0 || size > session.MaxRecoveryRecordBytes || size > session.MaxRecoveryContentBytes-total {
 			continue
 		}
 		records = append(records, session.RecoveryRecord{
@@ -853,6 +869,7 @@ func writeRecoveryRecords(rootDir string, preps []recoveryPrep) error {
 			Modified: now,
 			Content:  prep.Rope.Bytes(),
 		})
+		total += size
 	}
 	return session.SaveRecovery(rootDir, records)
 }

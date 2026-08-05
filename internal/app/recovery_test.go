@@ -254,6 +254,20 @@ func TestRecoveryPrepsRespectSuppression(t *testing.T) {
 	}
 }
 
+func TestRecoveryPrepsSkipOversizedBuffersBeforeMaterialization(t *testing.T) {
+	model := newRecoveryModel(t, t.TempDir())
+	createdAny, _ := model.newUntitledTab()
+	model = createdAny.(Model)
+	model.activeEditor().Buffer.ReplaceRopeSnapshot(
+		text.NewOwned(make([]byte, session.MaxRecoveryRecordBytes+1)),
+		text.Position{},
+	)
+
+	if preps := model.recoveryPreps(); len(preps) != 0 {
+		t.Fatalf("recoveryPreps() retained %d oversized buffer(s)", len(preps))
+	}
+}
+
 func TestHandleRecoveryLoadedStandalone(t *testing.T) {
 	model := newRecoveryModel(t, t.TempDir())
 

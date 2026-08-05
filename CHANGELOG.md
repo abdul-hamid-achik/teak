@@ -4,6 +4,18 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.10] - 2026-08-05
+
+### Recovery Resource Bounds
+
+- Autosave now rejects recovery candidates before rope materialization when a
+  buffer exceeds 4 MiB, the workspace exceeds 32 MiB of decoded recovery
+  content, or 256 records have already been retained.
+- Recovery persistence enforces the same per-record, aggregate, and count
+  limits defensively. Startup also rejects encoded recovery files larger than
+  48 MiB before reading them, with a limited reader protecting against growth
+  after the size check.
+
 ## [0.10.9] - 2026-08-05
 
 ### Crash Recovery Responsiveness
