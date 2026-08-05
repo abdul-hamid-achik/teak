@@ -236,6 +236,7 @@ type modelState struct {
 	dirDiagnostics            map[string]int                  // dir path → worst child severity
 	dirDiagnosticCounts       map[string]map[int]int          // dir path → severity reference counts
 	treeDiagnostics           map[string]int                  // file and directory diagnostics shared with the tree
+	diagnosticProjections     *diagnosticProjectionStore      // async per-file and aggregate Problems projections
 	gitBranch                 string                          // current git branch name
 	gitPanel                  git.Model                       // git sidebar panel
 	watcher                   *fileWatcher                    // watches files/dirs for external changes
@@ -359,6 +360,7 @@ func (m Model) ensureState() Model {
 		dirDiagnostics:            make(map[string]int),
 		dirDiagnosticCounts:       make(map[string]map[int]int),
 		treeDiagnostics:           make(map[string]int),
+		diagnosticProjections:     newDiagnosticProjectionStore(),
 		breakpoints:               make(map[string][]breakpointEntry),
 		debugGutterBreakpoints:    make(map[string]*editor.GutterOpts),
 		currentExecLine:           -1,
@@ -1334,6 +1336,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.DiagnosticsMsg:
 		return m.handleDiagnostics(msg)
+
+	case diagnosticsPreparedMsg:
+		return m.handleDiagnosticsPrepared(msg)
+
+	case diagnosticsSnapshotPreparedMsg:
+		return m.handleDiagnosticsSnapshotPrepared(msg)
 
 	case lsp.CompletionResultMsg:
 		return m.handleCompletionResult(msg)
@@ -4182,70 +4190,95 @@ func (m *Model) applySavedSettings(cfg config.Config) {
 func (m Model) handleDiagnostics(msg lsp.DiagnosticsMsg) (tea.Model, tea.Cmd) {
 	m.ensureDiagnosticIndexes()
 	path := lsp.URIToPath(msg.URI)
-	if msg.HasVersion {
-		for i := range m.editors {
-			if m.editors[i].Buffer.FilePath == path && m.editors[i].Buffer.Version() != msg.Version {
-				// Diagnostics are tied to the server's document version. Do not
-				// underline newer text with ranges computed for an older snapshot.
-				return m, nil
-			}
-		}
+	if !m.diagnosticsVersionCurrent(path, msg.Version, msg.HasVersion) {
+		return m, nil
+	}
+	if m.diagnosticProjections == nil {
+		m.diagnosticProjections = newDiagnosticProjectionStore()
+	}
+	generation, ctx := m.diagnosticProjections.begin(path)
+	return m, func() tea.Msg {
+		return prepareDiagnostics(ctx, msg, path, generation)
+	}
+}
+
+func (m Model) handleDiagnosticsPrepared(msg diagnosticsPreparedMsg) (tea.Model, tea.Cmd) {
+	if m.diagnosticProjections == nil {
+		return m, nil
+	}
+	if msg.Canceled || !m.diagnosticProjections.isLatest(msg.Path, msg.Generation) {
+		m.diagnosticProjections.finish(msg.Path, msg.Generation)
+		return m, nil
+	}
+	if !m.diagnosticsVersionCurrent(msg.Path, msg.Version, msg.HasVersion) {
+		m.diagnosticProjections.finish(msg.Path, msg.Generation)
+		return m, nil
+	}
+	snapshotGeneration, accepted := m.diagnosticProjections.accept(msg.Path, msg.Generation, msg.Problems)
+	if !accepted {
+		return m, nil
 	}
 
 	for i := range m.editors {
-		if m.editors[i].Buffer.FilePath == path {
-			diags := make([]editor.Diagnostic, len(msg.Diagnostics))
-			for j, d := range msg.Diagnostics {
-				diags[j] = editor.Diagnostic{
-					StartLine: d.Range.Start.Line,
-					StartCol:  d.Range.Start.Character,
-					EndLine:   d.Range.End.Line,
-					EndCol:    d.Range.End.Character,
-					Severity:  int(d.Severity),
-					Message:   d.Message,
-				}
-			}
-			m.editors[i].Diagnostics = diags
+		if m.editors[i].Buffer.FilePath == msg.Path {
+			m.editors[i].Diagnostics = msg.EditorDiagnostics
 			break
 		}
 	}
 
 	// Store full diagnostics in LSP coordinator (single source of truth)
 	if m.coordinator != nil {
-		_ = m.coordinator.HandleMessage(msg)
+		if coordinator := m.coordinator.GetLSPCoordinator(); coordinator != nil {
+			coordinator.StorePreparedDiagnostics(msg.Path, msg.Diagnostics)
+		}
 	}
 
 	// Update the changed file and only its ancestor severity counters. The
 	// shared tree map stays attached to the tree model, so a notification never
 	// copies every file and directory diagnostic.
-	oldSeverity, hadOldSeverity := m.fileDiagnostics[path]
-	newSeverity, hasNewSeverity := worstDiagnosticSeverity(msg.Diagnostics)
+	oldSeverity, hadOldSeverity := m.fileDiagnostics[msg.Path]
 	if hadOldSeverity {
-		m.adjustDirectoryDiagnostics(path, oldSeverity, -1)
+		m.adjustDirectoryDiagnostics(msg.Path, oldSeverity, -1)
 	}
-	if !hasNewSeverity {
-		delete(m.fileDiagnostics, path)
-		delete(m.treeDiagnostics, path)
+	if !msg.HasSeverity {
+		delete(m.fileDiagnostics, msg.Path)
+		delete(m.treeDiagnostics, msg.Path)
 	} else {
-		m.fileDiagnostics[path] = newSeverity
-		m.treeDiagnostics[path] = newSeverity
-		m.adjustDirectoryDiagnostics(path, newSeverity, 1)
+		m.fileDiagnostics[msg.Path] = msg.Severity
+		m.treeDiagnostics[msg.Path] = msg.Severity
+		m.adjustDirectoryDiagnostics(msg.Path, msg.Severity, 1)
 	}
 
 	// Sync to matching tab
 	for i, tab := range m.tabBar.Tabs {
-		if tab.FilePath == path {
-			sev := m.fileDiagnostics[path] // 0 if deleted
+		if tab.FilePath == msg.Path {
+			sev := m.fileDiagnostics[msg.Path] // 0 if deleted
 			m.tabBar.Tabs[i].DiagSeverity = sev
 		}
 	}
+	return m, m.diagnosticProjections.snapshotCmd(snapshotGeneration)
+}
 
-	// Update only the received file in the problems panel. Its model keeps the
-	// global presentation order through a linear merge, avoiding an aggregate
-	// coordinator walk and quadratic sort on each LSP notification.
-	m.updateProblemsPanelForFile(path, msg.Diagnostics)
-
+func (m Model) handleDiagnosticsSnapshotPrepared(msg diagnosticsSnapshotPreparedMsg) (tea.Model, tea.Cmd) {
+	if m.diagnosticProjections == nil || !m.diagnosticProjections.isCurrentSnapshot(msg.Generation) {
+		return m, nil
+	}
+	m.problemsPanel.ApplySnapshot(msg.Snapshot)
 	return m, nil
+}
+
+func (m Model) diagnosticsVersionCurrent(path string, version int, hasVersion bool) bool {
+	if !hasVersion {
+		return true
+	}
+	for i := range m.editors {
+		if m.editors[i].Buffer.FilePath == path && m.editors[i].Buffer.Version() != version {
+			// Diagnostics are tied to the server's document version. Do not
+			// underline newer text with ranges computed for an older snapshot.
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Model) ensureDiagnosticIndexes() {
@@ -4261,19 +4294,9 @@ func (m *Model) ensureDiagnosticIndexes() {
 	if m.treeDiagnostics == nil {
 		m.treeDiagnostics = make(map[string]int)
 	}
-}
-
-func worstDiagnosticSeverity(diagnostics []lsp.Diagnostic) (int, bool) {
-	if len(diagnostics) == 0 {
-		return 0, false
+	if m.diagnosticProjections == nil {
+		m.diagnosticProjections = newDiagnosticProjectionStore()
 	}
-	worst := int(diagnostics[0].Severity)
-	for _, diagnostic := range diagnostics[1:] {
-		if severity := int(diagnostic.Severity); severity < worst {
-			worst = severity
-		}
-	}
-	return worst, true
 }
 
 func (m *Model) adjustDirectoryDiagnostics(path string, severity, delta int) {
@@ -4302,23 +4325,6 @@ func (m *Model) adjustDirectoryDiagnostics(path string, severity, delta int) {
 		m.dirDiagnostics[dir] = worst
 		m.treeDiagnostics[dir] = worst
 	}
-}
-
-func (m *Model) updateProblemsPanelForFile(path string, diagnostics []lsp.Diagnostic) {
-	fileProblems := make([]problems.Problem, 0, len(diagnostics))
-	for _, diagnostic := range diagnostics {
-		fileProblems = append(fileProblems, problems.Problem{
-			FilePath: path,
-			Line:     diagnostic.Range.Start.Line,
-			Col:      diagnostic.Range.Start.Character,
-			EndLine:  diagnostic.Range.End.Line,
-			EndCol:   diagnostic.Range.End.Character,
-			Severity: int(diagnostic.Severity),
-			Message:  diagnostic.Message,
-			Source:   diagnostic.Source,
-		})
-	}
-	m.problemsPanel.ReplaceFileProblems(path, fileProblems)
 }
 
 // sortProblems sorts problems by severity, path, and line.

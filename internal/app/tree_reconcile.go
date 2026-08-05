@@ -28,7 +28,9 @@ func (m *Model) reconcileTreeTransfer(source, destination string, targetIsDir bo
 		}
 
 		oldEditorID := m.editors[index].ID()
-		m.reconcileTreeDiagnosticPath(oldPath, newPath)
+		if cmd := m.reconcileTreeDiagnosticPath(oldPath, newPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		m.reconcileTreeEditorPath(index, oldPath, newPath)
 		if cmd := m.reconcileTreeFileLoad(index, oldEditorID, oldPath, newPath); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -79,7 +81,7 @@ func (m *Model) reconcileTreeFileLoad(index int, oldEditorID uint64, oldPath, ne
 	return m.startFileLoad(newPath, m.editors[index], false, nil)
 }
 
-func (m *Model) reconcileTreeDiagnosticPath(oldPath, newPath string) {
+func (m *Model) reconcileTreeDiagnosticPath(oldPath, newPath string) tea.Cmd {
 	m.ensureDiagnosticIndexes()
 	oldSeverity, hadOldSeverity := m.fileDiagnostics[oldPath]
 	if hadOldSeverity {
@@ -93,12 +95,18 @@ func (m *Model) reconcileTreeDiagnosticPath(oldPath, newPath string) {
 		delete(m.fileDiagnostics, oldPath)
 		delete(m.treeDiagnostics, oldPath)
 	}
-	m.problemsPanel.RelocateFilePath(oldPath, newPath)
+	var snapshotCmd tea.Cmd
+	if m.diagnosticProjections != nil {
+		if generation, relocated := m.diagnosticProjections.relocate(oldPath, newPath); relocated {
+			snapshotCmd = m.diagnosticProjections.snapshotCmd(generation)
+		}
+	}
 	if m.coordinator != nil {
 		if coordinator := m.coordinator.GetLSPCoordinator(); coordinator != nil {
 			coordinator.RelocateFilePath(oldPath, newPath)
 		}
 	}
+	return snapshotCmd
 }
 
 func (m *Model) reconcileTreeEditorPath(index int, oldPath, newPath string) {

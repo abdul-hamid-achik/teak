@@ -11,6 +11,22 @@ import (
 	"teak/internal/problems"
 )
 
+func completeDiagnosticsForTest(t testing.TB, m Model, msg lsp.DiagnosticsMsg) Model {
+	t.Helper()
+	updatedAny, cmd := m.handleDiagnostics(msg)
+	updated := updatedAny.(Model)
+	if cmd == nil {
+		return updated
+	}
+	preparedAny, snapshotCmd := updated.Update(cmd())
+	prepared := preparedAny.(Model)
+	if snapshotCmd == nil {
+		return prepared
+	}
+	completedAny, _ := prepared.Update(snapshotCmd())
+	return completedAny.(Model)
+}
+
 func TestSortProblems(t *testing.T) {
 	probs := []problems.Problem{
 		{FilePath: "b.go", Line: 5, Severity: 2, Message: "warning"},
@@ -59,6 +75,190 @@ func TestSortProblemsBreaksSameLocationTiesDeterministically(t *testing.T) {
 	}
 }
 
+func TestHandleDiagnosticsProjectsOutsideUpdate(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := t.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	path := filepath.Join(root, "main.go")
+	updatedAny, cmd := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI: lsp.FileURI(path),
+		Diagnostics: []lsp.Diagnostic{{
+			Severity: lsp.SeverityError,
+			Range:    lsp.DiagRange{Start: lsp.DiagPosition{Line: 3, Character: 2}},
+			Message:  "undefined: value",
+		}},
+	})
+	updated := updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("handleDiagnostics returned no preparation command")
+	}
+	if got := len(updated.fileDiagnostics); got != 0 {
+		t.Fatalf("file diagnostics changed inside Update: got %d entries", got)
+	}
+	if got := updated.problemsPanel.ProblemCount(); got != 0 {
+		t.Fatalf("problems changed inside Update: got %d", got)
+	}
+
+	preparedAny, snapshotCmd := updated.Update(cmd())
+	prepared := preparedAny.(Model)
+	if snapshotCmd == nil {
+		t.Fatal("prepared diagnostic returned no panel snapshot command")
+	}
+	if got := prepared.fileDiagnostics[path]; got != int(lsp.SeverityError) {
+		t.Fatalf("file severity after preparation = %d, want %d", got, lsp.SeverityError)
+	}
+	if got := prepared.problemsPanel.ProblemCount(); got != 0 {
+		t.Fatalf("panel projection changed before snapshot was prepared: got %d", got)
+	}
+
+	completedAny, _ := prepared.Update(snapshotCmd())
+	completed := completedAny.(Model)
+	if got := completed.problemsPanel.ProblemCount(); got != 1 {
+		t.Fatalf("ProblemCount after snapshot = %d, want 1", got)
+	}
+}
+
+func TestHandleDiagnosticsLatestPreparationWins(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	m, err := NewModel("", t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	path := filepath.Join(m.rootDir, "main.go")
+	firstAny, firstCmd := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(path),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning, Message: "old"}},
+	})
+	m = firstAny.(Model)
+	secondAny, secondCmd := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(path),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "new"}},
+	})
+	m = secondAny.(Model)
+
+	stalePreparation := firstCmd().(diagnosticsPreparedMsg)
+	if !stalePreparation.Canceled {
+		t.Fatal("superseded preparation did not observe cancellation")
+	}
+	staleAny, staleCmd := m.Update(stalePreparation)
+	m = staleAny.(Model)
+	if staleCmd != nil {
+		t.Fatal("stale preparation scheduled a panel snapshot")
+	}
+	if _, ok := m.fileDiagnostics[path]; ok {
+		t.Fatal("stale preparation changed the file severity")
+	}
+
+	preparedAny, snapshotCmd := m.Update(secondCmd())
+	m = preparedAny.(Model)
+	if snapshotCmd == nil {
+		t.Fatal("latest preparation returned no panel snapshot")
+	}
+	completedAny, _ := m.Update(snapshotCmd())
+	m = completedAny.(Model)
+	if got := m.fileDiagnostics[path]; got != int(lsp.SeverityError) {
+		t.Fatalf("file severity = %d, want error", got)
+	}
+	if problem := m.problemsPanel.SelectedProblem(); problem == nil || problem.Message != "new" {
+		t.Fatalf("selected problem = %#v, want latest diagnostic", problem)
+	}
+}
+
+func TestHandleDiagnosticsRejectsVersionChangedDuringPreparation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	path := filepath.Join(t.TempDir(), "main.go")
+	m, err := NewModel(path, filepath.Dir(path), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	version := m.activeEditor().Buffer.Version()
+	updatedAny, cmd := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI:        lsp.FileURI(path),
+		Version:    version,
+		HasVersion: true,
+		Diagnostics: []lsp.Diagnostic{{
+			Severity: lsp.SeverityError,
+			Message:  "stale after edit",
+		}},
+	})
+	m = updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("versioned diagnostic returned no preparation command")
+	}
+	m.activeEditor().Buffer.InsertAtCursor([]byte("x"))
+
+	completedAny, nextCmd := m.Update(cmd())
+	m = completedAny.(Model)
+	if nextCmd != nil {
+		t.Fatal("obsolete version scheduled a panel snapshot")
+	}
+	if len(m.activeEditor().Diagnostics) != 0 || m.problemsPanel.ProblemCount() != 0 {
+		t.Fatalf("obsolete version was applied: editor=%#v problems=%d", m.activeEditor().Diagnostics, m.problemsPanel.ProblemCount())
+	}
+}
+
+func TestDiagnosticsPanelRejectsSupersededAggregateSnapshot(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	root := t.TempDir()
+	m, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.cleanup()
+
+	firstPath := filepath.Join(root, "first.go")
+	firstAny, firstPrepare := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(firstPath),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning, Message: "first"}},
+	})
+	m = firstAny.(Model)
+	firstPreparedAny, firstSnapshot := m.Update(firstPrepare())
+	m = firstPreparedAny.(Model)
+	if firstSnapshot == nil {
+		t.Fatal("first diagnostic returned no aggregate snapshot command")
+	}
+
+	secondPath := filepath.Join(root, "second.go")
+	secondAny, secondPrepare := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(secondPath),
+		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "second"}},
+	})
+	m = secondAny.(Model)
+	secondPreparedAny, secondSnapshot := m.Update(secondPrepare())
+	m = secondPreparedAny.(Model)
+	if secondSnapshot == nil {
+		t.Fatal("second diagnostic returned no aggregate snapshot command")
+	}
+
+	staleAny, _ := m.Update(firstSnapshot())
+	m = staleAny.(Model)
+	if got := m.problemsPanel.ProblemCount(); got != 0 {
+		t.Fatalf("superseded aggregate snapshot installed %d problems", got)
+	}
+	latestAny, _ := m.Update(secondSnapshot())
+	m = latestAny.(Model)
+	if got := m.problemsPanel.ProblemCount(); got != 2 {
+		t.Fatalf("latest aggregate snapshot installed %d problems, want 2", got)
+	}
+}
+
 func TestHandleDiagnosticsUpdatesOnlyChangedFileAndAncestors(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Session.Enabled = false
@@ -95,8 +295,7 @@ func TestHandleDiagnosticsUpdatesOnlyChangedFileAndAncestors(t *testing.T) {
 				Message:  step.path,
 			}}
 		}
-		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{URI: lsp.FileURI(step.path), Diagnostics: diagnostics})
-		m = updated.(Model)
+		m = completeDiagnosticsForTest(t, m, lsp.DiagnosticsMsg{URI: lsp.FileURI(step.path), Diagnostics: diagnostics})
 
 		if !reflect.DeepEqual(m.fileDiagnostics, step.files) {
 			t.Fatalf("file diagnostics after %q = %#v, want %#v", step.path, m.fileDiagnostics, step.files)
@@ -135,7 +334,7 @@ func TestHandleDiagnosticsLargeBatchKeepsPanelAndTreeEquivalent(t *testing.T) {
 	for i := 0; i < files; i++ {
 		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
 		severity := lsp.DiagSeverity((i / 10 % 4) + 1)
-		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
+		m = completeDiagnosticsForTest(t, m, lsp.DiagnosticsMsg{
 			URI: lsp.FileURI(path),
 			Diagnostics: []lsp.Diagnostic{{
 				Severity: severity,
@@ -143,7 +342,6 @@ func TestHandleDiagnosticsLargeBatchKeepsPanelAndTreeEquivalent(t *testing.T) {
 				Message:  "diagnostic",
 			}},
 		})
-		m = updated.(Model)
 	}
 
 	if got := len(m.fileDiagnostics); got != files {
@@ -160,67 +358,30 @@ func TestHandleDiagnosticsLargeBatchKeepsPanelAndTreeEquivalent(t *testing.T) {
 	}
 }
 
-func BenchmarkUpdateDiagnosticsSingleFile(b *testing.B) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
-	root := b.TempDir()
-	m, err := NewModel("", root, cfg)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer m.cleanup()
+func BenchmarkDispatchDiagnostics(b *testing.B) {
+	for _, diagnosticCount := range []int{1, 100_000} {
+		b.Run(fmt.Sprintf("diagnostics-%d", diagnosticCount), func(b *testing.B) {
+			cfg := config.DefaultConfig()
+			cfg.Session.Enabled = false
+			cfg.Agent.Enabled = false
+			root := b.TempDir()
+			m, err := NewModel("", root, cfg)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer m.cleanup()
 
-	for i := 0; i < 1_000; i++ {
-		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
-		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
-			URI:         lsp.FileURI(path),
-			Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning}},
+			msg := lsp.DiagnosticsMsg{
+				URI:         lsp.FileURI(filepath.Join(root, "main.go")),
+				Diagnostics: make([]lsp.Diagnostic, diagnosticCount),
+			}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				updated, _ := m.Update(msg)
+				m = updated.(Model)
+			}
 		})
-		m = updated.(Model)
-	}
-
-	msg := lsp.DiagnosticsMsg{
-		URI:         lsp.FileURI(filepath.Join(root, "pkg-00", "file-0000.go")),
-		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "updated"}},
-	}
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		updated, _ := m.Update(msg)
-		m = updated.(Model)
-	}
-}
-
-func BenchmarkHandleDiagnosticsSingleFile(b *testing.B) {
-	cfg := config.DefaultConfig()
-	cfg.Session.Enabled = false
-	cfg.Agent.Enabled = false
-	root := b.TempDir()
-	m, err := NewModel("", root, cfg)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer m.cleanup()
-
-	for i := 0; i < 1_000; i++ {
-		path := filepath.Join(root, fmt.Sprintf("pkg-%02d", i%10), fmt.Sprintf("file-%04d.go", i))
-		updated, _ := m.handleDiagnostics(lsp.DiagnosticsMsg{
-			URI:         lsp.FileURI(path),
-			Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityWarning}},
-		})
-		m = updated.(Model)
-	}
-
-	msg := lsp.DiagnosticsMsg{
-		URI:         lsp.FileURI(filepath.Join(root, "pkg-00", "file-0000.go")),
-		Diagnostics: []lsp.Diagnostic{{Severity: lsp.SeverityError, Message: "updated"}},
-	}
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		updated, _ := m.handleDiagnostics(msg)
-		m = updated.(Model)
 	}
 }
 

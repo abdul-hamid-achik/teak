@@ -286,6 +286,10 @@ func TestAppDiagnosticsHandling(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("LSP route did not schedule the listener continuation")
 	}
+	if got := model.activeEditor().Diagnostics; len(got) != 0 {
+		t.Fatalf("editor diagnostics changed before async preparation: %#v", got)
+	}
+	model = completeDiagnosticsForTest(t, model, msg)
 	if got := model.activeEditor().Diagnostics; len(got) != 1 || got[0].Message != "test error" || got[0].StartLine != 1 || got[0].StartCol != 2 {
 		t.Fatalf("editor diagnostics = %#v, want the received diagnostic", got)
 	}
@@ -307,12 +311,12 @@ func TestAppDiagnosticsHandling(t *testing.T) {
 	stale.HasVersion = true
 	stale.Version = model.activeEditor().Buffer.Version() + 1
 	stale.Diagnostics[0].Message = "stale error"
-	model.handleDiagnostics(stale)
+	model = completeDiagnosticsForTest(t, model, stale)
 	if got := model.activeEditor().Diagnostics[0].Message; got != "test error" {
 		t.Fatalf("stale diagnostics replaced current editor state with %q", got)
 	}
 
-	model.handleDiagnostics(lsp.DiagnosticsMsg{URI: lsp.FileURI(testFile)})
+	model = completeDiagnosticsForTest(t, model, lsp.DiagnosticsMsg{URI: lsp.FileURI(testFile)})
 	if len(model.activeEditor().Diagnostics) != 0 {
 		t.Fatalf("cleared diagnostics remained on editor: %#v", model.activeEditor().Diagnostics)
 	}

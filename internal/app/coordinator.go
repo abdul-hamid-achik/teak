@@ -15,6 +15,7 @@ import (
 type LSPCoordinatorInterface interface {
 	HandleMessage(msg tea.Msg) []tea.Cmd
 	GetDiagnostics(path string) []lsp.Diagnostic
+	StorePreparedDiagnostics(path string, diagnostics []lsp.Diagnostic)
 	SetTriggerChars(path string, chars []string)
 	GetTriggerChars(path string) []string
 	ClearDiagnostics(path string)

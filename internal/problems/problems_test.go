@@ -55,6 +55,22 @@ func TestModel_SetProblems(t *testing.T) {
 	}
 }
 
+func TestPrepareSnapshotOwnsInputAndApplyTransfersProjection(t *testing.T) {
+	input := []Problem{{FilePath: "/test/root/main.go", Severity: 1, Message: "original"}}
+	snapshot := PrepareSnapshot(input)
+	input[0].Message = "mutated"
+
+	m := New(ui.NordTheme(), "/test/root")
+	m.ApplySnapshot(snapshot)
+	problem := m.SelectedProblem()
+	if problem == nil || problem.Message != "original" {
+		t.Fatalf("applied problem = %#v, want owned original projection", problem)
+	}
+	if got, want := m.ErrorCount(), 1; got != want {
+		t.Fatalf("ErrorCount() = %d, want %d", got, want)
+	}
+}
+
 func TestModelReplaceFileProblemsPreservesOrderedPanelAndCounts(t *testing.T) {
 	m := New(ui.NordTheme(), "/test/root")
 	m.SetProblems([]Problem{

@@ -55,6 +55,16 @@ type Group struct {
 	Problems []Problem
 }
 
+// Snapshot is a fully prepared, immutable Problems panel projection. Building
+// it may be proportional to the workspace diagnostic count; applying it is a
+// constant-time ownership transfer suitable for a Bubble Tea Update loop.
+type Snapshot struct {
+	problems     []Problem
+	groups       []Group
+	errorCount   int
+	warningCount int
+}
+
 // Model represents the Problems panel state.
 type Model struct {
 	problems      []Problem
@@ -86,10 +96,30 @@ func (m *Model) SetSize(width, height int) {
 
 // SetProblems updates the problems list and rebuilds groups.
 func (m *Model) SetProblems(problems []Problem) {
-	m.problems = append(m.problems[:0], problems...)
-	slices.SortStableFunc(m.problems, Compare)
-	m.groups = m.buildGroups()
-	m.errorCount, m.warningCount = problemSeverityCounts(m.problems)
+	m.ApplySnapshot(PrepareSnapshot(problems))
+}
+
+// PrepareSnapshot owns and indexes a copy of problems. Callers should run this
+// outside Bubble Tea's Update loop for non-trivial inputs.
+func PrepareSnapshot(source []Problem) Snapshot {
+	owned := append([]Problem(nil), source...)
+	slices.SortStableFunc(owned, Compare)
+	errors, warnings := problemSeverityCounts(owned)
+	return Snapshot{
+		problems:     owned,
+		groups:       buildGroups(owned),
+		errorCount:   errors,
+		warningCount: warnings,
+	}
+}
+
+// ApplySnapshot installs a projection prepared by PrepareSnapshot without
+// scanning or copying its contents.
+func (m *Model) ApplySnapshot(snapshot Snapshot) {
+	m.problems = snapshot.problems
+	m.groups = snapshot.groups
+	m.errorCount = snapshot.errorCount
+	m.warningCount = snapshot.warningCount
 	// Keep selection in bounds
 	if m.selectedIndex >= len(m.problems) {
 		m.selectedIndex = max(0, len(m.problems)-1)
@@ -263,8 +293,12 @@ func problemSeverityCountsForFile(problems []Problem, filePath string) (errors, 
 
 // buildGroups groups problems by file.
 func (m *Model) buildGroups() []Group {
+	return buildGroups(m.problems)
+}
+
+func buildGroups(problems []Problem) []Group {
 	fileMap := make(map[string][]Problem)
-	for _, p := range m.problems {
+	for _, p := range problems {
 		fileMap[p.FilePath] = append(fileMap[p.FilePath], p)
 	}
 

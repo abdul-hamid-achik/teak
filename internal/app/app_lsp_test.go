@@ -123,8 +123,7 @@ func TestAppHandleDiagnosticsUpdatesProblemsPanel(t *testing.T) {
 		},
 	}
 
-	updated, _ := model.handleDiagnostics(msg)
-	updatedModel := updated.(Model)
+	updatedModel := completeDiagnosticsForTest(t, model, msg)
 
 	if updatedModel.problemsPanel.ProblemCount() != 1 {
 		t.Fatalf("ProblemCount() = %d, want 1", updatedModel.problemsPanel.ProblemCount())

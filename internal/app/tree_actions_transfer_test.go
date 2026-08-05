@@ -121,7 +121,7 @@ func TestTreeMoveRelocatesDiagnosticsWithOpenTab(t *testing.T) {
 	addDirtyEditor(t, &m, "active.go", "package active\n", "package active\n// local\n")
 	source := filepath.Join(root, "active.go")
 	destination := filepath.Join(root, "dest", "active.go")
-	m.handleDiagnostics(lsp.DiagnosticsMsg{URI: lsp.FileURI(source), Diagnostics: []lsp.Diagnostic{{
+	m = completeDiagnosticsForTest(t, m, lsp.DiagnosticsMsg{URI: lsp.FileURI(source), Diagnostics: []lsp.Diagnostic{{
 		Severity: lsp.SeverityError,
 		Message:  "before move",
 	}}})
@@ -129,6 +129,10 @@ func TestTreeMoveRelocatesDiagnosticsWithOpenTab(t *testing.T) {
 	msg := m.startTreeMove(source, filepath.Join(root, "dest"))().(treeActionResultMsg)
 	updatedAny, _ := m.Update(msg)
 	updated := updatedAny.(Model)
+	if generation := updated.diagnosticProjections.currentSnapshotGeneration(); generation != 0 {
+		snapshotAny, _ := updated.Update(updated.diagnosticProjections.snapshotCmd(generation)())
+		updated = snapshotAny.(Model)
+	}
 
 	if got := updated.fileDiagnostics[destination]; got != int(lsp.SeverityError) {
 		t.Fatalf("destination file diagnostic severity = %d, want %d", got, lsp.SeverityError)

@@ -4,6 +4,21 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.14] - 2026-08-05
+
+### Responsive LSP Diagnostics
+
+- LSP diagnostic conversion, global Problems projection, sorting, grouping,
+  and severity counting now run in cancellable background commands instead of
+  Bubble Tea's `Update()` loop.
+- Per-file and aggregate generations reject superseded publications and panel
+  snapshots. Versioned diagnostics are revalidated after preparation so an
+  intervening edit cannot install obsolete ranges.
+- File moves now relocate the immutable diagnostic projection in constant time
+  and rebuild the Problems snapshot asynchronously. On an Apple M5, dispatch
+  measured about 108–129 ns and 96 B whether a publication contained one or
+  100,000 diagnostics.
+
 ## [0.10.13] - 2026-08-05
 
 ### Responsive Agent Scrolling

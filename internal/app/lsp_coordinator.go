@@ -195,6 +195,20 @@ func (c *LSPCoordinator) GetDiagnostics(path string) []lsp.Diagnostic {
 	return slices.Clone(c.diagnostics[path])
 }
 
+// StorePreparedDiagnostics takes ownership of a slice already copied by an
+// asynchronous preparation command. The Update loop only swaps the reference.
+func (c *LSPCoordinator) StorePreparedDiagnostics(path string, diagnostics []lsp.Diagnostic) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.diagnostics[path] = diagnostics
+	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
+		for oldPath := range c.diagnostics {
+			delete(c.diagnostics, oldPath)
+			break
+		}
+	}
+}
+
 // SetTriggerChars sets trigger characters for a file.
 func (c *LSPCoordinator) SetTriggerChars(path string, chars []string) {
 	c.mu.Lock()
