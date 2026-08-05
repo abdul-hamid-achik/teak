@@ -4,6 +4,17 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-08-05
+
+### LSP Compatibility
+
+- Document-symbol requests now support both response shapes allowed by LSP:
+  hierarchical `DocumentSymbol` values and flat `SymbolInformation` values.
+  Servers such as `gopls` no longer produce symbol pickers and headless output
+  whose names are correct but whose navigation ranges are all zero.
+- Flat symbol locations pass through the negotiated position-encoding
+  conversion, and their container name is retained as picker detail.
+
 ## [0.10.5] - 2026-08-05
 
 ### LSP Cancellation

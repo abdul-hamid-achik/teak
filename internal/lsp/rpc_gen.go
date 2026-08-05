@@ -517,13 +517,59 @@ func (c *Client) DocumentSymbolContext(ctx context.Context, uri string) ([]Docum
 		return nil, nil
 	}
 
-	var symbols []DocumentSymbol
-	if err := json.Unmarshal(result, &symbols); err != nil {
+	var wireSymbols []documentSymbolWire
+	if err := json.Unmarshal(result, &wireSymbols); err != nil {
 		return nil, err
+	}
+	symbols := make([]DocumentSymbol, len(wireSymbols))
+	for index, symbol := range wireSymbols {
+		symbols[index] = symbol.documentSymbol()
 	}
 	converted, err := c.documentSymbolsFromProtocol(uri, symbols)
 	if err != nil {
 		return nil, err
 	}
 	return converted, nil
+}
+
+// documentSymbolWire accepts both result shapes allowed by the LSP method:
+// hierarchical DocumentSymbol values and flat SymbolInformation values whose
+// range is nested under location.
+type documentSymbolWire struct {
+	Name           string               `json:"name"`
+	Detail         string               `json:"detail,omitempty"`
+	Kind           int                  `json:"kind"`
+	Range          Range                `json:"range"`
+	SelectionRange Range                `json:"selectionRange"`
+	Children       []documentSymbolWire `json:"children,omitempty"`
+	ContainerName  string               `json:"containerName,omitempty"`
+	Location       *struct {
+		URI   string `json:"uri"`
+		Range Range  `json:"range"`
+	} `json:"location,omitempty"`
+}
+
+func (symbol documentSymbolWire) documentSymbol() DocumentSymbol {
+	rangeValue := symbol.Range
+	selection := symbol.SelectionRange
+	detail := symbol.Detail
+	if symbol.Location != nil {
+		rangeValue = symbol.Location.Range
+		selection = rangeValue
+		if detail == "" {
+			detail = symbol.ContainerName
+		}
+	}
+	children := make([]DocumentSymbol, len(symbol.Children))
+	for index, child := range symbol.Children {
+		children[index] = child.documentSymbol()
+	}
+	return DocumentSymbol{
+		Name:           symbol.Name,
+		Detail:         detail,
+		Kind:           symbol.Kind,
+		Range:          rangeValue,
+		SelectionRange: selection,
+		Children:       children,
+	}
 }

@@ -914,19 +914,27 @@ func TestHeadlessLSPFixtureProcess(t *testing.T) {
 				"result":  locations,
 			})
 		case "textDocument/documentSymbol":
+			var params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			}
+			if json.Unmarshal(request.Params, &params) != nil {
+				return
+			}
 			sendHeadlessLSPFixtureMessage(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      request.ID,
 				"result": []map[string]any{{
-					"name": "Fixture",
-					"kind": 12,
-					"range": map[string]any{
-						"start": map[string]int{"line": 0, "character": 0},
-						"end":   map[string]int{"line": 0, "character": 14},
-					},
-					"selectionRange": map[string]any{
-						"start": map[string]int{"line": 0, "character": 0},
-						"end":   map[string]int{"line": 0, "character": 7},
+					"name":          "Fixture",
+					"kind":          12,
+					"containerName": "fixture",
+					"location": map[string]any{
+						"uri": params.TextDocument.URI,
+						"range": map[string]any{
+							"start": map[string]int{"line": 0, "character": 0},
+							"end":   map[string]int{"line": 0, "character": 14},
+						},
 					},
 				}},
 			})

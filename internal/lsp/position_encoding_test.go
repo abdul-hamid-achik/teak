@@ -337,6 +337,48 @@ func TestClientFormattingConvertsTextEditsFromNegotiatedEncoding(t *testing.T) {
 	}
 }
 
+func TestClientDocumentSymbolDecodesFlatSymbolInformation(t *testing.T) {
+	uri := "file:///workspace/main.go"
+	stdin := &captureWriteCloser{written: make(chan struct{}, 1)}
+	client := &Client{
+		stdin:            stdin,
+		pending:          make(map[int]chan callResult),
+		running:          true,
+		openDocs:         map[string]int{uri: 1},
+		positionEncoding: positionEncodingUTF16,
+	}
+	client.setDocumentSnapshot(uri, 1, "a😀b")
+
+	result := make(chan struct {
+		symbols []DocumentSymbol
+		err     error
+	}, 1)
+	go func() {
+		symbols, err := client.DocumentSymbol(uri)
+		result <- struct {
+			symbols []DocumentSymbol
+			err     error
+		}{symbols, err}
+	}()
+
+	request := waitForCapturedRequest(t, stdin)
+	respondToCapturedRequest(t, client, request, fmt.Sprintf(`[{"name":"value","kind":13,"containerName":"app","location":{"uri":%q,"range":{"start":{"line":0,"character":1},"end":{"line":0,"character":3}}}}]`, uri))
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("DocumentSymbol() error = %v", got.err)
+	}
+	if len(got.symbols) != 1 {
+		t.Fatalf("DocumentSymbol() symbols = %#v, want one symbol", got.symbols)
+	}
+	symbol := got.symbols[0]
+	if symbol.Name != "value" || symbol.Detail != "app" || symbol.Range.Start.Character != 1 || symbol.Range.End.Character != 5 {
+		t.Fatalf("DocumentSymbol() symbol = %#v, want flat symbol with byte range 1:5", symbol)
+	}
+	if symbol.SelectionRange != symbol.Range {
+		t.Fatalf("selection range = %#v, want location range %#v", symbol.SelectionRange, symbol.Range)
+	}
+}
+
 func TestClientCompletionConvertsOutboundPosition(t *testing.T) {
 	uri := "file:///workspace/main.go"
 	stdin := &captureWriteCloser{written: make(chan struct{}, 1)}
