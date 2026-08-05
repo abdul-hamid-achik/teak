@@ -4,6 +4,20 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.18] - 2026-08-05
+
+### Prepared-Only File-Tree Input
+
+- Keyboard navigation, mouse clicks, wheel scrolling, hit-testing, and resize
+  now consume only an already prepared flat projection. If rows are pending or
+  invalidated, input waits instead of rebuilding visibility/filter state in
+  Bubble Tea's `Update()` loop.
+- Cursor clamping and scrolling accept known projection lengths, keeping
+  relayout independent of tree size. An AST invariant covers every interactive
+  handler, while fixtures explicitly prepare rows before simulating input.
+- On an Apple M5, resizing with an invalidated 100,000-entry root takes about
+  46 ns with zero allocations and does not populate either flat cache.
+
 ## [0.10.17] - 2026-08-05
 
 ### Constant-Time File-Tree Filter Reset

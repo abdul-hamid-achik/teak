@@ -662,6 +662,31 @@ func TestLoadedDirectoryExpansionProjectsAsynchronously(t *testing.T) {
 	}
 }
 
+func TestInteractiveInputDoesNotBuildInvalidatedProjection(t *testing.T) {
+	model := NewEmpty(t.TempDir(), ui.DefaultTheme())
+	model.Height = 10
+	model.Entries = []Entry{{Name: "a.go", Path: "/a.go"}, {Name: "b.go", Path: "/b.go"}}
+	model.cachedFlat = nil
+	model.sharedFlatCache = &flatEntryCache{}
+
+	for _, msg := range []tea.Msg{
+		tea.KeyPressMsg{Code: tea.KeyDown},
+		tea.MouseClickMsg{},
+		tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown}),
+	} {
+		updated, cmd := model.Update(msg)
+		if cmd != nil {
+			t.Fatalf("invalidated projection input %T scheduled an unexpected command", msg)
+		}
+		if updated.cachedFlat != nil || updated.sharedFlatCache.entries != nil {
+			t.Fatalf("invalidated projection input %T rebuilt rows", msg)
+		}
+	}
+	if entry := model.EntryAtY(0); entry != nil {
+		t.Fatalf("invalidated hit test returned stale entry %#v", entry)
+	}
+}
+
 func runFiletreeCommands(model Model, cmds ...tea.Cmd) Model {
 	queue := append([]tea.Cmd(nil), cmds...)
 	for len(queue) > 0 {
@@ -796,7 +821,8 @@ func TestEntryAtY(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file1.go"}}
-	model.cachedFlat = nil
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 	entry := model.EntryAtY(0)
 	if entry == nil {
 		t.Error("Expected non-nil entry")
@@ -967,7 +993,8 @@ func TestEntryAtYWithScroll(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}, {Name: "file3.go"}}
 	model.ScrollY = 1
-	model.cachedFlat = nil
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 	entry := model.EntryAtY(1)
 	if entry == nil {
 		t.Error("Expected non-nil entry")
@@ -1368,6 +1395,8 @@ func TestUpdateWithKeyPress(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file1.go"}, {Name: "file2.go"}}
 	model.Height = 10
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 
 	// Test down key
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -1392,7 +1421,8 @@ func TestUpdateWithEnterKey(t *testing.T) {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 	model.Entries = []Entry{{Name: "testdir", Path: path, IsDir: true, Expanded: false}}
-	model.cachedFlat = nil
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !model.Entries[0].Expanded {
@@ -1406,6 +1436,8 @@ func TestUpdateWithEnterKeyOnFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file.go", Path: filepath.Join(tmpDir, "file.go"), IsDir: false}}
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 
 	model, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
@@ -1524,6 +1556,8 @@ func TestHandleMouseClickDoubleClick(t *testing.T) {
 	model := New(tmpDir, theme)
 	model.Entries = []Entry{{Name: "file.go", Path: filepath.Join(tmpDir, "file.go"), IsDir: false}}
 	model.Height = 10
+	model.invalidateFlatCache()
+	_ = model.flatEntries()
 
 	// First click
 	mouseMsg := tea.MouseClickMsg{}

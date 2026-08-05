@@ -274,6 +274,22 @@ func BenchmarkFileTreeClearPreparedFilter100000(b *testing.B) {
 	}
 }
 
+func BenchmarkFileTreeResizeWithInvalidatedProjection100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	model.cachedFlat = nil
+	model.sharedFlatCache = &flatEntryCache{}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		candidate.SetSize(40, 20)
+		benchmarkTreeSnapshot = candidate
+	}
+	if benchmarkTreeSnapshot.cachedFlat != nil || benchmarkTreeSnapshot.sharedFlatCache.entries != nil {
+		b.Fatal("resize benchmark rebuilt an invalidated projection")
+	}
+}
+
 func deepCloneEntriesForBenchmark(entries []Entry) []Entry {
 	cloned := make([]Entry, len(entries))
 	for i, entry := range entries {

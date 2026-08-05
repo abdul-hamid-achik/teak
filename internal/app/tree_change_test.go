@@ -105,6 +105,7 @@ func TestTreeFilterReadyMessageIsRoutedToTheLiveTree(t *testing.T) {
 	if cmd == nil || !updatedTree.FilterPending() {
 		t.Fatal("tree did not schedule an asynchronous filter projection")
 	}
+	model.tree = updatedTree
 	msg := cmd()
 	routed, followup := model.Update(msg)
 	if followup != nil {

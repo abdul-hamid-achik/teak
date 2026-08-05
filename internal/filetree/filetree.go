@@ -504,13 +504,7 @@ func (m *Model) selectedPathCached() string {
 	if m.pendingSelection != "" {
 		return m.pendingSelection
 	}
-	var flat []Entry
-	if m.sharedFlatCache != nil {
-		flat = m.sharedFlatCache.entries
-	}
-	if flat == nil {
-		flat = m.cachedFlat
-	}
+	flat := m.cachedProjection()
 	if m.Cursor < 0 || m.Cursor >= len(flat) {
 		return ""
 	}
@@ -752,7 +746,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	flat := m.flatEntries()
+	flat := m.cachedProjection()
 	switch msg.String() {
 	case "up":
 		if m.Cursor > 0 {
@@ -774,7 +768,8 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			}
 		}
 	}
-	m.ensureCursorVisible()
+	m.clampCursorForLength(len(flat))
+	m.ensureCursorVisibleForLength(len(flat))
 	return m, nil
 }
 
@@ -787,7 +782,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	idx := m.ScrollY + mouse.Y - m.bodyOffset()
-	flat := m.flatEntries()
+	flat := m.cachedProjection()
 	if idx < 0 || idx >= len(flat) {
 		return m, nil
 	}
@@ -815,7 +810,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 
 func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	mouse := msg.Mouse()
-	flat := m.flatEntries()
+	flat := m.cachedProjection()
 	maxScroll := len(flat) - m.bodyHeight()
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -887,7 +882,7 @@ func (m Model) EntryAtY(y int) *Entry {
 	if m.filterActive && y < m.bodyOffset() {
 		return nil
 	}
-	flat := m.flatEntries()
+	flat := m.cachedProjection()
 	idx := m.ScrollY + y - m.bodyOffset()
 	if idx < 0 || idx >= len(flat) {
 		return nil
@@ -1028,10 +1023,14 @@ func (m *Model) ensureCursorVisible() {
 }
 
 func (m *Model) cachedProjectionLength() int {
+	return len(m.cachedProjection())
+}
+
+func (m *Model) cachedProjection() []Entry {
 	if m.sharedFlatCache != nil && m.sharedFlatCache.entries != nil {
-		return len(m.sharedFlatCache.entries)
+		return m.sharedFlatCache.entries
 	}
-	return len(m.cachedFlat)
+	return m.cachedFlat
 }
 
 func (m *Model) ensureCursorVisibleForLength(entryCount int) {
@@ -1054,7 +1053,11 @@ func (m *Model) ensureCursorVisibleForLength(entryCount int) {
 
 func (m *Model) clampCursor() {
 	flat := m.flatEntries()
-	if len(flat) == 0 {
+	m.clampCursorForLength(len(flat))
+}
+
+func (m *Model) clampCursorForLength(entryCount int) {
+	if entryCount == 0 {
 		m.Cursor = 0
 		m.ScrollY = 0
 		return
@@ -1062,10 +1065,10 @@ func (m *Model) clampCursor() {
 	if m.Cursor < 0 {
 		m.Cursor = 0
 	}
-	if m.Cursor >= len(flat) {
-		m.Cursor = len(flat) - 1
+	if m.Cursor >= entryCount {
+		m.Cursor = entryCount - 1
 	}
-	maxScroll := max(0, len(flat)-max(1, m.bodyHeight()))
+	maxScroll := max(0, entryCount-max(1, m.bodyHeight()))
 	if m.ScrollY < 0 {
 		m.ScrollY = 0
 	}
@@ -1776,5 +1779,7 @@ func (m Model) renderFilterLine() string {
 func (m *Model) SetSize(width, height int) {
 	m.Width = max(0, width)
 	m.Height = max(0, height)
-	m.ensureCursorVisible()
+	entryCount := m.cachedProjectionLength()
+	m.clampCursorForLength(entryCount)
+	m.ensureCursorVisibleForLength(entryCount)
 }

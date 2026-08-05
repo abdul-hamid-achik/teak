@@ -61,11 +61,16 @@ func TestInteractiveProjectionDispatchAndApplyDoNotTraverseTree(t *testing.T) {
 	}
 	targets := map[string]bool{
 		"ClearFilter":               false,
+		"EntryAtY":                  false,
+		"SetSize":                   false,
 		"StartFilter":               false,
 		"ToggleShowHiddenAsync":     false,
 		"ToggleShowGitIgnoredAsync": false,
 		"handleDirExpanded":         false,
 		"handleFilterReady":         false,
+		"handleKeyPress":            false,
+		"handleMouseClick":          false,
+		"handleMouseWheel":          false,
 		"toggleDir":                 false,
 	}
 	banned := map[string]bool{
