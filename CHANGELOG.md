@@ -4,6 +4,17 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-08-05
+
+### Headless LSP Teardown
+
+- Successful short-lived headless LSP queries no longer print false
+  `shutdown deadline exceeded` errors when the bounded graceful handshake
+  falls back to forced process teardown.
+- Cancel-notification failures caused by an already-closing transport are now
+  treated as expected only during shutdown; the same failures remain visible
+  while a client is running, as do unexpected teardown errors.
+
 ## [0.10.6] - 2026-08-05
 
 ### LSP Compatibility

@@ -1244,15 +1244,25 @@ func (c *Client) callInternal(ctx context.Context, method string, params any, re
 
 func (c *Client) cancelRequest(id int) {
 	if err := c.notify("$/cancelRequest", map[string]any{"id": id}); err != nil {
+		c.mu.RLock()
+		shuttingDown := c.shuttingDown
+		c.mu.RUnlock()
+		if isExpectedCancelNotificationError(err, shuttingDown) {
+			return
+		}
 		log.Error("lsp: cancel request notification failed", "id", id, "err", err)
 	}
+}
+
+func isExpectedCancelNotificationError(err error, shuttingDown bool) bool {
+	return shuttingDown && isExpectedShutdownError(err)
 }
 
 func isExpectedShutdownError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, errClientNotRunning) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errClientNotRunning) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

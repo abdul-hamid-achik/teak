@@ -48,6 +48,11 @@ func TestIsExpectedShutdownError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "bounded shutdown deadline",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
 			name: "broken pipe string",
 			err:  errors.New("write: broken pipe"),
 			want: true,
@@ -69,6 +74,26 @@ func TestIsExpectedShutdownError(t *testing.T) {
 			got := isExpectedShutdownError(tt.err)
 			if got != tt.want {
 				t.Fatalf("isExpectedShutdownError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCancelNotificationErrorExpectedOnlyDuringShutdown(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		shuttingDown bool
+		want         bool
+	}{
+		{name: "closed transport during shutdown", err: errClientNotRunning, shuttingDown: true, want: true},
+		{name: "closed transport while running", err: errClientNotRunning},
+		{name: "unexpected shutdown error", err: errors.New("permission denied"), shuttingDown: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isExpectedCancelNotificationError(tt.err, tt.shuttingDown); got != tt.want {
+				t.Fatalf("isExpectedCancelNotificationError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
