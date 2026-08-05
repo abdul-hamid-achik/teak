@@ -9,8 +9,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
+	"teak/internal/diff"
 	"teak/internal/session"
 	"teak/internal/text"
+	"teak/internal/ui"
 )
 
 func TestFileLoadCompletionDoesNotPopulateReplacementTab(t *testing.T) {
@@ -367,6 +369,97 @@ func TestLoadFileCmdPreparesImmutableRopeBeforeUpdate(t *testing.T) {
 	}
 	if loaded.Data != nil {
 		t.Fatalf("load command retained %d raw bytes after preparing the rope", len(loaded.Data))
+	}
+}
+
+func TestLoadDiffCmdPreparesHighlightedViewBeforeUpdate(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "new.go")
+	if err := os.WriteFile(path, []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := loadDiffCmd(context.Background(), root, "new.go", "??", 7, 11, ui.DefaultTheme(), 24)()
+	loaded, ok := msg.(DiffLoadedMsg)
+	if !ok {
+		t.Fatalf("load command returned %T", msg)
+	}
+	if loaded.Err != nil {
+		t.Fatalf("load command error = %v", loaded.Err)
+	}
+	if loaded.View == nil || loaded.View.FilePath != "new.go" || len(loaded.View.Lines) != 3 {
+		t.Fatalf("prepared diff view = %+v", loaded.View)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceled, ok := loadDiffCmd(ctx, root, "new.go", "??", 7, 12, ui.DefaultTheme(), 24)().(DiffLoadedMsg)
+	if !ok || !errors.Is(canceled.Err, context.Canceled) || canceled.View != nil {
+		t.Fatalf("canceled diff result = %+v", canceled)
+	}
+}
+
+func TestRootRoutesPreparedDiffViewport(t *testing.T) {
+	lines := make([]diff.DiffLine, 1_000)
+	for i := range lines {
+		lines[i] = diff.DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: diff.KindUnchanged, RightKind: diff.KindUnchanged,
+		}
+	}
+	view := diff.New("large.go", lines, ui.DefaultTheme())
+	view.SetSize(80, 10)
+	view, cmd := view.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if cmd == nil {
+		t.Fatal("diff scroll did not schedule viewport highlighting")
+	}
+	before := view.View()
+
+	model := Model{modelState: &modelState{diffViews: map[int]diff.Model{0: view}}}
+	updatedAny, next := model.Update(cmd())
+	if next != nil {
+		t.Fatal("prepared viewport unexpectedly scheduled more work")
+	}
+	updated := updatedAny.(Model)
+	after := updated.diffViews[0].View()
+	if after == before {
+		t.Fatal("root model did not route prepared viewport tokens")
+	}
+}
+
+func BenchmarkHandleDiffLoadedPreparedThousands(b *testing.B) {
+	root := b.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	cfg.Agent.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(model.cleanup)
+	model.width, model.height = 120, 40
+	openedAny, _ := model.openDiff("large.go", "M")
+	model = openedAny.(Model)
+
+	lines := make([]diff.DiffLine, 10_000)
+	for i := range lines {
+		lines[i] = diff.DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: diff.KindUnchanged, RightKind: diff.KindUnchanged,
+		}
+	}
+	view := diff.New("large.go", lines, model.theme)
+	if !view.PrepareViewport(context.Background(), 0, 40) {
+		b.Fatal("viewport highlighting was canceled")
+	}
+	msg := DiffLoadedMsg{Path: "large.go", View: &view, TabIndex: model.activeTab}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		updated, cmd := model.handleDiffLoaded(msg)
+		if cmd != nil || updated.(Model).diffViews[model.activeTab].FilePath != "large.go" {
+			b.Fatal("prepared diff was not installed")
+		}
 	}
 }
 

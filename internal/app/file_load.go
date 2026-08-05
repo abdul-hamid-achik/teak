@@ -123,7 +123,7 @@ func (m *Model) startDiffLoad(relPath, status string, ed editor.Editor) tea.Cmd 
 		m.pendingDiffLoads = make(map[uint64]pendingDiffLoad)
 	}
 	m.pendingDiffLoads[requestID] = pendingDiffLoad{ID: requestID, Path: relPath, EditorID: ed.ID(), Cancel: cancel}
-	return loadDiffCmd(ctx, m.rootDir, relPath, status, ed.ID(), requestID)
+	return loadDiffCmd(ctx, m.rootDir, relPath, status, ed.ID(), requestID, m.theme, m.height)
 }
 
 func (m *Model) latestFileLoadRequest() pendingFileLoad {

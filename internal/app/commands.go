@@ -11,6 +11,7 @@ import (
 	"teak/internal/diff"
 	"teak/internal/git"
 	"teak/internal/text"
+	"teak/internal/ui"
 )
 
 // FileSavedMsg is sent when a file has been saved successfully.
@@ -173,10 +174,11 @@ type LspReadyMsg struct {
 	OpenVersion int
 }
 
-// DiffLoadedMsg is sent when a diff has been computed.
+// DiffLoadedMsg is sent when a diff has been parsed and highlighted outside
+// Bubble Tea's Update loop.
 type DiffLoadedMsg struct {
 	Path      string
-	Lines     []diff.DiffLine
+	View      *diff.Model
 	EditorID  uint64
 	RequestID uint64
 	TabIndex  int // legacy test-only fallback
@@ -206,10 +208,27 @@ type FindNextMsg struct{}
 type FindPrevMsg struct{}
 
 // loadDiffCmd runs git diff and parses the result.
-func loadDiffCmd(ctx context.Context, rootDir, relPath, status string, editorID, requestID uint64) tea.Cmd {
+func loadDiffCmd(ctx context.Context, rootDir, relPath, status string, editorID, requestID uint64, theme ui.Theme, viewportHeight int) tea.Cmd {
 	return func() tea.Msg {
 		result := func(lines []diff.DiffLine, err error) tea.Msg {
-			return DiffLoadedMsg{Path: relPath, Lines: lines, EditorID: editorID, RequestID: requestID, Err: err}
+			if err != nil {
+				return DiffLoadedMsg{Path: relPath, EditorID: editorID, RequestID: requestID, Err: err}
+			}
+			if err := ctx.Err(); err != nil {
+				return DiffLoadedMsg{Path: relPath, EditorID: editorID, RequestID: requestID, Err: err}
+			}
+			view := diff.New(relPath, lines, theme)
+			if !view.PrepareViewport(ctx, 0, max(1, viewportHeight)) {
+				err := ctx.Err()
+				if err == nil {
+					err = fmt.Errorf("diff highlighting did not complete")
+				}
+				return DiffLoadedMsg{Path: relPath, EditorID: editorID, RequestID: requestID, Err: err}
+			}
+			if err := ctx.Err(); err != nil {
+				return DiffLoadedMsg{Path: relPath, EditorID: editorID, RequestID: requestID, Err: err}
+			}
+			return DiffLoadedMsg{Path: relPath, View: &view, EditorID: editorID, RequestID: requestID}
 		}
 		absPath := filepath.Join(rootDir, relPath)
 

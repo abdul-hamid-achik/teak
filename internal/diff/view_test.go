@@ -1,11 +1,211 @@
 package diff
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/ui"
 )
+
+func BenchmarkPrepareHighlightedDiffViewportThousands(b *testing.B) {
+	lines := make([]DiffLine, 10_000)
+	for i := range lines {
+		line := fmt.Sprintf("value%d := call%d(input)", i, i%37)
+		lines[i] = DiffLine{
+			Left: line, Right: line, LeftNum: i + 1, RightNum: i + 1,
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	theme := ui.DefaultTheme()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		model := New("large.go", lines, theme)
+		if !model.PrepareViewport(context.Background(), 0, 40) {
+			b.Fatal("viewport highlighting was canceled")
+		}
+		if len(model.leftHL.Line(0)) == 0 || len(model.rightHL.Line(0)) == 0 || len(model.leftLineMap) != len(lines) {
+			b.Fatal("diff highlighting was not prepared")
+		}
+	}
+}
+
+func BenchmarkPrepareDiffScrollViewportThousands(b *testing.B) {
+	lines := make([]DiffLine, 10_000)
+	for i := range lines {
+		line := fmt.Sprintf("value%d := call%d(input)", i, i%37)
+		lines[i] = DiffLine{
+			Left: line, Right: line, LeftNum: i + 1, RightNum: i + 1,
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		result := prepareViewportHighlight(
+			context.Background(), model.leftHL, model.rightHL,
+			model.leftSource, model.rightSource, model.leftLineMap, model.rightLineMap,
+			len(model.Lines), 5_000, 5_040,
+		)
+		if !result.complete || len(result.leftBatch.Lines) == 0 || len(result.rightBatch.Lines) == 0 {
+			b.Fatal("scroll viewport highlighting was not prepared")
+		}
+	}
+}
+
+func BenchmarkDiffScrollDispatchThousands(b *testing.B) {
+	lines := make([]DiffLine, 10_000)
+	for i := range lines {
+		lines[i] = DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	model.SetSize(80, 40)
+	model.ScrollY = 5_000
+	msg := tea.KeyPressMsg{Code: tea.KeyDown}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		candidate, cmd := model.Update(msg)
+		if candidate.ScrollY != 5_001 || cmd == nil {
+			b.Fatal("scroll did not schedule viewport preparation")
+		}
+	}
+}
+
+func BenchmarkViewPreparedDiffThousands(b *testing.B) {
+	lines := make([]DiffLine, 10_000)
+	for i := range lines {
+		line := fmt.Sprintf("value%d := call%d(input)", i, i%37)
+		lines[i] = DiffLine{
+			Left: line, Right: line, LeftNum: i + 1, RightNum: i + 1,
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	model.SetSize(160, 40)
+	model.ScrollY = 5_000
+	if !model.PrepareViewport(context.Background(), model.ScrollY, model.ScrollY+model.Height) {
+		b.Fatal("viewport highlighting was canceled")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if view := model.View(); view == "" {
+			b.Fatal("prepared diff rendered empty")
+		}
+	}
+}
+
+func TestNewDefersDiffTokenization(t *testing.T) {
+	lines := make([]DiffLine, 1_000)
+	for i := range lines {
+		lines[i] = DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	if got := model.leftHL.LineCount(); got != 0 {
+		t.Fatalf("New tokenized %d left lines eagerly", got)
+	}
+	if got := model.rightHL.LineCount(); got != 0 {
+		t.Fatalf("New tokenized %d right lines eagerly", got)
+	}
+}
+
+func TestPrepareViewportKeepsLargeDiffHighlightingSparse(t *testing.T) {
+	lines := make([]DiffLine, 10_000)
+	for i := range lines {
+		lines[i] = DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	if !model.PrepareViewport(context.Background(), 5_000, 5_024) {
+		t.Fatal("viewport preparation was canceled")
+	}
+	if got := model.leftHL.Line(model.leftLineMap[5_000]); len(got) == 0 {
+		t.Fatal("visible left line was not highlighted")
+	}
+	if got := model.rightHL.Line(model.rightLineMap[5_023]); len(got) == 0 {
+		t.Fatal("visible right line was not highlighted")
+	}
+	if got := model.leftHL.Line(model.leftLineMap[0]); got != nil {
+		t.Fatal("offscreen line was tokenized by a sparse viewport projection")
+	}
+}
+
+func TestDiffScrollPreparesLatestViewportAsynchronously(t *testing.T) {
+	lines := make([]DiffLine, 1_000)
+	for i := range lines {
+		lines[i] = DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	model.SetSize(80, 10)
+	if !model.PrepareViewport(context.Background(), 0, 10) {
+		t.Fatal("initial viewport preparation was canceled")
+	}
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if cmd == nil {
+		t.Fatal("scroll tokenized inside Update instead of scheduling preparation")
+	}
+	last := updated.leftLineMap[len(lines)-1]
+	if got := updated.leftHL.Line(last); got != nil {
+		t.Fatal("far viewport was highlighted before the command completed")
+	}
+
+	applied, next := updated.Update(cmd())
+	if next != nil {
+		t.Fatal("prepared viewport unexpectedly scheduled more work")
+	}
+	if got := applied.leftHL.Line(last); len(got) == 0 {
+		t.Fatal("prepared viewport did not highlight the final visible line")
+	}
+}
+
+func TestLaterDiffScrollCancelsObsoleteViewport(t *testing.T) {
+	lines := make([]DiffLine, 1_000)
+	for i := range lines {
+		lines[i] = DiffLine{
+			Left: "value := call(input)", Right: "value := call(input)",
+			LeftKind: KindUnchanged, RightKind: KindUnchanged,
+		}
+	}
+	model := New("large.go", lines, ui.DefaultTheme())
+	model.SetSize(80, 10)
+
+	afterEnd, endCmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if endCmd == nil {
+		t.Fatal("end scroll did not schedule highlighting")
+	}
+	afterHome, homeCmd := afterEnd.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if homeCmd == nil {
+		t.Fatal("home scroll did not supersede highlighting")
+	}
+	obsolete, ok := endCmd().(HighlightReadyMsg)
+	if !ok || !obsolete.canceled {
+		t.Fatalf("obsolete viewport result = %+v", obsolete)
+	}
+	afterObsolete, _ := afterHome.Update(obsolete)
+	if got := afterObsolete.leftHL.Line(afterObsolete.leftLineMap[len(lines)-1]); got != nil {
+		t.Fatal("obsolete viewport populated the far highlight cache")
+	}
+	current, ok := homeCmd().(HighlightReadyMsg)
+	if !ok || current.canceled {
+		t.Fatalf("current viewport result = %+v", current)
+	}
+}
 
 // TestDiffModelCreation tests New function
 func TestDiffModelCreation(t *testing.T) {

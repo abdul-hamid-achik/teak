@@ -1296,6 +1296,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DiffLoadedMsg:
 		return m.handleDiffLoaded(msg)
 
+	case diff.HighlightReadyMsg:
+		return m.handleDiffHighlightReady(msg)
+
 	case FileErrorMsg:
 		return m.handleFileError(msg)
 
@@ -3650,6 +3653,10 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 
 	// Save closed tab to history for reopening
 	tab := m.tabBar.Tabs[idx]
+	if view, ok := m.diffViews[idx]; ok {
+		view.CancelHighlight()
+		m.diffViews[idx] = view
+	}
 	if tab.FilePath != "" {
 		m.closedTabs = append(m.closedTabs, ClosedTab{
 			FilePath: tab.FilePath,
@@ -3692,6 +3699,7 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 		)
 		m.editors = nil
 		m.tabBar.Tabs = nil
+		m.diffViews = nil
 		m.activeTab = 0
 		m.tabBar.ActiveIdx = 0
 		w := editor.NewWelcome(m.theme)
@@ -5360,6 +5368,9 @@ func (m Model) openDiff(relPath, status string) (tea.Model, tea.Cmd) {
 	if replaceIdx >= 0 {
 		// Clean up any old diff view for this slot
 		m.removeLoadsForEditor(m.editors[replaceIdx].ID())
+		if view, ok := m.diffViews[replaceIdx]; ok {
+			view.CancelHighlight()
+		}
 		delete(m.diffViews, replaceIdx)
 		m.setEditor(replaceIdx, ed)
 		m.tabBar.Tabs[replaceIdx].Label = label
@@ -5408,14 +5419,27 @@ func (m Model) handleDiffLoaded(msg DiffLoadedMsg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Diff error: %v", msg.Err)
 		return m, nil
 	}
+	if msg.View == nil || msg.View.FilePath != msg.Path {
+		m.status = "Diff error: invalid prepared view"
+		return m, nil
+	}
 
-	dv := diff.New(msg.Path, msg.Lines, m.theme)
 	if m.diffViews == nil {
 		m.diffViews = make(map[int]diff.Model)
 	}
-	m.diffViews[tabIdx] = dv
+	m.diffViews[tabIdx] = *msg.View
 	m.relayout()
 	m.status = ""
+	return m, nil
+}
+
+func (m Model) handleDiffHighlightReady(msg diff.HighlightReadyMsg) (tea.Model, tea.Cmd) {
+	for index, view := range m.diffViews {
+		if view.ApplyHighlight(msg) {
+			m.diffViews[index] = view
+			break
+		}
+	}
 	return m, nil
 }
 

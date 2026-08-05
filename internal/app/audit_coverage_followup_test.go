@@ -508,9 +508,12 @@ func TestAuditDiffAndFileErrorResultsCannotCorruptTabs(t *testing.T) {
 		for _, value := range opened.pendingDiffLoads {
 			request = value
 		}
+		view := diff.New(request.Path, []diff.DiffLine{{
+			Right: "package main", RightNum: 1, RightKind: diff.KindAdded,
+		}}, opened.theme)
 		updatedAny, _ := opened.handleDiffLoaded(DiffLoadedMsg{
 			Path: request.Path, EditorID: request.EditorID, RequestID: request.ID,
-			Lines: []diff.DiffLine{{Right: "package main", RightNum: 1, RightKind: diff.KindAdded}},
+			View: &view,
 		})
 		updated := updatedAny.(Model)
 		if _, ok := updated.diffViews[updated.activeTab]; !ok || updated.status != "" {

@@ -1,9 +1,12 @@
 package diff
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"image/color"
 	"strings"
+	"sync/atomic"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -14,17 +17,46 @@ import (
 
 // Model is a read-only side-by-side diff viewer.
 type Model struct {
-	FilePath string
-	Lines    []DiffLine
-	ScrollY  int
-	Width    int
-	Height   int
-	theme    ui.Theme
-	leftHL   *highlight.Highlighter
-	rightHL  *highlight.Highlighter
+	id          uint64
+	FilePath    string
+	Lines       []DiffLine
+	ScrollY     int
+	Width       int
+	Height      int
+	theme       ui.Theme
+	leftHL      *highlight.Highlighter
+	rightHL     *highlight.Highlighter
+	leftSource  []string
+	rightSource []string
+	gutter      int
 	// Maps from DiffLine index → highlighter line index (-1 if no content)
 	leftLineMap  []int
 	rightLineMap []int
+	highlighting *highlightScheduler
+}
+
+type highlightLane struct {
+	generation uint64
+	cancel     context.CancelFunc
+}
+
+type highlightScheduler struct {
+	viewport highlightLane
+}
+
+var nextDiffModelID atomic.Uint64
+
+// HighlightReadyMsg contains viewport-scoped tokens built outside Update.
+// Model identity and generation reject results from closed views and obsolete
+// scroll positions.
+type HighlightReadyMsg struct {
+	modelID    uint64
+	generation uint64
+	leftBatch  highlight.TokenBatch
+	rightBatch highlight.TokenBatch
+	leftReady  bool
+	rightReady bool
+	canceled   bool
 }
 
 func (m Model) maxScroll() int {
@@ -35,58 +67,174 @@ func (m Model) maxScroll() int {
 // New creates a new diff view model.
 func New(filePath string, lines []DiffLine, theme ui.Theme) Model {
 	m := Model{
-		FilePath: filePath,
-		Lines:    lines,
-		theme:    theme,
+		id:           nextDiffModelID.Add(1),
+		FilePath:     filePath,
+		Lines:        lines,
+		theme:        theme,
+		highlighting: &highlightScheduler{},
 	}
 	m.buildHighlighting()
 	return m
 }
 
-// buildHighlighting tokenizes the left and right sides for syntax coloring.
-// Only actual content lines are sent to the highlighter; separators and
-// KindEmpty sides are mapped to -1 so View() can look up the correct
-// highlighter line index per DiffLine.
+// buildHighlighting prepares immutable per-side indexes for syntax coloring.
+// Tokenization is deliberately deferred to PrepareViewport: a large diff must
+// not allocate styled tokens for lines that have never been visible.
 func (m *Model) buildHighlighting() {
-	if len(m.Lines) == 0 {
-		return
-	}
-
-	var leftLines, rightLines []string
 	m.leftLineMap = make([]int, len(m.Lines))
 	m.rightLineMap = make([]int, len(m.Lines))
+	maxLineNumber := 0
 
-	leftIdx, rightIdx := 0, 0
 	for i, dl := range m.Lines {
+		if dl.LeftNum > maxLineNumber {
+			maxLineNumber = dl.LeftNum
+		}
+		if dl.RightNum > maxLineNumber {
+			maxLineNumber = dl.RightNum
+		}
 		if dl.IsSeparator {
 			m.leftLineMap[i] = -1
 			m.rightLineMap[i] = -1
 			continue
 		}
 		if dl.LeftKind != KindEmpty {
-			leftLines = append(leftLines, dl.Left)
-			m.leftLineMap[i] = leftIdx
-			leftIdx++
+			m.leftLineMap[i] = len(m.leftSource)
+			m.leftSource = append(m.leftSource, dl.Left)
 		} else {
 			m.leftLineMap[i] = -1
 		}
 		if dl.RightKind != KindEmpty {
-			rightLines = append(rightLines, dl.Right)
-			m.rightLineMap[i] = rightIdx
-			rightIdx++
+			m.rightLineMap[i] = len(m.rightSource)
+			m.rightSource = append(m.rightSource, dl.Right)
 		} else {
 			m.rightLineMap[i] = -1
 		}
 	}
 
-	leftContent := strings.Join(leftLines, "\n")
-	rightContent := strings.Join(rightLines, "\n")
-
 	m.leftHL = highlight.New(m.FilePath, m.theme)
-	m.leftHL.Tokenize([]byte(leftContent))
-
 	m.rightHL = highlight.New(m.FilePath, m.theme)
-	m.rightHL.Tokenize([]byte(rightContent))
+	digits := 1
+	for n := maxLineNumber; n >= 10; n /= 10 {
+		digits++
+	}
+	m.gutter = digits + 1
+}
+
+// PrepareViewport tokenizes and installs only the syntax context around the
+// requested diff rows. It is intended for a background command; the source
+// slices are immutable after New returns.
+func (m *Model) PrepareViewport(ctx context.Context, viewStart, viewEnd int) bool {
+	result := prepareViewportHighlight(
+		ctx,
+		m.leftHL,
+		m.rightHL,
+		m.leftSource,
+		m.rightSource,
+		m.leftLineMap,
+		m.rightLineMap,
+		len(m.Lines),
+		viewStart,
+		viewEnd,
+	)
+	if !result.complete {
+		return false
+	}
+	if result.leftReady {
+		m.leftHL.MergeBatch(result.leftBatch)
+	}
+	if result.rightReady {
+		m.rightHL.MergeBatch(result.rightBatch)
+	}
+	return true
+}
+
+type viewportHighlightResult struct {
+	leftBatch  highlight.TokenBatch
+	rightBatch highlight.TokenBatch
+	leftReady  bool
+	rightReady bool
+	complete   bool
+}
+
+func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Highlighter, leftSource, rightSource []string, leftMap, rightMap []int, totalLines, viewStart, viewEnd int) viewportHighlightResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	leftSnapshot, leftOK := captureSideViewport(leftSource, leftMap, totalLines, viewStart, viewEnd)
+	rightSnapshot, rightOK := captureSideViewport(rightSource, rightMap, totalLines, viewStart, viewEnd)
+	result := viewportHighlightResult{leftReady: leftOK, rightReady: rightOK}
+	if leftOK {
+		var complete bool
+		result.leftBatch, complete = leftHL.TokenizeViewportSnapshotBatch(ctx, leftSnapshot)
+		if !complete {
+			return result
+		}
+	}
+	if rightOK {
+		var complete bool
+		result.rightBatch, complete = rightHL.TokenizeViewportSnapshotBatch(ctx, rightSnapshot)
+		if !complete {
+			return result
+		}
+	}
+	result.complete = ctx.Err() == nil
+	return result
+}
+
+const diffHighlightContextRows = 200
+
+func captureSideViewport(source []string, lineMap []int, totalDiffLines, viewStart, viewEnd int) (highlight.ViewportSnapshot, bool) {
+	if len(source) == 0 || totalDiffLines == 0 {
+		return highlight.ViewportSnapshot{}, false
+	}
+	viewStart = max(0, min(viewStart, totalDiffLines))
+	viewEnd = max(viewStart, min(viewEnd, totalDiffLines))
+	if viewEnd == viewStart {
+		viewEnd = min(totalDiffLines, viewStart+1)
+	}
+	rangeStart := max(0, viewStart-diffHighlightContextRows)
+	rangeEnd := min(totalDiffLines, viewEnd+diffHighlightContextRows)
+	sourceStart, sourceEnd, ok := mappedSourceRange(lineMap, rangeStart, rangeEnd)
+	if !ok {
+		return highlight.ViewportSnapshot{}, false
+	}
+	sideViewStart, sideViewEnd, visible := mappedSourceRange(lineMap, viewStart, viewEnd)
+	if !visible {
+		sideViewStart = sourceStart
+		sideViewEnd = min(sourceEnd, sourceStart+1)
+	}
+
+	var content bytes.Buffer
+	for _, line := range source[sourceStart:sourceEnd] {
+		content.WriteString(line)
+		content.WriteByte('\n')
+	}
+	return highlight.ViewportSnapshot{
+		Content:   content.Bytes(),
+		LineCount: len(source),
+		StartLine: sourceStart,
+		ViewStart: sideViewStart,
+		ViewEnd:   sideViewEnd,
+	}, true
+}
+
+func mappedSourceRange(lineMap []int, start, end int) (int, int, bool) {
+	start = max(0, min(start, len(lineMap)))
+	end = max(start, min(end, len(lineMap)))
+	first, last := -1, -1
+	for _, mapped := range lineMap[start:end] {
+		if mapped < 0 {
+			continue
+		}
+		if first < 0 {
+			first = mapped
+		}
+		last = mapped
+	}
+	if first < 0 {
+		return 0, 0, false
+	}
+	return first, last + 1, true
 }
 
 // SetSize sets the viewport dimensions.
@@ -97,6 +245,11 @@ func (m *Model) SetSize(w, h int) {
 
 // Update handles scroll input.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if prepared, ok := msg.(HighlightReadyMsg); ok {
+		m.ApplyHighlight(prepared)
+		return m, nil
+	}
+	previousScroll := m.ScrollY
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -141,7 +294,75 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 	}
-	return m, nil
+	if m.ScrollY == previousScroll {
+		return m, nil
+	}
+	return m, m.scheduleViewportHighlight()
+}
+
+func (m *Model) scheduleViewportHighlight() tea.Cmd {
+	if len(m.Lines) == 0 || m.leftHL == nil || m.rightHL == nil {
+		return nil
+	}
+	ctx, generation := m.beginViewportHighlight()
+	modelID := m.id
+	leftHL, rightHL := m.leftHL, m.rightHL
+	leftSource, rightSource := m.leftSource, m.rightSource
+	leftMap, rightMap := m.leftLineMap, m.rightLineMap
+	totalLines := len(m.Lines)
+	viewStart := m.ScrollY
+	viewEnd := min(totalLines, viewStart+max(1, m.Height))
+	return func() tea.Msg {
+		result := prepareViewportHighlight(ctx, leftHL, rightHL, leftSource, rightSource, leftMap, rightMap, totalLines, viewStart, viewEnd)
+		return HighlightReadyMsg{
+			modelID: modelID, generation: generation,
+			leftBatch: result.leftBatch, rightBatch: result.rightBatch,
+			leftReady: result.leftReady, rightReady: result.rightReady,
+			canceled: !result.complete,
+		}
+	}
+}
+
+func (m *Model) beginViewportHighlight() (context.Context, uint64) {
+	if m.highlighting == nil {
+		m.highlighting = &highlightScheduler{}
+	}
+	lane := &m.highlighting.viewport
+	if lane.cancel != nil {
+		lane.cancel()
+	}
+	lane.generation++
+	ctx, cancel := context.WithCancel(context.Background())
+	lane.cancel = cancel
+	return ctx, lane.generation
+}
+
+// ApplyHighlight installs a current viewport projection in bounded time.
+func (m *Model) ApplyHighlight(msg HighlightReadyMsg) bool {
+	if msg.canceled || msg.modelID != m.id || m.highlighting == nil || msg.generation != m.highlighting.viewport.generation {
+		return false
+	}
+	if msg.leftReady {
+		m.leftHL.MergeBatch(msg.leftBatch)
+	}
+	if msg.rightReady {
+		m.rightHL.MergeBatch(msg.rightBatch)
+	}
+	m.highlighting.viewport.cancel = nil
+	return true
+}
+
+// CancelHighlight stops viewport work when the view is closed.
+func (m *Model) CancelHighlight() {
+	if m.highlighting == nil {
+		return
+	}
+	lane := &m.highlighting.viewport
+	if lane.cancel != nil {
+		lane.cancel()
+		lane.cancel = nil
+	}
+	lane.generation++
 }
 
 // View renders the side-by-side diff.
@@ -223,20 +444,10 @@ func (m Model) getTokens(hl *highlight.Highlighter, lineIdx int) []highlight.Sty
 }
 
 func (m Model) gutterWidth() int {
-	maxNum := 0
-	for _, dl := range m.Lines {
-		if dl.LeftNum > maxNum {
-			maxNum = dl.LeftNum
-		}
-		if dl.RightNum > maxNum {
-			maxNum = dl.RightNum
-		}
+	if m.gutter < 2 {
+		return 2
 	}
-	digits := 1
-	for n := maxNum; n >= 10; n /= 10 {
-		digits++
-	}
-	return digits + 1 // +1 for padding
+	return m.gutter
 }
 
 func (m Model) renderGutter(num int, kind LineKind, width int) string {

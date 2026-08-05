@@ -177,3 +177,34 @@ func TestTreeLoadHandlerDoesNotBuildProjection(t *testing.T) {
 		t.Fatal("tree-load projection invariant did not find handleTreeLoaded")
 	}
 }
+
+func TestDiffLoadedHandlerDoesNotTokenizeInUpdate(t *testing.T) {
+	targetFound := false
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "handleDiffLoaded" {
+				continue
+			}
+			targetFound = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "New" {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if ok && pkg.Name == "diff" {
+					t.Errorf("%s: diff parsing and highlighting must be prepared before Update", fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	})
+	if !targetFound {
+		t.Fatal("diff-load invariant did not find handleDiffLoaded")
+	}
+}
