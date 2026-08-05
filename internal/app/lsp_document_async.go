@@ -183,8 +183,8 @@ func (m Model) acceptsDocumentResult(kind documentRequestKind, metadata lsp.Docu
 	return !requireActive || editorIndex == m.activeTab
 }
 
-// snapshotCodeActionDiagnostics converts the editor-owned diagnostics while
-// still on the Bubble Tea event loop. The returned slice is safe for a tea.Cmd
+// snapshotCodeActionDiagnostics converts a viewport-sized projection from the
+// editor's immutable interval index. The returned slice is safe for a tea.Cmd
 // to retain while later diagnostics messages update the editor model.
 func snapshotCodeActionDiagnostics(diagnostics []editor.Diagnostic, line int) []lsp.Diagnostic {
 	// Most cursor lines have only a handful of diagnostics. Do not reserve the

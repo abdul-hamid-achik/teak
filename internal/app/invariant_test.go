@@ -209,6 +209,75 @@ func TestDiffLoadedHandlerDoesNotTokenizeInUpdate(t *testing.T) {
 	}
 }
 
+func TestCodeActionRequestDoesNotScanAllDiagnostics(t *testing.T) {
+	targetFound := false
+	indexedQueryFound := false
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "requestCodeActions" {
+				continue
+			}
+			targetFound = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				selector, ok := node.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				switch selector.Sel.Name {
+				case "Diagnostics":
+					t.Errorf("%s: code-action input scans the whole file diagnostic slice in Update", fset.Position(selector.Pos()))
+				case "DiagnosticsIntersecting":
+					indexedQueryFound = true
+				}
+				return true
+			})
+		}
+	})
+	if !targetFound {
+		t.Fatal("requestCodeActions was not found")
+	}
+	if !indexedQueryFound {
+		t.Fatal("requestCodeActions does not query the prepared diagnostic interval index")
+	}
+}
+
+func TestDiagnosticResultInstallsPreparedEditorIndex(t *testing.T) {
+	targetFound := false
+	installFound := false
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "handleDiagnosticsPrepared" {
+				continue
+			}
+			targetFound = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				switch typed := node.(type) {
+				case *ast.AssignStmt:
+					for _, target := range typed.Lhs {
+						selector, ok := target.(*ast.SelectorExpr)
+						if ok && selector.Sel.Name == "Diagnostics" {
+							t.Errorf("%s: diagnostic result assigns an unindexed editor slice in Update", fset.Position(selector.Pos()))
+						}
+					}
+				case *ast.SelectorExpr:
+					if typed.Sel.Name == "InstallPreparedDiagnostics" {
+						installFound = true
+					}
+				}
+				return true
+			})
+		}
+	})
+	if !targetFound {
+		t.Fatal("handleDiagnosticsPrepared was not found")
+	}
+	if !installFound {
+		t.Fatal("handleDiagnosticsPrepared does not install the prepared editor diagnostic index")
+	}
+}
+
 func TestLSPPickerHandlersOnlyDispatchPreparedItems(t *testing.T) {
 	targets := map[string]bool{
 		"handleCodeActionResult":     false,

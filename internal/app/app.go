@@ -4369,7 +4369,7 @@ func (m Model) handleDiagnosticsPrepared(msg diagnosticsPreparedMsg) (tea.Model,
 
 	for i := range m.editors {
 		if m.editors[i].Buffer.FilePath == msg.Path {
-			m.editors[i].Diagnostics = msg.EditorDiagnostics
+			m.editors[i].InstallPreparedDiagnostics(msg.EditorSet)
 			break
 		}
 	}
@@ -4809,7 +4809,7 @@ func (m Model) requestCodeActions() (Model, tea.Cmd) {
 	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
-	diagnostics := snapshotCodeActionDiagnostics(ed.Diagnostics, line)
+	diagnostics := snapshotCodeActionDiagnostics(ed.DiagnosticsIntersecting(line, line), line)
 	requester := m.codeActionRequester
 	return m, func() tea.Msg {
 		var (

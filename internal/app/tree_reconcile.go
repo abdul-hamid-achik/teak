@@ -129,7 +129,7 @@ func (m *Model) reconcileTreeEditorPath(index int, oldPath, newPath string) {
 	replacement := editor.New(ed.Buffer, m.theme, ed.Config)
 	replacement.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 	replacement.HasLSP = ed.HasLSP
-	replacement.Diagnostics = append([]editor.Diagnostic(nil), ed.Diagnostics...)
+	replacement.CopyPreparedDiagnosticsFrom(ed)
 	m.setEditor(index, replacement)
 }
 

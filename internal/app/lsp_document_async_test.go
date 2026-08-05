@@ -14,6 +14,22 @@ import (
 	"teak/internal/text"
 )
 
+var benchmarkCodeActionDiagnosticsSink []lsp.Diagnostic
+
+func BenchmarkCodeActionDiagnosticIndexedProjectionHundredThousand(b *testing.B) {
+	diagnostics := make([]editor.Diagnostic, 100_000)
+	for i := range diagnostics {
+		diagnostics[i] = editor.Diagnostic{StartLine: i, EndLine: i, Message: "diagnostic"}
+	}
+	var ed editor.Editor
+	ed.InstallDiagnostics(diagnostics)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkCodeActionDiagnosticsSink = snapshotCodeActionDiagnostics(ed.DiagnosticsIntersecting(50_000, 50_000), 50_000)
+	}
+}
+
 func TestCodeActionDiagnosticsAreSnapshottedBeforeCommand(t *testing.T) {
 	diagnostics := []editor.Diagnostic{
 		{StartLine: 2, StartCol: 1, EndLine: 4, EndCol: 3, Severity: 2, Message: "original"},
@@ -34,14 +50,14 @@ func TestCodeActionDiagnosticsAreSnapshottedBeforeCommand(t *testing.T) {
 
 func TestRequestCodeActionsSnapshotsDiagnosticsBeforeCommand(t *testing.T) {
 	model := newOverlayRequestTestModel(t)
-	model.activeEditor().Diagnostics = []editor.Diagnostic{{
+	model.activeEditor().InstallDiagnostics([]editor.Diagnostic{{
 		StartLine: 0,
 		StartCol:  1,
 		EndLine:   0,
 		EndCol:    4,
 		Severity:  1,
 		Message:   "original",
-	}}
+	}})
 
 	var received []lsp.Diagnostic
 	model.codeActionRequester = func(_ context.Context, _ string, _, _ int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error) {

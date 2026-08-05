@@ -1,19 +1,63 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
 	"teak/internal/text"
 	"teak/internal/ui"
 )
 
+var benchmarkDiagnosticViewSink string
+
+func BenchmarkEditorViewHundredThousandDiagnostics(b *testing.B) {
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("line\n", 100_001)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(100, 24)
+	ed.Viewport.ScrollY = 50_000
+	diagnostics := make([]Diagnostic, 100_000)
+	for i := range diagnostics {
+		diagnostics[i] = Diagnostic{
+			StartLine: i,
+			EndLine:   i,
+			EndCol:    4,
+			Severity:  i%4 + 1,
+		}
+	}
+	ed.InstallDiagnostics(diagnostics)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkDiagnosticViewSink = ed.View()
+	}
+}
+
+func BenchmarkEditorViewHundredThousandFoldedDiagnostics(b *testing.B) {
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("line\n", 100_001)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(100, 24)
+	ed.Folds.SetRegions([]FoldRegion{{StartLine: 0, EndLine: 99_976, Collapsed: true}})
+	diagnostics := make([]Diagnostic, 100_000)
+	for i := range diagnostics {
+		diagnostics[i] = Diagnostic{StartLine: i, EndLine: i, EndCol: 4, Severity: i%4 + 1}
+	}
+	ed.InstallDiagnostics(diagnostics)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkDiagnosticViewSink = ed.View()
+	}
+}
+
 func TestDiagnosticHighlightsUnderlineSingleLineRange(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("let x = 1\nlet y = 2\n"))
 	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
 	ed.SetSize(40, 10)
-	ed.Diagnostics = []Diagnostic{
+	ed.InstallDiagnostics([]Diagnostic{
 		{StartLine: 0, StartCol: 4, EndLine: 0, EndCol: 5, Severity: 1, Message: "undefined"},
-	}
+	})
 
 	highlights := ed.diagnosticHighlights()
 	if len(highlights) != 1 {
@@ -33,12 +77,12 @@ func TestDiagnosticHighlightsUseSeverityStyles(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("aaa\nbbb\nccc\nddd\n"))
 	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
 	ed.SetSize(40, 10)
-	ed.Diagnostics = []Diagnostic{
+	ed.InstallDiagnostics([]Diagnostic{
 		{StartLine: 0, StartCol: 0, EndLine: 0, EndCol: 1, Severity: 1},
 		{StartLine: 1, StartCol: 0, EndLine: 1, EndCol: 1, Severity: 2},
 		{StartLine: 2, StartCol: 0, EndLine: 2, EndCol: 1, Severity: 3},
 		{StartLine: 3, StartCol: 0, EndLine: 3, EndCol: 1, Severity: 4},
-	}
+	})
 
 	theme := ui.DefaultTheme()
 	want := []string{
@@ -62,9 +106,9 @@ func TestDiagnosticHighlightsSpanMultipleLines(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("start line\nmiddle line\nend line\n"))
 	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
 	ed.SetSize(40, 10)
-	ed.Diagnostics = []Diagnostic{
+	ed.InstallDiagnostics([]Diagnostic{
 		{StartLine: 0, StartCol: 6, EndLine: 2, EndCol: 3, Severity: 2},
-	}
+	})
 
 	highlights := ed.diagnosticHighlights()
 	if len(highlights) != 3 {
@@ -89,10 +133,10 @@ func TestDiagnosticHighlightsBoundedToViewport(t *testing.T) {
 	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
 	ed.SetSize(40, 1)
 	ed.Viewport.ScrollY = 2
-	ed.Diagnostics = []Diagnostic{
+	ed.InstallDiagnostics([]Diagnostic{
 		{StartLine: 0, StartCol: 0, EndLine: 0, EndCol: 1, Severity: 1},
 		{StartLine: 2, StartCol: 0, EndLine: 2, EndCol: 1, Severity: 1},
-	}
+	})
 
 	highlights := ed.diagnosticHighlights()
 	if len(highlights) != 1 {
@@ -100,6 +144,28 @@ func TestDiagnosticHighlightsBoundedToViewport(t *testing.T) {
 	}
 	if highlights[0].Line != 2 {
 		t.Fatalf("highlight on line %d, want line 2", highlights[0].Line)
+	}
+}
+
+func TestDiagnosticHighlightsExcludeCollapsedLines(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("line\n", 100)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(40, 3)
+	ed.Folds.SetRegions([]FoldRegion{{StartLine: 0, EndLine: 97, Collapsed: true}})
+	ed.InstallDiagnostics([]Diagnostic{
+		{StartLine: 50, EndLine: 50, EndCol: 4, Severity: 1, Message: "hidden"},
+		{StartLine: 98, EndLine: 98, EndCol: 4, Severity: 2, Message: "visible"},
+		{StartLine: 0, EndLine: 99, EndCol: 4, Severity: 3, Message: "spanning"},
+	})
+
+	highlights := ed.diagnosticHighlights()
+	if len(highlights) != 4 {
+		t.Fatalf("diagnosticHighlights() = %#v, want spanning highlights on 0/98/99 plus visible diagnostic", highlights)
+	}
+	for _, highlight := range highlights {
+		if highlight.Line != 0 && highlight.Line != 98 && highlight.Line != 99 {
+			t.Fatalf("diagnosticHighlights() included collapsed line %d", highlight.Line)
+		}
 	}
 }
 
@@ -118,9 +184,9 @@ func TestViewRendersDiagnosticUnderlines(t *testing.T) {
 	ed.SetSize(40, 10)
 	plain := ed.View()
 
-	ed.Diagnostics = []Diagnostic{
+	ed.InstallDiagnostics([]Diagnostic{
 		{StartLine: 0, StartCol: 4, EndLine: 0, EndCol: 5, Severity: 1, Message: "undefined"},
-	}
+	})
 	withDiag := ed.View()
 	if withDiag == plain {
 		t.Fatal("view with diagnostics identical to plain view — ranges are not underlined")

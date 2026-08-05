@@ -148,6 +148,33 @@ func TestTreeMoveRelocatesDiagnosticsWithOpenTab(t *testing.T) {
 	}
 }
 
+func TestTreeRenameAcrossExtensionsPreservesPreparedDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	m := newTreeUXModel(t, root)
+	addDirtyEditor(t, &m, "active.go", "package active\n", "package active\n")
+	source := filepath.Join(root, "active.go")
+	destination := filepath.Join(root, "active.txt")
+	m = completeDiagnosticsForTest(t, m, lsp.DiagnosticsMsg{URI: lsp.FileURI(source), Diagnostics: []lsp.Diagnostic{{
+		Range: lsp.DiagRange{
+			Start: lsp.DiagPosition{Line: 0},
+			End:   lsp.DiagPosition{Line: 0, Character: 7},
+		},
+		Severity: lsp.SeverityError,
+		Message:  "survives lexer rebuild",
+	}}})
+
+	msg := m.startTreeRename(source, "active.txt")().(treeActionResultMsg)
+	updatedAny, _ := m.Update(msg)
+	updated := updatedAny.(Model)
+	if got := updated.activeEditor().Buffer.FilePath; got != destination {
+		t.Fatalf("renamed editor path = %q, want %q", got, destination)
+	}
+	diagnostics := updated.activeEditor().DiagnosticsIntersecting(0, 0)
+	if len(diagnostics) != 1 || diagnostics[0].Message != "survives lexer rebuild" {
+		t.Fatalf("prepared diagnostics after lexer rebuild = %#v", diagnostics)
+	}
+}
+
 func TestTreeMoveRelocatesOpenTabsInsideDirectory(t *testing.T) {
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "src")

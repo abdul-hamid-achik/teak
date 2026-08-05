@@ -114,6 +114,7 @@ type Editor struct {
 	dragging                bool
 	Highlighter             *highlight.Highlighter
 	Diagnostics             []Diagnostic
+	diagnosticSet           *DiagnosticSet
 	autocomplete            overlays.Autocomplete
 	hover                   overlays.Hover
 	signatureHelp           overlays.SignatureHelp
@@ -1373,8 +1374,13 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 
 // View renders the editor content.
 func (e *Editor) View() string {
+	visibleDiagnostics, visibleLines, startLine, endLine := e.visibleDiagnosticProjection()
 	pluginHighlights := e.PluginHighlightRanges()
-	extra := append(e.diagnosticHighlights(), e.findMatchHighlights()...)
+	diagnosticHighlights := e.diagnosticHighlightsForRange(visibleDiagnostics, startLine, endLine)
+	if len(visibleLines) > 0 {
+		diagnosticHighlights = e.diagnosticHighlightsForLines(visibleDiagnostics, visibleLines)
+	}
+	extra := append(diagnosticHighlights, e.findMatchHighlights()...)
 	if len(extra) > 0 {
 		pluginHighlights = append(pluginHighlights, extra...)
 		sort.SliceStable(pluginHighlights, func(i, j int) bool {
@@ -1389,11 +1395,11 @@ func (e *Editor) View() string {
 	}
 	var view string
 	if e.Wrap != nil && e.Config.WordWrap {
-		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, e.Wrap, pluginHighlights)
+		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, e.Wrap, pluginHighlights)
 	} else if len(e.Folds.Regions) > 0 {
-		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, &e.Folds, pluginHighlights)
+		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, &e.Folds, pluginHighlights)
 	} else {
-		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, e.Diagnostics, e.DebugGutter, pluginHighlights)
+		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, pluginHighlights)
 	}
 	if fv := e.find.View(); fv != "" {
 		view = fv + "\n" + view
@@ -1440,15 +1446,22 @@ func (e Editor) findMatchHighlights() []HighlightRange {
 // ranges so errors and warnings are marked in the text itself, not just by a
 // colored gutter number. Multi-line diagnostics underline every covered line.
 func (e Editor) diagnosticHighlights() []HighlightRange {
-	if e.Buffer == nil || len(e.Diagnostics) == 0 {
+	diagnostics, visibleLines, startLine, endLine := e.visibleDiagnosticProjection()
+	if len(visibleLines) > 0 {
+		return e.diagnosticHighlightsForLines(diagnostics, visibleLines)
+	}
+	return e.diagnosticHighlightsForRange(diagnostics, startLine, endLine)
+}
+
+func (e Editor) diagnosticHighlightsForRange(diagnostics []Diagnostic, startLine, endLine int) []HighlightRange {
+	if e.Buffer == nil || len(diagnostics) == 0 {
 		return nil
 	}
-	startLine, endLine := e.visibleBufferLineRange()
 	if startLine > endLine {
 		return nil
 	}
 	var ranges []HighlightRange
-	for _, d := range e.Diagnostics {
+	for _, d := range diagnostics {
 		if d.EndLine < startLine || d.StartLine > endLine {
 			continue
 		}
@@ -1456,28 +1469,145 @@ func (e Editor) diagnosticHighlights() []HighlightRange {
 		first := max(d.StartLine, startLine)
 		last := min(d.EndLine, endLine)
 		for line := first; line <= last; line++ {
-			lineLen := len(e.Buffer.Line(line))
-			start := 0
-			if line == d.StartLine {
-				start = min(d.StartCol, lineLen)
+			if highlight, ok := e.diagnosticHighlightForLine(d, line, style); ok {
+				ranges = append(ranges, highlight)
 			}
-			end := lineLen
-			if line == d.EndLine {
-				end = min(d.EndCol, lineLen)
-			}
-			if end <= start {
-				continue
-			}
-			ranges = append(ranges, HighlightRange{
-				Namespace: -2,
-				Line:      line,
-				StartCol:  start,
-				EndCol:    end,
-				Style:     style,
-			})
 		}
 	}
 	return ranges
+}
+
+func (e Editor) diagnosticHighlightsForLines(diagnostics []Diagnostic, visibleLines []int) []HighlightRange {
+	if e.Buffer == nil || len(diagnostics) == 0 || len(visibleLines) == 0 {
+		return nil
+	}
+	var ranges []HighlightRange
+	for _, diagnostic := range diagnostics {
+		style := diagnosticStyle(e.theme, diagnostic.Severity)
+		for _, line := range visibleLines {
+			if line < diagnostic.StartLine || line > diagnostic.EndLine {
+				continue
+			}
+			if highlight, ok := e.diagnosticHighlightForLine(diagnostic, line, style); ok {
+				ranges = append(ranges, highlight)
+			}
+		}
+	}
+	return ranges
+}
+
+func (e Editor) diagnosticHighlightForLine(diagnostic Diagnostic, line int, style lipgloss.Style) (HighlightRange, bool) {
+	lineLen := len(e.Buffer.Line(line))
+	start := 0
+	if line == diagnostic.StartLine {
+		start = min(diagnostic.StartCol, lineLen)
+	}
+	end := lineLen
+	if line == diagnostic.EndLine {
+		end = min(diagnostic.EndCol, lineLen)
+	}
+	if end <= start {
+		return HighlightRange{}, false
+	}
+	return HighlightRange{
+		Namespace: -2,
+		Line:      line,
+		StartCol:  start,
+		EndCol:    end,
+		Style:     style,
+	}, true
+}
+
+// InstallPreparedDiagnostics swaps a diagnostic collection whose interval
+// index was built outside Update. DiagnosticSet is immutable after creation.
+func (e *Editor) InstallPreparedDiagnostics(set *DiagnosticSet) {
+	e.diagnosticSet = set
+	if set == nil {
+		e.Diagnostics = nil
+		return
+	}
+	e.Diagnostics = set.diagnostics
+}
+
+// InstallDiagnostics is a synchronous convenience for construction and tests.
+// Production LSP results use PrepareDiagnosticSet in a tea.Cmd followed by
+// InstallPreparedDiagnostics in Update.
+func (e *Editor) InstallDiagnostics(diagnostics []Diagnostic) {
+	owned := append([]Diagnostic(nil), diagnostics...)
+	set, err := PrepareDiagnosticSet(context.Background(), owned)
+	if err != nil {
+		e.InstallPreparedDiagnostics(nil)
+		return
+	}
+	e.InstallPreparedDiagnostics(set)
+}
+
+// CopyPreparedDiagnosticsFrom shares an immutable diagnostic projection when
+// an editor shell is rebuilt around the same buffer (for example after a path
+// change selects a different lexer).
+func (e *Editor) CopyPreparedDiagnosticsFrom(source *Editor) {
+	if source == nil {
+		e.InstallPreparedDiagnostics(nil)
+		return
+	}
+	e.InstallPreparedDiagnostics(source.diagnosticSet)
+}
+
+// DiagnosticsIntersecting returns an owned projection for a line range. It is
+// safe for a tea.Cmd to retain after later diagnostic publications replace the
+// editor's immutable set.
+func (e Editor) DiagnosticsIntersecting(startLine, endLine int) []Diagnostic {
+	return e.diagnosticsIntersecting(startLine, endLine)
+}
+
+// DiagnosticMessageAtLine returns the first non-empty diagnostic message on a
+// line without allocating a projection or scanning the file-wide collection.
+func (e Editor) DiagnosticMessageAtLine(line, maxWidth int) string {
+	if e.diagnosticSet == nil {
+		return ""
+	}
+	message := ""
+	bestIndex := int(^uint(0) >> 1)
+	e.diagnosticSet.visitIntersecting(line, line, func(index int, diagnostic Diagnostic) bool {
+		candidate := strings.TrimSpace(diagnostic.Message)
+		if candidate != "" && index < bestIndex {
+			bestIndex = index
+			message = candidate
+		}
+		return true
+	})
+	if message == "" || maxWidth <= 1 {
+		return message
+	}
+	runes := []rune(message)
+	if len(runes) > maxWidth {
+		return string(runes[:maxWidth-1]) + "…"
+	}
+	return message
+}
+
+func (e Editor) diagnosticsIntersecting(startLine, endLine int) []Diagnostic {
+	if startLine > endLine || e.diagnosticSet == nil {
+		return nil
+	}
+	return e.diagnosticSet.Intersecting(startLine, endLine)
+}
+
+func (e Editor) visibleDiagnosticProjection() ([]Diagnostic, []int, int, int) {
+	if e.Buffer == nil || e.diagnosticSet == nil || e.Buffer.LineCount() == 0 {
+		return nil, nil, 0, -1
+	}
+	if (e.Wrap == nil || !e.Config.WordWrap) && e.Folds.HasCollapsedRegions() {
+		lineCount := e.Buffer.LineCount()
+		start := e.Viewport.foldedScrollStart(&e.Folds, lineCount)
+		visibleLines := e.Folds.VisibleLines(start, e.Viewport.Height, lineCount)
+		if len(visibleLines) == 0 {
+			return nil, nil, 0, -1
+		}
+		return e.diagnosticSet.IntersectingLines(visibleLines), visibleLines, visibleLines[0], visibleLines[len(visibleLines)-1]
+	}
+	startLine, endLine := e.visibleBufferLineRange()
+	return e.diagnosticsIntersecting(startLine, endLine), nil, startLine, endLine
 }
 
 func diagnosticStyle(theme ui.Theme, severity int) lipgloss.Style {

@@ -102,9 +102,9 @@ func TestClipboardCopyResultEmitsOSC52(t *testing.T) {
 func TestStatusBarShowsDiagnosticUnderCursor(t *testing.T) {
 	m := newViewTestModel(t, false)
 	addDirtyEditor(t, &m, "main.go", "let x = 1\n", "let x = 1\n")
-	m.editors[m.activeTab].Diagnostics = []editor.Diagnostic{
+	m.editors[m.activeTab].InstallDiagnostics([]editor.Diagnostic{
 		{StartLine: 0, StartCol: 0, EndLine: 0, EndCol: 1, Severity: 1, Message: "undefined: x"},
-	}
+	})
 	m.editors[m.activeTab].Buffer.SetCursor(text.Position{Line: 0, Col: 0})
 
 	bar := m.renderStatusBar()

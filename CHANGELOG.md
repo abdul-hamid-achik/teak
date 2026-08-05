@@ -4,6 +4,27 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.26] - 2026-08-05
+
+### Viewport-Indexed LSP Diagnostics
+
+- LSP diagnostic preparation now builds a cancellable immutable interval
+  index alongside the existing editor, Problems, and severity projections;
+  `Update()` installs the prepared set without sorting or scanning it.
+- Editor rendering, gutter severity, and the idle status-bar message query
+  only diagnostics intersecting the visible lines. Collapsed folds use their
+  sparse visible-line projection, so hidden ranges are neither underlined nor
+  expanded into per-line render work.
+- Code-action requests use the same index instead of scanning every diagnostic
+  on the cursor keypress. Rebuilding an editor after a cross-extension rename
+  safely shares the immutable projection.
+- On an Apple M5 with 100,000 diagnostics, a normal editor frame dropped from
+  about 0.39 ms to 0.19-0.20 ms. A frame with nearly all diagnostics inside one
+  collapsed fold dropped from 114.8 ms and 468 MB to about 0.227 ms and
+  233 KB. Cursor-line code-action projection dropped from 72-91 microseconds
+  to about 0.21-0.23 microseconds; the one-time index build takes about 2.05 ms
+  in the background.
+
 ## [0.10.25] - 2026-08-05
 
 ### Responsive LSP Autocomplete

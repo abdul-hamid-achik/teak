@@ -23,16 +23,16 @@ type diagnosticProjectionStore struct {
 }
 
 type diagnosticsPreparedMsg struct {
-	Path              string
-	Version           int
-	HasVersion        bool
-	Generation        uint64
-	Diagnostics       []lsp.Diagnostic
-	EditorDiagnostics []editor.Diagnostic
-	Problems          []problems.Problem
-	Severity          int
-	HasSeverity       bool
-	Canceled          bool
+	Path        string
+	Version     int
+	HasVersion  bool
+	Generation  uint64
+	Diagnostics []lsp.Diagnostic
+	EditorSet   *editor.DiagnosticSet
+	Problems    []problems.Problem
+	Severity    int
+	HasSeverity bool
+	Canceled    bool
 }
 
 type diagnosticsSnapshotPreparedMsg struct {
@@ -177,7 +177,7 @@ func prepareDiagnostics(ctx context.Context, msg lsp.DiagnosticsMsg, path string
 		return prepared
 	}
 	prepared.Diagnostics = make([]lsp.Diagnostic, len(msg.Diagnostics))
-	prepared.EditorDiagnostics = make([]editor.Diagnostic, len(msg.Diagnostics))
+	editorDiagnostics := make([]editor.Diagnostic, len(msg.Diagnostics))
 	prepared.Problems = make([]problems.Problem, len(msg.Diagnostics))
 	for index, diagnostic := range msg.Diagnostics {
 		if index%256 == 0 {
@@ -187,7 +187,7 @@ func prepareDiagnostics(ctx context.Context, msg lsp.DiagnosticsMsg, path string
 			}
 		}
 		prepared.Diagnostics[index] = diagnostic
-		prepared.EditorDiagnostics[index] = editor.Diagnostic{
+		editorDiagnostics[index] = editor.Diagnostic{
 			StartLine: diagnostic.Range.Start.Line,
 			StartCol:  diagnostic.Range.Start.Character,
 			EndLine:   diagnostic.Range.End.Line,
@@ -210,5 +210,11 @@ func prepareDiagnostics(ctx context.Context, msg lsp.DiagnosticsMsg, path string
 			prepared.HasSeverity = true
 		}
 	}
+	set, err := editor.PrepareDiagnosticSet(ctx, editorDiagnostics)
+	if err != nil {
+		prepared.Canceled = true
+		return prepared
+	}
+	prepared.EditorSet = set
 	return prepared
 }
