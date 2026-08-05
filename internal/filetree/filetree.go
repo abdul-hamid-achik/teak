@@ -50,6 +50,7 @@ type FilterReadyMsg struct {
 	ShowGitIgnored    bool
 	Filter            string
 	Source            []Entry
+	SourceIndices     []int
 	Entries           []Entry
 	SelectedIndex     int
 	SelectionFound    bool
@@ -70,6 +71,7 @@ type RefreshResult struct {
 	source            []Entry
 	projection        []Entry
 	indexByPath       map[string]int
+	sourceIndices     []int
 	prepared          bool
 }
 
@@ -148,8 +150,9 @@ type Model struct {
 }
 
 type flatEntryCache struct {
-	entries []Entry // current visible projection
-	source  []Entry // unfiltered, visibility-aware flattened snapshot
+	entries       []Entry // current visible projection
+	source        []Entry // unfiltered, visibility-aware flattened snapshot
+	sourceIndices []int   // filtered row index → source row index for O(1) clearing
 }
 
 // SetDiagnostics sets the diagnostics map (file paths + directory paths → worst severity).
@@ -233,17 +236,31 @@ func (m Model) FilterActive() bool { return m.filterActive }
 // rather than acting on a previous query's stale result.
 func (m Model) FilterPending() bool { return m.filterPending }
 
+// RestoreView installs scalar view preferences on a newly loaded persistent
+// entry root and prepares its first visible projection asynchronously.
+func (m *Model) RestoreView(showHidden, showGitIgnored bool, filter string, filterActive bool) tea.Cmd {
+	m.showHidden = showHidden
+	m.showGitIgnored = showGitIgnored
+	m.filter = normalizeTreeFilter(filter)
+	m.filterActive = filterActive
+	return m.startProjection("", true)
+}
+
 // StartFilter opens the filter prompt without changing the current query.
 // This is used when an asynchronous tree snapshot replaces the live model.
 func (m *Model) StartFilter() {
 	m.filterActive = true
-	m.ensureCursorVisible()
+	m.ensureCursorVisibleForLength(m.cachedProjectionLength())
 }
 
 // SetFilter applies a case-insensitive substring filter to visible entry
 // names. Directories remain visible when a loaded descendant matches.
 func (m *Model) SetFilter(filter string) {
 	filter = normalizeTreeFilter(filter)
+	if filter == "" {
+		m.ClearFilter()
+		return
+	}
 	if m.filter == filter && !m.filterPending {
 		return
 	}
@@ -262,8 +279,32 @@ func (m *Model) SetFilter(filter string) {
 
 // ClearFilter removes the name filter and closes its prompt.
 func (m *Model) ClearFilter() {
-	m.SetFilter("")
 	m.filterActive = false
+	if m.filter == "" && !m.filterPending {
+		return
+	}
+	sourceIndex := m.Cursor
+	if m.sharedFlatCache != nil && m.Cursor >= 0 && m.Cursor < len(m.sharedFlatCache.sourceIndices) {
+		sourceIndex = m.sharedFlatCache.sourceIndices[m.Cursor]
+	}
+	m.cancelFilter()
+	m.filterGeneration++
+	m.filter = ""
+	m.pendingSelection = ""
+	if m.sharedFlatCache == nil || m.sharedFlatCache.source == nil {
+		m.invalidateProjectionCache()
+		return
+	}
+	m.cachedFlat = m.sharedFlatCache.source
+	m.sharedFlatCache.entries = m.sharedFlatCache.source
+	m.Cursor = sourceIndex
+	m.sharedFlatCache.sourceIndices = nil
+	if len(m.cachedFlat) == 0 {
+		m.Cursor = 0
+	} else if m.Cursor >= len(m.cachedFlat) {
+		m.Cursor = len(m.cachedFlat) - 1
+	}
+	m.ensureCursorVisibleForLength(len(m.cachedFlat))
 }
 
 // New creates a new file tree model rooted at the given directory.
@@ -383,6 +424,7 @@ func (m *Model) ApplyRefresh(result RefreshResult) bool {
 		m.sharedFlatCache = &flatEntryCache{}
 	}
 	m.sharedFlatCache.source = result.source
+	m.sharedFlatCache.sourceIndices = result.sourceIndices
 	m.sharedFlatCache.entries = result.projection
 	if index, ok := result.indexByPath[selectedPath]; ok {
 		m.Cursor = index
@@ -401,9 +443,10 @@ func (m Model) prepareRefreshResult(ctx context.Context, entries []Entry, patter
 		source = make([]Entry, 0)
 	}
 	projection := source
+	var sourceIndices []int
 	var err error
 	if m.filter != "" {
-		projection, err = filterFlatEntriesContext(ctx, source, m.filter)
+		projection, sourceIndices, err = filterFlatEntriesWithSourceIndicesContext(ctx, source, m.filter)
 		if err != nil {
 			return RefreshResult{}, err
 		}
@@ -427,6 +470,7 @@ func (m Model) prepareRefreshResult(ctx context.Context, entries []Entry, patter
 		source:            source,
 		projection:        projection,
 		indexByPath:       indexByPath,
+		sourceIndices:     sourceIndices,
 		prepared:          true,
 	}, nil
 }
@@ -698,8 +742,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "/", "slash":
-		m.filterActive = true
-		m.ensureCursorVisible()
+		m.StartFilter()
 		return m, nil
 	case "alt+h", "ctrl+h", "ctrl+.":
 		_, cmd := m.ToggleShowHiddenAsync()
@@ -822,6 +865,7 @@ func (m Model) handleFilterReady(msg FilterReadyMsg) (Model, tea.Cmd) {
 	}
 	m.cachedFlat = msg.Entries
 	m.sharedFlatCache.source = msg.Source
+	m.sharedFlatCache.sourceIndices = msg.SourceIndices
 	m.sharedFlatCache.entries = msg.Entries
 	if msg.SelectionFound {
 		m.Cursor = msg.SelectedIndex
@@ -981,6 +1025,13 @@ func applyDirectoryLoadResult(entries []Entry, path string, children []Entry, lo
 func (m *Model) ensureCursorVisible() {
 	m.clampCursor()
 	m.ensureCursorVisibleForLength(len(m.flatEntries()))
+}
+
+func (m *Model) cachedProjectionLength() int {
+	if m.sharedFlatCache != nil && m.sharedFlatCache.entries != nil {
+		return len(m.sharedFlatCache.entries)
+	}
+	return len(m.cachedFlat)
 }
 
 func (m *Model) ensureCursorVisibleForLength(entryCount int) {
@@ -1151,9 +1202,10 @@ func (m *Model) startProjection(selected string, rebuildSource bool) tea.Cmd {
 			}
 		}
 		projection := projectionSource
+		var sourceIndices []int
 		var err error
 		if filter != "" {
-			projection, err = filterFlatEntriesContext(ctx, projectionSource, filter)
+			projection, sourceIndices, err = filterFlatEntriesWithSourceIndicesContext(ctx, projectionSource, filter)
 		}
 		selectedIndex, selectionFound := projectionIndexContext(ctx, projection, selected)
 		if err == nil {
@@ -1162,7 +1214,7 @@ func (m *Model) startProjection(selected string, rebuildSource bool) tea.Cmd {
 		return FilterReadyMsg{
 			Generation: generation, EntriesGeneration: entriesGeneration,
 			ShowHidden: showHidden, ShowGitIgnored: showGitIgnored, Filter: filter,
-			Source: projectionSource, Entries: projection,
+			Source: projectionSource, SourceIndices: sourceIndices, Entries: projection,
 			SelectedIndex: selectedIndex, SelectionFound: selectionFound, Err: err,
 		}
 	}
@@ -1192,6 +1244,11 @@ func (m *Model) cancelFilter() {
 }
 
 func filterFlatEntriesContext(ctx context.Context, source []Entry, query string) ([]Entry, error) {
+	entries, _, err := filterFlatEntriesWithSourceIndicesContext(ctx, source, query)
+	return entries, err
+}
+
+func filterFlatEntriesWithSourceIndicesContext(ctx context.Context, source []Entry, query string) ([]Entry, []int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1201,7 +1258,7 @@ func filterFlatEntriesContext(ctx context.Context, source []Entry, query string)
 	for i, entry := range source {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		for len(ancestors) > 0 && source[ancestors[len(ancestors)-1]].Depth >= entry.Depth {
@@ -1218,20 +1275,22 @@ func filterFlatEntriesContext(ctx context.Context, source []Entry, query string)
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entries := make([]Entry, 0, len(source))
+	sourceIndices := make([]int, 0, min(len(source), 1_024))
 	for i, entry := range source {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if keep[i] {
 			entries = append(entries, entry)
+			sourceIndices = append(sourceIndices, i)
 		}
 	}
-	return entries, nil
+	return entries, sourceIndices, nil
 }
 
 func visibleEntries(entries []Entry, showHidden, showGitIgnored bool, query string) []Entry {
@@ -1273,6 +1332,7 @@ func (m *Model) invalidateFlatCache() {
 	if m.sharedFlatCache != nil {
 		m.sharedFlatCache.entries = nil
 		m.sharedFlatCache.source = nil
+		m.sharedFlatCache.sourceIndices = nil
 	}
 }
 

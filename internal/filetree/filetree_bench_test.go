@@ -247,6 +247,33 @@ func BenchmarkFileTreeApplyInteractiveProjection100000(b *testing.B) {
 	}
 }
 
+func BenchmarkFileTreeClearPreparedFilter100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	model.StartFilter()
+	pending, cmd := model.Update(tea.KeyPressMsg{Text: "file_a"})
+	ready, ok := cmd().(FilterReadyMsg)
+	if !ok {
+		b.Fatal("filter projection returned an unexpected message")
+	}
+	model, _ = pending.Update(ready)
+	filtered := model.sharedFlatCache.entries
+	sourceIndices := model.sharedFlatCache.sourceIndices
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		model.filter = "file_a"
+		model.filterActive = true
+		model.cachedFlat = filtered
+		model.sharedFlatCache.entries = filtered
+		model.sharedFlatCache.sourceIndices = sourceIndices
+		model.ClearFilter()
+		benchmarkTreeSnapshot = model
+	}
+	if benchmarkTreeSnapshot.Filter() != "" || benchmarkTreeSnapshot.FilterActive() {
+		b.Fatal("clear benchmark did not clear the prepared filter")
+	}
+}
+
 func deepCloneEntriesForBenchmark(entries []Entry) []Entry {
 	cloned := make([]Entry, len(entries))
 	for i, entry := range entries {

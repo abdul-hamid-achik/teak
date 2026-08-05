@@ -1596,14 +1596,7 @@ func (m Model) handleTreeLoaded(msg treeLoadedMsg) (tea.Model, tea.Cmd) {
 	filter := m.tree.Filter()
 	filterActive := m.tree.FilterActive()
 	m.tree = msg.Tree
-	m.tree.SetShowHidden(showHidden)
-	m.tree.SetShowGitIgnored(showGitIgnored)
-	m.tree.SetFilter(filter)
-	if filterActive {
-		// SetFilter intentionally does not own input; restore the prompt state
-		// separately when a full tree snapshot replaces the live model.
-		m.tree.StartFilter()
-	}
+	projectionCmd := m.tree.RestoreView(showHidden, showGitIgnored, filter, filterActive)
 	m.tree.SetDiagnostics(m.treeDiagnostics)
 	gitStatusMap := make(map[string]string)
 	for _, entry := range m.gitPanel.Entries {
@@ -1615,7 +1608,7 @@ func (m Model) handleTreeLoaded(msg treeLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.tree.SetGitStatus(gitStatusMap)
 	m.relayout()
-	return m, nil
+	return m, projectionCmd
 }
 
 func (m Model) handleTreeRefreshDebounce(msg treeRefreshDebounceMsg) (tea.Model, tea.Cmd) {

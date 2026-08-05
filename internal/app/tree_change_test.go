@@ -26,8 +26,8 @@ func applyGitRefresh(t *testing.T, model Model, msg git.RefreshMsg) Model {
 
 func loadInitialTreeForTest(t *testing.T, model *Model) {
 	t.Helper()
-	updated, _ := model.Update(treeLoadedMsg{Tree: filetree.New(model.rootDir, model.theme)})
-	*model = updated.(Model)
+	updated, cmd := model.Update(treeLoadedMsg{Tree: filetree.New(model.rootDir, model.theme)})
+	*model = runWorkspaceEditCommands(t, updated.(Model), cmd)
 }
 
 func TestNewModelDefersInitialTreeRead(t *testing.T) {
@@ -48,6 +48,40 @@ func TestNewModelDefersInitialTreeRead(t *testing.T) {
 	loadInitialTreeForTest(t, &model)
 	if len(model.tree.Entries) != 1 {
 		t.Fatalf("async tree result entries = %v, want one file", model.tree.Entries)
+	}
+}
+
+func TestTreeLoadPreparesVisibleProjectionAsynchronously(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+	model.tree.SetShowHidden(false)
+	model.tree.SetFilter("main")
+
+	loaded := filetree.NewEmpty(root, model.theme)
+	loaded.Entries = []filetree.Entry{
+		{Name: ".main.secret", Path: filepath.Join(root, ".main.secret")},
+		{Name: "main.go", Path: filepath.Join(root, "main.go")},
+		{Name: "notes.txt", Path: filepath.Join(root, "notes.txt")},
+	}
+	updatedAny, cmd := model.Update(treeLoadedMsg{Tree: loaded, Generation: model.treeRefreshGeneration})
+	updated := updatedAny.(Model)
+	if cmd == nil || !updated.tree.FilterPending() {
+		t.Fatal("tree load did not schedule its visible projection")
+	}
+	if entry := updated.tree.EntryAtY(0); entry != nil {
+		t.Fatalf("pending tree load exposed stale entry %#v", entry)
+	}
+
+	updated = runWorkspaceEditCommands(t, updated, cmd)
+	entry := updated.tree.EntryAtY(0)
+	if entry == nil || entry.Name != "main.go" {
+		t.Fatalf("prepared loaded entry = %#v, want main.go", entry)
 	}
 }
 

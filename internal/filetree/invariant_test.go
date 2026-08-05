@@ -60,6 +60,8 @@ func TestInteractiveProjectionDispatchAndApplyDoNotTraverseTree(t *testing.T) {
 		t.Fatalf("parse filetree.go: %v", err)
 	}
 	targets := map[string]bool{
+		"ClearFilter":               false,
+		"StartFilter":               false,
 		"ToggleShowHiddenAsync":     false,
 		"ToggleShowGitIgnoredAsync": false,
 		"handleDirExpanded":         false,
@@ -72,10 +74,12 @@ func TestInteractiveProjectionDispatchAndApplyDoNotTraverseTree(t *testing.T) {
 		"flatEntries":                             true,
 		"flattenEntries":                          true,
 		"flattenVisibleEntriesContext":            true,
+		"ensureCursorVisible":                     true,
 		"invalidateFlatCache":                     true,
 		"invalidateProjectionPreservingSelection": true,
 		"restoreSelection":                        true,
 		"selectedPath":                            true,
+		"SetFilter":                               true,
 		"visibleEntries":                          true,
 	}
 	for _, declaration := range file.Decls {

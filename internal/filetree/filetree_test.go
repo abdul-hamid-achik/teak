@@ -375,6 +375,44 @@ func TestTreeFilterPreservesSelectionWhenResultArrives(t *testing.T) {
 	}
 }
 
+func TestClearFilterUsesPreparedSourceAndPreservesSelection(t *testing.T) {
+	model := asyncFilterFixture(t)
+	updated, cmd := model.Update(tea.KeyPressMsg{Text: "main"})
+	updated, _ = updated.Update(cmd())
+	updated.Cursor = 1 // main.go in the filtered src/main.go projection
+
+	updated.ClearFilter()
+	if updated.FilterPending() || updated.FilterActive() || updated.Filter() != "" {
+		t.Fatal("cleared filter retained active or pending filter state")
+	}
+	if got := updated.selectedPath(); got != "/workspace/src/main.go" {
+		t.Fatalf("selected path after clearing = %q, want main.go", got)
+	}
+	if got := len(updated.flatEntries()); got != 4 {
+		t.Fatalf("unfiltered projection rows = %d, want 4", got)
+	}
+}
+
+func TestClearPendingFilterRestoresPreparedSource(t *testing.T) {
+	model := asyncFilterFixture(t)
+	model.Cursor = 2 // readme.txt in the unfiltered projection
+	updated, cmd := model.Update(tea.KeyPressMsg{Text: "main"})
+	if cmd == nil || !updated.FilterPending() {
+		t.Fatal("setup did not start an asynchronous filter")
+	}
+
+	updated.ClearFilter()
+	if updated.FilterPending() {
+		t.Fatal("clearing a pending filter did not cancel it")
+	}
+	if got := updated.selectedPath(); got != "/workspace/src/readme.txt" {
+		t.Fatalf("selected path after cancelling = %q, want readme.txt", got)
+	}
+	if got := len(updated.flatEntries()); got != 4 {
+		t.Fatalf("restored projection rows = %d, want 4", got)
+	}
+}
+
 func flatEntryNames(entries []Entry) []string {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

@@ -4,6 +4,20 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.17] - 2026-08-05
+
+### Constant-Time File-Tree Filter Reset
+
+- Clearing or blurring the project-tree filter now swaps back to its prepared
+  unfiltered source and restores the selected row through compact positional
+  indexes, without filtering or scanning the tree in `Update()`.
+- Initial tree results restore hidden/ignored preferences and active filter
+  state through a background projection command instead of three synchronous
+  cache invalidation and rebuild passes.
+- Opening the filter prompt uses only cached projection length. On an Apple
+  M5, clearing a prepared 100,000-entry filter takes about 37 ns with zero
+  allocations; its background filter command takes about 1.35 ms and 8.9 MiB.
+
 ## [0.10.16] - 2026-08-05
 
 ### Responsive File-Tree Interaction

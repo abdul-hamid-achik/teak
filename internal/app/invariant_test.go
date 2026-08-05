@@ -145,3 +145,35 @@ func TestPathReconciliationDoesNotMaterializeBuffers(t *testing.T) {
 		}
 	}
 }
+
+func TestTreeLoadHandlerDoesNotBuildProjection(t *testing.T) {
+	targetFound := false
+	banned := map[string]bool{
+		"SetFilter":         true,
+		"SetShowGitIgnored": true,
+		"SetShowHidden":     true,
+	}
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "handleTreeLoaded" {
+				continue
+			}
+			targetFound = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if ok && banned[selector.Sel.Name] {
+					t.Errorf("%s: handleTreeLoaded must install state and dispatch one prepared projection", fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	})
+	if !targetFound {
+		t.Fatal("tree-load projection invariant did not find handleTreeLoaded")
+	}
+}
