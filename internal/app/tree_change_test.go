@@ -12,6 +12,17 @@ import (
 	"teak/internal/git"
 )
 
+func applyGitRefresh(t *testing.T, model Model, msg git.RefreshMsg) Model {
+	t.Helper()
+	updatedModel, cmd := model.Update(msg)
+	updated := updatedModel.(Model)
+	for cmd != nil {
+		updatedModel, cmd = updated.Update(cmd())
+		updated = updatedModel.(Model)
+	}
+	return updated
+}
+
 func loadInitialTreeForTest(t *testing.T, model *Model) {
 	t.Helper()
 	updated, _ := model.Update(treeLoadedMsg{Tree: filetree.New(model.rootDir, model.theme)})
@@ -301,13 +312,12 @@ func TestGitSidebarMouseClickCollapsesDirectoryOnce(t *testing.T) {
 	model.height = 40
 	model.relayout()
 
-	updatedModel, _ := model.Update(git.RefreshMsg{
+	updated := applyGitRefresh(t, model, git.RefreshMsg{
 		Branch: "main",
 		Entries: []git.StatusEntry{
 			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
 		},
 	})
-	updated := updatedModel.(Model)
 
 	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 2})
 	updatedModel, cmd := updated.Update(click)
@@ -359,13 +369,12 @@ func TestGitSidebarMouseClickFocusesCommitBody(t *testing.T) {
 	model.height = 40
 	model.relayout()
 
-	updatedModel, _ := model.Update(git.RefreshMsg{
+	updated := applyGitRefresh(t, model, git.RefreshMsg{
 		Branch: "main",
 		Entries: []git.StatusEntry{
 			{Path: "a.go", IndexStatus: 'M', WorkStatus: ' '},
 		},
 	})
-	updated := updatedModel.(Model)
 
 	bodyY := -1
 	for y := 0; y < updated.height; y++ {
@@ -417,27 +426,25 @@ func TestGitRefreshMsgPreservesCollapsedDirectoryAfterInteraction(t *testing.T) 
 	model.height = 40
 	model.relayout()
 
-	updatedModel, _ := model.Update(git.RefreshMsg{
+	updated := applyGitRefresh(t, model, git.RefreshMsg{
 		Branch: "main",
 		Entries: []git.StatusEntry{
 			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
 			{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
 		},
 	})
-	updated := updatedModel.(Model)
 
 	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 2})
-	updatedModel, _ = updated.Update(click)
+	updatedModel, _ := updated.Update(click)
 	updated = updatedModel.(Model)
 
-	updatedModel, _ = updated.Update(git.RefreshMsg{
+	updated = applyGitRefresh(t, updated, git.RefreshMsg{
 		Branch: "main",
 		Entries: []git.StatusEntry{
 			{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
 			{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
 		},
 	})
-	updated = updatedModel.(Model)
 
 	node, staged := updated.gitPanel.NodeAtY(1)
 	if node == nil {

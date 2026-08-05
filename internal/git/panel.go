@@ -68,6 +68,23 @@ type panelLayout struct {
 // buildTree creates a tree structure from a flat list of status entries.
 func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 	root := &GitTreeNode{IsDir: true, Expanded: true}
+	directories := map[*GitTreeNode]map[string]*GitTreeNode{
+		root: make(map[string]*GitTreeNode),
+	}
+	findOrCreateDir := func(parent *GitTreeNode, name, path string, depth int, entry *StatusEntry) *GitTreeNode {
+		children := directories[parent]
+		if node := children[name]; node != nil {
+			return node
+		}
+		node := &GitTreeNode{
+			Name: name, Path: path, IsDir: true, Depth: depth,
+			Expanded: true, Entry: entry, Staged: staged,
+		}
+		parent.Children = append(parent.Children, node)
+		children[name] = node
+		directories[node] = make(map[string]*GitTreeNode)
+		return node
+	}
 
 	for i := range entries {
 		e := &entries[i]
@@ -81,32 +98,9 @@ func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 		if e.IsDir {
 			parts := strings.Split(path, "/")
 			node := root
-			for i, part := range parts {
-				dirPath := strings.Join(parts[:i+1], "/")
-				found := false
-				for _, c := range node.Children {
-					if c.IsDir && c.Name == part {
-						node = c
-						found = true
-						break
-					}
-				}
-				if !found {
-					dir := &GitTreeNode{
-						Name:     part,
-						Path:     dirPath,
-						IsDir:    true,
-						Depth:    node.Depth + 1,
-						Expanded: true,
-						Entry:    e,
-						Staged:   staged,
-					}
-					if node == root {
-						dir.Depth = 0
-					}
-					node.Children = append(node.Children, dir)
-					node = dir
-				}
+			for partIndex, part := range parts {
+				depth := partIndex
+				node = findOrCreateDir(node, part, strings.Join(parts[:partIndex+1], "/"), depth, e)
 			}
 			continue
 		}
@@ -125,27 +119,7 @@ func buildTree(entries []StatusEntry, staged bool) []*GitTreeNode {
 					Staged: staged,
 				})
 			} else {
-				// Find or create directory
-				found := false
-				for _, c := range node.Children {
-					if c.IsDir && c.Name == part {
-						node = c
-						found = true
-						break
-					}
-				}
-				if !found {
-					dirPath := strings.Join(parts[:j+1], "/")
-					dir := &GitTreeNode{
-						Name:     part,
-						Path:     dirPath,
-						IsDir:    true,
-						Depth:    j,
-						Expanded: true,
-					}
-					node.Children = append(node.Children, dir)
-					node = dir
-				}
+				node = findOrCreateDir(node, part, strings.Join(parts[:j+1], "/"), j, nil)
 			}
 		}
 	}
@@ -256,6 +230,10 @@ type Model struct {
 	// Double-click detection for file nodes
 	lastClickTime  time.Time
 	lastClickIndex int
+
+	refreshRequestGeneration uint64
+	sectionGeneration        uint64
+	expansion                *expansionState
 }
 
 // New creates a new git panel model.
@@ -278,6 +256,7 @@ func New(rootDir string, theme ui.Theme) Model {
 		commitTitle: ti,
 		commitBody:  ta,
 		spinner:     sp,
+		expansion:   newExpansionState(),
 	}
 	m.rebuildTreeRowCache()
 	return m
@@ -422,36 +401,18 @@ func buildTreeRowCache(stagedTree, unstagedTree []*GitTreeNode, stagedCollapsed,
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case RefreshMsg:
-		if msg.Err == nil {
-			m.Branch = msg.Branch
-			m.Entries = msg.Entries
-			m.deriveGroups()
-
-			// If the active section is now empty, move focus to the other section.
-			// This handles the case where unstaging the last staged file leaves the
-			// cursor stranded in an empty Staged section (and vice versa for staging).
-			flat := m.activeFlatTree()
-			if len(flat) == 0 {
-				switch m.activeSection {
-				case SectionStaged:
-					if len(m.Unstaged) > 0 {
-						m.activeSection = SectionUnstaged
-						m.Cursor = 0
-					}
-				case SectionUnstaged:
-					if len(m.Staged) > 0 {
-						m.activeSection = SectionStaged
-						m.Cursor = 0
-					}
-				}
-				flat = m.activeFlatTree()
-			}
-			if m.Cursor >= len(flat) {
-				m.Cursor = max(0, len(flat)-1)
-			}
-			m.ensureCursorVisible()
+		if msg.Err != nil {
+			return m, nil
 		}
-		return m, nil
+		if m.expansion == nil {
+			m.expansion = newExpansionState()
+		}
+		m.refreshRequestGeneration++
+		return m, prepareRefreshCmd(msg, m.refreshRequestGeneration, m.expansion, m.stagedCollapsed, m.unstagedCollapsed, m.sectionGeneration)
+
+	case PreparedRefreshMsg:
+		_, cmd := m.ApplyPreparedRefresh(msg)
+		return m, cmd
 
 	case spinner.TickMsg:
 		if m.spinning {
@@ -513,6 +474,57 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// ApplyPreparedRefresh installs a background projection in constant time. A
+// directory toggle that raced preparation causes the same immutable entries to
+// be projected again with the newer expansion snapshot.
+func (m *Model) ApplyPreparedRefresh(msg PreparedRefreshMsg) (bool, tea.Cmd) {
+	if msg.projection == nil || msg.RequestGeneration != m.refreshRequestGeneration {
+		return false, nil
+	}
+	if m.expansion == nil {
+		m.expansion = newExpansionState()
+	}
+	if msg.ExpansionGeneration != m.expansion.currentGeneration() {
+		retry := RefreshMsg{Branch: msg.Branch, Entries: msg.projection.entries, Generation: msg.Generation}
+		return false, prepareRefreshCmd(retry, msg.RequestGeneration, m.expansion, m.stagedCollapsed, m.unstagedCollapsed, m.sectionGeneration)
+	}
+	if msg.SectionGeneration != m.sectionGeneration {
+		retry := RefreshMsg{Branch: msg.Branch, Entries: msg.projection.entries, Generation: msg.Generation}
+		return false, prepareRefreshCmd(retry, msg.RequestGeneration, m.expansion, m.stagedCollapsed, m.unstagedCollapsed, m.sectionGeneration)
+	}
+
+	projection := msg.projection
+	m.Branch = msg.Branch
+	m.Entries = projection.entries
+	m.Staged = projection.staged
+	m.Unstaged = projection.unstaged
+	m.stagedTree = projection.stagedTree
+	m.unstagedTree = projection.unstagedTree
+	m.treeRowCache = projection.rowCache
+
+	flat := m.activeFlatTree()
+	if len(flat) == 0 {
+		switch m.activeSection {
+		case SectionStaged:
+			if len(m.Unstaged) > 0 {
+				m.activeSection = SectionUnstaged
+				m.Cursor = 0
+			}
+		case SectionUnstaged:
+			if len(m.Staged) > 0 {
+				m.activeSection = SectionStaged
+				m.Cursor = 0
+			}
+		}
+		flat = m.activeFlatTree()
+	}
+	if m.Cursor >= len(flat) {
+		m.Cursor = max(0, len(flat)-1)
+	}
+	m.ensureCursorVisible()
+	return true, nil
+}
+
 func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	// Zone-based clicks (buttons, stage-all, unstage-all) are handled by app.go
 	// which has access to the original absolute-coordinate message.
@@ -521,11 +533,13 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	switch hit.kind {
 	case treeRowStagedHeader:
 		m.stagedCollapsed = !m.stagedCollapsed
+		m.sectionGeneration++
 		m.rebuildTreeRowCache()
 		m.ensureCursorVisible()
 		return m, nil
 	case treeRowUnstagedHeader:
 		m.unstagedCollapsed = !m.unstagedCollapsed
+		m.sectionGeneration++
 		m.rebuildTreeRowCache()
 		m.ensureCursorVisible()
 		return m, nil
@@ -538,6 +552,7 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 		}
 		if hit.node.IsDir {
 			hit.node.Expanded = !hit.node.Expanded
+			m.recordDirectoryExpansion(hit.section, hit.node)
 			m.rebuildTreeRowCache()
 			m.ensureCursorVisible()
 			return m, nil
@@ -650,6 +665,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			node := flat[m.Cursor]
 			if node.IsDir {
 				node.Expanded = !node.Expanded
+				m.recordDirectoryExpansion(m.activeSection, node)
 				m.rebuildTreeRowCache()
 				m.ensureCursorVisible()
 				return m, nil
@@ -714,6 +730,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, m.FocusTitle()
 	}
 	return m, nil
+}
+
+func (m *Model) recordDirectoryExpansion(section GitSection, node *GitTreeNode) {
+	if node == nil || !node.IsDir {
+		return
+	}
+	if m.expansion == nil {
+		m.expansion = newExpansionState()
+	}
+	m.expansion.record(section, node.Path, node.Expanded)
 }
 
 // bodyViewHeight returns the visible height for the textarea component.

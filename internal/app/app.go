@@ -1252,6 +1252,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case git.RefreshMsg:
 		return m.handleGitRefresh(msg)
 
+	case git.PreparedRefreshMsg:
+		return m.handlePreparedGitRefresh(msg)
+
 	case git.OpenDiffMsg:
 		return m.openDiff(msg.Path, msg.Status)
 
@@ -2289,27 +2292,24 @@ func (m Model) handleGitRefresh(msg git.RefreshMsg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Git error: %v", msg.Err)
 		return m, cmd
 	}
-	// Also update the status bar branch display
+	return m, cmd
+}
+
+func (m Model) handlePreparedGitRefresh(msg git.PreparedRefreshMsg) (tea.Model, tea.Cmd) {
+	if msg.Generation != 0 && msg.Generation != m.gitRefreshGeneration {
+		return m, nil
+	}
+	applied, cmd := m.gitPanel.ApplyPreparedRefresh(msg)
+	if !applied {
+		return m, cmd
+	}
 	if msg.Branch != "" {
 		m.gitBranch = msg.Branch
 	}
-	// Update file tree git status indicators
-	if msg.Err == nil {
-		// Mark as git repo if we got entries (even if empty)
-		if !m.gitPanel.IsGitRepo() {
-			m.gitPanel.SetIsGitRepo(true)
-		}
-		gitStatusMap := make(map[string]string)
-		for _, e := range msg.Entries {
-			// Use the most visible status (unstaged > staged)
-			if e.IsUnstagedChange() {
-				gitStatusMap[e.Path] = e.DisplayStatus(false)
-			} else if e.IsStagedChange() {
-				gitStatusMap[e.Path] = e.DisplayStatus(true)
-			}
-		}
-		m.tree.SetGitStatus(gitStatusMap)
+	if !m.gitPanel.IsGitRepo() {
+		m.gitPanel.SetIsGitRepo(true)
 	}
+	m.tree.SetGitStatus(msg.GitStatus)
 	return m, cmd
 }
 

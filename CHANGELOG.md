@@ -4,6 +4,20 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.12] - 2026-08-05
+
+### Responsive Git Status Refresh
+
+- Git status entries are now grouped, indexed, projected into sidebar trees,
+  flattened into hit-test rows, and converted into file-tree decorations in a
+  background command instead of Bubble Tea's `Update()` loop.
+- Refresh and expansion generations discard obsolete projections and retry a
+  projection when a directory or section was toggled while it was being built,
+  preserving the latest interaction without racing mutable tree nodes.
+- Git tree construction now indexes child directories per parent instead of
+  repeatedly scanning siblings, removing quadratic behavior for repositories
+  with many changed paths in the same directory.
+
 ## [0.10.11] - 2026-08-05
 
 ### Path Reconciliation Performance

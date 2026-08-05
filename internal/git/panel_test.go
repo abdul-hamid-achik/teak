@@ -34,6 +34,16 @@ func testModel(entries []StatusEntry) Model {
 	return m
 }
 
+func applyRefresh(t *testing.T, m Model, msg RefreshMsg) Model {
+	t.Helper()
+	updated, cmd := m.Update(msg)
+	for cmd != nil {
+		prepared := cmd()
+		updated, cmd = updated.Update(prepared)
+	}
+	return updated
+}
+
 // ── TestBuildTree ────────────────────────────────────────────────────────
 
 func TestBuildTree(t *testing.T) {
@@ -811,7 +821,7 @@ func TestRefreshMsgUnstageFlow(t *testing.T) {
 				{Path: "app.go", IndexStatus: ' ', WorkStatus: 'M'},
 			},
 		}
-		m, _ = m.Update(refreshMsg)
+		m = applyRefresh(t, m, refreshMsg)
 
 		// After unstage, file should be in Unstaged only
 		if len(m.Staged) != 0 {
@@ -856,7 +866,7 @@ func TestRefreshMsgUnstageFlow(t *testing.T) {
 				{Path: "b.go", IndexStatus: ' ', WorkStatus: 'M'},
 			},
 		}
-		m, _ = m.Update(refreshMsg)
+		m = applyRefresh(t, m, refreshMsg)
 
 		if len(m.Staged) != 1 {
 			t.Errorf("Staged = %d, want 1", len(m.Staged))
@@ -891,7 +901,7 @@ func TestRefreshMsgUnstageFlow(t *testing.T) {
 				{Path: "c.go", IndexStatus: 'M', WorkStatus: ' '},
 			},
 		}
-		m, _ = m.Update(refreshMsg)
+		m = applyRefresh(t, m, refreshMsg)
 
 		if len(m.Staged) != 1 {
 			t.Errorf("Staged = %d, want 1", len(m.Staged))
@@ -916,7 +926,7 @@ func TestRefreshMsgUnstageFlow(t *testing.T) {
 		refreshMsg := RefreshMsg{
 			Err: fmt.Errorf("git reset failed"),
 		}
-		m, _ = m.Update(refreshMsg)
+		m = applyRefresh(t, m, refreshMsg)
 
 		// State should be unchanged
 		if len(m.Staged) != 1 {
@@ -926,6 +936,89 @@ func TestRefreshMsgUnstageFlow(t *testing.T) {
 			t.Errorf("Branch = %q, want main (preserved)", m.Branch)
 		}
 	})
+}
+
+func TestRefreshMsgDefersProjectionWork(t *testing.T) {
+	m := testModel([]StatusEntry{{
+		Path: "old.go", IndexStatus: 'M', WorkStatus: ' ',
+	}})
+	m.Branch = "old"
+
+	updated, cmd := m.Update(RefreshMsg{
+		Branch: "next",
+		Entries: []StatusEntry{{
+			Path: "new.go", IndexStatus: ' ', WorkStatus: 'M',
+		}},
+	})
+
+	if cmd == nil {
+		t.Fatal("refresh projected status entries inside Update instead of scheduling preparation")
+	}
+	if updated.Branch != "old" || len(updated.Entries) != 1 || updated.Entries[0].Path != "old.go" {
+		t.Fatalf("refresh mutated panel before preparation: branch=%q entries=%+v", updated.Branch, updated.Entries)
+	}
+}
+
+func TestPreparedRefreshLatestRequestWins(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "old.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.Branch = "old"
+
+	afterFirst, firstCmd := m.Update(RefreshMsg{
+		Branch:  "first",
+		Entries: []StatusEntry{{Path: "first.go", IndexStatus: 'M', WorkStatus: ' '}},
+	})
+	afterSecond, secondCmd := afterFirst.Update(RefreshMsg{
+		Branch:  "second",
+		Entries: []StatusEntry{{Path: "second.go", IndexStatus: ' ', WorkStatus: 'M'}},
+	})
+	if firstCmd == nil || secondCmd == nil {
+		t.Fatal("refresh requests did not schedule projection commands")
+	}
+
+	afterStale, staleCmd := afterSecond.Update(firstCmd())
+	if staleCmd != nil {
+		t.Fatal("stale projection unexpectedly scheduled more work")
+	}
+	if afterStale.Branch != "old" || afterStale.Entries[0].Path != "old.go" {
+		t.Fatalf("stale projection applied: branch=%q entries=%+v", afterStale.Branch, afterStale.Entries)
+	}
+
+	afterCurrent, retry := afterStale.Update(secondCmd())
+	if retry != nil {
+		t.Fatal("current projection unexpectedly required a retry")
+	}
+	if afterCurrent.Branch != "second" || len(afterCurrent.Entries) != 1 || afterCurrent.Entries[0].Path != "second.go" {
+		t.Fatalf("current projection not applied: branch=%q entries=%+v", afterCurrent.Branch, afterCurrent.Entries)
+	}
+}
+
+func TestPreparedRefreshRetriesAfterDirectoryToggle(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/old.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.Branch = "old"
+
+	pending, cmd := m.Update(RefreshMsg{
+		Branch:  "next",
+		Entries: []StatusEntry{{Path: "src/new.go", IndexStatus: 'M', WorkStatus: ' '}},
+	})
+	prepared := cmd()
+	pending.stagedTree[0].Expanded = false
+	pending.recordDirectoryExpansion(SectionStaged, pending.stagedTree[0])
+
+	unchanged, retry := pending.Update(prepared)
+	if retry == nil {
+		t.Fatal("projection prepared before the directory toggle was not retried")
+	}
+	if unchanged.Branch != "old" {
+		t.Fatalf("stale expansion projection changed branch to %q", unchanged.Branch)
+	}
+
+	applied, next := unchanged.Update(retry())
+	if next != nil {
+		t.Fatal("retried projection scheduled unexpected additional work")
+	}
+	if applied.Branch != "next" || len(applied.stagedTree) != 1 || applied.stagedTree[0].Expanded {
+		t.Fatalf("retried projection lost collapsed state: branch=%q tree=%+v", applied.Branch, applied.stagedTree)
+	}
 }
 
 // ── TestMMStatusBothSections ────────────────────────────────────────────
@@ -1067,7 +1160,7 @@ func TestRefreshMsgCursorClamp(t *testing.T) {
 			{Path: "c.go", IndexStatus: ' ', WorkStatus: 'M'},
 		},
 	}
-	m, _ = m.Update(refreshMsg)
+	m = applyRefresh(t, m, refreshMsg)
 
 	// Cursor should be clamped to valid index within staged tree
 	flat := m.activeFlatTree()
@@ -1087,8 +1180,9 @@ func TestRefreshMsgPreservesCollapsedDirectoryState(t *testing.T) {
 			t.Fatalf("expected staged tree to contain one directory node, got %#v", m.stagedTree)
 		}
 		m.stagedTree[0].Expanded = false
+		m.recordDirectoryExpansion(SectionStaged, m.stagedTree[0])
 
-		m, _ = m.Update(RefreshMsg{
+		m = applyRefresh(t, m, RefreshMsg{
 			Branch: "main",
 			Entries: []StatusEntry{
 				{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
@@ -1119,8 +1213,9 @@ func TestRefreshMsgPreservesCollapsedDirectoryState(t *testing.T) {
 			t.Fatalf("expected first child to be a directory, got %#v", pkg)
 		}
 		pkg.Expanded = false
+		m.recordDirectoryExpansion(SectionStaged, pkg)
 
-		m, _ = m.Update(RefreshMsg{
+		m = applyRefresh(t, m, RefreshMsg{
 			Branch: "main",
 			Entries: []StatusEntry{
 				{Path: "src/pkg/a.go", IndexStatus: 'M', WorkStatus: ' '},
@@ -1148,8 +1243,10 @@ func TestRefreshMsgPreservesCollapsedDirectoryState(t *testing.T) {
 		}
 		m.stagedTree[0].Expanded = false
 		m.unstagedTree[0].Expanded = true
+		m.recordDirectoryExpansion(SectionStaged, m.stagedTree[0])
+		m.recordDirectoryExpansion(SectionUnstaged, m.unstagedTree[0])
 
-		m, _ = m.Update(RefreshMsg{
+		m = applyRefresh(t, m, RefreshMsg{
 			Branch: "main",
 			Entries: []StatusEntry{
 				{Path: "src/both.go", IndexStatus: 'M', WorkStatus: 'M'},
@@ -1771,7 +1868,7 @@ func TestTreeRowCacheMatchesFlattenedTreeAndInvalidatesOnVisibilityChanges(t *te
 
 	// Refresh swaps both trees; a new cache must expose the refreshed nodes to
 	// rendering and hit-testing without retaining old pointers.
-	m, _ = m.Update(RefreshMsg{Entries: []StatusEntry{{
+	m = applyRefresh(t, m, RefreshMsg{Entries: []StatusEntry{{
 		Path: "fresh.go", IndexStatus: ' ', WorkStatus: 'M',
 	}}})
 	assertRows(t, m.treeRows())
@@ -1810,6 +1907,26 @@ func BenchmarkPanelTreeRowsCachedThousands(b *testing.B) {
 	for b.Loop() {
 		if got := len(m.treeRows()); got != 10_203 {
 			b.Fatalf("row count = %d, want 10203", got)
+		}
+	}
+}
+
+func BenchmarkBuildRefreshProjectionThousands(b *testing.B) {
+	entries := make([]StatusEntry, 10_000)
+	for i := range entries {
+		entries[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: ' ',
+			WorkStatus:  'M',
+		}
+	}
+	expansion := expansionSnapshot{staged: map[string]bool{}, unstaged: map[string]bool{}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		projection := buildRefreshProjection(entries, expansion, false, false)
+		if len(projection.rowCache.rows) != 10_203 {
+			b.Fatalf("row count = %d, want 10203", len(projection.rowCache.rows))
 		}
 	}
 }
