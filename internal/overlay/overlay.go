@@ -27,6 +27,16 @@ type Stack struct {
 	layers []Overlay
 }
 
+type cancellableOverlay interface {
+	Cancel()
+}
+
+func cancelOverlay(o Overlay) {
+	if cancellable, ok := o.(cancellableOverlay); ok {
+		cancellable.Cancel()
+	}
+}
+
 // Push adds an overlay to the top of the stack.
 func (s *Stack) Push(o Overlay) {
 	s.layers = append(s.layers, o)
@@ -40,6 +50,7 @@ func (s *Stack) Pop() Overlay {
 	}
 	top := s.layers[n-1]
 	s.layers = s.layers[:n-1]
+	cancelOverlay(top)
 	return top
 }
 
@@ -70,6 +81,7 @@ func (s *Stack) Update(msg tea.Msg) tea.Cmd {
 	n := len(s.layers)
 	updated, cmd := s.layers[n-1].Update(msg)
 	if updated.IsDismissed() {
+		cancelOverlay(updated)
 		s.layers = s.layers[:n-1]
 	} else {
 		s.layers[n-1] = updated
@@ -100,6 +112,9 @@ func (s *Stack) CapturesInput() bool {
 func (s *Stack) Clear() []Overlay {
 	removed := s.layers
 	s.layers = nil
+	for _, layer := range removed {
+		cancelOverlay(layer)
+	}
 	return removed
 }
 
@@ -109,6 +124,7 @@ func (s *Stack) Remove(target Overlay) bool {
 		if layer != target {
 			continue
 		}
+		cancelOverlay(layer)
 		copy(s.layers[i:], s.layers[i+1:])
 		s.layers[len(s.layers)-1] = nil
 		s.layers = s.layers[:len(s.layers)-1]

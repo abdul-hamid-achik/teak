@@ -48,6 +48,7 @@ type PickerFilterReadyMsg struct {
 type PickerItemsReadyMsg struct {
 	InstanceID uint64
 	ZoneID     string
+	Generation uint64
 	Items      []PickerItem
 	Err        error
 }
@@ -76,6 +77,9 @@ type Picker struct {
 	filterGeneration uint64
 	filterCancel     context.CancelFunc
 	instanceID       uint64
+	itemsPending     bool
+	itemsGeneration  uint64
+	itemsCancel      context.CancelFunc
 	pendingSelect    bool
 	dismissAction    tea.Msg
 }
@@ -105,6 +109,15 @@ func NewPicker(title string, items []PickerItem, theme ui.Theme, zoneID string) 
 	return p
 }
 
+// NewPendingPicker creates a picker whose items will be prepared by a command.
+// Until the matching PickerItemsReadyMsg arrives, selection and rendering use
+// an explicit loading state instead of briefly claiming there are no matches.
+func NewPendingPicker(title string, theme ui.Theme, zoneID string) *Picker {
+	p := NewPicker(title, nil, theme, zoneID)
+	p.itemsPending = true
+	return p
+}
+
 // Focus gives keyboard focus to the text input.
 func (p *Picker) Focus() tea.Cmd {
 	return p.input.Focus()
@@ -119,6 +132,7 @@ func (p *Picker) SetSize(w, h int) {
 
 // SetItems replaces the item list and refilters.
 func (p *Picker) SetItems(items []PickerItem) {
+	p.cancelItemsPreparation()
 	p.cancelFilter()
 	p.pendingSelect = false
 	p.items = items
@@ -129,9 +143,47 @@ func (p *Picker) SetItems(items []PickerItem) {
 // projection in a cancellable command. It is intended for large result sets
 // arriving from filesystem scans or other background operations.
 func (p *Picker) SetItemsAsync(items []PickerItem) tea.Cmd {
+	p.cancelItemsPreparation()
+	return p.installItemsAsync(items)
+}
+
+func (p *Picker) installItemsAsync(items []PickerItem) tea.Cmd {
 	p.cancelFilter()
+	p.itemsPending = false
 	p.items = items
 	return p.scheduleFilter()
+}
+
+// PrepareItemsCmd runs an item projection outside Bubble Tea's Update loop.
+// A newer preparation or picker cancellation invalidates and cancels the old
+// one; instance, zone, and generation keep late results harmless.
+func (p *Picker) PrepareItemsCmd(prepare func(context.Context) ([]PickerItem, error)) tea.Cmd {
+	if prepare == nil {
+		return nil
+	}
+	p.cancelItemsPreparation()
+	p.cancelFilter()
+	p.itemsPending = true
+	p.pendingSelect = false
+	p.items = nil
+	p.filtered = nil
+	p.cursor = 0
+	p.scrollY = 0
+	generation := p.itemsGeneration
+	instanceID := p.instanceID
+	zoneID := p.zoneID
+	ctx, cancel := context.WithCancel(context.Background())
+	p.itemsCancel = cancel
+	return func() tea.Msg {
+		items, err := prepare(ctx)
+		return PickerItemsReadyMsg{
+			InstanceID: instanceID,
+			ZoneID:     zoneID,
+			Generation: generation,
+			Items:      items,
+			Err:        err,
+		}
+	}
 }
 
 // ZoneID identifies the picker instance for callers that need to route an
@@ -158,7 +210,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
-			p.cancelFilter()
+			p.Cancel()
 			p.pendingSelect = false
 			p.dismissed = true
 			if p.dismissAction != nil {
@@ -167,7 +219,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 			}
 			return p, func() tea.Msg { return PickerCloseMsg{} }
 		case "enter":
-			if p.filterPending {
+			if p.pending() {
 				p.pendingSelect = true
 				return p, nil
 			}
@@ -209,7 +261,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
-		if p.filterPending {
+		if p.pending() {
 			return p, nil
 		}
 		mouse := msg.Mouse()
@@ -226,7 +278,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		return p, nil
 
 	case tea.MouseWheelMsg:
-		if p.filterPending {
+		if p.pending() {
 			return p, nil
 		}
 		mouse := msg.Mouse()
@@ -250,13 +302,22 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	case PickerFilterReadyMsg:
 		return p, p.handleFilterReady(msg)
 	case PickerItemsReadyMsg:
-		if msg.InstanceID != p.instanceID || msg.ZoneID != p.zoneID {
+		if msg.InstanceID != p.instanceID || msg.ZoneID != p.zoneID ||
+			(msg.Generation != 0 && msg.Generation != p.itemsGeneration) {
 			return p, nil
 		}
+		if p.itemsCancel != nil {
+			p.itemsCancel()
+			p.itemsCancel = nil
+		}
+		p.itemsPending = false
+		p.itemsGeneration++
 		if msg.Err != nil {
+			p.filtered = nil
+			p.pendingSelect = false
 			return p, nil
 		}
-		return p, p.SetItemsAsync(msg.Items)
+		return p, p.installItemsAsync(msg.Items)
 	}
 
 	// Forward to text input
@@ -265,6 +326,9 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	p.input, cmd = p.input.Update(msg)
 	if p.input.Value() != prevVal {
 		p.pendingSelect = false
+		if p.itemsPending {
+			return p, cmd
+		}
 		return p, tea.Batch(cmd, p.scheduleFilter())
 	}
 	return p, cmd
@@ -326,7 +390,11 @@ func (p *Picker) View() string {
 		sb.WriteString(rendered)
 	}
 
-	if p.filterPending {
+	if p.itemsPending {
+		sb.WriteByte('\n')
+		status := lipgloss.NewStyle().Foreground(ui.Nord3)
+		sb.WriteString(status.Render("  Loading..."))
+	} else if p.filterPending {
 		sb.WriteByte('\n')
 		status := lipgloss.NewStyle().Foreground(ui.Nord3)
 		sb.WriteString(status.Render("  Filtering..."))
@@ -366,15 +434,15 @@ func (p *Picker) CapturesInput() bool {
 
 // FilteredCount returns the number of items after filtering.
 func (p *Picker) FilteredCount() int {
-	if p.filterPending {
+	if p.pending() {
 		return 0
 	}
 	return len(p.filtered)
 }
 
-// FilterPending reports whether the current query is waiting for an
+// FilterPending reports whether items or the current query are waiting for an
 // asynchronous projection.
-func (p *Picker) FilterPending() bool { return p.filterPending }
+func (p *Picker) FilterPending() bool { return p.pending() }
 
 // Cursor returns the current cursor position.
 func (p *Picker) Cursor() int {
@@ -477,6 +545,25 @@ func (p *Picker) cancelFilter() {
 	p.filterGeneration++
 }
 
+func (p *Picker) cancelItemsPreparation() {
+	if p.itemsCancel != nil {
+		p.itemsCancel()
+		p.itemsCancel = nil
+	}
+	p.itemsPending = false
+	p.itemsGeneration++
+}
+
+// Cancel releases all cancellable picker work. Owners that clear an overlay
+// stack programmatically should call it before dropping the picker.
+func (p *Picker) Cancel() {
+	p.cancelItemsPreparation()
+	p.cancelFilter()
+	p.pendingSelect = false
+}
+
+func (p *Picker) pending() bool { return p.itemsPending || p.filterPending }
+
 func filterItemsContext(ctx context.Context, items []PickerItem, query string) ([]PickerMatch, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -526,7 +613,7 @@ func (p *Picker) visibleCount() int {
 }
 
 func (p *Picker) visibleRange() (start, end int) {
-	if p.filterPending {
+	if p.pending() {
 		return 0, 0
 	}
 	start = max(0, min(p.scrollY, len(p.filtered)))

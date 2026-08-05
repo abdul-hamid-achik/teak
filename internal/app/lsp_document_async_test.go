@@ -342,7 +342,13 @@ func TestCodeActionResultShowsPickerWithoutApplyingFirstAction(t *testing.T) {
 	if updated.overlayStack.Len() != 1 {
 		t.Fatalf("overlay stack length = %d, want 1", updated.overlayStack.Len())
 	}
-	if picker, ok := updated.overlayStack.Top().(*overlay.Picker); !ok || picker.FilteredCount() != 2 {
+	picker, ok := updated.overlayStack.Top().(*overlay.Picker)
+	if !ok || !picker.FilterPending() || picker.FilteredCount() != 0 {
+		t.Fatalf("top overlay = %T with unexpected pending item state", updated.overlayStack.Top())
+	}
+	ready := executePickerItemsPreparation(t, cmd)
+	updated = installPreparedPickerItems(t, updated, ready)
+	if picker, ok := updated.overlayStack.Top().(*overlay.Picker); !ok || picker.FilterPending() || picker.FilteredCount() != 2 {
 		t.Fatalf("top overlay = %T with unexpected item count", updated.overlayStack.Top())
 	}
 }

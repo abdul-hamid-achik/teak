@@ -657,6 +657,7 @@ func cleanupModelState(m *modelState) {
 	if m == nil {
 		return
 	}
+	m.overlayStack.Clear()
 	m.overlayRequests.cancelAll()
 	m.documentRequests.cancelAll()
 	if m.sessionRestoreCancel != nil {
@@ -2622,10 +2623,13 @@ func (m Model) handleCodeActionResult(msg lsp.CodeActionResultMsg) (tea.Model, t
 		m.status = "No code actions available"
 		return m, nil
 	}
-	items := lspCodeActionsToPickerItems(msg.Actions, msg.DocumentRequestMetadata)
-	picker := overlay.NewPicker(fmt.Sprintf("Code Actions (%d)", len(items)), items, m.theme, "lsp-code-actions")
-	m.overlayStack.Push(picker)
-	return m, picker.Focus()
+	return m.showPreparedLSPPicker(
+		fmt.Sprintf("Code Actions (%d)", len(msg.Actions)),
+		"lsp-code-actions",
+		func(ctx context.Context) ([]overlay.PickerItem, error) {
+			return lspCodeActionsToPickerItemsContext(ctx, msg.Actions, msg.DocumentRequestMetadata)
+		},
+	)
 }
 
 func (m Model) handleCodeActionCommandResult(msg lspCodeActionCommandResultMsg) (tea.Model, tea.Cmd) {
@@ -2647,10 +2651,13 @@ func (m Model) handleDocumentSymbolResult(msg lsp.DocumentSymbolResultMsg) (tea.
 		return m, nil
 	}
 	if len(msg.Symbols) > 0 {
-		items := lspSymbolsToPickerItems(msg.Symbols)
-		picker := overlay.NewPicker(fmt.Sprintf("Document Symbols (%d)", len(msg.Symbols)), items, m.theme, "lsp-sym")
-		m.overlayStack.Push(picker)
-		return m, picker.Focus()
+		return m.showPreparedLSPPicker(
+			fmt.Sprintf("Document Symbols (%d)", len(msg.Symbols)),
+			"lsp-sym",
+			func(ctx context.Context) ([]overlay.PickerItem, error) {
+				return lspSymbolsToPickerItemsContext(ctx, msg.Symbols)
+			},
+		)
 	}
 	m.status = "No symbols found"
 	return m, nil
@@ -2667,10 +2674,13 @@ func (m Model) handleDefinitionResult(msg lsp.DefinitionResultMsg) (tea.Model, t
 		m.setPendingLSPCursor(path, pos, loc.ProtocolEncoding)
 		return m.openFilePinned(path)
 	} else if len(msg.Locations) > 1 {
-		items := lspLocationsToPickerItems(msg.Locations, m.rootDir)
-		picker := overlay.NewPicker("Go to Definition", items, m.theme, "lsp-def")
-		m.overlayStack.Push(picker)
-		return m, picker.Focus()
+		return m.showPreparedLSPPicker(
+			"Go to Definition",
+			"lsp-def",
+			func(ctx context.Context) ([]overlay.PickerItem, error) {
+				return lspLocationsToPickerItemsContext(ctx, msg.Locations, m.rootDir)
+			},
+		)
 	}
 	m.status = "No definition found"
 	return m, nil
@@ -2690,13 +2700,26 @@ func (m Model) handleReferencesResult(msg lsp.ReferencesResultMsg) (tea.Model, t
 		m2.status = "Found 1 reference"
 		return m2, cmd
 	} else if len(msg.Locations) > 1 {
-		items := lspLocationsToPickerItems(msg.Locations, m.rootDir)
-		picker := overlay.NewPicker(fmt.Sprintf("References (%d)", len(msg.Locations)), items, m.theme, "lsp-refs")
-		m.overlayStack.Push(picker)
-		return m, picker.Focus()
+		return m.showPreparedLSPPicker(
+			fmt.Sprintf("References (%d)", len(msg.Locations)),
+			"lsp-refs",
+			func(ctx context.Context) ([]overlay.PickerItem, error) {
+				return lspLocationsToPickerItemsContext(ctx, msg.Locations, m.rootDir)
+			},
+		)
 	}
 	m.status = "No references found"
 	return m, nil
+}
+
+// showPreparedLSPPicker installs only a constant-size loading shell in Update.
+// Server-sized conversion and the picker's initial query projection run in
+// cancellable commands owned by the concrete picker instance.
+func (m Model) showPreparedLSPPicker(title, zoneID string, prepare func(context.Context) ([]overlay.PickerItem, error)) (tea.Model, tea.Cmd) {
+	picker := overlay.NewPendingPicker(title, m.theme, zoneID)
+	prepareCmd := picker.PrepareItemsCmd(prepare)
+	m.overlayStack.Push(picker)
+	return m, tea.Batch(picker.Focus(), prepareCmd)
 }
 
 func (m Model) handleRenameResult(msg lsp.RenameResultMsg) (tea.Model, tea.Cmd) {
@@ -4994,8 +5017,21 @@ func (m Model) requestReferences() (Model, tea.Cmd) {
 
 // lspLocationsToPickerItems converts LSP locations to picker items.
 func lspLocationsToPickerItems(locs []lsp.Location, rootDir string) []overlay.PickerItem {
+	items, _ := lspLocationsToPickerItemsContext(context.Background(), locs, rootDir)
+	return items
+}
+
+func lspLocationsToPickerItemsContext(ctx context.Context, locs []lsp.Location, rootDir string) ([]overlay.PickerItem, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	items := make([]overlay.PickerItem, len(locs))
 	for i, loc := range locs {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		path := lsp.URIToPath(loc.URI)
 		rel := path
 		if rootDir != "" {
@@ -5014,35 +5050,59 @@ func lspLocationsToPickerItems(locs []lsp.Location, rootDir string) []overlay.Pi
 			Value:       lspLocationPickerMsg{Location: loc},
 		}
 	}
-	return items
+	return items, ctx.Err()
 }
 
 // lspSymbolsToPickerItems flattens document symbols into picker items.
 func lspSymbolsToPickerItems(symbols []lsp.DocumentSymbol) []overlay.PickerItem {
+	items, _ := lspSymbolsToPickerItemsContext(context.Background(), symbols)
+	return items
+}
+
+func lspSymbolsToPickerItemsContext(ctx context.Context, symbols []lsp.DocumentSymbol) ([]overlay.PickerItem, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var items []overlay.PickerItem
-	var flatten func(syms []lsp.DocumentSymbol, prefix string)
-	flatten = func(syms []lsp.DocumentSymbol, prefix string) {
-		for _, s := range syms {
-			label := s.Name
-			if prefix != "" {
-				label = prefix + "." + s.Name
-			}
-			desc := s.Detail
-			if desc == "" {
-				desc = symbolKindName(s.Kind)
-			}
-			items = append(items, overlay.PickerItem{
-				Label:       label,
-				Description: desc,
-				Value:       lspSymbolPickerMsg{Symbol: s},
-			})
-			if len(s.Children) > 0 {
-				flatten(s.Children, label)
+	type frame struct {
+		symbols []lsp.DocumentSymbol
+		index   int
+		prefix  string
+	}
+	stack := []frame{{symbols: symbols}}
+	for processed := 0; len(stack) > 0; processed++ {
+		if processed%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
+		top := &stack[len(stack)-1]
+		if top.index >= len(top.symbols) {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		symbol := top.symbols[top.index]
+		top.index++
+		label := symbol.Name
+		if top.prefix != "" {
+			label = top.prefix + "." + symbol.Name
+		}
+		description := symbol.Detail
+		if description == "" {
+			description = symbolKindName(symbol.Kind)
+		}
+		children := symbol.Children
+		symbol.Children = nil
+		items = append(items, overlay.PickerItem{
+			Label:       label,
+			Description: description,
+			Value:       lspSymbolPickerMsg{Symbol: symbol},
+		})
+		if len(children) > 0 {
+			stack = append(stack, frame{symbols: children, prefix: label})
+		}
 	}
-	flatten(symbols, "")
-	return items
+	return items, ctx.Err()
 }
 
 // symbolKindName returns a human-readable name for an LSP SymbolKind value.

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 
 	"teak/internal/lsp"
@@ -8,8 +9,21 @@ import (
 )
 
 func lspCodeActionsToPickerItems(actions []lsp.CodeAction, metadata lsp.DocumentRequestMetadata) []overlay.PickerItem {
+	items, _ := lspCodeActionsToPickerItemsContext(context.Background(), actions, metadata)
+	return items
+}
+
+func lspCodeActionsToPickerItemsContext(ctx context.Context, actions []lsp.CodeAction, metadata lsp.DocumentRequestMetadata) ([]overlay.PickerItem, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	items := make([]overlay.PickerItem, 0, len(actions))
-	for _, action := range actions {
+	for i, action := range actions {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		description := action.Kind
 		switch {
 		case action.Edit != nil && action.Command != nil:
@@ -30,7 +44,7 @@ func lspCodeActionsToPickerItems(actions []lsp.CodeAction, metadata lsp.Document
 			},
 		})
 	}
-	return items
+	return items, ctx.Err()
 }
 
 func joinCodeActionDescription(kind, behavior string) string {

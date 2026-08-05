@@ -12,6 +12,7 @@ type mockOverlay struct {
 	dismissed bool
 	captures  bool
 	viewText  string
+	canceled  bool
 }
 
 func (m *mockOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
@@ -23,6 +24,7 @@ func (m *mockOverlay) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 func (m *mockOverlay) View() string        { return m.viewText }
 func (m *mockOverlay) IsDismissed() bool   { return m.dismissed }
 func (m *mockOverlay) CapturesInput() bool { return m.captures }
+func (m *mockOverlay) Cancel()             { m.canceled = true }
 
 func TestStackEmpty(t *testing.T) {
 	var s Stack
@@ -91,9 +93,12 @@ func TestStackPushPopLen(t *testing.T) {
 
 func TestStackClear(t *testing.T) {
 	var s Stack
-	s.Push(&mockOverlay{id: "a"})
-	s.Push(&mockOverlay{id: "b"})
-	s.Push(&mockOverlay{id: "c"})
+	a := &mockOverlay{id: "a"}
+	b := &mockOverlay{id: "b"}
+	c := &mockOverlay{id: "c"}
+	s.Push(a)
+	s.Push(b)
+	s.Push(c)
 	if s.Len() != 3 {
 		t.Fatalf("Len() = %d, want 3", s.Len())
 	}
@@ -104,6 +109,9 @@ func TestStackClear(t *testing.T) {
 	}
 	if s.Len() != 0 {
 		t.Errorf("Len() = %d, want 0", s.Len())
+	}
+	if !a.canceled || !b.canceled || !c.canceled {
+		t.Fatal("Clear did not cancel every removed overlay")
 	}
 }
 

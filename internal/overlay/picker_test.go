@@ -1,6 +1,9 @@
 package overlay
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -241,6 +244,61 @@ func TestPickerSetItemsAsyncDoesNotRefilterInUpdate(t *testing.T) {
 	p = o.(*Picker)
 	if got := p.FilteredCount(); got != 2 {
 		t.Fatalf("async item projection count = %d, want 2", got)
+	}
+}
+
+func TestPendingPickerPreparationIsCancelableAndRejectsStaleGeneration(t *testing.T) {
+	p := NewPendingPicker("Async", ui.DefaultTheme(), "async-picker")
+	firstCmd := p.PrepareItemsCmd(func(ctx context.Context) ([]PickerItem, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	secondCmd := p.PrepareItemsCmd(func(context.Context) ([]PickerItem, error) {
+		return []PickerItem{{Label: "current"}}, nil
+	})
+
+	stale, ok := firstCmd().(PickerItemsReadyMsg)
+	if !ok || !errors.Is(stale.Err, context.Canceled) {
+		t.Fatalf("stale preparation = %#v, want cancellation", stale)
+	}
+	updated, followup := p.Update(stale)
+	p = updated.(*Picker)
+	if followup != nil || !p.FilterPending() {
+		t.Fatal("stale item preparation replaced the current pending generation")
+	}
+
+	current := secondCmd().(PickerItemsReadyMsg)
+	updated, followup = p.Update(current)
+	p = updated.(*Picker)
+	if followup == nil || !p.FilterPending() {
+		t.Fatal("current item preparation did not schedule its filter")
+	}
+	ready := pickerFilterMessage(t, followup)
+	updated, _ = p.Update(ready)
+	p = updated.(*Picker)
+	if p.FilterPending() || p.FilteredCount() != 1 {
+		t.Fatalf("installed current preparation pending/count = %t/%d", p.FilterPending(), p.FilteredCount())
+	}
+}
+
+func TestPendingPickerShowsLoadingAndEscapeCancelsPreparation(t *testing.T) {
+	p := NewPendingPicker("Async", ui.DefaultTheme(), "async-picker")
+	prepareCmd := p.PrepareItemsCmd(func(ctx context.Context) ([]PickerItem, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if view := p.View(); !strings.Contains(view, "Loading...") {
+		t.Fatalf("pending picker view = %q, want loading status", view)
+	}
+
+	updated, _ := p.Update(keyEsc())
+	p = updated.(*Picker)
+	if !p.IsDismissed() || p.FilterPending() {
+		t.Fatal("escape did not dismiss and cancel the pending picker")
+	}
+	ready := prepareCmd().(PickerItemsReadyMsg)
+	if !errors.Is(ready.Err, context.Canceled) {
+		t.Fatalf("preparation error = %v, want context cancellation", ready.Err)
 	}
 }
 

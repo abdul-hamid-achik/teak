@@ -4,6 +4,23 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.24] - 2026-08-05
+
+### Responsive LSP Result Pickers
+
+- Definitions, references, document symbols, and code actions now prepare and
+  initially filter their picker items in cancellable background commands
+  instead of doing server-sized work in Bubble Tea's `Update()` loop.
+- Pending pickers show an explicit loading state and reject stale results by
+  instance, zone, and generation. Closing an overlay or shutting down the
+  model cancels its outstanding preparation and filtering work.
+- Document symbols are flattened iteratively so deeply nested server output
+  cannot exhaust the call stack, and unused child payloads are not retained by
+  picker selections.
+- Dispatching a 20,000-reference result now takes about 3.3 microseconds on an
+  Apple M5, down from 6.4-7.3 ms; the roughly 3.0 ms conversion runs outside
+  the event loop.
+
 ## [0.10.23] - 2026-08-05
 
 ### Bounded ACP Stream Ingestion

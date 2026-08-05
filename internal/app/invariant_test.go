@@ -208,3 +208,61 @@ func TestDiffLoadedHandlerDoesNotTokenizeInUpdate(t *testing.T) {
 		t.Fatal("diff-load invariant did not find handleDiffLoaded")
 	}
 }
+
+func TestLSPPickerHandlersOnlyDispatchPreparedItems(t *testing.T) {
+	targets := map[string]bool{
+		"handleCodeActionResult":     false,
+		"handleDocumentSymbolResult": false,
+		"handleDefinitionResult":     false,
+		"handleReferencesResult":     false,
+	}
+	banned := map[string]bool{
+		"lspCodeActionsToPickerItems": true,
+		"lspSymbolsToPickerItems":     true,
+		"lspLocationsToPickerItems":   true,
+	}
+	prepared := make(map[string]bool, len(targets))
+
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if _, tracked := targets[fn.Name.Name]; !tracked {
+				continue
+			}
+			targets[fn.Name.Name] = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch called := call.Fun.(type) {
+				case *ast.Ident:
+					if banned[called.Name] {
+						t.Errorf("%s: %s converts server-sized picker items in Update", fset.Position(call.Pos()), fn.Name.Name)
+					}
+				case *ast.SelectorExpr:
+					if called.Sel.Name == "showPreparedLSPPicker" {
+						prepared[fn.Name.Name] = true
+					}
+					if called.Sel.Name == "NewPicker" {
+						if pkg, ok := called.X.(*ast.Ident); ok && pkg.Name == "overlay" {
+							t.Errorf("%s: %s constructs a populated picker in Update", fset.Position(call.Pos()), fn.Name.Name)
+						}
+					}
+				}
+				return true
+			})
+		}
+	})
+
+	for name, seen := range targets {
+		if !seen {
+			t.Errorf("LSP picker invariant did not find %s", name)
+		} else if !prepared[name] {
+			t.Errorf("%s does not dispatch through showPreparedLSPPicker", name)
+		}
+	}
+}
