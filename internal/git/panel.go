@@ -46,10 +46,14 @@ type treeRowHit struct {
 // Model uses value semantics in Update, so invalidation always replaces this
 // pointer instead of mutating the cache shared by an older model value.
 type treeRowCache struct {
-	stagedFlat   []*GitTreeNode
-	unstagedFlat []*GitTreeNode
-	rows         []treeRowHit
+	stagedFlat    []*GitTreeNode
+	unstagedFlat  []*GitTreeNode
+	rows          []treeRowHit
+	stagedStart   int
+	unstagedStart int
 }
+
+var emptyTreeRowCache = treeRowCache{stagedStart: -1, unstagedStart: -1}
 
 type panelFooterMode int
 
@@ -232,6 +236,7 @@ type Model struct {
 	lastClickIndex int
 
 	refreshRequestGeneration uint64
+	statusGeneration         uint64
 	sectionGeneration        uint64
 	expansion                *expansionState
 }
@@ -361,14 +366,14 @@ func (m Model) activeFlatTree() []*GitTreeNode {
 	}
 }
 
-// treeRowsSnapshot returns the current cached tree representation. A
-// zero-value Model has no cache yet, so it gets a short-lived snapshot for
-// compatibility; normal models eagerly rebuild on every visibility change.
+// treeRowsSnapshot returns only prepared tree data. Constructors and
+// projection commands populate the cache; input handling must never flatten a
+// repository-sized tree as a fallback inside Update.
 func (m Model) treeRowsSnapshot() *treeRowCache {
 	if m.treeRowCache != nil {
 		return m.treeRowCache
 	}
-	return buildTreeRowCache(m.stagedTree, m.unstagedTree, m.stagedCollapsed, m.unstagedCollapsed)
+	return &emptyTreeRowCache
 }
 
 func (m *Model) rebuildTreeRowCache() {
@@ -377,18 +382,22 @@ func (m *Model) rebuildTreeRowCache() {
 
 func buildTreeRowCache(stagedTree, unstagedTree []*GitTreeNode, stagedCollapsed, unstagedCollapsed bool) *treeRowCache {
 	cache := &treeRowCache{
-		stagedFlat:   flattenTree(stagedTree),
-		unstagedFlat: flattenTree(unstagedTree),
+		stagedFlat:    flattenTree(stagedTree),
+		unstagedFlat:  flattenTree(unstagedTree),
+		stagedStart:   -1,
+		unstagedStart: -1,
 	}
 	rows := make([]treeRowHit, 0, 2+len(cache.stagedFlat)+len(cache.unstagedFlat))
 	rows = append(rows, treeRowHit{kind: treeRowStagedHeader})
 	if !stagedCollapsed {
+		cache.stagedStart = len(rows)
 		for i, node := range cache.stagedFlat {
 			rows = append(rows, treeRowHit{kind: treeRowNode, section: SectionStaged, index: i, node: node})
 		}
 	}
 	rows = append(rows, treeRowHit{kind: treeRowUnstagedHeader})
 	if !unstagedCollapsed {
+		cache.unstagedStart = len(rows)
 		for i, node := range cache.unstagedFlat {
 			rows = append(rows, treeRowHit{kind: treeRowNode, section: SectionUnstaged, index: i, node: node})
 		}
@@ -412,6 +421,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case PreparedRefreshMsg:
 		_, cmd := m.ApplyPreparedRefresh(msg)
+		return m, cmd
+
+	case PreparedTreeProjectionMsg:
+		_, cmd := m.ApplyPreparedTreeProjection(msg)
 		return m, cmd
 
 	case spinner.TickMsg:
@@ -501,6 +514,7 @@ func (m *Model) ApplyPreparedRefresh(msg PreparedRefreshMsg) (bool, tea.Cmd) {
 	m.stagedTree = projection.stagedTree
 	m.unstagedTree = projection.unstagedTree
 	m.treeRowCache = projection.rowCache
+	m.statusGeneration++
 
 	flat := m.activeFlatTree()
 	if len(flat) == 0 {
@@ -525,6 +539,43 @@ func (m *Model) ApplyPreparedRefresh(msg PreparedRefreshMsg) (bool, tea.Cmd) {
 	return true, nil
 }
 
+// ApplyPreparedTreeProjection installs visibility changes in constant time.
+// A status refresh supersedes projections based on its predecessor; expansion
+// or section changes that raced preparation are projected again from the
+// current immutable trees.
+func (m *Model) ApplyPreparedTreeProjection(msg PreparedTreeProjectionMsg) (bool, tea.Cmd) {
+	if msg.projection == nil || msg.StatusGeneration != m.statusGeneration {
+		return false, nil
+	}
+	if m.expansion == nil {
+		m.expansion = newExpansionState()
+	}
+	if msg.ExpansionGeneration != m.expansion.currentGeneration() || msg.SectionGeneration != m.sectionGeneration {
+		return false, m.prepareTreeProjection()
+	}
+	m.stagedTree = msg.projection.stagedTree
+	m.unstagedTree = msg.projection.unstagedTree
+	m.treeRowCache = msg.projection.rowCache
+	flat := m.activeFlatTree()
+	if m.Cursor >= len(flat) {
+		m.Cursor = max(0, len(flat)-1)
+	}
+	m.ensureCursorVisible()
+	return true, nil
+}
+
+func (m Model) prepareTreeProjection() tea.Cmd {
+	return prepareTreeProjectionCmd(
+		m.stagedTree,
+		m.unstagedTree,
+		m.expansion,
+		m.stagedCollapsed,
+		m.unstagedCollapsed,
+		m.statusGeneration,
+		m.sectionGeneration,
+	)
+}
+
 func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	// Zone-based clicks (buttons, stage-all, unstage-all) are handled by app.go
 	// which has access to the original absolute-coordinate message.
@@ -534,15 +585,11 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 	case treeRowStagedHeader:
 		m.stagedCollapsed = !m.stagedCollapsed
 		m.sectionGeneration++
-		m.rebuildTreeRowCache()
-		m.ensureCursorVisible()
-		return m, nil
+		return m, m.prepareTreeProjection()
 	case treeRowUnstagedHeader:
 		m.unstagedCollapsed = !m.unstagedCollapsed
 		m.sectionGeneration++
-		m.rebuildTreeRowCache()
-		m.ensureCursorVisible()
-		return m, nil
+		return m, m.prepareTreeProjection()
 	case treeRowNode:
 		m.activeSection = hit.section
 		m.Cursor = hit.index
@@ -551,11 +598,8 @@ func (m Model) handleClick(y int) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if hit.node.IsDir {
-			hit.node.Expanded = !hit.node.Expanded
-			m.recordDirectoryExpansion(hit.section, hit.node)
-			m.rebuildTreeRowCache()
-			m.ensureCursorVisible()
-			return m, nil
+			m.toggleDirectoryExpansion(hit.section, hit.node)
+			return m, m.prepareTreeProjection()
 		}
 		if hit.node.Entry == nil {
 			return m, nil
@@ -638,7 +682,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "up":
-		flat := m.activeFlatTree()
 		if m.Cursor > 0 {
 			m.Cursor--
 		} else if m.activeSection == SectionUnstaged && len(m.stagedTree) > 0 {
@@ -646,7 +689,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			stagedFlat := m.treeRowsSnapshot().stagedFlat
 			m.Cursor = len(stagedFlat) - 1
 		}
-		_ = flat
 		m.ensureCursorVisible()
 		return m, nil
 	case "down":
@@ -664,11 +706,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if len(flat) > 0 && m.Cursor < len(flat) {
 			node := flat[m.Cursor]
 			if node.IsDir {
-				node.Expanded = !node.Expanded
-				m.recordDirectoryExpansion(m.activeSection, node)
-				m.rebuildTreeRowCache()
-				m.ensureCursorVisible()
-				return m, nil
+				m.toggleDirectoryExpansion(m.activeSection, node)
+				return m, m.prepareTreeProjection()
 			}
 			if node.Entry != nil {
 				e := node.Entry
@@ -740,6 +779,16 @@ func (m *Model) recordDirectoryExpansion(section GitSection, node *GitTreeNode) 
 		m.expansion = newExpansionState()
 	}
 	m.expansion.record(section, node.Path, node.Expanded)
+}
+
+func (m *Model) toggleDirectoryExpansion(section GitSection, node *GitTreeNode) {
+	if node == nil || !node.IsDir {
+		return
+	}
+	if m.expansion == nil {
+		m.expansion = newExpansionState()
+	}
+	m.expansion.toggle(section, node.Path, node.Expanded)
 }
 
 // bodyViewHeight returns the visible height for the textarea component.
@@ -1208,10 +1257,19 @@ func (m *Model) scrollTree(delta int) {
 }
 
 func (m Model) activeTreeRowIndex() (int, bool) {
-	for i, row := range m.treeRows() {
-		if row.kind == treeRowNode && row.section == m.activeSection && row.index == m.Cursor {
-			return i, true
-		}
+	cache := m.treeRowsSnapshot()
+	start := -1
+	length := 0
+	switch m.activeSection {
+	case SectionStaged:
+		start = cache.stagedStart
+		length = len(cache.stagedFlat)
+	case SectionUnstaged:
+		start = cache.unstagedStart
+		length = len(cache.unstagedFlat)
+	}
+	if start >= 0 && m.Cursor >= 0 && m.Cursor < length {
+		return start + m.Cursor, true
 	}
 	return 0, false
 }

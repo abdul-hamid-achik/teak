@@ -24,6 +24,37 @@ func applyGitRefresh(t *testing.T, model Model, msg git.RefreshMsg) Model {
 	return updated
 }
 
+func TestPreparedGitTreeProjectionRoutesThroughRootModel(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+	model.gitPanel.SetSize(40, 20)
+	model = applyGitRefresh(t, model, git.RefreshMsg{Entries: []git.StatusEntry{
+		{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+	}})
+
+	panel, cmd := model.gitPanel.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 1}))
+	if cmd == nil {
+		t.Fatal("directory click did not schedule a tree projection")
+	}
+	model.gitPanel = panel
+	updatedAny, next := model.Update(cmd())
+	if next != nil {
+		t.Fatal("prepared tree projection unexpectedly scheduled more work")
+	}
+	updated := updatedAny.(Model)
+	node, staged := updated.gitPanel.NodeAtY(1)
+	if node == nil || !staged || node.Path != "src" || node.Expanded {
+		t.Fatalf("routed projection node = (%+v, staged=%v), want collapsed staged src", node, staged)
+	}
+}
+
 func loadInitialTreeForTest(t *testing.T, model *Model) {
 	t.Helper()
 	updated, cmd := model.Update(treeLoadedMsg{Tree: filetree.New(model.rootDir, model.theme)})
@@ -404,10 +435,14 @@ func TestGitSidebarMouseClickCollapsesDirectoryOnce(t *testing.T) {
 
 	click := tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 2})
 	updatedModel, cmd := updated.Update(click)
-	if cmd != nil {
-		t.Fatal("expected directory click to be handled without a follow-up command")
+	if cmd == nil {
+		t.Fatal("expected directory click to schedule a prepared tree projection")
 	}
 	updated = updatedModel.(Model)
+	for cmd != nil {
+		updatedModel, cmd = updated.Update(cmd())
+		updated = updatedModel.(Model)
+	}
 
 	if updated.focus != FocusGitPanel {
 		t.Fatalf("focus = %v, want %v", updated.focus, FocusGitPanel)

@@ -959,6 +959,179 @@ func TestRefreshMsgDefersProjectionWork(t *testing.T) {
 	}
 }
 
+func TestDirectoryToggleDefersTreeProjectionWork(t *testing.T) {
+	m := testModel([]StatusEntry{
+		{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "src/b.go", IndexStatus: 'M', WorkStatus: ' '},
+	})
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+	cache := m.treeRowCache
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("directory toggle rebuilt the tree inside Update instead of scheduling preparation")
+	}
+	if !updated.stagedTree[0].Expanded {
+		t.Fatal("directory toggle mutated the shared prepared tree before projection completed")
+	}
+	if updated.treeRowCache != cache {
+		t.Fatal("directory toggle replaced the prepared row cache inside Update")
+	}
+
+	applied, next := updated.Update(cmd())
+	if next != nil {
+		t.Fatal("prepared directory toggle unexpectedly scheduled more work")
+	}
+	if applied.stagedTree[0].Expanded {
+		t.Fatal("prepared directory toggle did not collapse the directory")
+	}
+	if applied.treeRowCache == cache {
+		t.Fatal("prepared directory toggle did not install a new row cache")
+	}
+}
+
+func TestSectionCollapseDefersTreeProjectionWork(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '}})
+	cache := m.treeRowCache
+
+	updated, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 0}))
+	if cmd == nil {
+		t.Fatal("section collapse rebuilt rows inside Update instead of scheduling preparation")
+	}
+	if !updated.stagedCollapsed {
+		t.Fatal("section collapsed state was not recorded immediately")
+	}
+	if updated.treeRowCache != cache {
+		t.Fatal("section collapse replaced the prepared row cache inside Update")
+	}
+
+	applied, next := updated.Update(cmd())
+	if next != nil {
+		t.Fatal("prepared section collapse unexpectedly scheduled more work")
+	}
+	if applied.treeRowCache == cache {
+		t.Fatal("prepared section collapse did not install a new row cache")
+	}
+	if got := len(applied.treeRowCache.rows); got != 2 {
+		t.Fatalf("collapsed row count = %d, want 2 headers", got)
+	}
+}
+
+func TestPendingDirectoryTogglesUseLatestDesiredState(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+
+	afterFirst, firstCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if firstCmd == nil {
+		t.Fatal("first directory toggle did not schedule preparation")
+	}
+	afterSecond, secondCmd := afterFirst.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if secondCmd == nil {
+		t.Fatal("second directory toggle did not schedule preparation")
+	}
+
+	// The first command snapshots shared expansion state when it executes. It
+	// must therefore install the latest (expanded) state, not the obsolete
+	// first click's collapsed state.
+	applied, retry := afterSecond.Update(firstCmd())
+	if retry != nil {
+		t.Fatal("latest-state projection unexpectedly required a retry")
+	}
+	if !applied.stagedTree[0].Expanded {
+		t.Fatal("two pending toggles left the directory collapsed")
+	}
+
+	applied, retry = applied.Update(secondCmd())
+	if retry != nil || !applied.stagedTree[0].Expanded {
+		t.Fatal("second equivalent projection changed the latest desired state")
+	}
+}
+
+func TestPreparedTreeProjectionCannotReplaceNewerStatus(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/old.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+
+	pending, toggleCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if toggleCmd == nil {
+		t.Fatal("directory toggle did not schedule preparation")
+	}
+	refreshed := applyRefresh(t, pending, RefreshMsg{Entries: []StatusEntry{{
+		Path: "lib/new.go", IndexStatus: 'M', WorkStatus: ' ',
+	}}})
+
+	afterStale, retry := refreshed.Update(toggleCmd())
+	if retry != nil {
+		t.Fatal("status-stale tree projection unexpectedly retried")
+	}
+	if len(afterStale.stagedTree) != 1 || afterStale.stagedTree[0].Path != "lib" {
+		t.Fatalf("stale tree projection replaced refreshed status: %+v", afterStale.stagedTree)
+	}
+}
+
+func TestPreparedTreeProjectionRetriesAfterLaterToggle(t *testing.T) {
+	m := testModel([]StatusEntry{{Path: "src/a.go", IndexStatus: 'M', WorkStatus: ' '}})
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+
+	afterFirst, firstCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if firstCmd == nil {
+		t.Fatal("first toggle did not schedule preparation")
+	}
+	prepared := firstCmd()
+	afterSecond, secondCmd := afterFirst.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if secondCmd == nil {
+		t.Fatal("later toggle did not schedule preparation")
+	}
+
+	unchanged, retry := afterSecond.Update(prepared)
+	if retry == nil {
+		t.Fatal("projection prepared before the later toggle was not retried")
+	}
+	if !unchanged.stagedTree[0].Expanded {
+		t.Fatal("stale prepared projection changed the visible tree")
+	}
+
+	applied, next := unchanged.Update(retry())
+	if next != nil || !applied.stagedTree[0].Expanded {
+		t.Fatal("retried projection did not install the latest expanded state")
+	}
+}
+
+func TestProjectTreeExpansionCopiesOnlyChangedPaths(t *testing.T) {
+	tree := buildTree([]StatusEntry{
+		{Path: "src/pkg/a.go", IndexStatus: 'M', WorkStatus: ' '},
+		{Path: "src/other.go", IndexStatus: 'M', WorkStatus: ' '},
+	}, true)
+	if len(tree) != 1 || len(tree[0].Children) != 2 {
+		t.Fatalf("unexpected fixture tree: %+v", tree)
+	}
+	originalRoot := tree[0]
+	originalPkg := originalRoot.Children[0]
+	originalOther := originalRoot.Children[1]
+
+	projected := projectTreeExpansion(tree, map[string]bool{"src/pkg": false})
+	if projected[0] == originalRoot {
+		t.Fatal("changed descendant did not copy its ancestor")
+	}
+	if projected[0].Children[0] == originalPkg || projected[0].Children[0].Expanded {
+		t.Fatal("changed directory was not copied with collapsed state")
+	}
+	if projected[0].Children[1] != originalOther {
+		t.Fatal("unchanged sibling was copied instead of shared")
+	}
+	if !originalPkg.Expanded {
+		t.Fatal("projection mutated the original tree")
+	}
+
+	unchanged := projectTreeExpansion(projected, map[string]bool{"src/pkg": false})
+	if unchanged[0] != projected[0] {
+		t.Fatal("already-current tree was copied")
+	}
+}
+
 func TestPreparedRefreshLatestRequestWins(t *testing.T) {
 	m := testModel([]StatusEntry{{Path: "old.go", IndexStatus: 'M', WorkStatus: ' '}})
 	m.Branch = "old"
@@ -1297,8 +1470,12 @@ func TestMouseClickOnDirectorySetsSectionCursorAndTogglesOnce(t *testing.T) {
 			m.Cursor = 99
 
 			updated, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: tt.clickY}))
+			if cmd == nil {
+				t.Fatal("expected directory click to schedule a prepared projection")
+			}
+			updated, cmd = updated.Update(cmd())
 			if cmd != nil {
-				t.Fatal("expected directory click to avoid returning a command")
+				t.Fatal("prepared directory click unexpectedly scheduled more work")
 			}
 
 			if updated.activeSection != tt.wantSection {
@@ -1852,7 +2029,12 @@ func TestTreeRowCacheMatchesFlattenedTreeAndInvalidatesOnVisibilityChanges(t *te
 
 	// The staged directory is the first node after the staged header. A click
 	// collapses it and must replace the cached visible rows.
-	m, _ = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 1}))
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 1}))
+	m, cmd = m.Update(cmd())
+	if cmd != nil {
+		t.Fatal("prepared directory click unexpectedly scheduled more work")
+	}
 	assertRows(t, m.treeRows())
 	if got := len(m.activeFlatTree()); got != 1 {
 		t.Fatalf("active flattened cache length = %d, want 1 after directory collapse", got)
@@ -1860,7 +2042,11 @@ func TestTreeRowCacheMatchesFlattenedTreeAndInvalidatesOnVisibilityChanges(t *te
 
 	// Header clicks change only section visibility, but they still invalidate
 	// the rendered/hit-test row cache.
-	m, _ = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 0}))
+	m, cmd = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, Y: 0}))
+	m, cmd = m.Update(cmd())
+	if cmd != nil {
+		t.Fatal("prepared header click unexpectedly scheduled more work")
+	}
 	assertRows(t, m.treeRows())
 	if !m.stagedCollapsed {
 		t.Fatal("staged header click did not collapse the section")
@@ -1911,6 +2097,78 @@ func BenchmarkPanelTreeRowsCachedThousands(b *testing.B) {
 	}
 }
 
+func BenchmarkPanelSetSizePreparedThousands(b *testing.B) {
+	entries := make([]StatusEntry, 10_000)
+	for i := range entries {
+		entries[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: ' ',
+			WorkStatus:  'M',
+		}
+	}
+	m := testModel(entries)
+	m.activeSection = SectionUnstaged
+	m.Cursor = len(m.unstagedTree) - 1
+	m.SetSize(80, 24)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		m.SetSize(80+i%2, 24)
+	}
+}
+
+func BenchmarkPanelDirectoryToggleDispatchThousands(b *testing.B) {
+	entries := make([]StatusEntry, 10_000)
+	for i := range entries {
+		entries[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: 'M',
+			WorkStatus:  ' ',
+		}
+	}
+	m := testModel(entries)
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+	msg := tea.KeyPressMsg{Code: tea.KeyEnter}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var cmd tea.Cmd
+		m, cmd = m.Update(msg)
+		if cmd == nil {
+			b.Fatal("directory toggle did not schedule preparation")
+		}
+	}
+}
+
+func BenchmarkPanelApplyPreparedTreeProjectionThousands(b *testing.B) {
+	entries := make([]StatusEntry, 10_000)
+	for i := range entries {
+		entries[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: 'M',
+			WorkStatus:  ' ',
+		}
+	}
+	m := testModel(entries)
+	m.activeSection = SectionStaged
+	m.Cursor = 0
+	pending, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	prepared, ok := cmd().(PreparedTreeProjectionMsg)
+	if !ok {
+		b.Fatal("toggle command did not return a prepared tree projection")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		candidate := pending
+		applied, retry := candidate.ApplyPreparedTreeProjection(prepared)
+		if !applied || retry != nil {
+			b.Fatal("prepared tree projection was not applied")
+		}
+	}
+}
+
 func BenchmarkBuildRefreshProjectionThousands(b *testing.B) {
 	entries := make([]StatusEntry, 10_000)
 	for i := range entries {
@@ -1920,13 +2178,54 @@ func BenchmarkBuildRefreshProjectionThousands(b *testing.B) {
 			WorkStatus:  'M',
 		}
 	}
-	expansion := expansionSnapshot{staged: map[string]bool{}, unstaged: map[string]bool{}}
+	expansion := expansionSnapshot{staged: map[string]bool{"pkg/000": false}, unstaged: map[string]bool{}}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
 		projection := buildRefreshProjection(entries, expansion, false, false)
-		if len(projection.rowCache.rows) != 10_203 {
-			b.Fatalf("row count = %d, want 10203", len(projection.rowCache.rows))
+		if len(projection.rowCache.rows) != 10_153 {
+			b.Fatalf("row count = %d, want 10153", len(projection.rowCache.rows))
+		}
+	}
+}
+
+func BenchmarkBuildTreeRowCacheThousands(b *testing.B) {
+	entries := make([]StatusEntry, 10_000)
+	for i := range entries {
+		entries[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: 'M',
+			WorkStatus:  ' ',
+		}
+	}
+	tree := buildTree(entries, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		cache := buildTreeRowCache(tree, nil, false, false)
+		if len(cache.rows) != 10_203 {
+			b.Fatalf("row count = %d, want 10203", len(cache.rows))
+		}
+	}
+}
+
+func BenchmarkBuildTreeProjectionThousands(b *testing.B) {
+	staged := make([]StatusEntry, 10_000)
+	for i := range staged {
+		staged[i] = StatusEntry{
+			Path:        fmt.Sprintf("pkg/%03d/file-%05d.go", i%200, i),
+			IndexStatus: 'M',
+			WorkStatus:  ' ',
+		}
+	}
+	stagedTree := buildTree(staged, true)
+	expansion := expansionSnapshot{staged: map[string]bool{"pkg/000": false}, unstaged: map[string]bool{}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		projection := buildTreeProjection(stagedTree, nil, expansion, false, false)
+		if len(projection.rowCache.rows) != 10_153 {
+			b.Fatalf("row count = %d, want 10153", len(projection.rowCache.rows))
 		}
 	}
 }

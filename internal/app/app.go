@@ -1261,6 +1261,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case git.PreparedRefreshMsg:
 		return m.handlePreparedGitRefresh(msg)
 
+	case git.PreparedTreeProjectionMsg:
+		return m.handlePreparedGitTreeProjection(msg)
+
 	case git.OpenDiffMsg:
 		return m.openDiff(msg.Path, msg.Status)
 
@@ -2328,6 +2331,11 @@ func (m Model) handlePreparedGitRefresh(msg git.PreparedRefreshMsg) (tea.Model, 
 		m.gitPanel.SetIsGitRepo(true)
 	}
 	m.tree.SetGitStatus(msg.GitStatus)
+	return m, cmd
+}
+
+func (m Model) handlePreparedGitTreeProjection(msg git.PreparedTreeProjectionMsg) (tea.Model, tea.Cmd) {
+	_, cmd := m.gitPanel.ApplyPreparedTreeProjection(msg)
 	return m, cmd
 }
 
