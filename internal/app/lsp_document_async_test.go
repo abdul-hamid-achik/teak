@@ -1,14 +1,17 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
 	"teak/internal/editor"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
+	"teak/internal/text"
 )
 
 func TestCodeActionDiagnosticsAreSnapshottedBeforeCommand(t *testing.T) {
@@ -41,7 +44,7 @@ func TestRequestCodeActionsSnapshotsDiagnosticsBeforeCommand(t *testing.T) {
 	}}
 
 	var received []lsp.Diagnostic
-	model.codeActionRequester = func(_ string, _, _ int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error) {
+	model.codeActionRequester = func(_ context.Context, _ string, _, _ int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error) {
 		received = diagnostics
 		return nil, nil
 	}
@@ -110,6 +113,150 @@ func TestDocumentResultRejectsStaleRequestIdentity(t *testing.T) {
 					t.Fatalf("acceptsDocumentResult() = %t, want %t; metadata = %#v", got, scenario.want, metadata)
 				}
 			})
+		}
+	}
+}
+
+func TestDocumentResultCursorSensitivityMatchesRequestKind(t *testing.T) {
+	tests := []struct {
+		kind documentRequestKind
+		want bool
+	}{
+		{documentRequestDefinition, false},
+		{documentRequestReferences, false},
+		{documentRequestCodeAction, false},
+		{documentRequestRename, false},
+		{documentRequestSymbols, true},
+		{documentRequestFolding, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.kind.String(), func(t *testing.T) {
+			model := newOverlayRequestTestModel(t)
+			model.activeEditor().Buffer.LoadContent([]byte("alpha beta"))
+			model.activeEditor().Buffer.SetCursor(text.Position{Col: 1})
+			metadata, ok := model.beginDocumentRequest(tt.kind, model.activeEditor().Buffer.FilePath)
+			if !ok {
+				t.Fatal("beginDocumentRequest() ok = false")
+			}
+			model.activeEditor().Buffer.SetCursor(text.Position{Col: 7})
+
+			if got := model.acceptsDocumentResult(tt.kind, metadata, tt.kind != documentRequestFolding); got != tt.want {
+				t.Fatalf("acceptsDocumentResult() = %t, want %t after cursor move", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBeginDocumentRequestContextCancelsSupersededRequest(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	path := model.activeEditor().Buffer.FilePath
+	first, firstContext, ok := model.beginDocumentRequestContext(documentRequestDefinition, path)
+	if !ok {
+		t.Fatal("first beginDocumentRequestContext() ok = false")
+	}
+	second, secondContext, ok := model.beginDocumentRequestContext(documentRequestDefinition, path)
+	if !ok {
+		t.Fatal("second beginDocumentRequestContext() ok = false")
+	}
+
+	select {
+	case <-firstContext.Done():
+	default:
+		t.Fatal("superseded definition request context remains active")
+	}
+	select {
+	case <-secondContext.Done():
+		t.Fatal("current definition request context was canceled")
+	default:
+	}
+	if second.Generation != first.Generation+1 {
+		t.Fatalf("generations = %d then %d, want consecutive", first.Generation, second.Generation)
+	}
+}
+
+func TestCursorMoveCancelsOnlyCursorSensitiveDocumentRequests(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	model.activeEditor().Buffer.LoadContent([]byte("alpha beta"))
+	model.activeEditor().Buffer.SetCursor(text.Position{Col: 5})
+	path := model.activeEditor().Buffer.FilePath
+	definitionMetadata, definitionContext, ok := model.beginDocumentRequestContext(documentRequestDefinition, path)
+	if !ok {
+		t.Fatal("begin definition request = false")
+	}
+	symbolMetadata, symbolContext, ok := model.beginDocumentRequestContext(documentRequestSymbols, path)
+	if !ok {
+		t.Fatal("begin symbols request = false")
+	}
+
+	updatedAny, _ := model.forwardToEditor(tea.KeyPressMsg{Code: tea.KeyLeft})
+	updated := updatedAny.(Model)
+	select {
+	case <-definitionContext.Done():
+	default:
+		t.Fatal("cursor move left definition request running")
+	}
+	select {
+	case <-symbolContext.Done():
+		t.Fatal("cursor-independent symbol request was canceled")
+	default:
+	}
+	if updated.acceptsDocumentResult(documentRequestDefinition, definitionMetadata, true) {
+		t.Fatal("canceled definition generation remained valid")
+	}
+	if !updated.acceptsDocumentResult(documentRequestSymbols, symbolMetadata, true) {
+		t.Fatal("cursor-independent symbol result became stale")
+	}
+}
+
+func TestDocumentEditCancelsCursorIndependentRequest(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	path := model.activeEditor().Buffer.FilePath
+	metadata, requestContext, ok := model.beginDocumentRequestContext(documentRequestFolding, path)
+	if !ok {
+		t.Fatal("begin folding request = false")
+	}
+
+	updatedAny, _ := model.forwardToEditor(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	updated := updatedAny.(Model)
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("document edit left folding request running")
+	}
+	if updated.acceptsDocumentResult(documentRequestFolding, metadata, false) {
+		t.Fatal("document edit left canceled folding generation valid")
+	}
+}
+
+func TestTabSwitchCancelsActiveDocumentAndOverlayRequests(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	firstPath := model.activeEditor().Buffer.FilePath
+	model.rootDir = t.TempDir()
+	second := addDirtyEditor(t, &model, "other.go", "package other\n", "package other\n")
+	if !model.activateTab(0) {
+		t.Fatal("activate first tab = false")
+	}
+	_, overlayContext, ok := model.beginOverlayRequestContext(overlayRequestHover)
+	if !ok {
+		t.Fatal("begin hover request = false")
+	}
+	_, documentContext, ok := model.beginDocumentRequestContext(documentRequestSymbols, firstPath)
+	if !ok {
+		t.Fatal("begin symbols request = false")
+	}
+
+	if !model.activateTab(second) {
+		t.Fatal("activate second tab = false")
+	}
+	for name, requestContext := range map[string]context.Context{
+		"hover":   overlayContext,
+		"symbols": documentContext,
+	} {
+		select {
+		case <-requestContext.Done():
+		default:
+			t.Fatalf("tab switch left %s request running", name)
 		}
 	}
 }

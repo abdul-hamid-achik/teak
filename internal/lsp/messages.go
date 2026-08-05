@@ -154,12 +154,15 @@ type OverlayRequestMetadata struct {
 	Generation uint64
 }
 
-// DocumentRequestMetadata identifies the document snapshot that originated a
-// non-overlay LSP request. Zero values preserve compatibility with legacy
-// callers while app-generated requests always include full identity.
+// DocumentRequestMetadata identifies the document snapshot and cursor that
+// originated a non-overlay LSP request. Zero values preserve compatibility
+// with legacy callers while app-generated requests always include full
+// identity. Consumers that are not cursor-sensitive may ignore the cursor.
 type DocumentRequestMetadata struct {
 	FilePath   string
 	Version    int
+	CursorLine int
+	CursorCol  int
 	Generation uint64
 }
 

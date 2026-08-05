@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
+
 	"teak/internal/editor"
 	"teak/internal/lsp"
 )
 
-type codeActionRequester func(filePath string, line, col int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error)
+type codeActionRequester func(context.Context, string, int, int, []lsp.Diagnostic) ([]lsp.CodeAction, error)
 
 type documentRequestKind uint8
 
@@ -40,6 +42,8 @@ func (kind documentRequestKind) String() string {
 
 type documentRequestTracker struct {
 	generations [documentRequestKindCount]uint64
+	cancels     [documentRequestKindCount]context.CancelFunc
+	filePaths   [documentRequestKindCount]string
 }
 
 func (tracker *documentRequestTracker) next(kind documentRequestKind) uint64 {
@@ -57,6 +61,81 @@ func (tracker documentRequestTracker) current(kind documentRequestKind) uint64 {
 	return tracker.generations[kind]
 }
 
+func (kind documentRequestKind) cursorSensitive() bool {
+	return kind == documentRequestDefinition ||
+		kind == documentRequestReferences ||
+		kind == documentRequestCodeAction ||
+		kind == documentRequestRename
+}
+
+func (kind documentRequestKind) requiresActiveDocument() bool {
+	return kind != documentRequestFolding
+}
+
+func (tracker *documentRequestTracker) start(kind documentRequestKind, filePath string) context.Context {
+	if kind >= documentRequestKindCount {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	if tracker.cancels[kind] != nil {
+		tracker.cancels[kind]()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tracker.cancels[kind] = cancel
+	tracker.filePaths[kind] = filePath
+	return ctx
+}
+
+func (tracker *documentRequestTracker) invalidate(kind documentRequestKind) {
+	if kind >= documentRequestKindCount {
+		return
+	}
+	if tracker.cancels[kind] != nil {
+		tracker.cancels[kind]()
+		tracker.cancels[kind] = nil
+		tracker.generations[kind]++
+	}
+	tracker.filePaths[kind] = ""
+}
+
+func (tracker *documentRequestTracker) invalidateEditor(filePath string, versionChanged, cursorChanged bool) {
+	for kind := documentRequestKind(0); kind < documentRequestKindCount; kind++ {
+		if tracker.filePaths[kind] != filePath {
+			continue
+		}
+		if versionChanged || (cursorChanged && kind.cursorSensitive()) {
+			tracker.invalidate(kind)
+		}
+	}
+}
+
+func (tracker *documentRequestTracker) invalidateActiveRequests() {
+	for kind := documentRequestKind(0); kind < documentRequestKindCount; kind++ {
+		if kind.requiresActiveDocument() {
+			tracker.invalidate(kind)
+		}
+	}
+}
+
+func (tracker *documentRequestTracker) invalidateDocument(filePath string) {
+	for kind := documentRequestKind(0); kind < documentRequestKindCount; kind++ {
+		if tracker.filePaths[kind] == filePath {
+			tracker.invalidate(kind)
+		}
+	}
+}
+
+func (tracker *documentRequestTracker) cancelAll() {
+	for kind := documentRequestKind(0); kind < documentRequestKindCount; kind++ {
+		if tracker.cancels[kind] != nil {
+			tracker.cancels[kind]()
+			tracker.cancels[kind] = nil
+		}
+		tracker.filePaths[kind] = ""
+	}
+}
+
 func (m *Model) beginDocumentRequest(kind documentRequestKind, filePath string) (lsp.DocumentRequestMetadata, bool) {
 	if filePath == "" {
 		return lsp.DocumentRequestMetadata{}, false
@@ -68,8 +147,18 @@ func (m *Model) beginDocumentRequest(kind documentRequestKind, filePath string) 
 	return lsp.DocumentRequestMetadata{
 		FilePath:   filePath,
 		Version:    m.editors[editorIndex].Buffer.Version(),
+		CursorLine: m.editors[editorIndex].Buffer.Cursor.Line,
+		CursorCol:  m.editors[editorIndex].Buffer.Cursor.Col,
 		Generation: m.documentRequests.next(kind),
 	}, true
+}
+
+func (m *Model) beginDocumentRequestContext(kind documentRequestKind, filePath string) (lsp.DocumentRequestMetadata, context.Context, bool) {
+	metadata, ok := m.beginDocumentRequest(kind, filePath)
+	if !ok {
+		return lsp.DocumentRequestMetadata{}, nil, false
+	}
+	return metadata, m.documentRequests.start(kind, filePath), true
 }
 
 func (m Model) acceptsDocumentResult(kind documentRequestKind, metadata lsp.DocumentRequestMetadata, requireActive bool) bool {
@@ -84,6 +173,11 @@ func (m Model) acceptsDocumentResult(kind documentRequestKind, metadata lsp.Docu
 	if editorIndex < 0 ||
 		m.editors[editorIndex].Buffer.Version() != metadata.Version ||
 		m.documentRequests.current(kind) != metadata.Generation {
+		return false
+	}
+	if kind.cursorSensitive() &&
+		(m.editors[editorIndex].Buffer.Cursor.Line != metadata.CursorLine ||
+			m.editors[editorIndex].Buffer.Cursor.Col != metadata.CursorCol) {
 		return false
 	}
 	return !requireActive || editorIndex == m.activeTab

@@ -650,6 +650,8 @@ func cleanupModelState(m *modelState) {
 	if m == nil {
 		return
 	}
+	m.overlayRequests.cancelAll()
+	m.documentRequests.cancelAll()
 	if m.sessionRestoreCancel != nil {
 		m.sessionRestoreCancel()
 		m.sessionRestoreCancel = nil
@@ -3618,6 +3620,11 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	m.removeLoadsForEditor(m.editors[idx].ID())
 	closingPath := buf.FilePath
 	wasActive := idx == m.activeTab
+	if wasActive {
+		m.overlayRequests.invalidateAll()
+		m.documentRequests.invalidateActiveRequests()
+	}
+	m.documentRequests.invalidateDocument(closingPath)
 	lastPathOwner := closingPath != "" && !m.hasOtherEditorForPath(closingPath, idx)
 	if m.watcher != nil && lastPathOwner {
 		m.watcher.UnwatchFile(closingPath)
@@ -4572,7 +4579,7 @@ func (m Model) requestDefinition() (Model, tea.Cmd) {
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	metadata, ok := m.beginDocumentRequest(documentRequestDefinition, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestDefinition, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4583,7 +4590,10 @@ func (m Model) requestDefinition() (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		locs, err := client.Definition(lsp.FileURI(filePath), line, col)
+		locs, err := client.DefinitionContext(requestContext, lsp.FileURI(filePath), line, col)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/definition", Message: err.Error()}
 		}
@@ -4595,7 +4605,7 @@ func (m Model) requestFoldingRanges(filePath string) (Model, tea.Cmd) {
 	if filePath == "" {
 		return m, nil
 	}
-	metadata, ok := m.beginDocumentRequest(documentRequestFolding, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestFolding, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4605,7 +4615,7 @@ func (m Model) requestFoldingRanges(filePath string) (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		ranges, err := client.FoldingRange(lsp.FileURI(filePath))
+		ranges, err := client.FoldingRangeContext(requestContext, lsp.FileURI(filePath))
 		if err != nil || len(ranges) == 0 {
 			return nil
 		}
@@ -4620,7 +4630,7 @@ func (m Model) requestCodeActions() (Model, tea.Cmd) {
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	metadata, ok := m.beginDocumentRequest(documentRequestCodeAction, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestCodeAction, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4634,13 +4644,13 @@ func (m Model) requestCodeActions() (Model, tea.Cmd) {
 			err     error
 		)
 		if requester != nil {
-			actions, err = requester(filePath, line, col, diagnostics)
+			actions, err = requester(requestContext, filePath, line, col, diagnostics)
 		} else {
 			client := mgr.ClientForFile(filePath)
 			if client == nil {
 				return nil
 			}
-			actions, err = client.CodeAction(lsp.FileURI(filePath), line, col, line, col, diagnostics)
+			actions, err = client.CodeActionContext(requestContext, lsp.FileURI(filePath), line, col, line, col, diagnostics)
 		}
 		if err != nil || len(actions) == 0 {
 			return nil
@@ -4732,7 +4742,7 @@ func (m Model) requestDocumentSymbols() (Model, tea.Cmd) {
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	metadata, ok := m.beginDocumentRequest(documentRequestSymbols, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestSymbols, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4741,7 +4751,10 @@ func (m Model) requestDocumentSymbols() (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		symbols, err := client.DocumentSymbol(lsp.FileURI(filePath))
+		symbols, err := client.DocumentSymbolContext(requestContext, lsp.FileURI(filePath))
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/documentSymbol", Message: err.Error()}
 		}
@@ -4844,7 +4857,7 @@ func (m Model) requestReferences() (Model, tea.Cmd) {
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	metadata, ok := m.beginDocumentRequest(documentRequestReferences, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestReferences, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4855,7 +4868,10 @@ func (m Model) requestReferences() (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		locs, err := client.References(lsp.FileURI(filePath), line, col)
+		locs, err := client.ReferencesContext(requestContext, lsp.FileURI(filePath), line, col)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		if err != nil {
 			return lsp.LspErrorMsg{Method: "textDocument/references", Message: err.Error()}
 		}
@@ -4977,7 +4993,7 @@ func (m Model) requestRename(newName string) (Model, tea.Cmd) {
 	}
 	mgr := m.lspMgr
 	filePath := ed.Buffer.FilePath
-	metadata, ok := m.beginDocumentRequest(documentRequestRename, filePath)
+	metadata, requestContext, ok := m.beginDocumentRequestContext(documentRequestRename, filePath)
 	if !ok {
 		return m, nil
 	}
@@ -4988,7 +5004,7 @@ func (m Model) requestRename(newName string) (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		edits, err := client.Rename(lsp.FileURI(filePath), line, col, newName)
+		edits, err := client.RenameContext(requestContext, lsp.FileURI(filePath), line, col, newName)
 		if err != nil || (len(edits.Changes) == 0 && len(edits.DocumentChanges) == 0) {
 			return nil
 		}

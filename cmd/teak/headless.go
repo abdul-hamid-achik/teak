@@ -3031,7 +3031,7 @@ func collectHeadlessLSPFormatContext(parentCtx context.Context, root, path strin
 	remaining := time.Until(deadline)
 	err, timedOut := runHeadlessLSPStageContext(operationCtx, remaining, func() error {
 		var err error
-		edits, err = client.Formatting(uri, lsp.FormattingOptions{TabSize: 4, InsertSpaces: true})
+		edits, err = client.FormattingContext(operationCtx, uri, lsp.FormattingOptions{TabSize: 4, InsertSpaces: true})
 		return err
 	})
 	if timedOut {

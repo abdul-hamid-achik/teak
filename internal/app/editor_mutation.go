@@ -16,6 +16,14 @@ func (m *Model) syncEditorStateAfterUpdate(tabIndex, prevVersion int, prevCursor
 	}
 
 	ed := &m.editors[tabIndex]
+	versionChanged := ed.Buffer.Version() != prevVersion
+	cursorChanged := ed.Buffer.Cursor != prevCursor
+	if tabIndex == m.activeTab && (versionChanged || cursorChanged) {
+		m.overlayRequests.invalidateAll()
+	}
+	if versionChanged || cursorChanged {
+		m.documentRequests.invalidateEditor(ed.Buffer.FilePath, versionChanged, cursorChanged)
+	}
 	if tabIndex < len(m.tabBar.Tabs) {
 		m.tabBar.Tabs[tabIndex].Dirty = ed.Buffer.Dirty()
 		if ed.Buffer.Dirty() {
@@ -24,7 +32,7 @@ func (m *Model) syncEditorStateAfterUpdate(tabIndex, prevVersion int, prevCursor
 	}
 
 	var cmds []tea.Cmd
-	if m.lspMgr != nil && ed.Buffer.Version() != prevVersion && ed.Buffer.FilePath != "" {
+	if m.lspMgr != nil && versionChanged && ed.Buffer.FilePath != "" {
 		if client := m.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
 			cmds = append(cmds, m.notifyLSPChange(client, ed))
 		}

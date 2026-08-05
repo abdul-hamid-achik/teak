@@ -164,6 +164,53 @@ func TestBeginOverlayRequestCapturesCurrentEditorAndIncrementsGeneration(t *test
 	}
 }
 
+func TestBeginOverlayRequestContextCancelsSupersededRequest(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	first, firstContext, ok := model.beginOverlayRequestContext(overlayRequestCompletion)
+	if !ok {
+		t.Fatal("first beginOverlayRequestContext() ok = false")
+	}
+	second, secondContext, ok := model.beginOverlayRequestContext(overlayRequestCompletion)
+	if !ok {
+		t.Fatal("second beginOverlayRequestContext() ok = false")
+	}
+
+	select {
+	case <-firstContext.Done():
+	default:
+		t.Fatal("superseded overlay request context remains active")
+	}
+	select {
+	case <-secondContext.Done():
+		t.Fatal("current overlay request context was canceled")
+	default:
+	}
+	if second.Generation != first.Generation+1 {
+		t.Fatalf("generations = %d then %d, want consecutive", first.Generation, second.Generation)
+	}
+}
+
+func TestCursorMoveCancelsInFlightOverlayRequest(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	model.activeEditor().Buffer.LoadContent([]byte("alpha beta"))
+	model.activeEditor().Buffer.SetCursor(text.Position{Col: 5})
+	metadata, requestContext, ok := model.beginOverlayRequestContext(overlayRequestHover)
+	if !ok {
+		t.Fatal("beginOverlayRequestContext() ok = false")
+	}
+
+	updatedAny, _ := model.forwardToEditor(tea.KeyPressMsg{Code: tea.KeyLeft})
+	updated := updatedAny.(Model)
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("cursor move left the hover request running")
+	}
+	if updated.acceptsOverlayResult(overlayRequestHover, metadata) {
+		t.Fatal("cursor move did not invalidate the canceled hover generation")
+	}
+}
+
 func TestOverlayResultAllowsLegacyZeroMetadata(t *testing.T) {
 	model := newOverlayRequestTestModel(t)
 	updatedAny, _ := model.Update(lsp.HoverResultMsg{Content: "legacy hover"})

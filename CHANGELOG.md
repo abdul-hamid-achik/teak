@@ -4,6 +4,24 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-08-05
+
+### LSP Cancellation
+
+- Completion, hover, signature help, definition, references, code actions,
+  rename, symbols, and folding requests now accept caller cancellation while
+  retaining their existing request-specific timeout ceilings.
+- Superseded requests are latest-wins: Teak sends `$/cancelRequest` instead of
+  leaving obsolete work running on the language server until timeout.
+- Edits cancel all requests for the affected document. Cursor-only movement
+  cancels position-dependent requests while allowing document symbols and
+  folding ranges to finish, and tab switches cancel active-document work.
+- Definition, references, code actions, and rename results now carry and
+  validate their originating cursor position in addition to file, version,
+  and generation identity.
+- Headless hover, definition, references, symbols, and formatting commands now
+  pass their operation context into the underlying LSP request.
+
 ## [0.10.4] - 2026-08-05
 
 ### LSP Reliability

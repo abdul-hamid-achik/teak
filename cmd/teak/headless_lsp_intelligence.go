@@ -310,7 +310,7 @@ func collectHeadlessLSPSymbolsContext(parentCtx context.Context, root, path stri
 	var symbols []lsp.DocumentSymbol
 	err, timedOut := runHeadlessLSPStageContext(session.ctx, time.Until(session.deadline), func() error {
 		var queryErr error
-		symbols, queryErr = session.client.DocumentSymbol(lsp.FileURI(path))
+		symbols, queryErr = session.client.DocumentSymbolContext(session.ctx, lsp.FileURI(path))
 		return queryErr
 	})
 	if timedOut {
@@ -355,7 +355,7 @@ func collectHeadlessLSPHoverContext(parentCtx context.Context, root, path string
 	var hover *lsp.HoverResult
 	err, timedOut := runHeadlessLSPStageContext(session.ctx, time.Until(session.deadline), func() error {
 		var queryErr error
-		hover, queryErr = session.client.Hover(lsp.FileURI(path), line, column)
+		hover, queryErr = session.client.HoverContext(session.ctx, lsp.FileURI(path), line, column)
 		return queryErr
 	})
 	if timedOut {
@@ -410,9 +410,9 @@ func collectHeadlessLSPLocationsContext(parentCtx context.Context, root, path, o
 	err, timedOut := runHeadlessLSPStageContext(session.ctx, time.Until(session.deadline), func() error {
 		var queryErr error
 		if operation == "references" {
-			locations, queryErr = session.client.References(lsp.FileURI(path), line, column)
+			locations, queryErr = session.client.ReferencesContext(session.ctx, lsp.FileURI(path), line, column)
 		} else {
-			locations, queryErr = session.client.Definition(lsp.FileURI(path), line, column)
+			locations, queryErr = session.client.DefinitionContext(session.ctx, lsp.FileURI(path), line, column)
 		}
 		return queryErr
 	})

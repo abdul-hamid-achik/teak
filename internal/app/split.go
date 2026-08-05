@@ -136,8 +136,7 @@ func (m *Model) focusSplitPaneAt(x, y int) {
 	}
 	m.split.focused = pane
 	if tab := m.split.paneTab(pane); tab >= 0 && tab < len(m.editors) {
-		m.activeTab = tab
-		m.tabBar.SetActive(m.activeTab)
+		m.activateTab(tab)
 	}
 }
 
@@ -166,7 +165,6 @@ func (m *Model) cycleSplitFocus() {
 		m.split.focused = 0
 	}
 	if tab := m.split.paneTab(m.split.focused); tab >= 0 && tab < len(m.editors) {
-		m.activeTab = tab
+		m.activateTab(tab)
 	}
-	m.tabBar.SetActive(m.activeTab)
 }

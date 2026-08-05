@@ -118,11 +118,17 @@ func (m *Model) refreshExecutionGutter(path string) {
 // activateTab centralizes active-editor projection for keyboard, mouse and
 // programmatic tab switches. TabBar owns the visible tab-strip scroll state.
 func (m *Model) activateTab(index int) bool {
-	if index < 0 || index >= len(m.editors) || index >= len(m.tabBar.Tabs) {
+	if index < 0 || index >= len(m.editors) {
 		return false
 	}
+	if index != m.activeTab {
+		m.overlayRequests.invalidateAll()
+		m.documentRequests.invalidateActiveRequests()
+	}
 	m.activeTab = index
-	m.tabBar.SetActive(index)
+	if index < len(m.tabBar.Tabs) {
+		m.tabBar.SetActive(index)
+	}
 	m.projectDebugGutterForEditor(index)
 	return true
 }

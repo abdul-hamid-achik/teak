@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/lsp"
 )
@@ -11,6 +13,7 @@ const (
 	overlayRequestCompletion overlayRequestKind = iota
 	overlayRequestHover
 	overlayRequestSignature
+	overlayRequestKindCount
 )
 
 func (kind overlayRequestKind) String() string {
@@ -27,37 +30,62 @@ func (kind overlayRequestKind) String() string {
 }
 
 type overlayRequestTracker struct {
-	completion uint64
-	hover      uint64
-	signature  uint64
+	generations [overlayRequestKindCount]uint64
+	cancels     [overlayRequestKindCount]context.CancelFunc
 }
 
 func (tracker *overlayRequestTracker) next(kind overlayRequestKind) uint64 {
-	switch kind {
-	case overlayRequestCompletion:
-		tracker.completion++
-		return tracker.completion
-	case overlayRequestHover:
-		tracker.hover++
-		return tracker.hover
-	case overlayRequestSignature:
-		tracker.signature++
-		return tracker.signature
-	default:
+	if kind >= overlayRequestKindCount {
 		return 0
 	}
+	tracker.generations[kind]++
+	return tracker.generations[kind]
 }
 
 func (tracker overlayRequestTracker) current(kind overlayRequestKind) uint64 {
-	switch kind {
-	case overlayRequestCompletion:
-		return tracker.completion
-	case overlayRequestHover:
-		return tracker.hover
-	case overlayRequestSignature:
-		return tracker.signature
-	default:
+	if kind >= overlayRequestKindCount {
 		return 0
+	}
+	return tracker.generations[kind]
+}
+
+func (tracker *overlayRequestTracker) start(kind overlayRequestKind) context.Context {
+	if kind >= overlayRequestKindCount {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	if tracker.cancels[kind] != nil {
+		tracker.cancels[kind]()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tracker.cancels[kind] = cancel
+	return ctx
+}
+
+func (tracker *overlayRequestTracker) invalidate(kind overlayRequestKind) {
+	if kind >= overlayRequestKindCount {
+		return
+	}
+	if tracker.cancels[kind] != nil {
+		tracker.cancels[kind]()
+		tracker.cancels[kind] = nil
+		tracker.generations[kind]++
+	}
+}
+
+func (tracker *overlayRequestTracker) invalidateAll() {
+	for kind := overlayRequestKind(0); kind < overlayRequestKindCount; kind++ {
+		tracker.invalidate(kind)
+	}
+}
+
+func (tracker *overlayRequestTracker) cancelAll() {
+	for kind := overlayRequestKind(0); kind < overlayRequestKindCount; kind++ {
+		if tracker.cancels[kind] != nil {
+			tracker.cancels[kind]()
+			tracker.cancels[kind] = nil
+		}
 	}
 }
 
@@ -73,6 +101,14 @@ func (m *Model) beginOverlayRequest(kind overlayRequestKind) (lsp.OverlayRequest
 		CursorCol:  editor.Buffer.Cursor.Col,
 		Generation: m.overlayRequests.next(kind),
 	}, true
+}
+
+func (m *Model) beginOverlayRequestContext(kind overlayRequestKind) (lsp.OverlayRequestMetadata, context.Context, bool) {
+	metadata, ok := m.beginOverlayRequest(kind)
+	if !ok {
+		return lsp.OverlayRequestMetadata{}, nil, false
+	}
+	return metadata, m.overlayRequests.start(kind), true
 }
 
 func (m Model) acceptsOverlayResult(kind overlayRequestKind, metadata lsp.OverlayRequestMetadata) bool {
@@ -99,7 +135,7 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 	if editor == nil || editor.Buffer.FilePath == "" {
 		return m, nil
 	}
-	metadata, ok := m.beginOverlayRequest(overlayRequestCompletion)
+	metadata, requestContext, ok := m.beginOverlayRequestContext(overlayRequestCompletion)
 	if !ok {
 		return m, nil
 	}
@@ -112,7 +148,7 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		items, err := client.Completion(lsp.FileURI(filePath), line, column)
+		items, err := client.CompletionContext(requestContext, lsp.FileURI(filePath), line, column)
 		if err != nil || len(items) == 0 {
 			return nil
 		}
@@ -128,7 +164,7 @@ func (m Model) requestHover() (tea.Model, tea.Cmd) {
 	if editor == nil || editor.Buffer.FilePath == "" {
 		return m, nil
 	}
-	metadata, ok := m.beginOverlayRequest(overlayRequestHover)
+	metadata, requestContext, ok := m.beginOverlayRequestContext(overlayRequestHover)
 	if !ok {
 		return m, nil
 	}
@@ -141,7 +177,7 @@ func (m Model) requestHover() (tea.Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		result, err := client.Hover(lsp.FileURI(filePath), line, column)
+		result, err := client.HoverContext(requestContext, lsp.FileURI(filePath), line, column)
 		if err != nil || result == nil {
 			return nil
 		}
@@ -157,7 +193,7 @@ func (m Model) requestSignatureHelp() (Model, tea.Cmd) {
 	if editor == nil || editor.Buffer.FilePath == "" {
 		return m, nil
 	}
-	metadata, ok := m.beginOverlayRequest(overlayRequestSignature)
+	metadata, requestContext, ok := m.beginOverlayRequestContext(overlayRequestSignature)
 	if !ok {
 		return m, nil
 	}
@@ -170,7 +206,7 @@ func (m Model) requestSignatureHelp() (Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		help, err := client.SignatureHelp(lsp.FileURI(filePath), line, column)
+		help, err := client.SignatureHelpContext(requestContext, lsp.FileURI(filePath), line, column)
 		if err != nil || help == nil {
 			return nil
 		}

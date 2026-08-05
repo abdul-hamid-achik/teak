@@ -284,6 +284,20 @@ func TestOverlayResultMessagesAllowLegacyZeroValueMetadata(t *testing.T) {
 	}
 }
 
+func TestDocumentResultMetadataPreservesCursorIdentity(t *testing.T) {
+	metadata := DocumentRequestMetadata{
+		FilePath:   "/workspace/main.go",
+		Version:    42,
+		CursorLine: 8,
+		CursorCol:  13,
+		Generation: 7,
+	}
+	msg := DefinitionResultMsg{DocumentRequestMetadata: metadata}
+	if msg.DocumentRequestMetadata != metadata {
+		t.Fatalf("request metadata = %#v, want %#v", msg.DocumentRequestMetadata, metadata)
+	}
+}
+
 func TestSignatureHelpStruct(t *testing.T) {
 	help := SignatureHelp{
 		Signatures: []SignatureInformation{
