@@ -378,6 +378,47 @@ func BenchmarkAgentViewStreamingFullRebuild(b *testing.B) {
 	}
 }
 
+func BenchmarkAgentScrollDirtyHistoryUpdate(b *testing.B) {
+	model := benchmarkMaxHistoryModel(b)
+	cache := model.chatCache
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		cache.dirty = true
+		updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+		if !cache.dirty {
+			b.Fatal("scroll event rendered the dirty transcript")
+		}
+		model = updated
+	}
+}
+
+// BenchmarkAgentViewDirtyMaxHistoryFullRebuild measures the exact transcript
+// render a dirty scroll event used to trigger inside Update.
+func BenchmarkAgentViewDirtyMaxHistoryFullRebuild(b *testing.B) {
+	model := benchmarkMaxHistoryModel(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		model.invalidateChatCache()
+		_ = model.View()
+	}
+}
+
+func benchmarkMaxHistoryModel(b *testing.B) Model {
+	b.Helper()
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(80, 30)
+	payload := strings.Repeat("bounded history ", 512)
+	for range maxChatMessages {
+		model.AddSystemMessage(payload)
+	}
+	_ = model.View()
+	return model
+}
+
 func benchmarkStreamingRenderModel(b *testing.B) Model {
 	b.Helper()
 	model := New(ui.DefaultTheme())
@@ -1125,6 +1166,7 @@ func TestAgentScrollControlsRefreshBoundsFromCurrentContent(t *testing.T) {
 					Content: "one two three four five six seven eight nine ten",
 				})
 			}
+			_ = model.View()    // The root View persists rendered lines through chatCache's shared pointer.
 			model.maxScroll = 0 // Simulate View having rendered a stale copy of the model.
 
 			updated, _ := model.Update(tt.msg)
@@ -1143,6 +1185,37 @@ func TestAgentScrollControlsRefreshBoundsFromCurrentContent(t *testing.T) {
 				t.Errorf("scrollY = %d, want %d", updated.scrollY, want)
 			}
 		})
+	}
+}
+
+func TestAgentScrollControlDoesNotRenderDirtyHistoryInUpdate(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(48, 20)
+	for range maxChatMessages {
+		model.AddSystemMessage("bounded history that must not be rendered by a scroll event")
+	}
+	_ = model.View()
+	cache := model.chatCache
+	if cache == nil || cache.fullBuilds != 1 || cache.dirty {
+		t.Fatalf("initial cache = %#v, want one completed render", cache)
+	}
+
+	model.AddSystemMessage("new message invalidates the transcript")
+	if !cache.dirty {
+		t.Fatal("new message did not invalidate the transcript cache")
+	}
+	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if cache.fullBuilds != 1 {
+		t.Fatalf("scroll event rebuilt full history inside Update: builds=%d", cache.fullBuilds)
+	}
+	if !cache.dirty {
+		t.Fatal("scroll event unexpectedly marked the dirty transcript as rendered")
+	}
+
+	_ = updated.View()
+	if cache.fullBuilds != 2 || cache.dirty {
+		t.Fatalf("View did not perform the deferred rebuild: builds=%d dirty=%v", cache.fullBuilds, cache.dirty)
 	}
 }
 

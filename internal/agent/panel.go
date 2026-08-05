@@ -1061,15 +1061,18 @@ func (m Model) chatViewHeight() int {
 	return h
 }
 
-// refreshScrollBounds recalculates scroll state from the current chat content
-// and panel dimensions. Scroll controls call this instead of relying on View
-// having persisted a previous render's measurements.
+// refreshScrollBounds recalculates scroll state from the last rendered chat
+// snapshot. The root app's View has a value receiver, but chatCache is shared
+// by pointer, so its line slice survives that copy. Never call
+// cachedChatLines here: a queued scroll event can arrive after an ACP message
+// invalidates several MiB of history and before View gets a chance to rebuild
+// it, and Update must stay independent of transcript size.
 func (m *Model) refreshScrollBounds() {
-	width := m.width
-	if width < 1 {
-		width = 1
+	lineCount := m.lastChatLineCount
+	if m.chatCache != nil && len(m.chatCache.lines) > 0 {
+		lineCount = len(m.chatCache.lines)
 	}
-	m.setScrollBounds(len(m.cachedChatLines(width)))
+	m.setScrollBounds(lineCount)
 }
 
 func (m *Model) setScrollBounds(chatLineCount int) {

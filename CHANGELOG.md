@@ -4,6 +4,19 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.13] - 2026-08-05
+
+### Responsive Agent Scrolling
+
+- Agent-panel wheel, PageUp/PageDown, and End handling no longer rebuild a
+  dirty transcript cache inside Bubble Tea's `Update()` loop. Scroll bounds
+  use the last rendered shared cache snapshot and leave wrapping and styling
+  to `View()`.
+- A maximum-history benchmark now guards the real dirty-cache branch. On an
+  Apple M5, the input path is about 0.89 microseconds with zero allocations,
+  while the full render it previously triggered costs about 100 milliseconds
+  and 38 MiB of allocations.
+
 ## [0.10.12] - 2026-08-05
 
 ### Responsive Git Status Refresh
