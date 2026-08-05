@@ -1414,18 +1414,38 @@ func (e Editor) findMatchHighlights() []HighlightRange {
 	if !e.find.Visible() || e.Buffer == nil || len(e.find.matches) == 0 {
 		return nil
 	}
+	current := e.find.CurrentMatchPosition()
+	if visibleLines := e.visibleCollapsedBufferLines(); len(visibleLines) > 0 {
+		ranges := make([]HighlightRange, 0, len(visibleLines))
+		start := visibleLines[0]
+		previous := start
+		for _, line := range visibleLines[1:] {
+			if line == previous+1 {
+				previous = line
+				continue
+			}
+			ranges = e.appendFindMatchHighlights(ranges, current, start, previous)
+			start, previous = line, line
+		}
+		return e.appendFindMatchHighlights(ranges, current, start, previous)
+	}
 	startLine, endLine := e.visibleBufferLineRange()
 	if startLine > endLine {
 		return nil
 	}
-	current := e.find.CurrentMatchPosition()
+	return e.appendFindMatchHighlights(nil, current, startLine, endLine)
+}
+
+func (e Editor) appendFindMatchHighlights(ranges []HighlightRange, current *FindMatch, startLine, endLine int) []HighlightRange {
 	first := sort.Search(len(e.find.matches), func(i int) bool {
 		return e.find.matches[i].Start.Line >= startLine
 	})
 	last := sort.Search(len(e.find.matches), func(i int) bool {
 		return e.find.matches[i].Start.Line > endLine
 	})
-	ranges := make([]HighlightRange, 0, last-first)
+	if ranges == nil {
+		ranges = make([]HighlightRange, 0, last-first)
+	}
 	for _, m := range e.find.matches[first:last] {
 		style := e.theme.FindMatch
 		if current != nil && current.Start == m.Start && current.End == m.End {
@@ -1597,17 +1617,20 @@ func (e Editor) visibleDiagnosticProjection() ([]Diagnostic, []int, int, int) {
 	if e.Buffer == nil || e.diagnosticSet == nil || e.Buffer.LineCount() == 0 {
 		return nil, nil, 0, -1
 	}
-	if (e.Wrap == nil || !e.Config.WordWrap) && e.Folds.HasCollapsedRegions() {
-		lineCount := e.Buffer.LineCount()
-		start := e.Viewport.foldedScrollStart(&e.Folds, lineCount)
-		visibleLines := e.Folds.VisibleLines(start, e.Viewport.Height, lineCount)
-		if len(visibleLines) == 0 {
-			return nil, nil, 0, -1
-		}
+	if visibleLines := e.visibleCollapsedBufferLines(); len(visibleLines) > 0 {
 		return e.diagnosticSet.IntersectingLines(visibleLines), visibleLines, visibleLines[0], visibleLines[len(visibleLines)-1]
 	}
 	startLine, endLine := e.visibleBufferLineRange()
 	return e.diagnosticsIntersecting(startLine, endLine), nil, startLine, endLine
+}
+
+func (e Editor) visibleCollapsedBufferLines() []int {
+	if e.Buffer == nil || (e.Wrap != nil && e.Config.WordWrap) || !e.Folds.HasCollapsedRegions() {
+		return nil
+	}
+	lineCount := e.Buffer.LineCount()
+	start := e.Viewport.foldedScrollStart(&e.Folds, lineCount)
+	return e.Folds.VisibleLines(start, e.Viewport.Height, lineCount)
 }
 
 func diagnosticStyle(theme ui.Theme, severity int) lipgloss.Style {

@@ -9,6 +9,8 @@ import (
 	"teak/internal/ui"
 )
 
+var benchmarkFindHighlightsSink []HighlightRange
+
 func findHighlightTestEditor(t *testing.T) Editor {
 	t.Helper()
 	buf := text.NewBufferFromBytes([]byte("foo bar foo\nbaz\nfoo\n"))
@@ -102,6 +104,32 @@ func TestFindMatchHighlightsBoundedToViewport(t *testing.T) {
 	}
 }
 
+func TestFindMatchHighlightsExcludeCollapsedLines(t *testing.T) {
+	const lineCount = 100
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("x\n", lineCount)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(40, 3)
+	ed.Folds.SetRegions([]FoldRegion{{StartLine: 0, EndLine: 97, Collapsed: true}})
+	ed.find.visible = true
+	ed.find.matches = make([]FindMatch, lineCount)
+	for line := range lineCount {
+		ed.find.matches[line] = FindMatch{
+			Start: text.Position{Line: line},
+			End:   text.Position{Line: line, Col: 1},
+		}
+	}
+
+	highlights := ed.findMatchHighlights()
+	if len(highlights) != 3 {
+		t.Fatalf("findMatchHighlights() = %d ranges, want only 3 visible matches", len(highlights))
+	}
+	for i, wantLine := range []int{0, 98, 99} {
+		if highlights[i].Line != wantLine {
+			t.Fatalf("highlight %d is on line %d, want visible line %d", i, highlights[i].Line, wantLine)
+		}
+	}
+}
+
 func TestFindMatchHighlightsEmptyWhenWidgetHidden(t *testing.T) {
 	ed := findHighlightTestEditor(t)
 	ed.HideFind()
@@ -147,5 +175,26 @@ func BenchmarkFindMatchHighlightsDeepViewport(b *testing.B) {
 		if got := len(ed.findMatchHighlights()); got != 10 {
 			b.Fatalf("visible highlights = %d, want 10", got)
 		}
+	}
+}
+
+func BenchmarkFindMatchHighlightsCollapsedTenThousand(b *testing.B) {
+	const lineCount = maxFindMatches
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("x\n", lineCount)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(40, 10)
+	ed.Folds.SetRegions([]FoldRegion{{StartLine: 0, EndLine: lineCount - 10, Collapsed: true}})
+	ed.find.visible = true
+	ed.find.matches = make([]FindMatch, lineCount)
+	for line := range lineCount {
+		ed.find.matches[line] = FindMatch{
+			Start: text.Position{Line: line},
+			End:   text.Position{Line: line, Col: 1},
+		}
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkFindHighlightsSink = ed.findMatchHighlights()
 	}
 }

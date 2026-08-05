@@ -4,6 +4,20 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.27] - 2026-08-05
+
+### Fold-Aware Find Highlights
+
+- In-buffer find now projects highlights through the exact visible line runs
+  when folds are collapsed, instead of treating the first and last rendered
+  rows as one broad buffer range and materializing matches on hidden lines.
+- The find and diagnostic paths share the same collapsed-line projection, so
+  fold visibility rules cannot drift between the two render features.
+- On an Apple M5 with the maximum 10,000 retained matches and only ten visible
+  rows, highlight preparation dropped from about 0.65-0.67 ms and 6.81 MB per
+  frame to about 0.0016 ms and 6.99 KB -- roughly 400x faster with 974x fewer
+  allocated bytes.
+
 ## [0.10.26] - 2026-08-05
 
 ### Viewport-Indexed LSP Diagnostics
