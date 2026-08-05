@@ -1,6 +1,11 @@
 package app
 
-import "teak/internal/lsp"
+import (
+	"teak/internal/editor"
+	"teak/internal/lsp"
+)
+
+type codeActionRequester func(filePath string, line, col int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error)
 
 type documentRequestKind uint8
 
@@ -82,4 +87,27 @@ func (m Model) acceptsDocumentResult(kind documentRequestKind, metadata lsp.Docu
 		return false
 	}
 	return !requireActive || editorIndex == m.activeTab
+}
+
+// snapshotCodeActionDiagnostics converts the editor-owned diagnostics while
+// still on the Bubble Tea event loop. The returned slice is safe for a tea.Cmd
+// to retain while later diagnostics messages update the editor model.
+func snapshotCodeActionDiagnostics(diagnostics []editor.Diagnostic, line int) []lsp.Diagnostic {
+	// Most cursor lines have only a handful of diagnostics. Do not reserve the
+	// entire file-wide slice when nearly all entries may be filtered out.
+	snapshot := make([]lsp.Diagnostic, 0, min(len(diagnostics), 8))
+	for _, diagnostic := range diagnostics {
+		if line < diagnostic.StartLine || line > diagnostic.EndLine {
+			continue
+		}
+		snapshot = append(snapshot, lsp.Diagnostic{
+			Range: lsp.DiagRange{
+				Start: lsp.DiagPosition{Line: diagnostic.StartLine, Character: diagnostic.StartCol},
+				End:   lsp.DiagPosition{Line: diagnostic.EndLine, Character: diagnostic.EndCol},
+			},
+			Severity: lsp.DiagSeverity(diagnostic.Severity),
+			Message:  diagnostic.Message,
+		})
+	}
+	return snapshot
 }

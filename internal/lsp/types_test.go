@@ -202,6 +202,8 @@ func TestOverlayResultMessagesPreserveRequestMetadata(t *testing.T) {
 	metadata := OverlayRequestMetadata{
 		FilePath:   "/workspace/main.go",
 		Version:    42,
+		CursorLine: 8,
+		CursorCol:  13,
 		Generation: 7,
 	}
 

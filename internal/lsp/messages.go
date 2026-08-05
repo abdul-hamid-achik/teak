@@ -143,12 +143,14 @@ type DiagnosticsMsg struct {
 	Diagnostics []Diagnostic
 }
 
-// OverlayRequestMetadata identifies the active-editor state that originated an
-// LSP overlay request. Zero values preserve compatibility with callers that do
-// not provide request identity.
+// OverlayRequestMetadata identifies the active-editor snapshot and cursor that
+// originated an LSP overlay request. A wholly zero value preserves compatibility
+// with callers that do not provide request identity.
 type OverlayRequestMetadata struct {
 	FilePath   string
 	Version    int
+	CursorLine int
+	CursorCol  int
 	Generation uint64
 }
 

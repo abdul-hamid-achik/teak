@@ -6,9 +6,58 @@ import (
 	"testing"
 
 	"teak/internal/config"
+	"teak/internal/editor"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
 )
+
+func TestCodeActionDiagnosticsAreSnapshottedBeforeCommand(t *testing.T) {
+	diagnostics := []editor.Diagnostic{
+		{StartLine: 2, StartCol: 1, EndLine: 4, EndCol: 3, Severity: 2, Message: "original"},
+		{StartLine: 8, EndLine: 8, Message: "outside cursor line"},
+	}
+
+	got := snapshotCodeActionDiagnostics(diagnostics, 3)
+	diagnostics[0].Message = "mutated after request"
+	diagnostics[0].StartLine = 99
+
+	if len(got) != 1 {
+		t.Fatalf("snapshot length = %d, want 1", len(got))
+	}
+	if got[0].Message != "original" || got[0].Range.Start.Line != 2 || got[0].Range.End.Line != 4 {
+		t.Fatalf("snapshot changed with editor diagnostics: %#v", got[0])
+	}
+}
+
+func TestRequestCodeActionsSnapshotsDiagnosticsBeforeCommand(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	model.activeEditor().Diagnostics = []editor.Diagnostic{{
+		StartLine: 0,
+		StartCol:  1,
+		EndLine:   0,
+		EndCol:    4,
+		Severity:  1,
+		Message:   "original",
+	}}
+
+	var received []lsp.Diagnostic
+	model.codeActionRequester = func(_ string, _, _ int, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error) {
+		received = diagnostics
+		return nil, nil
+	}
+	_, cmd := model.requestCodeActions()
+	if cmd == nil {
+		t.Fatal("requestCodeActions() command = nil")
+	}
+
+	model.activeEditor().Diagnostics[0].Message = "new publication"
+	model.activeEditor().Diagnostics[0].StartCol = 99
+	_ = cmd()
+
+	if len(received) != 1 || received[0].Message != "original" || received[0].Range.Start.Character != 1 {
+		t.Fatalf("request observed diagnostics after Update returned: %#v", received)
+	}
+}
 
 func TestDocumentResultRejectsStaleRequestIdentity(t *testing.T) {
 	kinds := []documentRequestKind{

@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
 	"teak/internal/lsp"
+	"teak/internal/text"
 )
 
 func newOverlayRequestTestModel(t *testing.T) Model {
@@ -75,6 +76,7 @@ func TestOverlayResultRejectsStaleRequestIdentity(t *testing.T) {
 	}
 	scenarios := []struct {
 		name   string
+		setup  func(*Model)
 		mutate func(*Model, overlayRequestKind, *lsp.OverlayRequestMetadata)
 		want   bool
 	}{
@@ -95,6 +97,16 @@ func TestOverlayResultRejectsStaleRequestIdentity(t *testing.T) {
 			},
 		},
 		{
+			name: "moved cursor",
+			setup: func(model *Model) {
+				model.activeEditor().Buffer.LoadContent([]byte("alpha beta"))
+				model.activeEditor().Buffer.SetCursor(text.Position{Line: 0, Col: 1})
+			},
+			mutate: func(model *Model, _ overlayRequestKind, _ *lsp.OverlayRequestMetadata) {
+				model.activeEditor().Buffer.SetCursor(text.Position{Line: 0, Col: 7})
+			},
+		},
+		{
 			name: "superseded generation",
 			mutate: func(model *Model, kind overlayRequestKind, _ *lsp.OverlayRequestMetadata) {
 				model.beginOverlayRequest(kind)
@@ -106,6 +118,9 @@ func TestOverlayResultRejectsStaleRequestIdentity(t *testing.T) {
 		for _, scenario := range scenarios {
 			t.Run(kind.String()+"/"+scenario.name, func(t *testing.T) {
 				model := newOverlayRequestTestModel(t)
+				if scenario.setup != nil {
+					scenario.setup(&model)
+				}
 				metadata, ok := model.beginOverlayRequest(kind)
 				if !ok {
 					t.Fatal("beginOverlayRequest() ok = false")
@@ -141,6 +156,9 @@ func TestBeginOverlayRequestCapturesCurrentEditorAndIncrementsGeneration(t *test
 	if first.Version != model.activeEditor().Buffer.Version() {
 		t.Fatalf("Version = %d, want %d", first.Version, model.activeEditor().Buffer.Version())
 	}
+	if first.CursorLine != model.activeEditor().Buffer.Cursor.Line || first.CursorCol != model.activeEditor().Buffer.Cursor.Col {
+		t.Fatalf("cursor = %d:%d, want %+v", first.CursorLine, first.CursorCol, model.activeEditor().Buffer.Cursor)
+	}
 	if second.Generation != first.Generation+1 {
 		t.Fatalf("generations = %d then %d, want consecutive", first.Generation, second.Generation)
 	}
@@ -168,6 +186,8 @@ func TestRequestSignatureHelpCapturesCurrentOverlayMetadata(t *testing.T) {
 	metadata := lsp.OverlayRequestMetadata{
 		FilePath:   model.activeEditor().Buffer.FilePath,
 		Version:    version,
+		CursorLine: model.activeEditor().Buffer.Cursor.Line,
+		CursorCol:  model.activeEditor().Buffer.Cursor.Col,
 		Generation: updated.overlayRequests.current(overlayRequestSignature),
 	}
 	if !updated.acceptsOverlayResult(overlayRequestSignature, metadata) {

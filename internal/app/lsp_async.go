@@ -69,6 +69,8 @@ func (m *Model) beginOverlayRequest(kind overlayRequestKind) (lsp.OverlayRequest
 	return lsp.OverlayRequestMetadata{
 		FilePath:   editor.Buffer.FilePath,
 		Version:    editor.Buffer.Version(),
+		CursorLine: editor.Buffer.Cursor.Line,
+		CursorCol:  editor.Buffer.Cursor.Col,
 		Generation: m.overlayRequests.next(kind),
 	}, true
 }
@@ -87,6 +89,8 @@ func (m Model) acceptsOverlayResult(kind overlayRequestKind, metadata lsp.Overla
 	}
 	return editor.Buffer.FilePath == metadata.FilePath &&
 		editor.Buffer.Version() == metadata.Version &&
+		editor.Buffer.Cursor.Line == metadata.CursorLine &&
+		editor.Buffer.Cursor.Col == metadata.CursorCol &&
 		m.overlayRequests.current(kind) == metadata.Generation
 }
 

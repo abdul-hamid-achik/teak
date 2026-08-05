@@ -331,6 +331,7 @@ type modelState struct {
 	workspaceEdits            workspaceEditState // serial background workspace-edit preparation/commit
 	replaces                  replaceAsyncState  // latest-wins background search/replace preparation
 	lspChanges                *lspChangePreparer // serializes immutable full-text preparation per LSP document
+	codeActionRequester       codeActionRequester
 	codeActionCommandGen      uint64
 	codeActionCommandStop     context.CancelFunc
 }
@@ -4625,27 +4626,22 @@ func (m Model) requestCodeActions() (Model, tea.Cmd) {
 	}
 	line := ed.Buffer.Cursor.Line
 	col := ed.Buffer.Cursor.Col
+	diagnostics := snapshotCodeActionDiagnostics(ed.Diagnostics, line)
+	requester := m.codeActionRequester
 	return m, func() tea.Msg {
-		client := mgr.ClientForFile(filePath)
-		if client == nil {
-			return nil
-		}
-		// Get diagnostics at cursor position
-		var diags []lsp.Diagnostic
-		for _, d := range ed.Diagnostics {
-			if line >= d.StartLine && line <= d.EndLine {
-				diags = append(diags, lsp.Diagnostic{
-					Range: lsp.DiagRange{
-						Start: lsp.DiagPosition{Line: d.StartLine, Character: d.StartCol},
-						End:   lsp.DiagPosition{Line: d.EndLine, Character: d.EndCol},
-					},
-					Severity: lsp.DiagSeverity(d.Severity),
-					Message:  d.Message,
-					Source:   "",
-				})
+		var (
+			actions []lsp.CodeAction
+			err     error
+		)
+		if requester != nil {
+			actions, err = requester(filePath, line, col, diagnostics)
+		} else {
+			client := mgr.ClientForFile(filePath)
+			if client == nil {
+				return nil
 			}
+			actions, err = client.CodeAction(lsp.FileURI(filePath), line, col, line, col, diagnostics)
 		}
-		actions, err := client.CodeAction(lsp.FileURI(filePath), line, col, line, col, diags)
 		if err != nil || len(actions) == 0 {
 			return nil
 		}

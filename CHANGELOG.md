@@ -4,6 +4,17 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-08-05
+
+### LSP Reliability
+
+- Completion, hover, and signature-help responses now carry the cursor
+  position that originated the request. Moving without editing invalidates a
+  late response instead of rendering or applying it at a different position.
+- Code-action requests now convert and copy the applicable diagnostics while
+  still on the Bubble Tea event loop. Background commands no longer retain an
+  editor pointer or observe a later diagnostics publication.
+
 ## [0.10.3] - 2026-08-05
 
 ### In-buffer Find Reliability
