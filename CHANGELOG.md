@@ -4,6 +4,16 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.11] - 2026-08-05
+
+### Path Reconciliation Performance
+
+- Save As and file-tree move/rename reconciliation no longer materialize the
+  complete editor buffer inside `Update()` when a file extension changes.
+- The redundant highlighter replacement was removed; `editor.New` already
+  creates the correct lexer and tokenizes a strictly byte-bounded prefix. An
+  AST invariant now rejects future full-buffer materialization in both paths.
+
 ## [0.10.10] - 2026-08-05
 
 ### Recovery Resource Bounds

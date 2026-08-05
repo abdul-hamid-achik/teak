@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/editor"
-	"teak/internal/highlight"
 )
 
 // reconcileTreeTransfer updates in-memory identities after a filesystem move
@@ -123,9 +122,6 @@ func (m *Model) reconcileTreeEditorPath(index int, oldPath, newPath string) {
 	replacement.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 	replacement.HasLSP = ed.HasLSP
 	replacement.Diagnostics = append([]editor.Diagnostic(nil), ed.Diagnostics...)
-	highlighter := highlight.New(newPath, m.theme)
-	highlighter.TokenizePrefix(ed.Buffer.Bytes(), 60)
-	replacement.Highlighter = highlighter
 	m.setEditor(index, replacement)
 }
 

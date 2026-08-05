@@ -104,3 +104,44 @@ func TestUpdateStaysARoutingFunction(t *testing.T) {
 		})
 	})
 }
+
+// Path changes rebuild editor configuration on the Bubble Tea event loop.
+// editor.New already tokenizes a byte-bounded prefix; materializing the whole
+// buffer here makes Save As and tree renames pause in proportion to document
+// size before the next frame can render.
+func TestPathReconciliationDoesNotMaterializeBuffers(t *testing.T) {
+	targets := map[string]bool{
+		"reconcileSaveAs":         false,
+		"reconcileTreeEditorPath": false,
+	}
+
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if _, tracked := targets[fn.Name.Name]; !tracked {
+				continue
+			}
+			targets[fn.Name.Name] = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "Bytes" {
+					t.Errorf("%s: materializes a complete buffer during path reconciliation", fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	})
+
+	for name, seen := range targets {
+		if !seen {
+			t.Errorf("path reconciliation invariant did not find %s", name)
+		}
+	}
+}

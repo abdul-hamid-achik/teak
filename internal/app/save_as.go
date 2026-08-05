@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/editor"
-	"teak/internal/highlight"
 	"teak/internal/lsp"
 	"teak/internal/overlay"
 	"teak/internal/plugin"
@@ -194,11 +193,6 @@ func (m *Model) reconcileSaveAs(tabIndex int, oldPath, newPath string) tea.Cmd {
 
 	if filepath.Ext(oldPath) != filepath.Ext(newPath) || ed.Highlighter == nil {
 		replacement := editor.New(ed.Buffer, m.theme, ed.Config)
-		if newPath != "" {
-			hl := highlight.New(newPath, m.theme)
-			hl.TokenizePrefix(ed.Buffer.Bytes(), 60)
-			replacement.Highlighter = hl
-		}
 		replacement.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 		replacement.HasLSP = ed.HasLSP
 		m.setEditor(tabIndex, replacement)
