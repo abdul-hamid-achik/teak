@@ -306,6 +306,97 @@ func TestSessionUpdateHonorsRuntimeOutputBudget(t *testing.T) {
 	}
 }
 
+func TestSessionUpdateSplitsLargeTextAndThoughtChunksBeforeQueue(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(string) sdk.SessionUpdate
+		text   func(tea.Msg) (string, bool)
+	}{
+		{
+			name:   "agent text",
+			update: sdk.UpdateAgentMessageText,
+			text: func(msg tea.Msg) (string, bool) {
+				value, ok := msg.(AgentTextMsg)
+				return value.Text, ok
+			},
+		},
+		{
+			name:   "agent thought",
+			update: sdk.UpdateAgentThoughtText,
+			text: func(msg tea.Msg) (string, bool) {
+				value, ok := msg.(AgentThoughtMsg)
+				return value.Text, ok
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := make(chan tea.Msg, 8)
+			handler := newClientHandler(messages, t.TempDir())
+			handler.beginPromptOutput()
+			input := strings.Repeat("x", MaxAgentStreamChunkBytes-1) +
+				"界" + strings.Repeat("y", MaxAgentStreamChunkBytes+17)
+			if err := handler.SessionUpdate(context.Background(), sdk.SessionNotification{
+				SessionId: sdk.SessionId("fixture"),
+				Update:    tt.update(input),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var combined strings.Builder
+			messageCount := len(messages)
+			if messageCount < 2 {
+				t.Fatalf("queued messages = %d, want split stream", messageCount)
+			}
+			for range messageCount {
+				part, ok := tt.text(<-messages)
+				if !ok {
+					t.Fatal("queued stream message has the wrong type")
+				}
+				if len(part) > MaxAgentStreamChunkBytes {
+					t.Fatalf("queued chunk = %d bytes, want at most %d", len(part), MaxAgentStreamChunkBytes)
+				}
+				if !utf8.ValidString(part) {
+					t.Fatalf("queued chunk is not valid UTF-8: %q", part)
+				}
+				combined.WriteString(part)
+			}
+			if got := combined.String(); got != input {
+				t.Fatalf("combined stream length = %d, want exact %d-byte input", len(got), len(input))
+			}
+		})
+	}
+}
+
+func TestSessionUpdateNormalizesInvalidUTF8BeforeQueue(t *testing.T) {
+	messages := make(chan tea.Msg, 2)
+	handler := newClientHandler(messages, t.TempDir())
+	handler.beginPromptOutput()
+	input := "before" + string([]byte{0xff, 0xfe}) + "after"
+	if err := handler.SessionUpdate(context.Background(), sdk.SessionNotification{
+		Update: sdk.UpdateAgentMessageText(input),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := <-messages
+	text, ok := message.(AgentTextMsg)
+	if !ok {
+		t.Fatalf("queued message = %T, want AgentTextMsg", message)
+	}
+	if !utf8.ValidString(text.Text) || text.Text != strings.ToValidUTF8(input, "�") {
+		t.Fatalf("queued text = %q, want normalized UTF-8", text.Text)
+	}
+}
+
+func TestNormalizeAgentStreamTextCapsRawInputBeforeNormalization(t *testing.T) {
+	const want = maxACPStreamOutputBytes + utf8.UTFMax
+	input := strings.Repeat("x", want+1024)
+	if got := normalizeAgentStreamText(input); len(got) != want || !utf8.ValidString(got) {
+		t.Fatalf("normalized input = %d valid=%t, want %d valid bytes", len(got), utf8.ValidString(got), want)
+	}
+}
+
 func TestSessionUpdateBoundsToolCallDiffBeforeQueue(t *testing.T) {
 	messages := make(chan tea.Msg, 1)
 	handler := newClientHandler(messages, t.TempDir())

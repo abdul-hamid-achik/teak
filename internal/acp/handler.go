@@ -152,13 +152,25 @@ func (h *ClientHandler) setExecutionPolicy(policy execpolicy.Policy) {
 	h.executionPolicy = policy
 }
 
-// sendNonBlocking sends a message to msgChan with a timeout to prevent deadlocks.
-// If the channel is full, it logs a warning and drops the message.
-func (h *ClientHandler) sendNonBlocking(msg tea.Msg) {
+// sendNonBlocking sends a message to msgChan with a timeout to prevent
+// deadlocks. The common case avoids allocating a timer. If the channel stays
+// full, it logs a warning, drops the message, and reports failure to callers
+// that need to stop a multi-message stream.
+func (h *ClientHandler) sendNonBlocking(msg tea.Msg) bool {
 	select {
 	case h.msgChan <- msg:
-	case <-time.After(msgChanTimeout):
+		return true
+	default:
+	}
+
+	timer := time.NewTimer(msgChanTimeout)
+	defer timer.Stop()
+	select {
+	case h.msgChan <- msg:
+		return true
+	case <-timer.C:
 		log.Warn("acp: dropped message (channel full)", "type", fmt.Sprintf("%T", msg))
+		return false
 	}
 }
 
@@ -216,6 +228,47 @@ func (h *ClientHandler) boundStreamText(input string) string {
 	h.streamBytes = limit
 	h.streamTruncated = true
 	return prefix + acpStreamTruncatedMarker
+}
+
+// normalizeAgentStreamText avoids scanning an arbitrarily large raw payload
+// merely to normalize UTF-8. One extra rune-width beyond the aggregate budget
+// is enough for boundStreamText to observe overflow and add its marker.
+func normalizeAgentStreamText(input string) string {
+	const rawLimit = maxACPStreamOutputBytes + utf8.UTFMax
+	if len(input) > rawLimit {
+		input = input[:rawLimit]
+	}
+	return strings.ToValidUTF8(input, "�")
+}
+
+// sendAgentStreamText normalizes agent-controlled text and divides it into
+// queue messages small enough for the panel to process within one Update.
+// strings.Clone prevents every queued substring from retaining the original
+// multi-megabyte SDK payload.
+func (h *ClientHandler) sendAgentStreamText(input string, thought bool) {
+	text := h.boundStreamText(normalizeAgentStreamText(input))
+	for text != "" {
+		end := minInt(len(text), MaxAgentStreamChunkBytes)
+		if end < len(text) {
+			for end > 0 && !utf8.RuneStart(text[end]) {
+				end--
+			}
+		}
+		if end == 0 {
+			return
+		}
+		part := strings.Clone(text[:end])
+		var sent bool
+		if thought {
+			sent = h.sendNonBlocking(AgentThoughtMsg{Text: part})
+		} else {
+			sent = h.sendNonBlocking(AgentTextMsg{Text: part})
+		}
+		if !sent {
+			return
+		}
+		text = text[end:]
+	}
 }
 
 // boundToolCallContents copies tool-call payloads before they enter the
@@ -438,16 +491,10 @@ func (h *ClientHandler) SessionUpdate(_ context.Context, params sdk.SessionNotif
 
 	switch {
 	case u.AgentMessageChunk != nil:
-		text := h.boundStreamText(extractText(u.AgentMessageChunk.Content))
-		if text != "" {
-			h.sendNonBlocking(AgentTextMsg{Text: text})
-		}
+		h.sendAgentStreamText(extractText(u.AgentMessageChunk.Content), false)
 
 	case u.AgentThoughtChunk != nil:
-		text := h.boundStreamText(extractText(u.AgentThoughtChunk.Content))
-		if text != "" {
-			h.sendNonBlocking(AgentThoughtMsg{Text: text})
-		}
+		h.sendAgentStreamText(extractText(u.AgentThoughtChunk.Content), true)
 
 	case u.ToolCall != nil:
 		h.sendNonBlocking(AgentToolCallMsg{

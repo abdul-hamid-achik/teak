@@ -62,6 +62,9 @@ func TestAgentStreamingContentIsBoundedAndValidUTF8(t *testing.T) {
 
 	model, _ = model.Update(acp.AgentTextMsg{Text: oversized})
 
+	if model.streamBytes > acp.MaxAgentStreamChunkBytes {
+		t.Fatalf("one Update consumed %d stream bytes, want at most %d", model.streamBytes, acp.MaxAgentStreamChunkBytes)
+	}
 	if model.streamBytes > maxStreamContentBytes {
 		t.Fatalf("streamBytes = %d, want at most %d", model.streamBytes, maxStreamContentBytes)
 	}
@@ -71,6 +74,21 @@ func TestAgentStreamingContentIsBoundedAndValidUTF8(t *testing.T) {
 	for _, block := range model.streamBlocks {
 		if !utf8.ValidString(block.Content) {
 			t.Fatal("bounded stream content is not valid UTF-8")
+		}
+	}
+}
+
+func BenchmarkAgentStreamUpdateRejectsOversizedRawChunk(b *testing.B) {
+	base := New(ui.DefaultTheme())
+	message := acp.AgentTextMsg{Text: strings.Repeat("x", 4<<20)}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(message.Text)))
+	b.ResetTimer()
+	for b.Loop() {
+		model := base
+		updated, _ := model.Update(message)
+		if updated.streamBytes != acp.MaxAgentStreamChunkBytes {
+			b.Fatalf("stream bytes = %d, want %d", updated.streamBytes, acp.MaxAgentStreamChunkBytes)
 		}
 	}
 }

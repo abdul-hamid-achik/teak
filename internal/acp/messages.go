@@ -6,6 +6,11 @@ import (
 	sdk "github.com/coder/acp-go-sdk"
 )
 
+// MaxAgentStreamChunkBytes is the largest streamed text payload placed on the
+// Bubble Tea queue. Keeping this shared with the panel bounds the work of one
+// Update call even when an ACP implementation emits a multi-megabyte update.
+const MaxAgentStreamChunkBytes = 64 << 10
+
 // AgentTextMsg carries a streaming text chunk from the agent.
 type AgentTextMsg struct {
 	Text string

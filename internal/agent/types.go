@@ -35,7 +35,7 @@ const (
 	// streamRenderBlockBytes bounds the amount of text that a single ACP
 	// chunk can make the renderer revisit. Splitting only affects the
 	// renderer's internal blocks; the final prompt still concatenates them.
-	streamRenderBlockBytes = 64 << 10
+	streamRenderBlockBytes = acp.MaxAgentStreamChunkBytes
 	maxToolCalls           = 64
 	maxToolContentBytes    = 32 << 10
 	maxPendingWrites       = 32

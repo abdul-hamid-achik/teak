@@ -482,6 +482,21 @@ func truncateValidUTF8Bytes(value string, limit int) string {
 	return value[:end]
 }
 
+// boundStreamUpdateText caps raw internal messages before UTF-8 normalization.
+// ACP traffic is already split by ClientHandler, but this defensive boundary
+// keeps tests and other in-process producers from making Update scan an
+// arbitrarily large string.
+func boundStreamUpdateText(value string) string {
+	if len(value) > acp.MaxAgentStreamChunkBytes {
+		end := acp.MaxAgentStreamChunkBytes
+		for end > 0 && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		value = value[:end]
+	}
+	return truncateUTF8Bytes(value, acp.MaxAgentStreamChunkBytes)
+}
+
 // ClearHistory clears all chat messages and state.
 func (m *Model) ClearHistory() {
 	m.messages = nil
@@ -504,7 +519,8 @@ func (m *Model) appendToStreamBlock(kind StreamBlockKind, text string) {
 	if m.streamBytes >= maxStreamContentBytes {
 		return
 	}
-	text = truncateUTF8Bytes(text, maxStreamContentBytes-m.streamBytes)
+	text = boundStreamUpdateText(text)
+	text = truncateValidUTF8Bytes(text, maxStreamContentBytes-m.streamBytes)
 	if text == "" {
 		return
 	}
@@ -513,7 +529,7 @@ func (m *Model) appendToStreamBlock(kind StreamBlockKind, text string) {
 		n := len(m.streamBlocks)
 		if n > 0 && m.streamBlocks[n-1].Kind == kind && m.streamBlocks[n-1].ToolCall == nil && len(m.streamBlocks[n-1].Content) < streamRenderBlockBytes {
 			available := streamRenderBlockBytes - len(m.streamBlocks[n-1].Content)
-			part := truncateUTF8Bytes(text, available)
+			part := truncateValidUTF8Bytes(text, available)
 			if part != "" {
 				firstChanged = min(firstChanged, n-1)
 				m.streamBlocks[n-1].Content += part
@@ -528,7 +544,7 @@ func (m *Model) appendToStreamBlock(kind StreamBlockKind, text string) {
 		if n >= maxStreamBlocks {
 			break
 		}
-		part := truncateUTF8Bytes(text, streamRenderBlockBytes)
+		part := truncateValidUTF8Bytes(text, streamRenderBlockBytes)
 		if part == "" {
 			break
 		}

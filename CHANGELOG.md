@@ -4,6 +4,20 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.23] - 2026-08-05
+
+### Bounded ACP Stream Ingestion
+
+- Agent text and thought updates are normalized and split into ordered 64 KiB
+  queue messages before they reach Bubble Tea, while preserving the existing
+  4 MiB per-prompt budget and visible truncation marker.
+- The panel defensively caps direct internal stream messages before UTF-8
+  normalization, so a malformed or multi-megabyte payload cannot make one
+  `Update()` call scan or split document-sized input.
+- Processing a raw 4 MiB panel message now takes about 30 microseconds and 32
+  bytes on an Apple M5, down from roughly 17.4 ms and 2.1 KiB. Normal queue
+  sends also avoid allocating a timeout timer unless backpressure occurs.
+
 ## [0.10.22] - 2026-08-05
 
 ### Ordered and Asynchronous ACP Prompt Completion
