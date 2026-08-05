@@ -1493,6 +1493,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case acp.AgentPromptResponseMsg:
 		return m.handleAgentPromptResponse(msg)
 
+	case agent.PromptFinalizedMsg:
+		var cmd tea.Cmd
+		m.agentPanel, cmd = m.agentPanel.Update(msg)
+		return m, cmd
+
 	case acp.AgentErrorMsg:
 		return m.handleAgentError(msg)
 
@@ -2900,8 +2905,9 @@ func (m Model) handleAgentPromptResponse(msg acp.AgentPromptResponseMsg) (tea.Mo
 	if m.acpMgr != nil && !m.acpMgr.IsCurrentPromptGeneration(msg.Generation) {
 		return m, nil
 	}
-	m.agentPanel, _ = m.agentPanel.Update(msg)
-	return m, nil
+	var cmd tea.Cmd
+	m.agentPanel, cmd = m.agentPanel.Update(msg)
+	return m, cmd
 }
 
 func (m Model) handleAgentError(msg acp.AgentErrorMsg) (tea.Model, tea.Cmd) {

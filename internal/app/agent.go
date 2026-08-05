@@ -38,6 +38,7 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 		return m, m.listenACP()
 	}
 
+	var followup tea.Cmd
 	switch inner := msg.msg.(type) {
 	case acp.AgentTextMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
@@ -67,8 +68,9 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			m.relayout()
 		}
 	case acp.AgentPromptResponseMsg:
-		updated, _ := m.handleAgentPromptResponse(inner)
+		updated, cmd := m.handleAgentPromptResponse(inner)
 		m = updated.(Model)
+		followup = cmd
 	case acp.AgentSessionInfoMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentModelChangedMsg:
@@ -97,7 +99,7 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, m.listenACP()
+	return m, tea.Batch(followup, m.listenACP())
 }
 
 // handleFileReadRequest captures only immutable editor state in Update. Path
@@ -277,7 +279,7 @@ func (m Model) sendAgentPrompt(text string) tea.Cmd {
 	}
 	// Clear tagged files after sending
 	m.agentPanel.ClearTaggedFiles()
-	return m.acpMgr.Prompt(text, files)
+	return m.acpMgr.PromptQueued(text, files)
 }
 
 // startAgent starts the ACP agent subprocess.

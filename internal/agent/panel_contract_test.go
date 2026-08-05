@@ -91,11 +91,26 @@ func TestAgentPromptResponseCommitsStreamAndResetsTransientState(t *testing.T) {
 	})
 
 	model, cmd := model.Update(acp.AgentPromptResponseMsg{Err: errors.New("agent unavailable")})
+	if cmd == nil {
+		t.Fatal("prompt completion did not schedule asynchronous finalization")
+	}
+	if !model.loading || model.state != AgentThinking || len(model.streamBlocks) != 0 || len(model.toolCallMap) != 0 {
+		t.Fatalf("transient state while finalizing: loading=%t state=%v blocks=%d tools=%d", model.loading, model.state, len(model.streamBlocks), len(model.toolCallMap))
+	}
+	if len(model.messages) != 0 {
+		t.Fatalf("prompt response projected messages synchronously: %#v", model.messages)
+	}
+
+	ready := cmd()
+	if _, ok := ready.(PromptFinalizedMsg); !ok {
+		t.Fatalf("finalization command returned %T, want PromptFinalizedMsg", ready)
+	}
+	model, cmd = model.Update(ready)
 	if cmd != nil {
-		t.Fatal("prompt completion returned an unexpected command")
+		t.Fatal("prepared prompt completion returned an unexpected command")
 	}
 	if model.loading || model.state != AgentIdle || len(model.streamBlocks) != 0 || len(model.toolCallMap) != 0 {
-		t.Fatalf("transient state after prompt response: loading=%t state=%v blocks=%d tools=%d", model.loading, model.state, len(model.streamBlocks), len(model.toolCallMap))
+		t.Fatalf("transient state after prepared response: loading=%t state=%v blocks=%d tools=%d", model.loading, model.state, len(model.streamBlocks), len(model.toolCallMap))
 	}
 	if len(model.messages) != 2 {
 		t.Fatalf("messages = %d, want user-visible agent response plus error", len(model.messages))
@@ -111,6 +126,57 @@ func TestAgentPromptResponseCommitsStreamAndResetsTransientState(t *testing.T) {
 	}
 	if !sawAnswer || !sawError {
 		t.Fatalf("committed messages = %#v, want answer and error", model.messages)
+	}
+}
+
+func TestAgentPromptFinalizationRejectsSupersededResult(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.loading = true
+	model.state = AgentThinking
+	model, _ = model.Update(acp.AgentTextMsg{Text: "superseded"})
+
+	model, firstCmd := model.Update(acp.AgentPromptResponseMsg{})
+	if firstCmd == nil {
+		t.Fatal("first response did not schedule finalization")
+	}
+	model, _ = model.Update(acp.AgentTextMsg{Text: "latest"})
+	model, latestCmd := model.Update(acp.AgentPromptResponseMsg{})
+	if latestCmd == nil {
+		t.Fatal("latest response did not schedule finalization")
+	}
+
+	model, _ = model.Update(firstCmd())
+	if !model.loading || len(model.messages) != 0 {
+		t.Fatalf("superseded result changed panel state: loading=%t messages=%#v", model.loading, model.messages)
+	}
+	model, _ = model.Update(latestCmd())
+	if model.loading || model.state != AgentIdle {
+		t.Fatalf("latest result left panel busy: loading=%t state=%v", model.loading, model.state)
+	}
+	if len(model.messages) != 1 || model.messages[0].Content != "latest" {
+		t.Fatalf("messages = %#v, want only latest finalized response", model.messages)
+	}
+}
+
+func TestClearHistoryDiscardsPendingPromptFinalization(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.loading = true
+	model.state = AgentThinking
+	model, _ = model.Update(acp.AgentTextMsg{Text: "discard me"})
+
+	model, cmd := model.Update(acp.AgentPromptResponseMsg{})
+	if cmd == nil {
+		t.Fatal("response did not schedule finalization")
+	}
+	model.ClearHistory()
+	model, _ = model.Update(cmd())
+	if model.loading || model.state != AgentIdle {
+		t.Fatalf("discarded finalization left panel busy: loading=%t state=%v", model.loading, model.state)
+	}
+	if len(model.messages) != 0 {
+		t.Fatalf("cleared response reappeared: %#v", model.messages)
 	}
 }
 

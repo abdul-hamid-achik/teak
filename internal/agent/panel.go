@@ -26,6 +26,7 @@ type Model struct {
 	theme         ui.Theme
 
 	messages     []ChatMessage
+	messageSizes []int
 	streamBlocks []StreamBlock
 	toolCallMap  map[string]*ToolCallState
 	messageBytes int
@@ -39,6 +40,10 @@ type Model struct {
 	loading   bool
 	connected bool
 	state     AgentState
+
+	promptFinalizeGeneration uint64
+	promptFinalizing         bool
+	discardFinalizedPrompt   bool
 
 	permission  *PermissionPrompt
 	alwaysAllow map[string]bool
@@ -340,6 +345,10 @@ func (m *Model) AddSystemMessage(text string) {
 }
 
 func (m *Model) appendChatMessage(msg ChatMessage) {
+	m.appendPreparedChatMessage(prepareChatMessage(msg))
+}
+
+func prepareChatMessage(msg ChatMessage) preparedChatMessage {
 	msg.Content = truncateUTF8Bytes(msg.Content, maxChatMessageBytes)
 	if len(msg.ToolCalls) > maxToolCalls {
 		msg.ToolCalls = msg.ToolCalls[:maxToolCalls]
@@ -347,16 +356,26 @@ func (m *Model) appendChatMessage(msg ChatMessage) {
 	for i, toolCall := range msg.ToolCalls {
 		msg.ToolCalls[i] = boundedToolCall(toolCall)
 	}
+	return preparedChatMessage{message: msg, size: chatMessageSize(msg)}
+}
 
-	size := chatMessageSize(msg)
-	m.messages = append(m.messages, msg)
-	m.messageBytes += size
+func (m *Model) appendPreparedChatMessage(prepared preparedChatMessage) {
+	m.messages = append(m.messages, prepared.message)
+	m.messageSizes = append(m.messageSizes, prepared.size)
+	m.messageBytes += prepared.size
 	for len(m.messages) > maxChatMessages || m.messageBytes > maxChatHistoryBytes {
 		if len(m.messages) == 0 {
 			m.messageBytes = 0
+			m.messageSizes = nil
 			break
 		}
-		m.messageBytes -= chatMessageSize(m.messages[0])
+		removedSize := 0
+		if len(m.messageSizes) > 0 {
+			removedSize = m.messageSizes[0]
+			m.messageSizes[0] = 0
+			m.messageSizes = m.messageSizes[1:]
+		}
+		m.messageBytes -= removedSize
 		m.messages[0] = ChatMessage{}
 		m.messages = m.messages[1:]
 	}
@@ -446,6 +465,13 @@ func truncateUTF8Bytes(value string, limit int) string {
 		return ""
 	}
 	value = strings.ToValidUTF8(value, "�")
+	return truncateValidUTF8Bytes(value, limit)
+}
+
+func truncateValidUTF8Bytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(value) <= limit {
 		return value
 	}
@@ -459,10 +485,14 @@ func truncateUTF8Bytes(value string, limit int) string {
 // ClearHistory clears all chat messages and state.
 func (m *Model) ClearHistory() {
 	m.messages = nil
+	m.messageSizes = nil
 	m.streamBlocks = nil
 	m.toolCallMap = make(map[string]*ToolCallState)
 	m.messageBytes = 0
 	m.streamBytes = 0
+	if m.promptFinalizing {
+		m.discardFinalizedPrompt = true
+	}
 	m.scrollY = 0
 	m.autoScroll = true
 	m.invalidateChatCache()
@@ -720,32 +750,33 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case acp.AgentPromptResponseMsg:
-		if msg.Err != nil {
-			m.AddSystemMessage("Agent request failed: " + msg.Err.Error())
-		}
-		var toolCalls []*ToolCallState
-		var textParts []string
-		for _, block := range m.streamBlocks {
-			switch block.Kind {
-			case BlockText:
-				textParts = append(textParts, block.Content)
-			case BlockToolCall:
-				if block.ToolCall != nil {
-					toolCalls = append(toolCalls, block.ToolCall)
-				}
-			}
-		}
-		content := strings.Join(textParts, "")
-		if content != "" || len(toolCalls) > 0 {
-			m.appendChatMessage(ChatMessage{
-				Role:      RoleAgent,
-				Content:   content,
-				ToolCalls: toolCalls,
-			})
-		}
+		blocks := m.streamBlocks
+		streamBytes := m.streamBytes
 		m.streamBlocks = nil
 		m.streamBytes = 0
 		m.toolCallMap = make(map[string]*ToolCallState)
+		m.promptFinalizeGeneration++
+		m.promptFinalizing = true
+		m.discardFinalizedPrompt = false
+		m.loading = true
+		m.state = AgentThinking
+		m.invalidateChatCache()
+		if m.autoScroll {
+			m.scrollY = m.maxScroll + 10
+		}
+		return m, schedulePromptFinalization(m.promptFinalizeGeneration, blocks, streamBytes, msg.Err)
+
+	case PromptFinalizedMsg:
+		if !m.promptFinalizing || msg.generation != m.promptFinalizeGeneration {
+			return m, nil
+		}
+		if !m.discardFinalizedPrompt {
+			for _, prepared := range msg.messages {
+				m.appendPreparedChatMessage(prepared)
+			}
+		}
+		m.promptFinalizing = false
+		m.discardFinalizedPrompt = false
 		m.loading = false
 		m.state = AgentIdle
 		m.invalidateChatCache()
@@ -875,6 +906,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.input.SetValue("")
 		m.loading = true
 		m.state = AgentThinking
+		m.discardFinalizedPrompt = false
 		m.autoScroll = true
 		m.invalidateChatCache()
 		return m, m.spinner.Tick
@@ -940,6 +972,54 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func schedulePromptFinalization(generation uint64, blocks []StreamBlock, streamBytes int, responseErr error) tea.Cmd {
+	return func() tea.Msg {
+		return PromptFinalizedMsg{
+			generation: generation,
+			messages:   preparePromptResponse(blocks, streamBytes, responseErr),
+		}
+	}
+}
+
+func preparePromptResponse(blocks []StreamBlock, streamBytes int, responseErr error) []preparedChatMessage {
+	messages := make([]preparedChatMessage, 0, 2)
+	if responseErr != nil {
+		messages = append(messages, prepareChatMessage(ChatMessage{
+			Role:    RoleSystem,
+			Content: "Agent request failed: " + responseErr.Error(),
+		}))
+	}
+
+	var content strings.Builder
+	content.Grow(min(streamBytes, maxChatMessageBytes))
+	toolCalls := make([]*ToolCallState, 0, min(len(blocks), maxToolCalls))
+	textComplete := false
+	for _, block := range blocks {
+		switch block.Kind {
+		case BlockText:
+			if textComplete {
+				continue
+			}
+			remaining := maxChatMessageBytes - content.Len()
+			validContent := strings.ToValidUTF8(block.Content, "�")
+			part := truncateValidUTF8Bytes(validContent, remaining)
+			content.WriteString(part)
+			if len(part) < len(validContent) || content.Len() >= maxChatMessageBytes {
+				textComplete = true
+			}
+		case BlockToolCall:
+			if block.ToolCall != nil && len(toolCalls) < maxToolCalls {
+				toolCalls = append(toolCalls, boundedToolCall(block.ToolCall))
+			}
+		}
+	}
+	if content.Len() > 0 || len(toolCalls) > 0 {
+		message := ChatMessage{Role: RoleAgent, Content: content.String(), ToolCalls: toolCalls}
+		messages = append(messages, preparedChatMessage{message: message, size: chatMessageSize(message)})
+	}
+	return messages
 }
 
 // lastVisibleToolCall returns the most recent tool call (streaming or completed).

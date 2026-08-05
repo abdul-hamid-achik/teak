@@ -406,6 +406,48 @@ func BenchmarkAgentViewDirtyMaxHistoryFullRebuild(b *testing.B) {
 	}
 }
 
+func BenchmarkAgentPromptResponseDispatchMaxStream(b *testing.B) {
+	blocks, streamBytes := benchmarkPromptStream()
+	base := New(ui.DefaultTheme())
+	base.loading = true
+	base.state = AgentThinking
+	base.streamBlocks = blocks
+	base.streamBytes = streamBytes
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		model := base
+		_, cmd := model.Update(acp.AgentPromptResponseMsg{})
+		if cmd == nil {
+			b.Fatal("prompt response did not dispatch finalization")
+		}
+	}
+}
+
+func BenchmarkAgentPromptResponseProjectionMaxStream(b *testing.B) {
+	blocks, streamBytes := benchmarkPromptStream()
+	b.ReportAllocs()
+	b.SetBytes(int64(streamBytes))
+	b.ResetTimer()
+	for b.Loop() {
+		messages := preparePromptResponse(blocks, streamBytes, nil)
+		if len(messages) != 1 || len(messages[0].message.Content) != maxChatMessageBytes {
+			b.Fatalf("prepared response = %#v", messages)
+		}
+	}
+}
+
+func benchmarkPromptStream() ([]StreamBlock, int) {
+	const blockBytes = streamRenderBlockBytes
+	block := strings.Repeat("x", blockBytes)
+	blocks := make([]StreamBlock, maxStreamContentBytes/blockBytes)
+	for i := range blocks {
+		blocks[i] = StreamBlock{Kind: BlockText, Content: block}
+	}
+	return blocks, len(block) * len(blocks)
+}
+
 func benchmarkMaxHistoryModel(b *testing.B) Model {
 	b.Helper()
 	model := New(ui.DefaultTheme())

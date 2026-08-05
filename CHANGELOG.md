@@ -4,6 +4,22 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.22] - 2026-08-05
+
+### Ordered and Asynchronous ACP Prompt Completion
+
+- Agent prompt finalization now detaches its bounded stream snapshot in
+  `Update()` and prepares text, tool calls, UTF-8 truncation, and history sizes
+  in a generated background command. Superseded results are rejected and
+  clearing history while preparation is pending cannot resurrect old output.
+- The maximum 2 MiB completion dispatch takes about 0.8 microseconds and 112
+  bytes on an Apple M5, down from roughly 1.02–1.04 ms and 2.10 MiB of
+  synchronous work. Background projection takes about 0.27 ms and 525 KiB.
+- Interactive ACP prompts now place their terminal result on the same FIFO as
+  streaming notifications. This guarantees all already-emitted thought, text,
+  and tool updates reach the panel before completion is finalized, while the
+  direct `Prompt` API remains available to non-TUI consumers.
+
 ## [0.10.21] - 2026-08-05
 
 ### Fast Diff Rendering and Responsive Branch Selection

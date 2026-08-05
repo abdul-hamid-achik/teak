@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -62,10 +63,52 @@ func TestManagerEndToEndWithFakeACP(t *testing.T) {
 		t.Fatalf("session id = %q, want fixture-session", sessionInfo.SessionID)
 	}
 
-	msg := mgr.Prompt("inspect this workspace", nil)()
-	response, ok := msg.(AgentPromptResponseMsg)
-	if !ok {
-		t.Fatalf("prompt returned %T, want AgentPromptResponseMsg", msg)
+	directMsg := mgr.Prompt("inspect this workspace directly", nil)()
+	directResponse, ok := directMsg.(AgentPromptResponseMsg)
+	if !ok || directResponse.Err != nil || directResponse.StopReason != sdk.StopReasonEndTurn {
+		t.Fatalf("direct prompt = %#v (%T), want successful end_turn response", directMsg, directMsg)
+	}
+	var directThought, directText string
+	directDeadline := time.After(2 * time.Second)
+	for directThought == "" || directText == "" {
+		select {
+		case incoming := <-mgr.MsgChan():
+			switch value := incoming.(type) {
+			case AgentThoughtMsg:
+				directThought += value.Text
+			case AgentTextMsg:
+				directText += value.Text
+			}
+		case <-directDeadline:
+			t.Fatalf("timed out draining direct prompt stream (thought=%q text=%q)", directThought, directText)
+		}
+	}
+
+	if msg := mgr.PromptQueued("inspect this workspace", nil)(); msg != nil {
+		t.Fatalf("queued prompt returned %T, want channel delivery", msg)
+	}
+
+	var thought, text string
+	var response *AgentPromptResponseMsg
+	var eventOrder []string
+	deadline = time.After(2 * time.Second)
+	for response == nil {
+		select {
+		case incoming := <-mgr.MsgChan():
+			switch value := incoming.(type) {
+			case AgentThoughtMsg:
+				thought += value.Text
+				eventOrder = append(eventOrder, "thought")
+			case AgentTextMsg:
+				text += value.Text
+				eventOrder = append(eventOrder, "text")
+			case AgentPromptResponseMsg:
+				response = &value
+				eventOrder = append(eventOrder, "response")
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for queued prompt completion (order=%v thought=%q text=%q)", eventOrder, thought, text)
+		}
 	}
 	if response.Err != nil {
 		t.Fatalf("prompt failed: %v", response.Err)
@@ -73,35 +116,26 @@ func TestManagerEndToEndWithFakeACP(t *testing.T) {
 	if response.StopReason != sdk.StopReasonEndTurn {
 		t.Fatalf("stop reason = %q, want end_turn", response.StopReason)
 	}
-
-	var thought, text string
-	deadline = time.After(2 * time.Second)
-	for thought == "" || text == "" {
-		select {
-		case incoming := <-mgr.MsgChan():
-			switch value := incoming.(type) {
-			case AgentThoughtMsg:
-				thought += value.Text
-			case AgentTextMsg:
-				text += value.Text
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for streamed output (thought=%q text=%q)", thought, text)
-		}
-	}
 	if thought != "fixture thought" || text != "fixture response" {
 		t.Fatalf("streamed output = thought %q/text %q, want fixture messages", thought, text)
 	}
+	if len(eventOrder) != 3 || eventOrder[len(eventOrder)-1] != "response" ||
+		!slices.Contains(eventOrder[:len(eventOrder)-1], "thought") ||
+		!slices.Contains(eventOrder[:len(eventOrder)-1], "text") {
+		t.Fatalf("ACP event order = %v, want both stream events before response", eventOrder)
+	}
 
 	records := runs.List()
-	if len(records) != 1 {
-		t.Fatalf("runtime records = %d, want 1", len(records))
+	if len(records) != 2 {
+		t.Fatalf("runtime records = %d, want 2", len(records))
 	}
-	if records[0].Status != agentruntime.RunCompleted {
-		t.Fatalf("runtime status = %q, want completed", records[0].Status)
-	}
-	if records[0].Handoff == nil || !records[0].Handoff.Verified {
-		t.Fatal("completed ACP run must contain a verified handoff")
+	for _, record := range records {
+		if record.Status != agentruntime.RunCompleted {
+			t.Fatalf("runtime status = %q, want completed", record.Status)
+		}
+		if record.Handoff == nil || !record.Handoff.Verified {
+			t.Fatal("completed ACP run must contain a verified handoff")
+		}
 	}
 }
 

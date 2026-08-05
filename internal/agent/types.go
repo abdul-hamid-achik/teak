@@ -56,6 +56,19 @@ type ChatMessage struct {
 	ToolCalls []*ToolCallState
 }
 
+// PromptFinalizedMsg carries a prompt transcript prepared outside Bubble
+// Tea's Update loop. Its payload is intentionally private: the app only routes
+// the message back to the panel that owns the transcript.
+type PromptFinalizedMsg struct {
+	generation uint64
+	messages   []preparedChatMessage
+}
+
+type preparedChatMessage struct {
+	message ChatMessage
+	size    int
+}
+
 // ToolCallState tracks a tool call's lifecycle.
 type ToolCallState struct {
 	ID        sdk.ToolCallId

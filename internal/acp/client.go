@@ -29,6 +29,7 @@ const (
 	acpCancelTimeout        = 750 * time.Millisecond
 	acpSessionChangeTimeout = 5 * time.Second
 	acpPromptTimeout        = 10 * time.Minute
+	promptQueueTimeout      = 5 * time.Second
 	acpHeartbeatInterval    = 15 * time.Second
 	maxTaggedFiles          = 32
 	maxTaggedFileBytes      = 256 << 10
@@ -326,6 +327,46 @@ func (m *Manager) Prompt(text string, files []TaggedFile) tea.Cmd {
 		return m.promptTracked(runManager, text, files, connectionGeneration)
 	}
 	return m.promptWithContext(context.Background(), text, files)
+}
+
+// PromptQueued runs Prompt but delivers its terminal result through MsgChan.
+// The interactive app uses this form so the response is ordered after every
+// streaming notification the ACP handler already placed in the same FIFO.
+// Prompt remains available to callers that explicitly consume its return
+// value without running the TUI listener.
+func (m *Manager) PromptQueued(text string, files []TaggedFile) tea.Cmd {
+	prompt := m.Prompt(text, files)
+	if prompt == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg := prompt()
+		if msg == nil {
+			return nil
+		}
+		if m.enqueuePromptResult(msg) {
+			return nil
+		}
+		// A stopped or unconsumed UI must not strand the command forever. The
+		// direct fallback preserves the terminal result, though normal Teak
+		// operation always has an ACP listener draining the queue.
+		return msg
+	}
+}
+
+func (m *Manager) enqueuePromptResult(msg tea.Msg) bool {
+	if m.msgChan == nil {
+		return false
+	}
+	timer := time.NewTimer(promptQueueTimeout)
+	defer timer.Stop()
+	select {
+	case m.msgChan <- msg:
+		return true
+	case <-timer.C:
+		log.Warn("acp: prompt result queue timed out", "type", fmt.Sprintf("%T", msg))
+		return false
+	}
 }
 
 func (m *Manager) promptTracked(runManager *agentruntime.Manager, text string, files []TaggedFile, connectionGeneration uint64) tea.Cmd {

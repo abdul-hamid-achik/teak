@@ -300,6 +300,26 @@ func TestManager_PromptBeforeStart(t *testing.T) {
 	}
 }
 
+func TestManager_PromptQueuedBeforeStartDeliversErrorThroughMessageChannel(t *testing.T) {
+	mgr := NewManager("/tmp", "echo", nil)
+	cmd := mgr.PromptQueued("hello", nil)
+	if cmd == nil {
+		t.Fatal("PromptQueued() returned a nil command")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("PromptQueued command returned %T, want channel delivery", msg)
+	}
+	select {
+	case msg := <-mgr.MsgChan():
+		response, ok := msg.(AgentPromptResponseMsg)
+		if !ok || response.Err == nil {
+			t.Fatalf("queued message = %#v (%T), want failed prompt response", msg, msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queued prompt response")
+	}
+}
+
 func TestManager_SetModelBeforeStart(t *testing.T) {
 	mgr := NewManager("/tmp", "echo", nil)
 	cmd := mgr.SetModel("some-model")

@@ -20,10 +20,18 @@ func TestDirectAgentPromptResponseCommitsStream(t *testing.T) {
 	}
 
 	updatedAny, cmd := m.Update(acp.AgentPromptResponseMsg{StopReason: sdk.StopReason("end_turn")})
-	if cmd != nil {
-		t.Fatal("direct prompt completion emitted an unexpected command")
+	if cmd == nil {
+		t.Fatal("direct prompt completion did not schedule finalization")
 	}
 	updated := updatedAny.(Model)
+	if updated.agentPanel.State() != agent.AgentThinking {
+		t.Fatalf("agent state = %v, want thinking while finalizing", updated.agentPanel.State())
+	}
+	updatedAny, cmd = updated.Update(cmd())
+	if cmd != nil {
+		t.Fatal("prepared prompt completion emitted an unexpected command")
+	}
+	updated = updatedAny.(Model)
 	if updated.agentPanel.State() != agent.AgentIdle {
 		t.Fatalf("agent state = %v, want idle after direct prompt completion", updated.agentPanel.State())
 	}
