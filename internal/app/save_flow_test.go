@@ -14,7 +14,7 @@ import (
 	"teak/internal/text"
 )
 
-func newSaveFlowModel(t *testing.T, cfg config.Config, rootDir string) Model {
+func newSaveFlowModel(t testing.TB, cfg config.Config, rootDir string) Model {
 	t.Helper()
 
 	cfg.Session.Enabled = false
@@ -33,7 +33,7 @@ func newSaveFlowModel(t *testing.T, cfg config.Config, rootDir string) Model {
 	return model
 }
 
-func addDirtyEditor(t *testing.T, model *Model, fileName, diskContent, bufferContent string) int {
+func addDirtyEditor(t testing.TB, model *Model, fileName, diskContent, bufferContent string) int {
 	t.Helper()
 
 	path := filepath.Join(model.rootDir, fileName)
@@ -156,6 +156,7 @@ func TestFormatOnSaveAppliedEditsThenSaves(t *testing.T) {
 		},
 	})
 	updated := updatedAny.(Model)
+	updated, cmd = completeFormatPreparation(t, updated, cmd)
 
 	if got := updated.editors[0].Buffer.Content(); got != "fmt.Println(1)\n" {
 		t.Fatalf("formatted buffer = %q", got)
@@ -714,7 +715,7 @@ func TestSaveAsFormatsSnapshotBeforeWritingNewPath(t *testing.T) {
 	}
 	req := model.pendingSaves[requestID]
 
-	formattedAny, saveCmd := model.Update(lsp.FormatResultMsg{
+	formattedAny, prepareCmd := model.Update(lsp.FormatResultMsg{
 		RequestID:      requestID,
 		FilePath:       newPath,
 		BaseVersion:    req.SnapshotVersion,
@@ -728,6 +729,7 @@ func TestSaveAsFormatsSnapshotBeforeWritingNewPath(t *testing.T) {
 		}},
 	})
 	formatted := formattedAny.(Model)
+	formatted, saveCmd := completeFormatPreparation(t, formatted, prepareCmd)
 	if got := formatted.editors[0].Buffer.FilePath; got != oldPath {
 		t.Fatalf("format must not redirect buffer before Save As writes: got %q, want %q", got, oldPath)
 	}

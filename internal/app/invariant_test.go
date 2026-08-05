@@ -373,3 +373,44 @@ func TestCompletionHandlerOnlyDispatchesPreparedItems(t *testing.T) {
 		t.Fatal("handleCompletionResult does not dispatch prepareCompletionItemsCmd")
 	}
 }
+
+func TestFormatHandlerOnlyDispatchesPreparation(t *testing.T) {
+	found := false
+	dispatches := false
+	banned := map[string]bool{
+		"validateFormattingTextEdits": true,
+		"applyTextEditsToBuffer":      true,
+	}
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "handleFormatResult" {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				called, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if called.Name == "prepareFormatCmd" {
+					dispatches = true
+				}
+				if banned[called.Name] {
+					t.Errorf("%s: format validation and application must be prepared before Update", fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	})
+	if !found {
+		t.Fatal("format preparation invariant did not find handleFormatResult")
+	}
+	if !dispatches {
+		t.Fatal("handleFormatResult does not dispatch prepareFormatCmd")
+	}
+}

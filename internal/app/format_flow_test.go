@@ -28,6 +28,10 @@ func TestManualFormatUpdatesAppMutationState(t *testing.T) {
 		}},
 	})
 	updated := updatedAny.(Model)
+	if got, want := updated.editors[idx].Buffer.Content(), "before\n"; got != want {
+		t.Fatalf("format mutated content before preparation: got %q, want %q", got, want)
+	}
+	updated, cmd = completeFormatPreparation(t, updated, cmd)
 
 	if got, want := updated.editors[idx].Buffer.Content(), "after\n"; got != want {
 		t.Fatalf("formatted content = %q, want %q", got, want)

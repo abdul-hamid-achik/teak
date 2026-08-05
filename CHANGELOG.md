@@ -4,6 +4,27 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.29] - 2026-08-05
+
+### Responsive Atomic Formatting
+
+- LSP formatting responses are now validated and applied to an immutable
+  snapshot in a background command instead of performing server-sized work in
+  Bubble Tea's `Update()` loop. The prepared rope is installed as one atomic,
+  undoable editor mutation.
+- Formatting results are bound to the editor identity, buffer version, and
+  source rope. Typing, closing, or replacing the document while preparation is
+  running discards the obsolete result instead of overwriting newer work;
+  shutdown cancels all tracked preparations.
+- Cursor and multicursor selections are mapped through the edits off-loop and
+  restored with the prepared snapshot. Save, Save As, dirty-tab, preview-pin,
+  highlighting, LSP sync, and plugin autocmd reconciliation still use their
+  existing coordinated paths.
+- With 4,096 one-byte edits on an Apple M5, result dispatch dropped from about
+  72-90 ms, 309 MB, and 3.35 million allocations in `Update()` to about 15.8
+  microseconds, 352 bytes, and four allocations. The roughly 93 ms preparation
+  now runs outside the event loop.
+
 ## [0.10.28] - 2026-08-05
 
 ### Viewport-Prepared Plugin Highlights

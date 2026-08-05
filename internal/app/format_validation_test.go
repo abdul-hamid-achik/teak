@@ -76,12 +76,12 @@ func TestFormatResultRejectsInvalidEditsWithoutMutatingBuffer(t *testing.T) {
 				Edits:          tt.edits,
 			})
 			updated := updatedAny.(Model)
-
-			if cmd != nil {
-				t.Fatal("invalid manual format must not schedule post-edit work")
-			}
 			if got := updated.editors[idx].Buffer.Content(); got != beforeContent {
-				t.Fatalf("invalid format mutated content: got %q, want %q", got, beforeContent)
+				t.Fatalf("invalid format mutated content before preparation: got %q, want %q", got, beforeContent)
+			}
+			updated, cmd = completeFormatPreparation(t, updated, cmd)
+			if cmd != nil {
+				t.Fatal("invalid manual format must not schedule post-edit work after rejection")
 			}
 			if got := updated.editors[idx].Buffer.Version(); got != beforeVersion {
 				t.Fatalf("invalid format changed version: got %d, want %d", got, beforeVersion)
@@ -115,6 +115,7 @@ func TestFormatOnSaveInvalidEditsSavesOriginalSnapshot(t *testing.T) {
 		},
 	})
 	updated := updatedAny.(Model)
+	updated, cmd = completeFormatPreparation(t, updated, cmd)
 
 	if got := updated.editors[idx].Buffer.Content(); got != "after\n" {
 		t.Fatalf("invalid format mutated buffered content: got %q", got)

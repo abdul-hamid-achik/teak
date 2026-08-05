@@ -336,6 +336,7 @@ type modelState struct {
 	documentRequests          documentRequestTracker
 	workspaceEdits            workspaceEditState // serial background workspace-edit preparation/commit
 	replaces                  replaceAsyncState  // latest-wins background search/replace preparation
+	formatPreparations        formatPreparationTracker
 	lspChanges                *lspChangePreparer // serializes immutable full-text preparation per LSP document
 	codeActionRequester       codeActionRequester
 	codeActionCommandGen      uint64
@@ -683,6 +684,7 @@ func cleanupModelState(m *modelState) {
 		m.workspaceEdits.cancel()
 		m.workspaceEdits.cancel = nil
 	}
+	m.formatPreparations.cancelAll()
 	if m.codeActionCommandStop != nil {
 		m.codeActionCommandStop()
 		m.codeActionCommandStop = nil
@@ -1382,6 +1384,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.FormatResultMsg:
 		return m.handleFormatResult(msg)
+
+	case formatPreparedMsg:
+		return m.handleFormatPrepared(msg)
 
 	case lsp.CodeActionResultMsg:
 		return m.handleCodeActionResult(msg)
@@ -2588,67 +2593,32 @@ func (m Model) handleFormatResult(msg lsp.FormatResultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 
-	formatStatus := msg.Status
-	formatErr := msg.Err
-	var postMutationCmd tea.Cmd
-	if formatStatus == lsp.FormatApplied && idx >= 0 {
-		if err := validateFormattingTextEdits(m.editors[idx].Buffer, msg.Edits); err != nil {
-			// Format responses are untrusted server input. Do not let the
-			// buffer's interactive position clamping turn an invalid response
-			// into a partial or Unicode-corrupting edit.
-			formatStatus = lsp.FormatError
-			formatErr = fmt.Errorf("invalid formatting edits: %w", err)
-			m.status = fmt.Sprintf("Formatting result rejected: %v", err)
-		} else {
-			prevVersion := m.editors[idx].Buffer.Version()
-			prevCursor := m.editors[idx].Buffer.Cursor
-			applied := applyTextEditsToBuffer(m.editors[idx].Buffer, msg.Edits)
-			if applied > 0 {
-				if m.editors[idx].Highlighter != nil {
-					m.editors[idx].Highlighter.Invalidate()
-				}
-				editorID := m.editors[idx].ID()
-				version := m.editors[idx].Buffer.Version()
-				retokenizeCmd := func() tea.Msg {
-					return editor.RetokenizeMsg{EditorID: editorID, Version: version}
-				}
-				postMutationCmd = tea.Batch(
-					retokenizeCmd,
-					m.syncEditorStateAfterUpdate(idx, prevVersion, prevCursor),
-				)
-				m.status = "Document formatted"
-			}
-		}
-	}
-	if msg.RequestID == 0 {
-		switch formatStatus {
-		case lsp.FormatApplied:
-			if idx >= 0 && idx == m.activeTab {
-				m.setEditor(m.activeTab, m.editors[idx])
-			}
-		case lsp.FormatNoOp:
-			m.status = "No formatting changes"
-		case lsp.FormatUnsupported:
-			m.status = "Formatting not supported"
-		case lsp.FormatError:
-			if formatErr != nil {
-				m.status = fmt.Sprintf("Formatting failed: %v", formatErr)
-			} else {
-				m.status = "Formatting failed"
-			}
-		}
-		return m, postMutationCmd
+	if msg.Status != lsp.FormatApplied || idx < 0 {
+		return m.finishFormatResult(msg, idx, nil)
 	}
 
-	if formatStatus == lsp.FormatApplied && idx >= 0 {
-		req := m.pendingSaves[msg.RequestID]
-		req.Snapshot = m.editors[idx].Buffer.Rope()
-		req.SnapshotVersion = m.editors[idx].Buffer.Version()
-		req.LineEnding = m.editors[idx].Buffer.LineEnding()
-		m.pendingSaves[msg.RequestID] = req
+	ed := &m.editors[idx]
+	generation, ctx, ok := m.formatPreparations.begin()
+	if !ok {
+		msg.Status = lsp.FormatError
+		msg.Err = fmt.Errorf("too many formatting results are being prepared")
+		return m.finishFormatResult(msg, idx, nil)
 	}
-	m.setPendingSaveNote(msg.RequestID, formatResultNote(formatStatus, formatErr))
-	return m, tea.Batch(postMutationCmd, m.startSaveRequest(msg.RequestID))
+	request := formatPreparationRequest{
+		Generation:  generation,
+		RequestID:   msg.RequestID,
+		FilePath:    msg.FilePath,
+		EditorID:    ed.ID(),
+		BaseVersion: ed.Buffer.Version(),
+		Source:      ed.Buffer.Rope(),
+		Cursor:      ed.Buffer.Cursor,
+	}
+	if ed.Buffer.Selections != nil {
+		request.Selections = append([]text.Selection(nil), ed.Buffer.Selections.All()...)
+		request.Primary = ed.Buffer.Selections.PrimaryIndex()
+	}
+	m.status = "Preparing formatting..."
+	return m, prepareFormatCmd(ctx, request, msg.Edits)
 }
 
 func (m Model) handleCodeActionResult(msg lsp.CodeActionResultMsg) (tea.Model, tea.Cmd) {
