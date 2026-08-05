@@ -122,6 +122,9 @@ func (m *Model) activateTab(index int) bool {
 		return false
 	}
 	if index != m.activeTab {
+		if m.activeTab >= 0 && m.activeTab < len(m.editors) {
+			m.editors[m.activeTab].HideAutocomplete()
+		}
 		m.overlayRequests.invalidateAll()
 		m.documentRequests.invalidateActiveRequests()
 	}

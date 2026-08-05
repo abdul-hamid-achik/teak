@@ -1,13 +1,18 @@
 package overlays
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
+
+var autocompleteBenchmarkCmd tea.Cmd
 
 func TestNewAutocomplete(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -68,6 +73,185 @@ func TestAutocompleteHide(t *testing.T) {
 	}
 	if ac.Cursor != 0 {
 		t.Errorf("expected Cursor 0, got %d", ac.Cursor)
+	}
+}
+
+func TestAutocompleteDismissalRejectsPreparedItems(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	generation := autocomplete.BeginLoading()
+	if view := ansi.Strip(autocomplete.View()); !strings.Contains(view, "Loading") {
+		t.Fatalf("loading view = %q", view)
+	}
+	autocomplete.Hide()
+	if cmd := autocomplete.InstallItems(7, generation, []AutocompleteItem{{Label: "late"}}, ""); cmd != nil {
+		t.Fatal("dismissed loading generation accepted late items")
+	}
+	if autocomplete.Visible {
+		t.Fatal("dismissed autocomplete became visible again")
+	}
+}
+
+func TestAutocompleteAsyncFilterRejectsSupersededResult(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	autocomplete.Show([]AutocompleteItem{{Label: "apple"}, {Label: "banana"}})
+	staleCmd := autocomplete.ScheduleFilter(9, "app")
+	currentCmd := autocomplete.ScheduleFilter(9, "ban")
+
+	stale := staleCmd().(AutocompleteFilterReadyMsg)
+	if !errors.Is(stale.Err, context.Canceled) {
+		t.Fatalf("superseded filter error = %v, want context cancellation", stale.Err)
+	}
+	if item := autocomplete.ApplyFilter(stale); item != nil {
+		t.Fatalf("superseded filter selected %#v", item)
+	}
+	current := currentCmd().(AutocompleteFilterReadyMsg)
+	autocomplete.ApplyFilter(current)
+	if len(autocomplete.Items) != 1 || autocomplete.Items[0].Label != "banana" {
+		t.Fatalf("current items = %+v, want banana", autocomplete.Items)
+	}
+}
+
+func TestAutocompleteInstallItemsFiltersCurrentPrefix(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	if cmd := autocomplete.ScheduleFilter(1, "app"); cmd != nil {
+		t.Fatal("hidden autocomplete scheduled a filter")
+	}
+	generation := autocomplete.BeginLoading()
+	if !autocomplete.ItemsLoading() {
+		t.Fatal("BeginLoading did not report item preparation")
+	}
+	if cmd := autocomplete.ScheduleFilter(1, "app"); cmd != nil {
+		t.Fatal("item-loading autocomplete scheduled a premature filter")
+	}
+	if cmd := autocomplete.InstallItems(1, generation+1, []AutocompleteItem{{Label: "apple"}}, "app"); cmd != nil {
+		t.Fatal("wrong item generation scheduled a filter")
+	}
+	cmd := autocomplete.InstallItems(1, generation, []AutocompleteItem{{Label: "apple"}, {Label: "banana"}}, "app")
+	if cmd == nil || !autocomplete.Pending() || autocomplete.ItemsLoading() {
+		t.Fatalf("installed items pending/loading = %t/%t, want true/false", autocomplete.Pending(), autocomplete.ItemsLoading())
+	}
+	autocomplete.ApplyFilter(cmd().(AutocompleteFilterReadyMsg))
+	if len(autocomplete.Items) != 1 || autocomplete.Items[0].Label != "apple" {
+		t.Fatalf("installed items = %+v, want apple", autocomplete.Items)
+	}
+
+	emptyGeneration := autocomplete.BeginLoading()
+	if cmd := autocomplete.InstallItems(1, emptyGeneration, nil, ""); cmd != nil {
+		t.Fatal("empty item preparation scheduled a filter")
+	}
+	if autocomplete.Visible {
+		t.Fatal("empty prepared collection left autocomplete visible")
+	}
+}
+
+func TestAutocompleteSynchronousFilterCompatibility(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	autocomplete.Filter("ignored while hidden")
+	autocomplete.Show([]AutocompleteItem{{Label: "apple"}, {Label: "Apply"}, {Label: "banana"}})
+	autocomplete.Filter("app")
+	if len(autocomplete.Items) != 2 {
+		t.Fatalf("prefix filter items = %d, want 2", len(autocomplete.Items))
+	}
+	autocomplete.Filter("")
+	if len(autocomplete.Items) != 3 {
+		t.Fatalf("empty-prefix items = %d, want 3", len(autocomplete.Items))
+	}
+	autocomplete.allItems = nil
+	autocomplete.Filter("ban")
+	if len(autocomplete.Items) != 1 || autocomplete.Items[0].Label != "banana" {
+		t.Fatalf("fallback source items = %+v, want banana", autocomplete.Items)
+	}
+	autocomplete.Show([]AutocompleteItem{{Label: "apple"}})
+	autocomplete.Filter("zzz")
+	if autocomplete.Visible {
+		t.Fatal("no-match synchronous filter remained visible")
+	}
+}
+
+func TestAutocompletePendingSelectionUsesCurrentProjection(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	autocomplete.RequestSelection() // no pending work: deliberately inert
+	autocomplete.Show([]AutocompleteItem{{Label: "apple"}, {Label: "banana"}})
+	cmd := autocomplete.ScheduleFilter(4, "ban")
+	autocomplete.RequestSelection()
+	autocomplete.MoveUp()
+	autocomplete.MoveDown()
+	if selected := autocomplete.Selected(); selected != nil {
+		t.Fatalf("pending Selected() = %#v, want nil", selected)
+	}
+	if selected := autocomplete.SelectAt(0); selected != nil {
+		t.Fatalf("pending SelectAt() = %#v, want nil", selected)
+	}
+	selected := autocomplete.ApplyFilter(cmd().(AutocompleteFilterReadyMsg))
+	if selected == nil || selected.Label != "banana" {
+		t.Fatalf("pending selection = %#v, want banana", selected)
+	}
+	if autocomplete.Visible {
+		t.Fatal("autocomplete remained visible after pending selection")
+	}
+}
+
+func TestAutocompleteCurrentFilterErrorClosesPopup(t *testing.T) {
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	autocomplete.Show([]AutocompleteItem{{Label: "apple"}})
+	cmd := autocomplete.ScheduleFilter(5, "app")
+	ready := cmd().(AutocompleteFilterReadyMsg)
+	ready.Err = errors.New("projection failed")
+	autocomplete.ApplyFilter(ready)
+	if autocomplete.Visible {
+		t.Fatal("failed current filter left popup visible")
+	}
+}
+
+func TestFilterAutocompleteItemsContextEdges(t *testing.T) {
+	items := []AutocompleteItem{{Label: "Alpha"}, {Label: "beta"}}
+	all, err := filterAutocompleteItemsContext(nil, items, "")
+	if err != nil || len(all) != len(items) {
+		t.Fatalf("empty-prefix projection = %d, %v", len(all), err)
+	}
+	filtered, err := filterAutocompleteItemsContext(context.Background(), items, "AL")
+	if err != nil || len(filtered) != 1 || filtered[0].Label != "Alpha" {
+		t.Fatalf("case-insensitive projection = %+v, %v", filtered, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	filtered, err = filterAutocompleteItemsContext(ctx, items, "a")
+	if !errors.Is(err, context.Canceled) || filtered != nil {
+		t.Fatalf("cancelled projection = %+v, %v", filtered, err)
+	}
+}
+
+func BenchmarkAutocompleteFilterDispatchTwentyThousand(b *testing.B) {
+	items := make([]AutocompleteItem, 20_000)
+	for i := range items {
+		items[i] = AutocompleteItem{Label: fmt.Sprintf("completion-%05d", i)}
+	}
+	autocomplete := NewAutocomplete(ui.DefaultTheme())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		autocomplete.Show(items)
+		cmd := autocomplete.ScheduleFilter(17, "completion-19999")
+		if cmd == nil {
+			b.Fatal("filter dispatch returned no command")
+		}
+		autocompleteBenchmarkCmd = cmd
+	}
+	autocomplete.Hide()
+	autocompleteBenchmarkCmd = nil
+}
+
+func BenchmarkAutocompleteFilterProjectionTwentyThousand(b *testing.B) {
+	items := make([]AutocompleteItem, 20_000)
+	for i := range items {
+		items[i] = AutocompleteItem{Label: fmt.Sprintf("completion-%05d", i)}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		filtered, err := filterAutocompleteItemsContext(b.Context(), items, "completion-19999")
+		if err != nil || len(filtered) != 1 {
+			b.Fatalf("filtered items = %d, %v", len(filtered), err)
+		}
 	}
 }
 

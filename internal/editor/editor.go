@@ -463,6 +463,10 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 				e.autocomplete.MoveDown()
 				return e, nil
 			case "enter", "tab":
+				if e.autocomplete.Pending() {
+					e.autocomplete.RequestSelection()
+					return e, nil
+				}
 				if item := e.autocomplete.Selected(); item != nil {
 					e.applyCompletion(*item)
 				}
@@ -596,6 +600,15 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			} else {
 				e.Highlighter.SetLines(msg.Lines)
 			}
+		}
+		return e, nil
+	case overlays.AutocompleteFilterReadyMsg:
+		if msg.EditorID != e.id {
+			return e, nil
+		}
+		if item := e.autocomplete.ApplyFilter(msg); item != nil {
+			e.applyCompletion(*item)
+			return e, e.scheduleRetokenize()
 		}
 		return e, nil
 	}
@@ -975,8 +988,8 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		if e.Highlighter != nil {
 			e.invalidateHighlightForLastChange()
 		}
-		e.refilterAutocomplete()
-		return e, tea.Batch(e.scheduleRetokenize(), e.TriggerCompletion())
+		filterCmd := e.refilterAutocomplete()
+		return e, tea.Batch(e.scheduleRetokenize(), filterCmd, e.TriggerCompletion())
 	}
 	return e, nil
 }
@@ -985,11 +998,17 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 // typed since the server answered, closing it when nothing matches. Without
 // this the popup kept showing items that no longer match the prefix and never
 // dismissed itself.
-func (e *Editor) refilterAutocomplete() {
+func (e *Editor) refilterAutocomplete() tea.Cmd {
 	if !e.autocomplete.Visible {
-		return
+		return nil
 	}
-	e.autocomplete.Filter(e.completionPrefix())
+	if e.autocomplete.ItemsLoading() {
+		// The user edited again before server items were converted. Invalidate
+		// that loading generation; the edit already schedules a newer request.
+		e.autocomplete.Hide()
+		return nil
+	}
+	return e.autocomplete.ScheduleFilter(e.id, e.completionPrefix())
 }
 
 // completionPrefix returns the identifier prefix immediately before the
@@ -1622,6 +1641,24 @@ func (e *Editor) EnsureCursorVisible() {
 // ShowAutocomplete displays completion items.
 func (e *Editor) ShowAutocomplete(items []overlays.AutocompleteItem) {
 	e.autocomplete.Show(items)
+}
+
+// BeginAutocompleteLoading opens a constant-size completion shell and returns
+// the generation required to install asynchronously prepared server items.
+func (e *Editor) BeginAutocompleteLoading() uint64 {
+	return e.autocomplete.BeginLoading()
+}
+
+// AcceptsAutocompleteItems reports whether a prepared server collection still
+// belongs to this editor's visible loading request.
+func (e Editor) AcceptsAutocompleteItems(generation uint64) bool {
+	return e.autocomplete.AcceptsItems(generation)
+}
+
+// InstallAutocompleteItems transfers prepared items in constant time and
+// schedules client-side prefix filtering outside Update.
+func (e *Editor) InstallAutocompleteItems(generation uint64, items []overlays.AutocompleteItem) tea.Cmd {
+	return e.autocomplete.InstallItems(e.id, generation, items, e.completionPrefix())
 }
 
 // HideAutocomplete dismisses the autocomplete popup.

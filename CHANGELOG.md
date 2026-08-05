@@ -4,6 +4,25 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.25] - 2026-08-05
+
+### Responsive LSP Autocomplete
+
+- Completion-item conversion and every client-side prefix projection now run
+  in cancellable, generation-bound commands instead of scanning and copying a
+  server-sized result inside Bubble Tea's `Update()` loop.
+- The popup exposes bounded loading and filtering states. Escape, later
+  typing, tab switches, tab closure, and shutdown invalidate obsolete work;
+  Enter or Tab waits for the current projection rather than selecting stale
+  data.
+- A completion accepted while filtering still passes through the root editor
+  mutation reconciler, preserving dirty state, preview pinning, LSP sync, and
+  plugin autocmds.
+- With 20,000 items on an Apple M5, result dispatch dropped from about 236-239
+  microseconds and 1.76 MiB to 0.45 microseconds and 208 bytes. Per-keystroke
+  filter dispatch dropped from about 226-231 microseconds and 1.76 MiB to 0.064
+  microseconds and 176 bytes; the roughly 0.2 ms projections run off-loop.
+
 ## [0.10.24] - 2026-08-05
 
 ### Responsive LSP Result Pickers

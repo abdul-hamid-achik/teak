@@ -266,3 +266,41 @@ func TestLSPPickerHandlersOnlyDispatchPreparedItems(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletionHandlerOnlyDispatchesPreparedItems(t *testing.T) {
+	found := false
+	dispatches := false
+	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "handleCompletionResult" {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				switch value := node.(type) {
+				case *ast.RangeStmt:
+					t.Errorf("%s: completion handler loops over server-sized items in Update", fset.Position(value.Pos()))
+				case *ast.CallExpr:
+					called, ok := value.Fun.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					if called.Name == "prepareCompletionItemsCmd" {
+						dispatches = true
+					}
+					if called.Name == "lspCompletionItemsContext" {
+						t.Errorf("%s: completion handler converts server items directly in Update", fset.Position(value.Pos()))
+					}
+				}
+				return true
+			})
+		}
+	})
+	if !found {
+		t.Fatal("completion preparation invariant did not find handleCompletionResult")
+	}
+	if !dispatches {
+		t.Fatal("handleCompletionResult does not dispatch prepareCompletionItemsCmd")
+	}
+}

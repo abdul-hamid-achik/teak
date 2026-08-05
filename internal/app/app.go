@@ -660,6 +660,9 @@ func cleanupModelState(m *modelState) {
 	m.overlayStack.Clear()
 	m.overlayRequests.cancelAll()
 	m.documentRequests.cancelAll()
+	for i := range m.editors {
+		m.editors[i].HideAutocomplete()
+	}
 	if m.sessionRestoreCancel != nil {
 		m.sessionRestoreCancel()
 		m.sessionRestoreCancel = nil
@@ -1193,6 +1196,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editor.TokenizeCompleteMsg:
 		return m.handleEditorAsyncMsg(msg.EditorID, msg)
 
+	case overlays.AutocompleteFilterReadyMsg:
+		return m.handleAutocompleteFilterReady(msg)
+
 	case editor.ClipboardPasteResultMsg:
 		return m.handleClipboardPasteResult(msg)
 
@@ -1364,6 +1370,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.CompletionResultMsg:
 		return m.handleCompletionResult(msg)
+
+	case completionItemsPreparedMsg:
+		return m.handleCompletionItemsPrepared(msg)
 
 	case lsp.HoverResultMsg:
 		return m.handleHoverResult(msg)
@@ -1858,6 +1867,21 @@ func (m Model) handleEditorAsyncMsg(editorID uint64, msg tea.Msg) (tea.Model, te
 	updated, cmd := m.editors[idx].Update(msg)
 	m.setEditor(idx, updated)
 	return m, cmd
+}
+
+func (m Model) handleAutocompleteFilterReady(msg overlays.AutocompleteFilterReadyMsg) (tea.Model, tea.Cmd) {
+	idx := m.editorIndexForAsyncMessage(msg.EditorID)
+	if idx < 0 {
+		return m, nil
+	}
+	previousVersion := m.editors[idx].Buffer.Version()
+	previousCursor := m.editors[idx].Buffer.Cursor
+	updated, cmd := m.editors[idx].Update(msg)
+	m.setEditor(idx, updated)
+	if updated.Buffer.Version() == previousVersion {
+		return m, cmd
+	}
+	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
 }
 
 func (m Model) handleClipboardPasteResult(msg editor.ClipboardPasteResultMsg) (tea.Model, tea.Cmd) {
@@ -2456,26 +2480,38 @@ func (m Model) handleCompletionResult(msg lsp.CompletionResultMsg) (tea.Model, t
 	if !m.acceptsOverlayResult(overlayRequestCompletion, msg.OverlayRequestMetadata) {
 		return m, nil
 	}
-	items := make([]overlays.AutocompleteItem, len(msg.Items))
-	for i, item := range msg.Items {
-		items[i] = overlays.AutocompleteItem{
-			Label:      item.Label,
-			Detail:     item.Detail,
-			InsertText: item.InsertText,
-			HasEdit:    item.HasEdit,
-			Edit: overlays.AutocompleteEdit{
-				StartLine: item.Edit.StartLine,
-				StartCol:  item.Edit.StartCol,
-				EndLine:   item.Edit.EndLine,
-				EndCol:    item.Edit.EndCol,
-			},
-		}
+	ed := m.activeEditor()
+	if ed == nil {
+		return m, nil
 	}
-	if m.activeEditor() != nil {
-		m.activeEditor().ShowAutocomplete(items)
-		m.setEditor(m.activeTab, *m.activeEditor())
+	if len(msg.Items) == 0 {
+		ed.HideAutocomplete()
+		m.setEditor(m.activeTab, *ed)
+		return m, nil
 	}
-	return m, nil
+	generation := ed.BeginAutocompleteLoading()
+	editorID := ed.ID()
+	m.setEditor(m.activeTab, *ed)
+	ctx := m.overlayRequests.start(overlayRequestCompletion)
+	return m, prepareCompletionItemsCmd(ctx, editorID, generation, msg.OverlayRequestMetadata, msg.Items)
+}
+
+func (m Model) handleCompletionItemsPrepared(msg completionItemsPreparedMsg) (tea.Model, tea.Cmd) {
+	if !m.acceptsOverlayResult(overlayRequestCompletion, msg.Metadata) {
+		return m, nil
+	}
+	ed := m.activeEditor()
+	if ed == nil || ed.ID() != msg.EditorID || !ed.AcceptsAutocompleteItems(msg.AutocompleteGeneration) {
+		return m, nil
+	}
+	if msg.Err != nil {
+		ed.HideAutocomplete()
+		m.setEditor(m.activeTab, *ed)
+		return m, nil
+	}
+	cmd := ed.InstallAutocompleteItems(msg.AutocompleteGeneration, msg.Items)
+	m.setEditor(m.activeTab, *ed)
+	return m, cmd
 }
 
 func (m Model) handleHoverResult(msg lsp.HoverResultMsg) (tea.Model, tea.Cmd) {
@@ -3737,6 +3773,7 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 	}
 
 	// Save closed tab to history for reopening
+	m.editors[idx].HideAutocomplete()
 	tab := m.tabBar.Tabs[idx]
 	if view, ok := m.diffViews[idx]; ok {
 		view.CancelHighlight()
