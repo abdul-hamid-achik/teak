@@ -4,6 +4,23 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.15] - 2026-08-05
+
+### Persistent File-Tree Refresh
+
+- Directory expansion and asynchronous child installation now replace only
+  the entry slices along the affected path. Background refreshes can capture
+  the persistent root in constant time without cloning the visible tree or
+  racing later keyboard and mouse updates.
+- Refresh commands now prepare visibility filtering, flattened rows, path
+  indexes, and selection projection before returning. `Update()` validates the
+  entry revision and view state, then transfers the prepared projection; a
+  conflicting interaction retries from the latest root instead of recursively
+  merging and flattening the tree on the event loop.
+- On an Apple M5, capturing and applying a prepared 100,000-entry refresh take
+  about 20 ns and 52 ns respectively with zero allocations. The removed deep
+  clone costs about 0.64–0.76 ms and 8.8 MiB per refresh dispatch.
+
 ## [0.10.14] - 2026-08-05
 
 ### Responsive LSP Diagnostics

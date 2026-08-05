@@ -1632,7 +1632,12 @@ func (m Model) handleTreeRefreshResult(msg treeRefreshResultMsg) (tea.Model, tea
 		}
 		return m, nil
 	}
-	m.tree.ApplyRefresh(msg.Refresh)
+	if !m.tree.ApplyRefresh(msg.Refresh) {
+		// Expansion, visibility, or filtering changed while the immutable
+		// snapshot was being refreshed. Rebuild from the latest persistent root
+		// instead of merging or flattening the tree inside Update.
+		return m, m.startTreeRefresh(msg.Generation)
+	}
 	return m, nil
 }
 
@@ -5619,9 +5624,8 @@ func (m *Model) startTreeRefresh(generation uint64) tea.Cmd {
 	m.cancelTreeRefresh()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.treeRefreshCancel = cancel
-	// Take ownership of entry slices before the command starts. The snapshot
-	// clone is memory-only; filesystem traversal and recursive reads happen in
-	// the command below, never in Update.
+	// Entry roots are persistent. Capturing one is constant-time and remains
+	// race-free when later keyboard or mouse events replace a path by copy.
 	tree := m.tree.SnapshotForRefresh()
 	return func() tea.Msg {
 		refresh, err := tree.Refresh(ctx, tree.Root)

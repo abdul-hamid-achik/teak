@@ -1,12 +1,19 @@
 package filetree
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/ui"
+)
+
+var (
+	benchmarkTreeSnapshot Model
+	benchmarkTreeEntries  []Entry
+	benchmarkApplyResult  bool
 )
 
 // createTestTree creates a file tree model with a specified number of entries
@@ -164,6 +171,57 @@ func BenchmarkFileTreeFilterUpdate100000(b *testing.B) {
 			b.Fatal("filter input did not schedule a pending projection")
 		}
 	}
+}
+
+func BenchmarkFileTreeSnapshotForRefresh100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkTreeSnapshot = model.SnapshotForRefresh()
+	}
+	if len(benchmarkTreeSnapshot.Entries) != len(model.Entries) {
+		b.Fatal("snapshot benchmark did not retain the entry root")
+	}
+}
+
+func BenchmarkFileTreeDeepCloneComparison100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkTreeEntries = deepCloneEntriesForBenchmark(model.Entries)
+	}
+	if len(benchmarkTreeEntries) != len(model.Entries) {
+		b.Fatal("deep-clone comparison did not copy the entry root")
+	}
+}
+
+func BenchmarkFileTreeApplyPreparedRefresh100000(b *testing.B) {
+	model := largeFilterBenchmarkModel(b)
+	result, err := model.prepareRefreshResult(context.Background(), model.Entries, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		candidate := model
+		benchmarkApplyResult = candidate.ApplyRefresh(result)
+		benchmarkTreeSnapshot = candidate
+	}
+	if !benchmarkApplyResult || len(benchmarkTreeSnapshot.sharedFlatCache.entries) != len(model.Entries) {
+		b.Fatal("apply benchmark did not install the prepared projection")
+	}
+}
+
+func deepCloneEntriesForBenchmark(entries []Entry) []Entry {
+	cloned := make([]Entry, len(entries))
+	for i, entry := range entries {
+		cloned[i] = entry
+		cloned[i].Children = deepCloneEntriesForBenchmark(entry.Children)
+	}
+	return cloned
 }
 
 func largeFilterBenchmarkModel(b *testing.B) Model {

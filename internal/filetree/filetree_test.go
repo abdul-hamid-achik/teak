@@ -546,6 +546,88 @@ func TestApplyRefreshDoesNotUndoExpansionMadeWhileRefreshRuns(t *testing.T) {
 	}
 }
 
+func TestSnapshotForRefreshSharesPersistentEntries(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	model := NewEmpty(root, ui.DefaultTheme())
+	model.Entries = []Entry{{
+		Name:     "nested",
+		Path:     dir,
+		IsDir:    true,
+		Expanded: false,
+		Children: []Entry{{Name: "child.go", Path: filepath.Join(dir, "child.go")}},
+	}}
+
+	snapshot := model.SnapshotForRefresh()
+	if &snapshot.Entries[0] != &model.Entries[0] {
+		t.Fatal("SnapshotForRefresh cloned the complete entry tree")
+	}
+
+	updated, cmd := model.ToggleEntry(dir)
+	if cmd != nil {
+		t.Fatal("loaded directory expansion unexpectedly scheduled a read")
+	}
+	if !updated.Entries[0].Expanded {
+		t.Fatal("updated tree did not expand the directory")
+	}
+	if snapshot.Entries[0].Expanded {
+		t.Fatal("copy-on-write expansion mutated the refresh snapshot")
+	}
+	if &updated.Entries[0] == &snapshot.Entries[0] {
+		t.Fatal("copy-on-write expansion reused the mutated entry slice")
+	}
+}
+
+func TestDirectoryLoadResultUsesCopyOnWrite(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	model := NewEmpty(root, ui.DefaultTheme())
+	model.Entries = []Entry{{Name: "nested", Path: dir, IsDir: true, Expanded: true, Loading: true}}
+	snapshot := model.SnapshotForRefresh()
+	child := Entry{Name: "child.go", Path: filepath.Join(dir, "child.go")}
+
+	updated, cmd := model.Update(DirExpandedMsg{Path: dir, Children: []Entry{child}})
+	if cmd != nil {
+		t.Fatal("directory result scheduled an unexpected command")
+	}
+	if updated.Entries[0].Loading || len(updated.Entries[0].Children) != 1 {
+		t.Fatalf("updated directory = %#v, want completed child load", updated.Entries[0])
+	}
+	if !snapshot.Entries[0].Loading || snapshot.Entries[0].Children != nil {
+		t.Fatalf("directory result mutated refresh snapshot: %#v", snapshot.Entries[0])
+	}
+	if &updated.Entries[0] == &snapshot.Entries[0] {
+		t.Fatal("directory result reused the mutated entry slice")
+	}
+}
+
+func TestRefreshPreparesProjectionForConstantTimeApply(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(root, ui.DefaultTheme())
+	model.Cursor = 1
+	selected := model.flatEntries()[model.Cursor].Path
+
+	result, err := model.SnapshotForRefresh().Refresh(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.invalidateFlatCache()
+	if applied := model.ApplyRefresh(result); !applied {
+		t.Fatal("fresh prepared refresh was rejected")
+	}
+	if model.sharedFlatCache == nil || model.sharedFlatCache.entries == nil || model.sharedFlatCache.source == nil {
+		t.Fatal("ApplyRefresh did not install the prepared flattened projection")
+	}
+	if got := model.sharedFlatCache.entries[model.Cursor].Path; got != selected {
+		t.Fatalf("selected path = %q, want %q", got, selected)
+	}
+}
+
 func TestRefreshHonorsCancelledContext(t *testing.T) {
 	root := t.TempDir()
 	model := New(root, ui.DefaultTheme())

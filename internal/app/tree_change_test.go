@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -223,6 +224,57 @@ func TestTreeRefreshIgnoresStaleResult(t *testing.T) {
 	ignored := ignoredModel.(Model)
 	if len(ignored.tree.Entries) != 1 || ignored.tree.Entries[0].Name != "fresh.go" {
 		t.Fatalf("stale tree refresh overwrote current tree: %#v", ignored.tree.Entries)
+	}
+}
+
+func TestTreeRefreshRetriesWhenExpansionChangesDuringCommand(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "nested")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "child.go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.Enabled = false
+	model, err := NewModel("", root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer model.cleanup()
+	loadInitialTreeForTest(t, &model)
+
+	snapshot := model.tree.SnapshotForRefresh()
+	result, err := snapshot.Refresh(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.tree, _ = model.tree.ToggleEntry(dir)
+	if !model.tree.Entries[0].Expanded {
+		t.Fatal("setup did not expand the live directory")
+	}
+
+	updatedAny, retryCmd := model.handleTreeRefreshResult(treeRefreshResultMsg{
+		Generation: model.treeRefreshGeneration,
+		Refresh:    result,
+	})
+	updated := updatedAny.(Model)
+	if retryCmd == nil {
+		t.Fatal("refresh did not retry after the persistent entry root changed")
+	}
+	if !updated.tree.Entries[0].Expanded {
+		t.Fatal("stale refresh result undid the live expansion")
+	}
+
+	retryResult := retryCmd().(treeRefreshResultMsg)
+	completedAny, nextCmd := updated.handleTreeRefreshResult(retryResult)
+	completed := completedAny.(Model)
+	if nextCmd != nil {
+		t.Fatal("current retry scheduled another refresh")
+	}
+	if !completed.tree.Entries[0].Expanded || len(completed.tree.Entries[0].Children) != 1 {
+		t.Fatalf("retried refresh tree = %#v, want expanded directory with one child", completed.tree.Entries)
 	}
 }
 
