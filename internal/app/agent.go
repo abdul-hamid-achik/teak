@@ -67,10 +67,8 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			m.relayout()
 		}
 	case acp.AgentPromptResponseMsg:
-		if m.acpMgr != nil && !m.acpMgr.IsCurrentPromptGeneration(inner.Generation) {
-			return m, m.listenACP()
-		}
-		m.agentPanel, _ = m.agentPanel.Update(inner)
+		updated, _ := m.handleAgentPromptResponse(inner)
+		m = updated.(Model)
 	case acp.AgentSessionInfoMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentModelChangedMsg:
@@ -79,14 +77,8 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 		m.agentPanel.AddSystemMessage("Mode changed to " + string(inner.ModeId))
 	case acp.AgentErrorMsg:
-		if inner.Err == nil {
-			m.agentPanel.AddSystemMessage("Error: unknown agent error")
-			m.status = "Error: unknown agent error"
-		} else {
-			message := "Error: " + inner.Err.Error()
-			m.agentPanel.AddSystemMessage(message)
-			m.status = message
-		}
+		updated, _ := m.handleAgentError(inner)
+		m = updated.(Model)
 	case acp.AgentStartedMsg:
 		m.agentPanel.SetConnected(true)
 	case acp.AgentStoppedMsg:

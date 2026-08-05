@@ -4,6 +4,50 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.21] - 2026-08-05
+
+### Fast Diff Rendering and Responsive Branch Selection
+
+- Prepared diff tokens now carry their row background and write exact cached
+  SGR sequences directly into the viewport builder. A prepared 40-row,
+  10,000-line diff renders in about 0.37 ms on an Apple M5, down from roughly
+  1.3 ms, with about 68% fewer allocations.
+- Git branch filtering now runs in cancellable background commands. Query and
+  picker-open generations reject obsolete filters and lists; Enter waits for
+  the current result instead of switching a stale selection. Dispatching a
+  50,000-branch filter takes about 3 microseconds in `Update()`, down from
+  0.84–0.97 ms of synchronous scanning.
+- Direct ACP command results now reach the root agent panel: prompt completion
+  commits streamed output and leaves the thinking state, immediate errors are
+  visible, and model/mode results keep panel and coordinator metadata aligned
+  without starting a duplicate channel listener.
+- The runtime failure-store fixture now synchronizes watcher reads and test
+  failure toggles, eliminating the race that blocked the v0.10.20 release gate.
+
+## [0.10.20] - 2026-08-05
+
+### Viewport-Only Diff Highlighting
+
+- Diff parsing, compact indexing, and initial viewport highlighting moved into
+  the cancellable load command instead of running in the root `Update()` loop.
+- Scroll highlighting captures only bounded context around visible rows and
+  uses model identity, generations, and cancellation to reject obsolete work.
+- Gutter width is precomputed and sparse token batches preserve coloring while
+  avoiding whole-diff tokenization. Opening the 10,000-line benchmark dropped
+  from roughly 380 ms and 403 MiB to about 7 ms and 5.4 MiB.
+
+## [0.10.19] - 2026-08-05
+
+### Responsive Git-Tree Interaction
+
+- Directory and staged/unstaged section toggles now prepare persistent tree
+  projections in cancellable commands instead of flattening changed paths in
+  `Update()`.
+- Status, expansion, and section generations reject obsolete projections;
+  copy-on-write updates clone only the changed directory and its ancestors.
+- Cached staged and unstaged row starts make cursor visibility constant-time,
+  and input or resize never falls back to a synchronous tree flatten.
+
 ## [0.10.18] - 2026-08-05
 
 ### Prepared-Only File-Tree Input

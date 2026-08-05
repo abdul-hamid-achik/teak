@@ -263,6 +263,7 @@ type modelState struct {
 	sidebarTab                SidebarTab                      // active sidebar tab
 	showBranchPicker          bool                            // branch picker overlay visible
 	branchPickerM             git.BranchPickerModel           // branch picker model
+	branchListGeneration      uint64                          // rejects lists from an earlier picker-open request
 	gitContextMenu            editor.ContextMenu              // context menu for git panel
 	gitContextEntry           *git.StatusEntry                // entry right-clicked in git panel
 	gitContextStaged          bool                            // whether the right-clicked entry is in staged section
@@ -1282,7 +1283,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case git.BranchListMsg:
 		return m.handleGitBranchList(msg)
 
+	case git.BranchFilterReadyMsg:
+		return m.handleGitBranchFilterReady(msg)
+
 	case git.SwitchBranchMsg:
+		m.branchPickerM.CancelFilter()
+		m.branchListGeneration++
 		m.showBranchPicker = false
 		return m, git.SwitchBranchCmd(m.gitPanel.RootDir(), msg.Branch)
 
@@ -1290,6 +1296,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleGitSwitchBranchResult(msg)
 
 	case git.CloseBranchPickerMsg:
+		m.branchPickerM.CancelFilter()
+		m.branchListGeneration++
 		m.showBranchPicker = false
 		return m, nil
 
@@ -1474,11 +1482,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCodemapResult(msg)
 
 	case acp.AgentModelChangedMsg:
+		m.observeDirectACPResult(msg)
 		m.agentPanel, _ = m.agentPanel.Update(msg)
 		return m, nil
 
 	case acp.AgentModeChangedMsg:
+		m.observeDirectACPResult(msg)
 		return m.handleAgentPanelModeChanged(msg)
+
+	case acp.AgentPromptResponseMsg:
+		return m.handleAgentPromptResponse(msg)
+
+	case acp.AgentErrorMsg:
+		return m.handleAgentError(msg)
 
 	case agent.CancelRequestedMsg:
 		return m.handleAgentCancelRequested(msg)
@@ -2374,19 +2390,30 @@ func (m Model) handleGitPullResult(msg git.PullResultMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleGitOpenBranchPicker(_ git.OpenBranchPickerMsg) (tea.Model, tea.Cmd) {
 	m.cancelActiveEditorDrag()
+	m.branchPickerM.SetBranches(nil, "")
+	m.branchListGeneration++
 	m.showBranchPicker = true
 	m.branchPickerM.SetSize(m.width, m.height)
 	return m, tea.Batch(
-		git.ListBranchesCmd(m.gitPanel.RootDir()),
+		git.ListBranchesCmd(m.gitPanel.RootDir(), m.branchListGeneration),
 		m.branchPickerM.Focus(),
 	)
 }
 
 func (m Model) handleGitBranchList(msg git.BranchListMsg) (tea.Model, tea.Cmd) {
-	if msg.Err == nil {
+	if m.showBranchPicker && (msg.Generation == 0 || msg.Generation == m.branchListGeneration) && msg.Err == nil {
 		m.branchPickerM.SetBranches(msg.Branches, msg.Current)
 	}
 	return m, nil
+}
+
+func (m Model) handleGitBranchFilterReady(msg git.BranchFilterReadyMsg) (tea.Model, tea.Cmd) {
+	if !m.showBranchPicker {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.branchPickerM, cmd = m.branchPickerM.Update(msg)
+	return m, cmd
 }
 
 func (m Model) handleGitSwitchBranchResult(msg git.SwitchBranchResultMsg) (tea.Model, tea.Cmd) {
@@ -2867,6 +2894,35 @@ func (m Model) handleAgentPanelModeChanged(msg acp.AgentModeChangedMsg) (tea.Mod
 	m.agentPanel, _ = m.agentPanel.Update(msg)
 	m.agentPanel.AddSystemMessage("Mode changed to " + string(msg.ModeId))
 	return m, nil
+}
+
+func (m Model) handleAgentPromptResponse(msg acp.AgentPromptResponseMsg) (tea.Model, tea.Cmd) {
+	if m.acpMgr != nil && !m.acpMgr.IsCurrentPromptGeneration(msg.Generation) {
+		return m, nil
+	}
+	m.agentPanel, _ = m.agentPanel.Update(msg)
+	return m, nil
+}
+
+func (m Model) handleAgentError(msg acp.AgentErrorMsg) (tea.Model, tea.Cmd) {
+	if msg.Err == nil {
+		m.agentPanel.AddSystemMessage("Error: unknown agent error")
+		m.status = "Error: unknown agent error"
+		return m, nil
+	}
+	message := "Error: " + msg.Err.Error()
+	m.agentPanel.AddSystemMessage(message)
+	m.status = message
+	return m, nil
+}
+
+// Direct ACP command results do not pass through routeACPMsg, so let the
+// coordinator observe state-changing results without executing the echo
+// command its channel-routing API returns.
+func (m Model) observeDirectACPResult(msg tea.Msg) {
+	if m.coordinator != nil {
+		_ = m.coordinator.HandleMessage(msg)
+	}
 }
 
 func (m Model) handleAgentCancelRequested(_ agent.CancelRequestedMsg) (tea.Model, tea.Cmd) {

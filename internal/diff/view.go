@@ -28,6 +28,8 @@ type Model struct {
 	rightHL     *highlight.Highlighter
 	leftSource  []string
 	rightSource []string
+	leftKinds   []LineKind
+	rightKinds  []LineKind
 	gutter      int
 	// Maps from DiffLine index → highlighter line index (-1 if no content)
 	leftLineMap  []int
@@ -100,12 +102,14 @@ func (m *Model) buildHighlighting() {
 		if dl.LeftKind != KindEmpty {
 			m.leftLineMap[i] = len(m.leftSource)
 			m.leftSource = append(m.leftSource, dl.Left)
+			m.leftKinds = append(m.leftKinds, dl.LeftKind)
 		} else {
 			m.leftLineMap[i] = -1
 		}
 		if dl.RightKind != KindEmpty {
 			m.rightLineMap[i] = len(m.rightSource)
 			m.rightSource = append(m.rightSource, dl.Right)
+			m.rightKinds = append(m.rightKinds, dl.RightKind)
 		} else {
 			m.rightLineMap[i] = -1
 		}
@@ -130,6 +134,8 @@ func (m *Model) PrepareViewport(ctx context.Context, viewStart, viewEnd int) boo
 		m.rightHL,
 		m.leftSource,
 		m.rightSource,
+		m.leftKinds,
+		m.rightKinds,
 		m.leftLineMap,
 		m.rightLineMap,
 		len(m.Lines),
@@ -156,7 +162,7 @@ type viewportHighlightResult struct {
 	complete   bool
 }
 
-func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Highlighter, leftSource, rightSource []string, leftMap, rightMap []int, totalLines, viewStart, viewEnd int) viewportHighlightResult {
+func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Highlighter, leftSource, rightSource []string, leftKinds, rightKinds []LineKind, leftMap, rightMap []int, totalLines, viewStart, viewEnd int) viewportHighlightResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -177,8 +183,42 @@ func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Hi
 			return result
 		}
 	}
+	styles := make(map[diffTokenStyleKey]highlight.StyledToken)
+	if leftOK {
+		applyDiffBackgrounds(&result.leftBatch, leftKinds, styles)
+	}
+	if rightOK {
+		applyDiffBackgrounds(&result.rightBatch, rightKinds, styles)
+	}
 	result.complete = ctx.Err() == nil
 	return result
+}
+
+type diffTokenStyleKey struct {
+	kind           LineKind
+	prefix, suffix string
+	fast           bool
+}
+
+func applyDiffBackgrounds(batch *highlight.TokenBatch, kinds []LineKind, styles map[diffTokenStyleKey]highlight.StyledToken) {
+	for lineOffset := range batch.Lines {
+		lineIndex := batch.StartLine + lineOffset
+		if lineIndex < 0 || lineIndex >= len(kinds) {
+			continue
+		}
+		for tokenIndex, token := range batch.Lines[lineOffset] {
+			key := diffTokenStyleKey{kind: kinds[lineIndex], prefix: token.Prefix, suffix: token.Suffix, fast: token.FastSGR}
+			styled, ok := styles[key]
+			if !ok || !token.FastSGR {
+				styled = token.WithBackground(backgroundForKind(kinds[lineIndex]))
+				if token.FastSGR {
+					styles[key] = styled
+				}
+			}
+			styled.Text = token.Text
+			batch.Lines[lineOffset][tokenIndex] = styled
+		}
+	}
 }
 
 const diffHighlightContextRows = 200
@@ -308,12 +348,13 @@ func (m *Model) scheduleViewportHighlight() tea.Cmd {
 	modelID := m.id
 	leftHL, rightHL := m.leftHL, m.rightHL
 	leftSource, rightSource := m.leftSource, m.rightSource
+	leftKinds, rightKinds := m.leftKinds, m.rightKinds
 	leftMap, rightMap := m.leftLineMap, m.rightLineMap
 	totalLines := len(m.Lines)
 	viewStart := m.ScrollY
 	viewEnd := min(totalLines, viewStart+max(1, m.Height))
 	return func() tea.Msg {
-		result := prepareViewportHighlight(ctx, leftHL, rightHL, leftSource, rightSource, leftMap, rightMap, totalLines, viewStart, viewEnd)
+		result := prepareViewportHighlight(ctx, leftHL, rightHL, leftSource, rightSource, leftKinds, rightKinds, leftMap, rightMap, totalLines, viewStart, viewEnd)
 		return HighlightReadyMsg{
 			modelID: modelID, generation: generation,
 			leftBatch: result.leftBatch, rightBatch: result.rightBatch,
@@ -383,6 +424,7 @@ func (m Model) View() string {
 	}
 
 	var sb strings.Builder
+	sb.Grow(max(0, m.Height*m.Width*4))
 	for i := range m.Height {
 		lineIdx := m.ScrollY + i
 		if i > 0 {
@@ -463,6 +505,10 @@ func (m Model) renderGutter(num int, kind LineKind, width int) string {
 
 // bgForKind returns the background color for a diff line kind.
 func (m Model) bgForKind(kind LineKind) color.Color {
+	return backgroundForKind(kind)
+}
+
+func backgroundForKind(kind LineKind) color.Color {
 	switch kind {
 	case KindAdded:
 		return lipgloss.Color("#2E3B2E")
@@ -491,6 +537,7 @@ func (m Model) renderContentHighlighted(text string, kind LineKind, width int, t
 	if len(tokens) > 0 && kind != KindEmpty {
 		// Render with syntax highlighting, overriding background to match diff kind
 		var sb strings.Builder
+		sb.Grow(max(0, width*4))
 		widthLeft := width
 		for _, tok := range tokens {
 			if widthLeft <= 0 {
@@ -505,9 +552,9 @@ func (m Model) renderContentHighlighted(text string, kind LineKind, width int, t
 				t = truncateToWidth(t, widthLeft)
 				tw = runewidth.StringWidth(t)
 			}
-			// Use the token's foreground but override background for diff coloring
-			style := tok.Style.Background(bg)
-			sb.WriteString(style.Render(t))
+			// Background-adjusted SGR is prepared with the viewport tokens, so
+			// rendering avoids lipgloss's generic per-token layout pipeline.
+			tok.WriteTo(&sb, t)
 			widthLeft -= tw
 		}
 		// Pad remaining width

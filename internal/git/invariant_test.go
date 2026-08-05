@@ -108,3 +108,63 @@ func TestTreeRowSnapshotHasNoSynchronousFallback(t *testing.T) {
 		t.Fatal("treeRowsSnapshot was not found")
 	}
 }
+
+func TestBranchPickerInputDoesNotScanBranches(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "branchpicker.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse branchpicker.go: %v", err)
+	}
+
+	wanted := map[string]bool{"Update": false, "updateInput": false}
+	deferredFilterFound := false
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if _, tracked := wanted[fn.Name.Name]; tracked {
+			wanted[fn.Name.Name] = true
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if _, ok := node.(*ast.RangeStmt); ok {
+					t.Errorf("%s: %s must not scan branch collections", fset.Position(node.Pos()), fn.Name.Name)
+				}
+				if call, ok := node.(*ast.CallExpr); ok {
+					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "filterBranchesContext" {
+						t.Errorf("%s: %s must dispatch filtering through a tea.Cmd", fset.Position(call.Pos()), fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+		if fn.Name.Name != "scheduleFilter" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			ast.Inspect(literal.Body, func(inner ast.Node) bool {
+				call, ok := inner.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				ident, ok := call.Fun.(*ast.Ident)
+				if ok && ident.Name == "filterBranchesContext" {
+					deferredFilterFound = true
+				}
+				return true
+			})
+			return false
+		})
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Errorf("branch picker invariant did not find %s", name)
+		}
+	}
+	if !deferredFilterFound {
+		t.Fatal("scheduleFilter does not defer filterBranchesContext inside a tea.Cmd")
+	}
+}

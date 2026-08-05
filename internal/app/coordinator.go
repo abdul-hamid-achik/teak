@@ -2,10 +2,10 @@ package app
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	log "github.com/charmbracelet/log"
 	"teak/internal/acp"
 	"teak/internal/dap"
 	"teak/internal/lsp"
@@ -79,7 +79,7 @@ func NewCoordinator(lspMgr *lsp.Manager, dapMgr *dap.Manager, acpMgr *acp.Manage
 func (c *Coordinator) HandleMessage(msg tea.Msg) []tea.Cmd {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Coordinator panic recovered: %v", r)
+			log.Error("coordinator panic recovered", "panic", r)
 			// Could return error message to UI here
 		}
 	}()

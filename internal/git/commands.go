@@ -241,6 +241,9 @@ type BranchListMsg struct {
 	Branches []string
 	Current  string
 	Err      error
+	// Generation identifies the picker-open request that produced this list.
+	// Zero is accepted by callers that do not need stale-result rejection.
+	Generation uint64
 }
 
 // SwitchBranchMsg requests switching to a branch.
@@ -333,7 +336,7 @@ func PullCmd(rootDir string) tea.Cmd {
 }
 
 // ListBranchesCmd lists all branches.
-func ListBranchesCmd(rootDir string) tea.Cmd {
+func ListBranchesCmd(rootDir string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		// Get current branch
 		current := ""
@@ -344,7 +347,7 @@ func ListBranchesCmd(rootDir string) tea.Cmd {
 		// List all branches
 		out, err := runGitCommandTimeout(rootDir, gitReadTimeout, gitOutputLimit, "branch", "-a", "--format=%(refname:short)")
 		if err != nil {
-			return BranchListMsg{Err: err}
+			return BranchListMsg{Generation: generation, Err: err}
 		}
 
 		var branches []string
@@ -354,7 +357,7 @@ func ListBranchesCmd(rootDir string) tea.Cmd {
 				branches = append(branches, line)
 			}
 		}
-		return BranchListMsg{Branches: branches, Current: current}
+		return BranchListMsg{Generation: generation, Branches: branches, Current: current}
 	}
 }
 

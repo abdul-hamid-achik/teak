@@ -3,9 +3,13 @@ package diff
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
+	"teak/internal/highlight"
 	"teak/internal/ui"
 )
 
@@ -47,7 +51,8 @@ func BenchmarkPrepareDiffScrollViewportThousands(b *testing.B) {
 	for b.Loop() {
 		result := prepareViewportHighlight(
 			context.Background(), model.leftHL, model.rightHL,
-			model.leftSource, model.rightSource, model.leftLineMap, model.rightLineMap,
+			model.leftSource, model.rightSource, model.leftKinds, model.rightKinds,
+			model.leftLineMap, model.rightLineMap,
 			len(model.Lines), 5_000, 5_040,
 		)
 		if !result.complete || len(result.leftBatch.Lines) == 0 || len(result.rightBatch.Lines) == 0 {
@@ -139,6 +144,99 @@ func TestPrepareViewportKeepsLargeDiffHighlightingSparse(t *testing.T) {
 	}
 	if got := model.leftHL.Line(model.leftLineMap[0]); got != nil {
 		t.Fatal("offscreen line was tokenized by a sparse viewport projection")
+	}
+}
+
+func TestPreparedDiffTokensCarryTheirLineBackground(t *testing.T) {
+	lines := []DiffLine{
+		{Left: "oldValue", Right: "newValue", LeftKind: KindRemoved, RightKind: KindAdded},
+		{Left: "sameValue", Right: "sameValue", LeftKind: KindUnchanged, RightKind: KindUnchanged},
+	}
+	model := New("main.go", lines, ui.DefaultTheme())
+	if !model.PrepareViewport(context.Background(), 0, len(lines)) {
+		t.Fatal("viewport preparation was canceled")
+	}
+
+	checks := []struct {
+		name   string
+		tokens []highlight.StyledToken
+		kind   LineKind
+	}{
+		{name: "removed", tokens: model.leftHL.Line(model.leftLineMap[0]), kind: KindRemoved},
+		{name: "added", tokens: model.rightHL.Line(model.rightLineMap[0]), kind: KindAdded},
+		{name: "unchanged", tokens: model.leftHL.Line(model.leftLineMap[1]), kind: KindUnchanged},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if len(check.tokens) == 0 {
+				t.Fatal("expected prepared syntax tokens")
+			}
+			gotR, gotG, gotB, gotA := check.tokens[0].Style.GetBackground().RGBA()
+			wantR, wantG, wantB, wantA := backgroundForKind(check.kind).RGBA()
+			if gotR != wantR || gotG != wantG || gotB != wantB || gotA != wantA {
+				t.Fatalf("background RGBA = (%d,%d,%d,%d), want (%d,%d,%d,%d)", gotR, gotG, gotB, gotA, wantR, wantG, wantB, wantA)
+			}
+		})
+	}
+}
+
+func TestPreparedDiffFastRenderMatchesLipglossReference(t *testing.T) {
+	lines := []DiffLine{
+		{Left: "oldValue := \"á\t漢\"", Right: "newValue := call(input)", LeftKind: KindRemoved, RightKind: KindAdded},
+		{Left: "sameValue := 42", Right: "sameValue := 42", LeftKind: KindUnchanged, RightKind: KindUnchanged},
+	}
+	model := New("main.go", lines, ui.DefaultTheme())
+	if !model.PrepareViewport(context.Background(), 0, len(lines)) {
+		t.Fatal("viewport preparation was canceled")
+	}
+
+	reference := func(text string, kind LineKind, width int, tokens []highlight.StyledToken) string {
+		var sb strings.Builder
+		widthLeft := width
+		for _, token := range tokens {
+			if widthLeft <= 0 {
+				break
+			}
+			part := strings.ReplaceAll(strings.TrimRight(token.Text, "\n\r"), "\t", "    ")
+			partWidth := runewidth.StringWidth(part)
+			if partWidth > widthLeft {
+				part = truncateToWidth(part, widthLeft)
+				partWidth = runewidth.StringWidth(part)
+			}
+			sb.WriteString(token.Style.Background(model.bgForKind(kind)).Render(part))
+			widthLeft -= partWidth
+		}
+		if widthLeft > 0 {
+			padding := lipgloss.NewStyle().Background(model.bgForKind(kind)).Foreground(model.fgForKind(kind))
+			sb.WriteString(padding.Render(strings.Repeat(" ", widthLeft)))
+		}
+		return sb.String()
+	}
+
+	tests := []struct {
+		name   string
+		text   string
+		kind   LineKind
+		tokens []highlight.StyledToken
+		widths []int
+	}{
+		{name: "removed unicode and tab", text: lines[0].Left, kind: KindRemoved, tokens: model.leftHL.Line(model.leftLineMap[0]), widths: []int{9, 32}},
+		{name: "added", text: lines[0].Right, kind: KindAdded, tokens: model.rightHL.Line(model.rightLineMap[0]), widths: []int{11, 32}},
+		{name: "unchanged", text: lines[1].Left, kind: KindUnchanged, tokens: model.leftHL.Line(model.leftLineMap[1]), widths: []int{8, 24}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.tokens) == 0 {
+				t.Fatal("expected prepared syntax tokens")
+			}
+			for _, width := range tt.widths {
+				got := model.renderContentHighlighted(tt.text, tt.kind, width, tt.tokens)
+				want := reference(tt.text, tt.kind, width, tt.tokens)
+				if got != want {
+					t.Fatalf("width %d fast render = %q, want lipgloss reference %q", width, got, want)
+				}
+			}
+		})
 	}
 }
 

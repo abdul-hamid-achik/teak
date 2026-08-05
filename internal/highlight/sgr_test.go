@@ -75,6 +75,21 @@ func TestStyledTokenWriteToMatchesRender(t *testing.T) {
 	}
 }
 
+func TestStyledTokenWithBackgroundMatchesLipgloss(t *testing.T) {
+	h := New("main.go", ui.DefaultTheme())
+	style, pair := h.resolveToken(0)
+	tok := newStyledToken("", style, pair)
+	background := ui.Nord11
+	withBackground := tok.WithBackground(background)
+	wantStyle := style.Background(background)
+
+	for _, sample := range []string{"identifier", "áé漢字", "\ttabbed"} {
+		if got, want := withBackground.Render(sample), wantStyle.Render(sample); got != want {
+			t.Fatalf("WithBackground(%q) = %q, want %q", sample, got, want)
+		}
+	}
+}
+
 func TestDeriveSGRRejectsContentDependentStyle(t *testing.T) {
 	// A fixed-width style pads according to the content length, so no constant
 	// prefix/suffix can reproduce it. Accepting one would truncate or misalign.

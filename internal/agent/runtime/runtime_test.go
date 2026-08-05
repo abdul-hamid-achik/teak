@@ -612,7 +612,7 @@ func TestListWithErrorReportsExternalStoreFailure(t *testing.T) {
 	if _, err := m.Start(testSpec(root)); err != nil {
 		t.Fatal(err)
 	}
-	store.loadFail = true
+	store.setLoadFail(true)
 
 	if _, err := m.ListWithError(); err == nil || !strings.Contains(err.Error(), "fixture load failure") {
 		t.Fatalf("ListWithError() error = %v, want fixture load failure", err)
@@ -940,7 +940,7 @@ func TestHeartbeatPersistenceFailureRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	current = current.Add(time.Minute)
-	store.fail = true
+	store.setFail(true)
 	if err := m.Heartbeat(handle.ID); err == nil {
 		t.Fatal("Heartbeat() unexpectedly succeeded with a failing store")
 	}
@@ -951,7 +951,7 @@ func TestHeartbeatPersistenceFailureRollsBack(t *testing.T) {
 	if !after.LastHeartbeatAt.Equal(before.LastHeartbeatAt) {
 		t.Fatalf("heartbeat after failed persistence = %v, want rollback to %v", after.LastHeartbeatAt, before.LastHeartbeatAt)
 	}
-	store.fail = false
+	store.setFail(false)
 	_ = m.Cancel(handle.ID)
 }
 
@@ -1390,12 +1390,15 @@ func TestParentTimeoutCancelsActiveChildren(t *testing.T) {
 }
 
 type failingStore struct {
+	mu       sync.RWMutex
 	records  []RunRecord
 	fail     bool
 	loadFail bool
 }
 
 func (s *failingStore) Load() ([]RunRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.loadFail {
 		return nil, errors.New("fixture load failure")
 	}
@@ -1403,11 +1406,25 @@ func (s *failingStore) Load() ([]RunRecord, error) {
 }
 
 func (s *failingStore) Save(records []RunRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.fail {
 		return errors.New("fixture store failure")
 	}
 	s.records = cloneRecords(records)
 	return nil
+}
+
+func (s *failingStore) setFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail = fail
+}
+
+func (s *failingStore) setLoadFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadFail = fail
 }
 
 func TestTerminalPersistenceFailureRollsBackState(t *testing.T) {
@@ -1421,7 +1438,7 @@ func TestTerminalPersistenceFailureRollsBackState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.fail = true
+	store.setFail(true)
 	if err := m.Cancel(handle.ID); err == nil {
 		t.Fatal("Cancel() unexpectedly succeeded with a failing store")
 	}

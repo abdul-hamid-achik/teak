@@ -3,6 +3,7 @@ package highlight
 import (
 	"bytes"
 	"context"
+	"image/color"
 	"io"
 	"strings"
 
@@ -30,6 +31,19 @@ type StyledToken struct {
 	Prefix  string
 	Suffix  string
 	FastSGR bool
+}
+
+// WithBackground returns a token whose fast SGR path exactly matches the same
+// lipgloss style with background applied. Call this while preparing cached
+// tokens, not during rendering: deriving the escape pair intentionally probes
+// lipgloss for byte-for-byte equivalence.
+func (t StyledToken) WithBackground(background color.Color) StyledToken {
+	t.Style = t.Style.Background(background)
+	pair := deriveSGR(t.Style)
+	t.Prefix = pair.prefix
+	t.Suffix = pair.suffix
+	t.FastSGR = pair.fast
+	return t
 }
 
 // Render writes the token's styled text. It uses the precomputed escape

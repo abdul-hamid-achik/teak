@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -20,6 +21,21 @@ type BranchPickerModel struct {
 	theme    ui.Theme
 	width    int
 	height   int
+
+	filterPending    bool
+	filterGeneration uint64
+	filterCancel     context.CancelFunc
+	pendingSwitch    bool
+}
+
+// BranchFilterReadyMsg carries a branch projection prepared outside the
+// Bubble Tea update loop. Generation and query make slower obsolete results
+// harmless after another character is typed or the picker is dismissed.
+type BranchFilterReadyMsg struct {
+	Generation uint64
+	Query      string
+	Branches   []string
+	Err        error
 }
 
 // branchPickerGeometry is expressed in terminal cells, the same coordinate
@@ -49,12 +65,14 @@ func NewBranchPicker(theme ui.Theme) BranchPickerModel {
 
 // SetBranches populates the branch list and resets the filter.
 func (m *BranchPickerModel) SetBranches(branches []string, current string) {
+	m.cancelFilter()
 	m.branches = branches
+	m.filtered = branches
 	m.current = current
 	m.cursor = 0
 	m.scrollY = 0
+	m.pendingSwitch = false
 	m.input.SetValue("")
-	m.filter()
 }
 
 // Focus gives focus to the text input.
@@ -74,8 +92,14 @@ func (m BranchPickerModel) Update(msg tea.Msg) (BranchPickerModel, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
+			m.cancelFilter()
+			m.pendingSwitch = false
 			return m, func() tea.Msg { return CloseBranchPickerMsg{} }
 		case "enter":
+			if m.filterPending {
+				m.pendingSwitch = true
+				return m, nil
+			}
 			return m, m.switchSelectedCmd()
 		case "up":
 			m.moveCursor(-1)
@@ -86,6 +110,9 @@ func (m BranchPickerModel) Update(msg tea.Msg) (BranchPickerModel, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		if m.filterPending {
+			return m, nil
+		}
 		mouse := msg.Mouse()
 		if mouse.Button != tea.MouseLeft {
 			return m, nil
@@ -105,6 +132,9 @@ func (m BranchPickerModel) Update(msg tea.Msg) (BranchPickerModel, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		if m.filterPending {
+			return m, nil
+		}
 		mouse := msg.Mouse()
 		geometry := m.geometry()
 		if !geometry.listContains(mouse.X, mouse.Y) {
@@ -123,6 +153,9 @@ func (m BranchPickerModel) Update(msg tea.Msg) (BranchPickerModel, tea.Cmd) {
 		// release to text input or the editor is both unnecessary and can
 		// complete a drag that began before the picker opened.
 		return m, nil
+
+	case BranchFilterReadyMsg:
+		return m, m.handleFilterReady(msg)
 	}
 
 	return m.updateInput(msg)
@@ -147,7 +180,8 @@ func (m BranchPickerModel) updateInput(msg tea.Msg) (BranchPickerModel, tea.Cmd)
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	if m.input.Value() != prevVal {
-		m.filter()
+		m.pendingSwitch = false
+		return m, tea.Batch(cmd, m.scheduleFilter())
 	}
 	return m, cmd
 }
@@ -155,16 +189,97 @@ func (m BranchPickerModel) updateInput(msg tea.Msg) (BranchPickerModel, tea.Cmd)
 // CloseBranchPickerMsg requests closing the branch picker.
 type CloseBranchPickerMsg struct{}
 
-func (m *BranchPickerModel) filter() {
-	query := strings.ToLower(m.input.Value())
-	m.filtered = nil
-	for _, b := range m.branches {
-		if query == "" || strings.Contains(strings.ToLower(b), query) {
-			m.filtered = append(m.filtered, b)
-		}
-	}
+func (m *BranchPickerModel) scheduleFilter() tea.Cmd {
+	m.cancelFilter()
+	query := m.input.Value()
 	m.cursor = 0
 	m.scrollY = 0
+	m.filtered = nil
+	if query == "" {
+		m.filtered = m.branches
+		return nil
+	}
+
+	m.filterGeneration++
+	generation := m.filterGeneration
+	branches := m.branches
+	ctx, cancel := context.WithCancel(context.Background())
+	m.filterCancel = cancel
+	m.filterPending = true
+	return func() tea.Msg {
+		filtered, err := filterBranchesContext(ctx, branches, query)
+		return BranchFilterReadyMsg{
+			Generation: generation,
+			Query:      query,
+			Branches:   filtered,
+			Err:        err,
+		}
+	}
+}
+
+func (m *BranchPickerModel) handleFilterReady(msg BranchFilterReadyMsg) tea.Cmd {
+	if !m.filterPending || msg.Generation != m.filterGeneration || msg.Query != m.input.Value() {
+		return nil
+	}
+	m.filterCancel = nil
+	m.filterPending = false
+	if msg.Err != nil {
+		m.filtered = nil
+		m.pendingSwitch = false
+		return nil
+	}
+	m.filtered = msg.Branches
+	m.cursor = 0
+	m.scrollY = 0
+	if !m.pendingSwitch {
+		return nil
+	}
+	m.pendingSwitch = false
+	return m.switchSelectedCmd()
+}
+
+func (m *BranchPickerModel) cancelFilter() {
+	if m.filterCancel != nil {
+		m.filterCancel()
+		m.filterCancel = nil
+	}
+	m.filterPending = false
+	m.filterGeneration++
+}
+
+// CancelFilter stops pending projection work when the picker is hidden.
+func (m *BranchPickerModel) CancelFilter() {
+	m.cancelFilter()
+	m.pendingSwitch = false
+}
+
+func filterBranchesContext(ctx context.Context, branches []string, query string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	query = strings.ToLower(query)
+	if query == "" {
+		return branches, nil
+	}
+
+	matches := make([]string, 0, min(len(branches), 256))
+	for i, branch := range branches {
+		if i%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if strings.Contains(strings.ToLower(branch), query) {
+			matches = append(matches, branch)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return matches, nil
 }
 
 // moveCursor clamps selection and keeps it within the rendered list. It is
@@ -283,7 +398,7 @@ func (m BranchPickerModel) View() string {
 		endIdx = len(m.filtered)
 	}
 
-	for i := m.scrollY; i < endIdx; i++ {
+	for i := m.scrollY; !m.filterPending && i < endIdx; i++ {
 		b := m.filtered[i]
 		prefix := "  "
 		if b == m.current {
@@ -301,7 +416,9 @@ func (m BranchPickerModel) View() string {
 		}
 	}
 
-	if len(m.filtered) == 0 {
+	if m.filterPending {
+		sb.WriteString(m.theme.GitEntry.Render("  Filtering branches..."))
+	} else if len(m.filtered) == 0 {
 		sb.WriteString(m.theme.GitEntry.Render("  No matching branches"))
 	}
 

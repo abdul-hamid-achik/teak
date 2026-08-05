@@ -340,10 +340,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if surface == mouseStatus {
 		if zone.Get("status-bar-branch").InBounds(msg) && m.gitPanel.IsGitRepo() {
 			m.cancelActiveEditorDrag()
+			m.branchPickerM.SetBranches(nil, "")
+			m.branchListGeneration++
 			m.showBranchPicker = true
 			m.branchPickerM.SetSize(m.width, m.height)
 			return m, tea.Batch(
-				git.ListBranchesCmd(m.gitPanel.RootDir()),
+				git.ListBranchesCmd(m.gitPanel.RootDir(), m.branchListGeneration),
 				m.branchPickerM.Focus(),
 			)
 		}

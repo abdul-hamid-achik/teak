@@ -1,6 +1,8 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -139,7 +141,8 @@ func TestBranchPickerMouseRespectsFilterAndClippedTerminalCells(t *testing.T) {
 	m := branchPickerForMouse(t, 12, 12, []string{"main", "feature/\u754c\u754c\u754c"}, "main")
 	focus := m.Focus()
 	m, _ = m.Update(focus())
-	filtered, _ := m.Update(tea.KeyPressMsg{Text: "feature"})
+	filtered, filterCmd := m.Update(tea.KeyPressMsg{Text: "feature"})
+	filtered, _ = filtered.Update(branchPickerFilterMessage(t, filterCmd))
 	if len(filtered.filtered) != 1 || filtered.filtered[0] != "feature/\u754c\u754c\u754c" {
 		t.Fatalf("text filter = %#v, want one Unicode branch", filtered.filtered)
 	}
@@ -169,5 +172,158 @@ func TestBranchPickerMouseRespectsFilterAndClippedTerminalCells(t *testing.T) {
 	}
 	if got := cmd().(SwitchBranchMsg).Branch; got != "feature/\u754c\u754c\u754c" {
 		t.Fatalf("switch branch = %q, want filtered Unicode branch", got)
+	}
+}
+
+func TestBranchPickerFiltersInputAsynchronously(t *testing.T) {
+	m := branchPickerForMouse(t, 100, 30, []string{"main", "feature/café", "feature/other", "release"}, "main")
+	_ = m.Focus()
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "café"})
+	if !updated.filterPending {
+		t.Fatal("input did not mark the branch filter pending")
+	}
+	if updated.filtered != nil {
+		t.Fatalf("input synchronously projected branches: %#v", updated.filtered)
+	}
+	ready := branchPickerFilterMessage(t, cmd)
+	updated, followup := updated.Update(ready)
+	if followup != nil {
+		t.Fatal("ordinary filter completion emitted an unexpected command")
+	}
+	if updated.filterPending {
+		t.Fatal("current filter result remained pending")
+	}
+	if len(updated.filtered) != 1 || updated.filtered[0] != "feature/café" {
+		t.Fatalf("filtered branches = %#v, want Unicode match", updated.filtered)
+	}
+}
+
+func TestBranchPickerLatestFilterWins(t *testing.T) {
+	m := branchPickerForMouse(t, 100, 30, []string{"main", "feature/one", "feature/two", "release"}, "main")
+	_ = m.Focus()
+
+	first, firstCmd := m.Update(tea.KeyPressMsg{Text: "fea"})
+	latest, latestCmd := first.Update(tea.KeyPressMsg{Text: "ture/two"})
+	stale := branchPickerFilterMessage(t, firstCmd)
+	current := branchPickerFilterMessage(t, latestCmd)
+
+	latest, followup := latest.Update(stale)
+	if followup != nil || !latest.filterPending || latest.filtered != nil {
+		t.Fatal("stale filter result changed the pending latest projection")
+	}
+	latest, _ = latest.Update(current)
+	if latest.filterPending || len(latest.filtered) != 1 || latest.filtered[0] != "feature/two" {
+		t.Fatalf("latest filter result = pending %v, branches %#v", latest.filterPending, latest.filtered)
+	}
+}
+
+func TestBranchPickerEnterDuringPendingFilterSwitchesWhenReady(t *testing.T) {
+	m := branchPickerForMouse(t, 100, 30, []string{"main", "feature/one", "feature/two"}, "main")
+	_ = m.Focus()
+	m, cmd := m.Update(tea.KeyPressMsg{Text: "feature/two"})
+
+	var followup tea.Cmd
+	m, followup = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if followup != nil {
+		t.Fatal("Enter switched a stale branch while filtering was pending")
+	}
+	m, followup = m.Update(branchPickerFilterMessage(t, cmd))
+	if followup == nil {
+		t.Fatal("pending Enter did not switch after the current result arrived")
+	}
+	msg, ok := followup().(SwitchBranchMsg)
+	if !ok || msg.Branch != "feature/two" {
+		t.Fatalf("pending switch = %#v, want feature/two", msg)
+	}
+}
+
+func TestBranchPickerEscapeCancelsPendingFilter(t *testing.T) {
+	m := branchPickerForMouse(t, 100, 30, []string{"main", "feature/one"}, "main")
+	_ = m.Focus()
+	m, cmd := m.Update(tea.KeyPressMsg{Text: "feature"})
+	ready := branchPickerFilterMessage(t, cmd)
+
+	m, closeCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if closeCmd == nil {
+		t.Fatal("Escape did not close the branch picker")
+	}
+	if m.filterPending {
+		t.Fatal("Escape left the branch filter pending")
+	}
+	updated, followup := m.Update(ready)
+	if followup != nil || updated.filterPending || updated.filtered != nil {
+		t.Fatal("canceled filter result was applied after Escape")
+	}
+}
+
+func TestFilterBranchesContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	branches := make([]string, 1_000)
+	if matches, err := filterBranchesContext(ctx, branches, "feature"); !errors.Is(err, context.Canceled) || matches != nil {
+		t.Fatalf("canceled filter = (%#v, %v), want nil context.Canceled", matches, err)
+	}
+}
+
+func branchPickerFilterMessage(t *testing.T, cmd tea.Cmd) BranchFilterReadyMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil branch picker command")
+	}
+	switch msg := cmd().(type) {
+	case BranchFilterReadyMsg:
+		return msg
+	case tea.BatchMsg:
+		for _, child := range msg {
+			if child == nil {
+				continue
+			}
+			if ready, ok := child().(BranchFilterReadyMsg); ok {
+				return ready
+			}
+		}
+	}
+	t.Fatal("branch picker command did not produce BranchFilterReadyMsg")
+	return BranchFilterReadyMsg{}
+}
+
+func BenchmarkBranchPickerFilterDispatchThousands(b *testing.B) {
+	branches := make([]string, 50_000)
+	for i := range branches {
+		branches[i] = fmt.Sprintf("feature/branch-%05d", i)
+	}
+	branches[len(branches)/2] = "feature/needle"
+
+	model := NewBranchPicker(ui.DefaultTheme())
+	model.SetBranches(branches, "main")
+	_ = model.Focus()
+	input := tea.KeyPressMsg{Text: "needle"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		updated, cmd := model.Update(input)
+		if !updated.filterPending || cmd == nil || updated.filtered != nil {
+			b.Fatal("branch filter was not dispatched asynchronously")
+		}
+		updated.cancelFilter()
+	}
+}
+
+func BenchmarkFilterBranchesContextThousands(b *testing.B) {
+	branches := make([]string, 50_000)
+	for i := range branches {
+		branches[i] = fmt.Sprintf("feature/branch-%05d", i)
+	}
+	branches[len(branches)/2] = "feature/needle"
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		matches, err := filterBranchesContext(context.Background(), branches, "needle")
+		if err != nil || len(matches) != 1 || matches[0] != "feature/needle" {
+			b.Fatalf("background filter = (%#v, %v), want feature/needle", matches, err)
+		}
 	}
 }
