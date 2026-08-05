@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"teak/internal/lsp"
+	"teak/internal/plugin"
 	"teak/internal/text"
 )
 
@@ -172,6 +173,32 @@ func TestTreeRenameAcrossExtensionsPreservesPreparedDiagnostics(t *testing.T) {
 	diagnostics := updated.activeEditor().DiagnosticsIntersecting(0, 0)
 	if len(diagnostics) != 1 || diagnostics[0].Message != "survives lexer rebuild" {
 		t.Fatalf("prepared diagnostics after lexer rebuild = %#v", diagnostics)
+	}
+}
+
+func TestTreeRenameAcrossExtensionsPreservesPreparedPluginHighlights(t *testing.T) {
+	root := t.TempDir()
+	m := newTreeUXModel(t, root)
+	index := addDirtyEditor(t, &m, "active.go", "package active\n", "package active\n")
+	source := filepath.Join(root, "active.go")
+	if err := m.setPluginHighlightsForEditor(index, plugin.UIHighlightRequest{
+		Namespace: 7,
+		Highlights: []plugin.UIHighlight{{
+			Line:       0,
+			StartCol:   0,
+			EndCol:     7,
+			Foreground: "#88c0d0",
+		}},
+	}); err != nil {
+		t.Fatalf("setPluginHighlightsForEditor() error = %v", err)
+	}
+
+	msg := m.startTreeRename(source, "active.txt")().(treeActionResultMsg)
+	updatedAny, _ := m.Update(msg)
+	updated := updatedAny.(Model)
+	ranges := updated.editors[index].PluginHighlightRanges()
+	if len(ranges) != 1 || ranges[0].Namespace != 7 || ranges[0].Line != 0 {
+		t.Fatalf("prepared plugin highlights after lexer rebuild = %#v", ranges)
 	}
 }
 

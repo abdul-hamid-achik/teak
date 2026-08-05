@@ -190,6 +190,31 @@ func TestPluginRuntimeBoundsHighlightNamespacesAndTotalRanges(t *testing.T) {
 	}
 }
 
+func TestPluginRuntimeIgnoresStaleHighlightsWhenApplyingLimits(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	runtime := newPluginRuntime(&model)
+	for namespace := 1; namespace <= maxPluginHighlightNamespaces; namespace++ {
+		if err := runtime.SetHighlights(plugin.UIHighlightRequest{
+			Namespace:  namespace,
+			Highlights: []plugin.UIHighlight{{Line: 0, StartCol: 0, EndCol: 1}},
+		}); err != nil {
+			t.Fatalf("SetHighlights(namespace %d) error = %v", namespace, err)
+		}
+	}
+	model.activeEditor().Buffer.InsertAtCursor([]byte("changed"))
+
+	if err := runtime.SetHighlights(plugin.UIHighlightRequest{
+		Namespace:  maxPluginHighlightNamespaces + 1,
+		Highlights: []plugin.UIHighlight{{Line: 0, StartCol: 0, EndCol: 1}},
+	}); err != nil {
+		t.Fatalf("SetHighlights() retained stale namespace limits: %v", err)
+	}
+	ranges := model.activeEditor().PluginHighlightRanges()
+	if len(ranges) != 1 || ranges[0].Namespace != maxPluginHighlightNamespaces+1 {
+		t.Fatalf("highlights after stale replacement = %#v", ranges)
+	}
+}
+
 func TestPluginRuntimeTracksRetokenizeEditorIdentity(t *testing.T) {
 	model := newInputRoutingTestModel(t)
 	buf := text.NewBufferFromBytes([]byte("package main\n"))

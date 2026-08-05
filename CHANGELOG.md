@@ -4,6 +4,25 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.28] - 2026-08-05
+
+### Viewport-Prepared Plugin Highlights
+
+- Plugin highlight namespaces are cloned and sorted once when published, then
+  queried with binary search for only the visible line runs. Rendering no
+  longer flattens, copies, and sorts every retained plugin range on each frame.
+- Diagnostics, find matches, and plugin highlights share the same viewport
+  projection, including sparse lines around collapsed folds. Copy-on-write
+  prepared collections remain safe across Bubble Tea model copies and lexer
+  rebuilds after cross-extension renames.
+- Editing a buffer now invalidates the whole prior collection for replacement,
+  clearing, and limit accounting, so updating one namespace cannot revive stale
+  highlights or inherit obsolete namespace limits.
+- On an Apple M5 with the maximum 4,096 retained ranges and 24 visible rows,
+  editor rendering dropped from about 1.68-1.76 ms and 9.07 MB per frame to
+  0.169-0.170 ms and 86 KB -- roughly 10x faster with 105x fewer allocated
+  bytes. Preparing a maximum 512-range plugin update takes about 0.34 ms once.
+
 ## [0.10.27] - 2026-08-05
 
 ### Fold-Aware Find Highlights

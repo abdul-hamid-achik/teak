@@ -123,8 +123,8 @@ type Editor struct {
 	HasLSP                  bool
 	TriggerCharacters       []string    // from LSP server capabilities
 	DebugGutter             *GutterOpts // set by app when debugging
-	PluginHighlights        map[int][]HighlightRange
-	PluginHighlightVersion  int
+	pluginHighlights        map[int][]HighlightRange
+	pluginHighlightVersion  int
 	Folds                   FoldState   // code folding state
 	Wrap                    *WrapLayout // word wrap layout (nil when disabled)
 	lastVersion             int
@@ -177,8 +177,8 @@ func New(buf *text.Buffer, theme ui.Theme, cfg Config) Editor {
 		Config:                 cfg,
 		theme:                  theme,
 		Highlighter:            hl,
-		PluginHighlights:       make(map[int][]HighlightRange),
-		PluginHighlightVersion: -1,
+		pluginHighlights:       make(map[int][]HighlightRange),
+		pluginHighlightVersion: -1,
 		autocomplete:           overlays.NewAutocomplete(theme),
 		hover:                  overlays.NewHover(theme),
 		signatureHelp:          overlays.NewSignatureHelp(theme),
@@ -1375,12 +1375,12 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 // View renders the editor content.
 func (e *Editor) View() string {
 	visibleDiagnostics, visibleLines, startLine, endLine := e.visibleDiagnosticProjection()
-	pluginHighlights := e.PluginHighlightRanges()
+	pluginHighlights := e.pluginHighlightRangesForProjection(visibleLines, startLine, endLine)
 	diagnosticHighlights := e.diagnosticHighlightsForRange(visibleDiagnostics, startLine, endLine)
 	if len(visibleLines) > 0 {
 		diagnosticHighlights = e.diagnosticHighlightsForLines(visibleDiagnostics, visibleLines)
 	}
-	extra := append(diagnosticHighlights, e.findMatchHighlights()...)
+	extra := append(diagnosticHighlights, e.findMatchHighlightsForProjection(visibleLines, startLine, endLine)...)
 	if len(extra) > 0 {
 		pluginHighlights = append(pluginHighlights, extra...)
 		sort.SliceStable(pluginHighlights, func(i, j int) bool {
@@ -1411,11 +1411,16 @@ func (e *Editor) View() string {
 // the existing render pipeline paints them. The current match gets a distinct
 // style so the user can see where the next Enter will land.
 func (e Editor) findMatchHighlights() []HighlightRange {
+	visibleLines, startLine, endLine := e.visibleBufferProjection()
+	return e.findMatchHighlightsForProjection(visibleLines, startLine, endLine)
+}
+
+func (e Editor) findMatchHighlightsForProjection(visibleLines []int, startLine, endLine int) []HighlightRange {
 	if !e.find.Visible() || e.Buffer == nil || len(e.find.matches) == 0 {
 		return nil
 	}
 	current := e.find.CurrentMatchPosition()
-	if visibleLines := e.visibleCollapsedBufferLines(); len(visibleLines) > 0 {
+	if len(visibleLines) > 0 {
 		ranges := make([]HighlightRange, 0, len(visibleLines))
 		start := visibleLines[0]
 		previous := start
@@ -1429,7 +1434,6 @@ func (e Editor) findMatchHighlights() []HighlightRange {
 		}
 		return e.appendFindMatchHighlights(ranges, current, start, previous)
 	}
-	startLine, endLine := e.visibleBufferLineRange()
 	if startLine > endLine {
 		return nil
 	}
@@ -1614,14 +1618,25 @@ func (e Editor) diagnosticsIntersecting(startLine, endLine int) []Diagnostic {
 }
 
 func (e Editor) visibleDiagnosticProjection() ([]Diagnostic, []int, int, int) {
-	if e.Buffer == nil || e.diagnosticSet == nil || e.Buffer.LineCount() == 0 {
-		return nil, nil, 0, -1
+	visibleLines, startLine, endLine := e.visibleBufferProjection()
+	if e.diagnosticSet == nil {
+		return nil, visibleLines, startLine, endLine
 	}
-	if visibleLines := e.visibleCollapsedBufferLines(); len(visibleLines) > 0 {
+	if len(visibleLines) > 0 {
 		return e.diagnosticSet.IntersectingLines(visibleLines), visibleLines, visibleLines[0], visibleLines[len(visibleLines)-1]
 	}
-	startLine, endLine := e.visibleBufferLineRange()
 	return e.diagnosticsIntersecting(startLine, endLine), nil, startLine, endLine
+}
+
+func (e Editor) visibleBufferProjection() ([]int, int, int) {
+	if e.Buffer == nil || e.Buffer.LineCount() == 0 {
+		return nil, 0, -1
+	}
+	if visibleLines := e.visibleCollapsedBufferLines(); len(visibleLines) > 0 {
+		return visibleLines, visibleLines[0], visibleLines[len(visibleLines)-1]
+	}
+	startLine, endLine := e.visibleBufferLineRange()
+	return nil, startLine, endLine
 }
 
 func (e Editor) visibleCollapsedBufferLines() []int {

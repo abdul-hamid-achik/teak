@@ -80,9 +80,6 @@ func (m *Model) setPluginHighlightsForEditor(index int, request plugin.UIHighlig
 	if ed.Buffer == nil {
 		return fmt.Errorf("editor has no active buffer")
 	}
-	if ed.PluginHighlights == nil {
-		ed.PluginHighlights = make(map[int][]editor.HighlightRange)
-	}
 	ranges := make([]editor.HighlightRange, 0, len(request.Highlights))
 	for _, highlight := range request.Highlights {
 		ranges = append(ranges, editor.HighlightRange{
@@ -94,25 +91,15 @@ func (m *Model) setPluginHighlightsForEditor(index int, request plugin.UIHighlig
 		})
 	}
 	if len(ranges) > 0 {
-		if _, exists := ed.PluginHighlights[request.Namespace]; !exists && len(ed.PluginHighlights) >= maxPluginHighlightNamespaces {
+		namespaceCount, existingTotal, exists := ed.PluginHighlightCounts(request.Namespace)
+		if !exists && namespaceCount >= maxPluginHighlightNamespaces {
 			return fmt.Errorf("highlight namespace limit reached (max %d)", maxPluginHighlightNamespaces)
 		}
-		total := len(ranges)
-		for namespace, existing := range ed.PluginHighlights {
-			if namespace != request.Namespace {
-				total += len(existing)
-			}
-		}
-		if total > maxPluginHighlightTotal {
+		if existingTotal+len(ranges) > maxPluginHighlightTotal {
 			return fmt.Errorf("highlight range limit reached (max %d)", maxPluginHighlightTotal)
 		}
 	}
-	if len(ranges) == 0 {
-		delete(ed.PluginHighlights, request.Namespace)
-	} else {
-		ed.PluginHighlights[request.Namespace] = ranges
-	}
-	ed.PluginHighlightVersion = ed.Buffer.Version()
+	ed.ReplacePluginHighlights(request.Namespace, ranges)
 	m.setEditor(index, *ed)
 	return nil
 }
@@ -128,12 +115,7 @@ func (m *Model) clearPluginHighlightsForEditor(index, namespace int) error {
 	if ed.Buffer == nil {
 		return fmt.Errorf("editor has no active buffer")
 	}
-	if namespace == 0 {
-		ed.PluginHighlights = make(map[int][]editor.HighlightRange)
-	} else if ed.PluginHighlights != nil {
-		delete(ed.PluginHighlights, namespace)
-	}
-	ed.PluginHighlightVersion = ed.Buffer.Version()
+	ed.ClearPluginHighlights(namespace)
 	m.setEditor(index, *ed)
 	return nil
 }
