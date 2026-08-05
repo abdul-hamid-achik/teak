@@ -4,6 +4,18 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-08-05
+
+### Crash Recovery Responsiveness
+
+- Crash-recovery bytes are now converted into owned immutable rope snapshots
+  inside background load commands, so session and standalone recovery no
+  longer build multi-megabyte ropes inside Bubble Tea's `Update()` loop.
+- Existing clean buffers are compared with recovery snapshots in a background
+  command bound to editor identity and version. Equal or stale results are
+  discarded; applicable snapshots are installed by identity and pass through
+  central editor reconciliation.
+
 ## [0.10.8] - 2026-08-05
 
 ### Editor State Synchronization

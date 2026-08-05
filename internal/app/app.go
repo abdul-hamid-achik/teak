@@ -1059,6 +1059,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case recoveryLoadedMsg:
 		return m.handleRecoveryLoaded(msg)
+	case recoveryComparisonsMsg:
+		return m.handleRecoveryComparisons(msg)
 
 	case pluginLoadResultMsg:
 		return m.handlePluginLoadResult(msg)

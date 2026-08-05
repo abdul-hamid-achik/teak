@@ -49,7 +49,7 @@ type sessionRestoreResultMsg struct {
 	State      session.State
 	Files      []restoredSessionFile
 	Skipped    []session.TabState
-	Recovery   []session.RecoveryRecord
+	Recovery   []preparedRecoveryRecord
 	Err        error
 }
 
@@ -112,7 +112,13 @@ func sessionRestoreCmd(ctx context.Context, generation uint64, rootDir string) t
 			log.Warn("recovery load failed", "err", recErr)
 			recoveryRecords = nil
 		}
-		return sessionRestoreResultMsg{Generation: generation, State: filtered, Files: files, Skipped: skipped, Recovery: recoveryRecords}
+		return sessionRestoreResultMsg{
+			Generation: generation,
+			State:      filtered,
+			Files:      files,
+			Skipped:    skipped,
+			Recovery:   prepareRecoveryRecords(recoveryRecords),
+		}
 	}
 }
 
@@ -309,7 +315,7 @@ func (m *Model) applySessionRestore(result sessionRestoreResultMsg) tea.Cmd {
 // merged into the restored tabs: session tabs come back, missing CLI files are
 // appended, CLI line:col wins via startupCursors, and the first CLI file becomes
 // active.
-func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restoredSessionFile, recovery []session.RecoveryRecord) tea.Cmd {
+func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restoredSessionFile, recovery []preparedRecoveryRecord) tea.Cmd {
 	if len(state.Tabs) != len(files) {
 		releaseRestoredSessionFiles(files)
 		return nil
@@ -320,10 +326,10 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 	// Index crash-recovery records: path records override the pinned disk
 	// bytes of their session tab; untitled records recreate buffers that only
 	// ever existed in the editor.
-	recoveryByPath := make(map[string]session.RecoveryRecord, len(recovery))
-	var untitledRecovery []session.RecoveryRecord
+	recoveryByPath := make(map[string]preparedRecoveryRecord, len(recovery))
+	var untitledRecovery []preparedRecoveryRecord
 	for _, record := range recovery {
-		if len(record.Content) == 0 {
+		if record.Snapshot == nil {
 			continue
 		}
 		if record.FilePath == "" {
@@ -384,11 +390,8 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 		if record, ok := recoveryByPath[filepath.Clean(tab.FilePath)]; ok {
 			// The crash snapshot is newer than the pinned disk bytes; restore
 			// it and surface the buffer as unsaved so nothing is lost silently.
-			snapshot = text.New(record.Content)
-			ending = text.LF
-			if record.CRLF {
-				ending = text.CRLF
-			}
+			snapshot = record.Snapshot
+			ending = record.LineEnding
 			recoveredDirty = true
 			delete(recoveryByPath, filepath.Clean(tab.FilePath))
 			recoveredCount++
@@ -481,7 +484,7 @@ func (m *Model) restoreSessionFromPinnedRead(state session.State, files []restor
 // record and returns the command that installs its content as an unsaved
 // buffer. Path records keep their file identity; untitled records get the
 // usual Untitled-N label.
-func (m *Model) appendRecoveredTab(record session.RecoveryRecord) tea.Cmd {
+func (m *Model) appendRecoveredTab(record preparedRecoveryRecord) tea.Cmd {
 	buf := text.NewBuffer()
 	buf.FilePath = record.FilePath
 	cfg := editor.DefaultConfig()
@@ -514,11 +517,8 @@ func (m *Model) appendRecoveredTab(record session.RecoveryRecord) tea.Cmd {
 		BaseRope:    ed.Buffer.Rope(),
 		Cancel:      func() {},
 	}
-	snapshot := text.New(record.Content)
-	ending := text.LF
-	if record.CRLF {
-		ending = text.CRLF
-	}
+	snapshot := record.Snapshot
+	ending := record.LineEnding
 	return func() tea.Msg {
 		return FileLoadedMsg{Path: record.FilePath, Snapshot: snapshot, LineEnding: ending, EditorID: editorID, RequestID: requestID, RecoveredDirty: true}
 	}

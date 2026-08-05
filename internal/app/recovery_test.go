@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
 	"teak/internal/session"
+	"teak/internal/text"
 )
 
 func newRecoveryModel(t *testing.T, rootDir string) Model {
@@ -140,6 +141,10 @@ func TestSessionRestoreAppliesRecoveryOverDiskContent(t *testing.T) {
 
 	model := newRecoveryModel(t, root)
 	result := sessionRestoreCmd(model.sessionRestoreCtx, model.sessionRestoreGeneration, root)()
+	restoreResult, ok := result.(sessionRestoreResultMsg)
+	if !ok || len(restoreResult.Recovery) != 1 || restoreResult.Recovery[0].Snapshot == nil {
+		t.Fatalf("session restore recovery was not prepared off Update: %#v", result)
+	}
 	updated, command := model.Update(result)
 	model = updated.(Model)
 	if command == nil {
@@ -252,9 +257,9 @@ func TestRecoveryPrepsRespectSuppression(t *testing.T) {
 func TestHandleRecoveryLoadedStandalone(t *testing.T) {
 	model := newRecoveryModel(t, t.TempDir())
 
-	msg := recoveryLoadedMsg{Records: []session.RecoveryRecord{
-		{FilePath: "/nonexistent/elsewhere.txt", Content: []byte("recovered file")},
-		{Untitled: true, Content: []byte("recovered untitled")},
+	msg := recoveryLoadedMsg{Records: []preparedRecoveryRecord{
+		{FilePath: "/nonexistent/elsewhere.txt", Snapshot: text.NewFromString("recovered file")},
+		{Untitled: true, Snapshot: text.NewFromString("recovered untitled")},
 	}}
 	updatedAny, _ := model.handleRecoveryLoaded(msg)
 	model = updatedAny.(Model)
@@ -278,5 +283,112 @@ func TestHandleRecoveryLoadedStandalone(t *testing.T) {
 	}
 	if fileContent != "recovered file" || untitledContent != "recovered untitled" {
 		t.Fatalf("recovered contents = %q / %q", fileContent, untitledContent)
+	}
+}
+
+func TestRecoveryLoadCmdPreparesOwnedSnapshots(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := session.SaveRecovery(root, []session.RecoveryRecord{{
+		FilePath: filepath.Join(root, "main.go"),
+		CRLF:     true,
+		Content:  []byte("recovered\n"),
+	}}); err != nil {
+		t.Fatalf("SaveRecovery() error = %v", err)
+	}
+
+	msg, ok := recoveryLoadCmd(root)().(recoveryLoadedMsg)
+	if !ok {
+		t.Fatalf("recoveryLoadCmd() returned unexpected message")
+	}
+	if len(msg.Records) != 1 {
+		t.Fatalf("prepared records = %d, want 1", len(msg.Records))
+	}
+	record := msg.Records[0]
+	if record.Snapshot == nil || record.Snapshot.String() != "recovered\n" {
+		t.Fatalf("prepared snapshot = %#v", record.Snapshot)
+	}
+	if record.LineEnding != text.CRLF {
+		t.Fatalf("line ending = %v, want CRLF", record.LineEnding)
+	}
+}
+
+func TestExistingBufferRecoveryComparesBeforeApplying(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "main.go", "disk\n", "disk\n")
+	ed := model.activeEditor()
+	recovered := text.NewFromString("recovered\n")
+	overlayCtx := model.overlayRequests.start(overlayRequestHover)
+	documentCtx := model.documentRequests.start(documentRequestDefinition, ed.Buffer.FilePath)
+
+	updatedAny, compareCmd := model.handleRecoveryLoaded(recoveryLoadedMsg{Records: []preparedRecoveryRecord{{
+		FilePath: ed.Buffer.FilePath,
+		Snapshot: recovered,
+	}}})
+	model = updatedAny.(Model)
+	if compareCmd == nil {
+		t.Fatal("existing clean buffer did not schedule a background comparison")
+	}
+	if got := model.activeEditor().Buffer.Content(); got != "disk\n" {
+		t.Fatalf("Update applied recovery before comparison: %q", got)
+	}
+
+	comparisonMsg, ok := compareCmd().(recoveryComparisonsMsg)
+	if !ok {
+		t.Fatalf("comparison command returned unexpected message")
+	}
+	resultAny, postCmd := model.Update(comparisonMsg)
+	result := resultAny.(Model)
+	if postCmd == nil {
+		t.Fatal("applied recovery did not schedule editor reconciliation")
+	}
+	if result.activeEditor().Buffer.Rope() != recovered {
+		t.Fatal("recovery did not install the prepared rope by identity")
+	}
+	if !result.activeEditor().Buffer.Dirty() {
+		t.Fatal("recovered buffer is not dirty")
+	}
+	assertContextCanceled(t, "overlay request", overlayCtx)
+	assertContextCanceled(t, "document request", documentCtx)
+}
+
+func TestExistingBufferRecoveryDiscardsEqualOrStaleResults(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		mutate bool
+	}{
+		{name: "equal content", value: "disk\n"},
+		{name: "buffer changed during comparison", value: "recovered\n", mutate: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+			addDirtyEditor(t, &model, "main.go", "disk\n", "disk\n")
+			ed := model.activeEditor()
+			updatedAny, compareCmd := model.handleRecoveryLoaded(recoveryLoadedMsg{Records: []preparedRecoveryRecord{{
+				FilePath: ed.Buffer.FilePath,
+				Snapshot: text.NewFromString(tt.value),
+			}}})
+			model = updatedAny.(Model)
+			msg := compareCmd().(recoveryComparisonsMsg)
+			if tt.mutate {
+				model.activeEditor().Buffer.InsertAtCursor([]byte("live "))
+			}
+
+			resultAny, postCmd := model.Update(msg)
+			result := resultAny.(Model)
+			if postCmd != nil {
+				t.Fatal("discarded recovery scheduled follow-up work")
+			}
+			want := "disk\n"
+			if tt.mutate {
+				want = "live disk\n"
+			}
+			if got := result.activeEditor().Buffer.Content(); got != want {
+				t.Fatalf("buffer content = %q, want %q", got, want)
+			}
+		})
 	}
 }
