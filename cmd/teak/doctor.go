@@ -150,7 +150,7 @@ func parseDoctorArgs(args []string) (doctorOptions, bool, error) {
 func runDoctorCLI(args []string, stdout, stderr io.Writer, buildVersion string) int {
 	opts, showHelp, err := parseDoctorArgs(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n%s", err, doctorUsageText)
+		_, _ = fmt.Fprintf(stderr, "Error: %v\n%s", err, doctorUsageText)
 		return 2
 	}
 	if showHelp {
@@ -163,11 +163,14 @@ func runDoctorCLI(args []string, stdout, stderr io.Writer, buildVersion string) 
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
-			fmt.Fprintf(stderr, "Error: write doctor report: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error: write doctor report: %v\n", err)
 			return 1
 		}
 	} else {
-		writeDoctorReport(stdout, report)
+		if err := writeDoctorReport(stdout, report); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error: write doctor report: %v\n", err)
+			return 1
+		}
 	}
 
 	for _, check := range report.Checks {
@@ -567,34 +570,35 @@ func doctorWorkspace(root string) (string, error) {
 	return abs, nil
 }
 
-func writeDoctorReport(w io.Writer, report doctorReport) {
-	fmt.Fprintf(w, "teak doctor %s\n", report.Version)
-	fmt.Fprintf(w, "Runtime: %s (%s/%s)\n", report.GoVersion, report.OS, report.Arch)
-	fmt.Fprintf(w, "Workspace: %s\n", report.Workspace)
-	fmt.Fprintf(w, "Config: %s\n\n", report.ConfigPath)
+func writeDoctorReport(w io.Writer, report doctorReport) error {
+	var body strings.Builder
+	fmt.Fprintf(&body, "teak doctor %s\n", report.Version)
+	fmt.Fprintf(&body, "Runtime: %s (%s/%s)\n", report.GoVersion, report.OS, report.Arch)
+	fmt.Fprintf(&body, "Workspace: %s\n", report.Workspace)
+	fmt.Fprintf(&body, "Config: %s\n\n", report.ConfigPath)
 
 	counts := map[string]int{"pass": 0, "warn": 0, "fail": 0}
 	checks := append([]doctorCheck(nil), report.Checks...)
 	sort.SliceStable(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
 	for _, check := range checks {
 		counts[check.Status]++
-		fmt.Fprintf(w, "%-4s %-18s %s\n", strings.ToUpper(check.Status), check.Name, check.Detail)
+		fmt.Fprintf(&body, "%-4s %-18s %s\n", strings.ToUpper(check.Status), check.Name, check.Detail)
 		if check.Capability != "" {
-			fmt.Fprintf(w, "     %-18s capability: %s\n", "", check.Capability)
+			fmt.Fprintf(&body, "     %-18s capability: %s\n", "", check.Capability)
 		}
 		if check.Hint != "" {
-			fmt.Fprintf(w, "     %-18s hint: %s\n", "", check.Hint)
+			fmt.Fprintf(&body, "     %-18s hint: %s\n", "", check.Hint)
 		}
 	}
-	fmt.Fprintf(w, "\nSummary: %d passed, %d warnings, %d failures\n", counts["pass"], counts["warn"], counts["fail"])
+	fmt.Fprintf(&body, "\nSummary: %d passed, %d warnings, %d failures\n", counts["pass"], counts["warn"], counts["fail"])
 	if len(report.Actions) > 0 {
-		fmt.Fprintln(w, "\nActions:")
+		fmt.Fprintln(&body, "\nActions:")
 		for _, action := range report.Actions {
-			fmt.Fprintf(w, "- %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
+			fmt.Fprintf(&body, "- %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
 		}
 	}
 	if len(report.Languages) > 0 {
-		fmt.Fprintln(w, "\nDetected languages:")
+		fmt.Fprintln(&body, "\nDetected languages:")
 		for _, language := range report.Languages {
 			detail := fmt.Sprintf("%s files=%d server=%s state=%s", language.LanguageID, language.Files, language.Server, language.State)
 			if language.VersionProbe != "" {
@@ -612,15 +616,17 @@ func writeDoctorReport(w io.Writer, report doctorReport) {
 			if language.Path != "" {
 				detail += " (" + language.Path + ")"
 			}
-			fmt.Fprintln(w, detail)
+			fmt.Fprintln(&body, detail)
 			if language.Hint != "" {
-				fmt.Fprintf(w, "  hint: %s\n", language.Hint)
+				fmt.Fprintf(&body, "  hint: %s\n", language.Hint)
 			}
 		}
 	}
 	if report.LanguageScan != nil && report.LanguageScan.Truncated {
-		fmt.Fprintf(w, "\nLanguage scan: truncated after %d files (%d ms)\n", report.LanguageScan.ScannedFiles, report.LanguageScan.DurationMS)
+		fmt.Fprintf(&body, "\nLanguage scan: truncated after %d files (%d ms)\n", report.LanguageScan.ScannedFiles, report.LanguageScan.DurationMS)
 	}
+	_, err := io.WriteString(w, body.String())
+	return err
 }
 
 func lspConfigsFromConfig(cfg config.Config) []lsp.ServerConfig {

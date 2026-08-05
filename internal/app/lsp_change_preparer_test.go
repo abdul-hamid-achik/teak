@@ -11,7 +11,55 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/lsp"
 	"teak/internal/text"
+	"teak/internal/toolpath"
 )
+
+type lspChangeDispatchResultMsg struct{}
+
+func TestLSPChangePreparerReturnsDispatchFailureMessage(t *testing.T) {
+	preparer := newLSPChangePreparer()
+	want := lspChangeDispatchResultMsg{}
+	cmd := preparer.queue(lspChangePayload{
+		path:     "/workspace/retry.go",
+		version:  1,
+		snapshot: text.NewFromString("package retry\n"),
+		dispatch: func(string) tea.Msg { return want },
+	})
+	if cmd == nil {
+		t.Fatal("queue() command = nil")
+	}
+	if got := cmd(); got != want {
+		t.Fatalf("queue() message = %#v, want %#v", got, want)
+	}
+}
+
+func TestEnsureFormattingDocumentSnapshotReturnsOpenError(t *testing.T) {
+	root := t.TempDir()
+	path := root + "/format.lint-open-error"
+	mgr := lsp.NewManager(root, []lsp.ServerConfig{{
+		Extensions: []string{".lint-open-error"},
+		Command:    "teak-lsp-that-does-not-exist",
+		LanguageID: "lint-open-error",
+	}})
+	mgr.BeginDocument(path)
+
+	synced, err := ensureFormattingDocumentSnapshot(
+		mgr,
+		path,
+		1,
+		text.NewFromString("format me\n"),
+		&lsp.Client{},
+	)
+	if synced {
+		t.Fatal("ensureFormattingDocumentSnapshot() synced = true after didOpen failed")
+	}
+	if err == nil {
+		t.Fatal("ensureFormattingDocumentSnapshot() error = nil after didOpen failed")
+	}
+	if !toolpath.IsMissing(err) {
+		t.Fatalf("ensureFormattingDocumentSnapshot() error = %T %v, want missing-tool startup error", err, err)
+	}
+}
 
 func TestLSPChangePreparerLatestWinsAndMaterializesOneSnapshotAtATime(t *testing.T) {
 	p := newLSPChangePreparer()
@@ -42,10 +90,11 @@ func TestLSPChangePreparerLatestWinsAndMaterializesOneSnapshotAtATime(t *testing
 			path:     "/workspace/main.go",
 			version:  version,
 			snapshot: text.NewFromString(content),
-			dispatch: func(content string) {
+			dispatch: func(content string) tea.Msg {
 				mu.Lock()
 				sent = append(sent, content)
 				mu.Unlock()
+				return nil
 			},
 		}
 	}
@@ -112,7 +161,10 @@ func TestLSPChangePreparerCancelDiscardsActiveSnapshot(t *testing.T) {
 		path:     "/workspace/main.go",
 		version:  1,
 		snapshot: text.NewFromString("content"),
-		dispatch: func(string) { dispatched.Add(1) },
+		dispatch: func(string) tea.Msg {
+			dispatched.Add(1)
+			return nil
+		},
 	})
 	done := make(chan struct{})
 	go func() { cmd(); close(done) }()
@@ -151,7 +203,10 @@ func TestLSPChangePreparerBurstRetainsAndDispatchesOnlyNewestPendingSnapshot(t *
 			path:     "/workspace/main.go",
 			version:  version,
 			snapshot: text.NewFromString(content),
-			dispatch: func(content string) { dispatched = append(dispatched, content) },
+			dispatch: func(content string) tea.Msg {
+				dispatched = append(dispatched, content)
+				return nil
+			},
 		})
 		if version == 1 {
 			first = cmd
@@ -183,7 +238,10 @@ func TestLSPChangePreparerRejectsDelayedOlderVersion(t *testing.T) {
 			path:     "/workspace/main.go",
 			version:  version,
 			snapshot: text.NewFromString(content),
-			dispatch: func(content string) { sent = append(sent, content) },
+			dispatch: func(content string) tea.Msg {
+				sent = append(sent, content)
+				return nil
+			},
 		}
 	}
 	newest := p.queue(newPayload(9, "newest"))
@@ -223,7 +281,7 @@ func TestLSPMaterializationBudgetCapsAllOutboundRoutes(t *testing.T) {
 		path:     "/workspace/prepared.unknown",
 		version:  1,
 		snapshot: text.NewFromString("prepared"),
-		dispatch: func(string) {},
+		dispatch: func(string) tea.Msg { return nil },
 	})
 	buffer := text.NewBuffer()
 	buffer.FilePath = "/workspace/open.unknown"
@@ -249,7 +307,7 @@ func TestLSPMaterializationBudgetCapsAllOutboundRoutes(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = ensureFormattingDocumentSnapshot(nil, "/workspace/format.unknown", 1, text.NewFromString("format"), &lsp.Client{}, budget)
+		_, _ = ensureFormattingDocumentSnapshot(nil, "/workspace/format.unknown", 1, text.NewFromString("format"), &lsp.Client{}, budget)
 	}()
 
 	waitForMaterialization := func() {
@@ -309,7 +367,10 @@ func TestLSPChangePreparerCloseCancelsWhileWaitingForGlobalSlot(t *testing.T) {
 		path:     "/workspace/closed.unknown",
 		version:  1,
 		snapshot: text.NewFromString("must-not-flatten"),
-		dispatch: func(string) { dispatched.Add(1) },
+		dispatch: func(string) tea.Msg {
+			dispatched.Add(1)
+			return nil
+		},
 	})
 	if cmd == nil {
 		t.Fatal("queue returned nil command")

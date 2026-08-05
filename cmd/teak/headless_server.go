@@ -919,7 +919,7 @@ func runHeadlessServe(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeHeadlessError(stderr, fmt.Errorf("listen for REST control plane: %w", err))
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	server := newHeadlessRESTHTTPServer(newHeadlessRESTHandlerForWorkspaces(workspaces, defaultWorkspace, opts.token))
 	if opts.json {
@@ -933,9 +933,13 @@ func runHeadlessServe(args []string, stdout, stderr io.Writer) int {
 			return code
 		}
 	} else {
-		fmt.Fprintf(stdout, "REST control plane listening on %s\nDefault workspace (%s): %s\n", listener.Addr(), defaultWorkspace, root)
+		var body strings.Builder
+		fmt.Fprintf(&body, "REST control plane listening on %s\nDefault workspace (%s): %s\n", listener.Addr(), defaultWorkspace, root)
 		for _, entry := range headlessRESTWorkspaceEntries(workspaces) {
-			fmt.Fprintf(stdout, "Workspace %s: %s\n", entry.Name, entry.Workspace)
+			fmt.Fprintf(&body, "Workspace %s: %s\n", entry.Name, entry.Workspace)
+		}
+		if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+			return code
 		}
 	}
 
@@ -955,7 +959,9 @@ func runHeadlessServe(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: REST control plane: %v\n", err)
+		if _, writeErr := fmt.Fprintf(stderr, "Error: REST control plane: %v\n", err); writeErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0

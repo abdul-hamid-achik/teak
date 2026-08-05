@@ -54,14 +54,14 @@ func TestDisabledServerIsRetriedAfterCooldown(t *testing.T) {
 	m, clock, attempts := newFailingManager(t, errors.New("boom"))
 
 	for range maxRetries {
-		m.EnsureClient("main.tst")
+		_, _ = m.EnsureClient("main.tst")
 	}
 	if *attempts != maxRetries {
 		t.Fatalf("start attempts = %d, want %d", *attempts, maxRetries)
 	}
 
 	// Before the cooldown lapses the server stays disabled.
-	m.EnsureClient("main.tst")
+	_, _ = m.EnsureClient("main.tst")
 	if *attempts != maxRetries {
 		t.Fatalf("start attempts = %d, want no retry before cooldown expiry", *attempts)
 	}
@@ -71,7 +71,7 @@ func TestDisabledServerIsRetriedAfterCooldown(t *testing.T) {
 	// After the cooldown the server must be tried again: this is what lets a
 	// language server installed mid-session start working without restarting
 	// Teak, which was previously impossible.
-	m.EnsureClient("main.tst")
+	_, _ = m.EnsureClient("main.tst")
 	if *attempts != maxRetries+1 {
 		t.Errorf("start attempts = %d, want %d after cooldown expiry", *attempts, maxRetries+1)
 	}
@@ -81,7 +81,7 @@ func TestServerHealthReportsRetryingCooldown(t *testing.T) {
 	m, clock, _ := newFailingManager(t, errors.New("boom"))
 
 	for range maxRetries {
-		m.EnsureClient("main.tst")
+		_, _ = m.EnsureClient("main.tst")
 	}
 
 	health := m.ServerHealth("main.tst")

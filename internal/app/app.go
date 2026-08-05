@@ -685,6 +685,10 @@ func cleanupModelState(m *modelState) {
 		m.healthDashboardCancel()
 		m.healthDashboardCancel = nil
 	}
+	// Stop search commands before stopping their shared indexers. Otherwise a
+	// semantic-search waiter that is scheduled late can become a new setup
+	// leader after CancelIndexing has already taken its snapshot.
+	m.searchM.Cancel()
 	// A semantic index build deliberately outlives the search that started it,
 	// so nothing else cancels it. Without this it would keep running as an
 	// orphaned process after Teak exits.
@@ -2920,12 +2924,22 @@ func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) tea.Cmd {
 			path:     path,
 			version:  version,
 			snapshot: snapshot,
-			dispatch: func(content string) {
+			dispatch: func(content string) tea.Msg {
 				if mgr != nil {
-					mgr.OpenDocument(path, generation, languageID, version, content)
-					return
+					if err := mgr.OpenDocument(path, generation, languageID, version, content); err != nil {
+						command := ""
+						if cfg := mgr.ConfigForFile(path); cfg != nil {
+							command = cfg.Command
+						}
+						return lsp.LspErrorMsg{
+							Method:  "textDocument/didOpen",
+							Message: lspStartupMessage(command, err),
+						}
+					}
+					return nil
 				}
 				client.DidOpen(uri, languageID, version, content)
+				return nil
 			},
 		})
 	}
@@ -2940,12 +2954,13 @@ func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) tea.Cmd {
 			path:     path,
 			version:  version,
 			snapshot: snapshot,
-			dispatch: func(content string) {
+			dispatch: func(content string) tea.Msg {
 				if mgr != nil {
 					mgr.ChangeDocumentIncremental(path, generation, version, startLine, startCol, endLine, endCol, replacement, content)
-					return
+					return nil
 				}
 				client.DidChangeIncrementalWithContent(uri, version, startLine, startCol, endLine, endCol, replacement, content)
+				return nil
 			},
 		})
 	}
@@ -2954,12 +2969,13 @@ func (m *Model) notifyLSPChange(client *lsp.Client, ed *editor.Editor) tea.Cmd {
 		path:     path,
 		version:  version,
 		snapshot: snapshot,
-		dispatch: func(content string) {
+		dispatch: func(content string) tea.Msg {
 			if mgr != nil {
 				mgr.ChangeDocument(path, generation, version, content)
-				return
+				return nil
 			}
 			client.DidChange(uri, version, content)
+			return nil
 		},
 	})
 }

@@ -133,10 +133,14 @@ func runHeadlessLSPIntelligenceContext(ctx context.Context, root, operation stri
 				return code
 			}
 		} else {
-			fmt.Fprintf(stdout, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nSymbols: %d\n", response.Workspace, response.RelativePath, response.Server, response.State, len(response.Symbols))
-			writeHeadlessSymbolsText(stdout, response.Symbols, 0)
+			var body strings.Builder
+			fmt.Fprintf(&body, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nSymbols: %d\n", response.Workspace, response.RelativePath, response.Server, response.State, len(response.Symbols))
+			appendHeadlessSymbolsText(&body, response.Symbols, 0)
 			if response.Detail != "" {
-				fmt.Fprintln(stdout, response.Detail)
+				fmt.Fprintln(&body, response.Detail)
+			}
+			if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+				return code
 			}
 		}
 		return headlessLSPQueryExitCode(response.State)
@@ -150,12 +154,16 @@ func runHeadlessLSPIntelligenceContext(ctx context.Context, root, operation stri
 				return code
 			}
 		} else {
-			fmt.Fprintf(stdout, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nFound: %t\n", response.Workspace, response.RelativePath, response.Server, response.State, response.Found)
+			var body strings.Builder
+			fmt.Fprintf(&body, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nFound: %t\n", response.Workspace, response.RelativePath, response.Server, response.State, response.Found)
 			if response.Content != "" {
-				fmt.Fprintln(stdout, response.Content)
+				fmt.Fprintln(&body, response.Content)
 			}
 			if response.Detail != "" {
-				fmt.Fprintln(stdout, response.Detail)
+				fmt.Fprintln(&body, response.Detail)
+			}
+			if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+				return code
 			}
 		}
 		return headlessLSPQueryExitCode(response.State)
@@ -169,12 +177,16 @@ func runHeadlessLSPIntelligenceContext(ctx context.Context, root, operation stri
 				return code
 			}
 		} else {
-			fmt.Fprintf(stdout, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nLocations: %d\n", response.Workspace, response.RelativePath, response.Server, response.State, len(response.Locations))
+			var body strings.Builder
+			fmt.Fprintf(&body, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nLocations: %d\n", response.Workspace, response.RelativePath, response.Server, response.State, len(response.Locations))
 			for _, location := range response.Locations {
-				fmt.Fprintf(stdout, "%s:%d:%d\n", location.Path, location.Line+1, location.Column+1)
+				fmt.Fprintf(&body, "%s:%d:%d\n", location.Path, location.Line+1, location.Column+1)
 			}
 			if response.Detail != "" {
-				fmt.Fprintln(stdout, response.Detail)
+				fmt.Fprintln(&body, response.Detail)
+			}
+			if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+				return code
 			}
 		}
 		return headlessLSPQueryExitCode(response.State)
@@ -432,7 +444,6 @@ func boundedHeadlessLSPContent(content string) (string, bool) {
 }
 
 func boundedHeadlessLSPSymbols(symbols []lsp.DocumentSymbol) ([]headlessLSPSymbol, bool) {
-	result := make([]headlessLSPSymbol, 0, min(len(symbols), maxHeadlessLSPQuerySymbols))
 	truncated := false
 	count := 0
 	var convert func([]lsp.DocumentSymbol, int) []headlessLSPSymbol
@@ -458,7 +469,7 @@ func boundedHeadlessLSPSymbols(symbols []lsp.DocumentSymbol) ([]headlessLSPSymbo
 		}
 		return output
 	}
-	result = convert(symbols, 0)
+	result := convert(symbols, 0)
 	return result, truncated
 }
 
@@ -497,9 +508,9 @@ func boundedHeadlessLSPLocations(root string, locations []lsp.Location) ([]headl
 	return result, skipped, truncated
 }
 
-func writeHeadlessSymbolsText(w io.Writer, symbols []headlessLSPSymbol, depth int) {
+func appendHeadlessSymbolsText(w *strings.Builder, symbols []headlessLSPSymbol, depth int) {
 	for _, symbol := range symbols {
 		fmt.Fprintf(w, "%s%s:%d:%d\n", strings.Repeat("  ", depth), symbol.Name, symbol.Line+1, symbol.Column+1)
-		writeHeadlessSymbolsText(w, symbol.Children, depth+1)
+		appendHeadlessSymbolsText(w, symbol.Children, depth+1)
 	}
 }

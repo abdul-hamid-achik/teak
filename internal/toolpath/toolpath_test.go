@@ -310,6 +310,7 @@ func TestCommandTreatsNilContextAsBackground(t *testing.T) {
 	fixture := writeExecutable(t, dir, "codemap")
 	r := newTestResolver(t, dir, map[string]string{"codemap": fixture})
 
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	cmd, err := r.Command(nil, "codemap")
 	if err != nil {
 		t.Fatalf("Command(nil) error = %v", err)
@@ -572,8 +573,8 @@ func TestResolveIsSafeForConcurrentUse(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for range 50 {
-				r.Resolve("codemap")
-				r.Resolve("absent-tool")
+				_, _ = r.Resolve("codemap")
+				_, _ = r.Resolve("absent-tool")
 				r.Invalidate("codemap")
 			}
 		}()

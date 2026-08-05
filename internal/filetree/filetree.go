@@ -941,14 +941,6 @@ func (m *Model) cancelFilter() {
 	m.filterPending = false
 }
 
-func (m Model) visibleEntries() []Entry {
-	query := strings.ToLower(m.filter)
-	if m.showHidden && m.showGitIgnored && query == "" {
-		return m.Entries
-	}
-	return visibleEntries(m.Entries, m.showHidden, m.showGitIgnored, query)
-}
-
 func filterFlatEntriesContext(ctx context.Context, source []Entry, query string) ([]Entry, error) {
 	if ctx == nil {
 		ctx = context.Background()

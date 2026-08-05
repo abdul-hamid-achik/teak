@@ -949,11 +949,14 @@ func (m Model) handleTreeActionResult(msg treeActionResultMsg) (tea.Model, tea.C
 
 	case treeActionRename, treeActionMove, treeActionCopy:
 		search.InvalidateSemanticIndex(m.rootDir)
-		label := "Copied"
-		if msg.Kind == treeActionRename {
+		var label string
+		switch msg.Kind {
+		case treeActionRename:
 			label = "Renamed"
-		} else if msg.Kind == treeActionMove {
+		case treeActionMove:
 			label = "Moved"
+		default:
+			label = "Copied"
 		}
 		m.status = fmt.Sprintf("%s: %s", label, filepath.Base(msg.Path))
 		var cmds []tea.Cmd

@@ -101,8 +101,8 @@ func TestRequestReturnsWhenDAPTransportEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer readPipe.Close()
-	defer writePipe.Close()
+	defer func() { _ = readPipe.Close() }()
+	defer func() { _ = writePipe.Close() }()
 
 	client := &Client{
 		stdin:       writePipe,

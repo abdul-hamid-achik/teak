@@ -1948,12 +1948,12 @@ func TestParseFileLocation(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	path, line, col := parseFileLocation(weird)
+	path, line, _ := parseFileLocation(weird)
 	if path != weird || line != -1 {
 		t.Fatalf("existing colon name: path=%q line=%d, want intact", path, line)
 	}
 
-	path, line, col = parseFileLocation("main.go:12:3")
+	path, line, col := parseFileLocation("main.go:12:3")
 	if path != "main.go" || line != 11 || col != 2 {
 		t.Fatalf("got path=%q line=%d col=%d", path, line, col)
 	}

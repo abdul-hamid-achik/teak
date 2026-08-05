@@ -10,6 +10,12 @@ import (
 	"teak/internal/toolpath"
 )
 
+type rejectingWriter struct{}
+
+func (rejectingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("injected writer failure")
+}
+
 func TestHeadlessCommandPredicatesAndFormatting(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -54,7 +60,7 @@ func TestHeadlessCommandPredicatesAndFormatting(t *testing.T) {
 
 func TestWriteDoctorReportSortsChecksAndRendersDetails(t *testing.T) {
 	var output bytes.Buffer
-	writeDoctorReport(&output, doctorReport{
+	if err := writeDoctorReport(&output, doctorReport{
 		Version:    "test-version",
 		GoVersion:  "go1.test",
 		OS:         "test-os",
@@ -67,7 +73,9 @@ func TestWriteDoctorReportSortsChecksAndRendersDetails(t *testing.T) {
 			{Name: "tool:a", Status: "fail", Detail: "missing", Hint: "install a"},
 		},
 		Languages: []doctorLanguage{{LanguageID: "go", Files: 2, Server: "gopls", State: "available", VersionProbe: "ready"}},
-	})
+	}); err != nil {
+		t.Fatalf("writeDoctorReport() error = %v", err)
+	}
 
 	text := output.String()
 	for _, want := range []string{
@@ -92,6 +100,38 @@ func TestWriteDoctorReportSortsChecksAndRendersDetails(t *testing.T) {
 	}
 }
 
+func TestWriteDoctorReportPropagatesWriterFailure(t *testing.T) {
+	if err := writeDoctorReport(rejectingWriter{}, doctorReport{Version: "test"}); err == nil {
+		t.Fatal("writeDoctorReport() error = nil for failing writer")
+	}
+}
+
+func TestWriteHeadlessErrorReportsWriterFailure(t *testing.T) {
+	if code := writeHeadlessError(rejectingWriter{}, errors.New("request failed")); code != 1 {
+		t.Fatalf("writeHeadlessError() code = %d, want writer-failure code 1", code)
+	}
+}
+
+func TestWriteHeadlessTextReportsOutputFailureAsRuntimeError(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := writeHeadlessText(rejectingWriter{}, &stderr, "response"); code != 1 {
+		t.Fatalf("writeHeadlessText() code = %d, want runtime-failure code 1", code)
+	}
+	if !strings.Contains(stderr.String(), "write response") {
+		t.Fatalf("writeHeadlessText() stderr = %q, want actionable write failure", stderr.String())
+	}
+}
+
+func TestWriteHeadlessRuntimeErrorUsesRuntimeFailureCode(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := writeHeadlessRuntimeError(&stderr, errors.New("write dashboard")); code != 1 {
+		t.Fatalf("writeHeadlessRuntimeError() code = %d, want runtime-failure code 1", code)
+	}
+	if !strings.Contains(stderr.String(), "write dashboard") {
+		t.Fatalf("writeHeadlessRuntimeError() stderr = %q, want actionable failure", stderr.String())
+	}
+}
+
 func TestUnavailableToolStatusPreservesActionableHint(t *testing.T) {
 	status := unavailableToolStatus(headlessToolStatus{Name: "codemap", State: "checking"}, &toolpath.MissingToolError{
 		Tool: "codemap",
@@ -110,7 +150,7 @@ func TestUnavailableToolStatusPreservesActionableHint(t *testing.T) {
 func TestWriteHeadlessHealthDashboardRendersCurrentHistoryAndTrend(t *testing.T) {
 	when := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	var output bytes.Buffer
-	writeHeadlessHealthDashboard(&output, headlessHealthDashboardResponse{
+	if err := writeHeadlessHealthDashboard(&output, headlessHealthDashboardResponse{
 		Workspace: "/workspace",
 		State:     "degraded",
 		Current: headlessHealthResponse{
@@ -123,7 +163,9 @@ func TestWriteHeadlessHealthDashboardRendersCurrentHistoryAndTrend(t *testing.T)
 		},
 		History: headlessHealthHistoryResponse{State: "ready", Snapshots: []headlessHealthHistorySnapshot{{State: "healthy"}, {State: "degraded"}}},
 		Trend:   headlessHealthTrend{Healthy: 1, Degraded: 1, Failed: 0, Other: 0, LatestAt: when.Format(time.RFC3339Nano), LatestState: "healthy", HeapDeltaBytes: 12, DurationDeltaMS: 1.25},
-	})
+	}); err != nil {
+		t.Fatalf("writeHeadlessHealthDashboard() error = %v", err)
+	}
 
 	text := output.String()
 	for _, want := range []string{

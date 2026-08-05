@@ -47,6 +47,7 @@ func TestRunWithTimeoutAcceptsNilContext(t *testing.T) {
 	// The command is intentionally invalid. The contract under test is that
 	// a nil caller context is normalized before context.WithTimeout is used;
 	// the command's eventual error is not relevant here.
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	_, _ = runWithTimeout(nil, t.TempDir(), time.Millisecond, "--invalid-test-flag")
 }
 

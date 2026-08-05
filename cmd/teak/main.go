@@ -344,7 +344,6 @@ func isAllDigits(s string) bool {
 // Input line/col are 1-based; returned values are 0-based. line is -1 when
 // unspecified. An existing filesystem path is never split (names may contain ':').
 func parseFileLocation(arg string) (path string, line, col int) {
-	line, col = -1, 0
 	if arg == "" {
 		return "", -1, 0
 	}

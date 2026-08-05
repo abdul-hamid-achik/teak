@@ -96,7 +96,7 @@ func (r *Resolver) agentSocketAvailable() bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 
@@ -126,7 +126,7 @@ func (r *Resolver) agentGet(ctx context.Context, project, key string) (string, e
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := fmt.Sprintf(`{"op":"get","project":%q,"key":%q}`+"\n", project, key)
 	if _, err := conn.Write([]byte(req)); err != nil {
@@ -151,7 +151,7 @@ func (r *Resolver) agentGetAll(ctx context.Context, project string) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := fmt.Sprintf(`{"op":"getall","project":%q}`+"\n", project)
 	if _, err := conn.Write([]byte(req)); err != nil {

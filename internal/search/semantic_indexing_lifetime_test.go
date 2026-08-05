@@ -214,6 +214,9 @@ func TestCancelIndexingStopsSubprocessAndWaitForShutdown(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("ensureVecgrepReadyContext() error = %v, want context.Canceled", err)
 		}
+		if !errors.Is(err, errSemanticIndexBuildStopped) {
+			t.Fatalf("ensureVecgrepReadyContext() error = %v, want stopped index build classification", err)
+		}
 	case <-time.After(subprocessTimeout):
 		t.Fatal("leader did not return after CancelIndexing")
 	}
@@ -233,7 +236,7 @@ func TestInteractiveIndexBuildHasBoundedTimeout(t *testing.T) {
 	bin, state := fakeVecgrepScript(t)
 	configureFakeVecgrep(t, bin)
 	previousTimeout := semanticIndexTimeout
-	semanticIndexTimeout = time.Second
+	semanticIndexTimeout = 3 * time.Second
 	t.Cleanup(func() {
 		semanticIndexTimeout = previousTimeout
 		CancelIndexing()
@@ -253,7 +256,10 @@ func TestInteractiveIndexBuildHasBoundedTimeout(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("ensureVecgrepReadyContext() error = %v, want deadline exceeded", err)
 		}
-		if elapsed := time.Since(started); elapsed > 3*time.Second {
+		if !errors.Is(err, errSemanticIndexBuildStopped) {
+			t.Fatalf("ensureVecgrepReadyContext() error = %v, want stopped index build classification", err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
 			t.Fatalf("interactive index timeout took %s, want bounded termination", elapsed)
 		}
 	case <-time.After(subprocessTimeout):

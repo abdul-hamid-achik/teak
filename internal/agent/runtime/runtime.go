@@ -1433,7 +1433,7 @@ func validateArtifactFile(workspace, relative, expectedDigest string) error {
 	if err != nil {
 		return fmt.Errorf("open artifact: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	hash := sha256.New()
 	written, err := io.Copy(hash, io.LimitReader(file, maxArtifactBytes+1))
 	if err != nil {

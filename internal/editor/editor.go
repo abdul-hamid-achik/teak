@@ -1007,7 +1007,7 @@ func (e Editor) completionPrefix() string {
 	start := col
 	for start > 0 {
 		r, size := utf8.DecodeLastRune(line[:start])
-		if !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
 			break
 		}
 		start -= size

@@ -855,8 +855,7 @@ func (h *ClientHandler) CreateTerminal(ctx context.Context, params sdk.CreateTer
 // terminalOutputLimit combines the transport cap with the active durable run
 // budget. The runtime budget is intentionally only a ceiling here: a caller's
 // lower request and ACP's hard safety cap remain in force as well.
-func (h *ClientHandler) terminalOutputLimit(ctx context.Context, requested *int) (int, error) {
-	ctx = normalizeACPContext(ctx)
+func (h *ClientHandler) terminalOutputLimit(_ context.Context, requested *int) (int, error) {
 	limit, err := terminalOutputLimit(requested)
 	if err != nil {
 		return 0, err

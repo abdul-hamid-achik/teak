@@ -1098,7 +1098,9 @@ func runHeadlessMCPContext(parentCtx context.Context, args []string, stdin io.Re
 	}
 	server := newHeadlessMCPServer(root, nil)
 	if err := server.serve(parentCtx, stdin, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "Error: MCP transport: %v\n", err)
+		if _, writeErr := fmt.Fprintf(stderr, "Error: MCP transport: %v\n", err); writeErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0

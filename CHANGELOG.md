@@ -4,6 +4,35 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-05
+
+### Reliability
+
+- Semantic-search waiters no longer restart a `vecgrep index` process after
+  its hard timeout expires or application shutdown cancels it. Every caller
+  sharing that setup flight now receives the same terminal outcome.
+- Application teardown cancels the active text or semantic search before it
+  stops shared indexers, preventing a late search command from starting new
+  subprocess work during shutdown.
+- The interactive-index timeout regression test now leaves realistic process
+  startup headroom under a busy full-suite run while still proving bounded
+  subprocess termination.
+- Failed LSP document reopens are now surfaced through the editor instead of
+  being discarded, and format-on-save reports synchronization failures rather
+  than treating them as successful no-ops.
+- Doctor and human-readable headless commands now detect output write failures
+  and return a runtime-failure exit code instead of reporting false success.
+
+### Maintenance
+
+- Cleared the repository's full `golangci-lint` backlog, including unchecked
+  I/O and subprocess errors, ineffective assignments, stale helpers, and
+  intentional nil-context contract tests that now document their exemptions.
+- Corrected `github.com/charmbracelet/ultraviolet` to be recorded as a direct
+  module dependency, keeping `go mod tidy -diff` clean.
+
+## [0.10.1] - 2026-08-04
+
 ### 2026-08 Codebase Audit — Fix Clusters
 
 A read-only multi-agent audit of the editor landed fixes in four clusters.

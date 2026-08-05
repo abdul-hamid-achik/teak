@@ -712,11 +712,6 @@ func (h *Highlighter) IsDirty() bool {
 	return h.dirty
 }
 
-func (h *Highlighter) styleForToken(tt chroma.TokenType) lipgloss.Style {
-	style, _ := h.resolveToken(tt)
-	return style
-}
-
 // resolveToken returns the style for a token type along with its precomputed
 // escape sequences, walking up the token hierarchy to find a match.
 func (h *Highlighter) resolveToken(tt chroma.TokenType) (lipgloss.Style, sgrPair) {

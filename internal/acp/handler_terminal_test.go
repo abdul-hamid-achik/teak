@@ -55,6 +55,7 @@ func TestACPHandlersTreatNilContextAsBackground(t *testing.T) {
 	}
 
 	handler := newClientHandler(make(chan tea.Msg), root)
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	terminal, err := handler.CreateTerminal(nil, sdk.CreateTerminalRequest{
 		Command: "sh",
 		Args:    []string{"-c", "printf ready"},
@@ -65,9 +66,11 @@ func TestACPHandlersTreatNilContextAsBackground(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = handler.ReleaseTerminal(context.Background(), sdk.ReleaseTerminalRequest{TerminalId: terminal.TerminalId})
 	})
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	if _, err := handler.WaitForTerminalExit(nil, sdk.WaitForTerminalExitRequest{TerminalId: terminal.TerminalId}); err != nil {
 		t.Fatalf("WaitForTerminalExit(nil) error = %v", err)
 	}
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	output, err := handler.TerminalOutput(nil, sdk.TerminalOutputRequest{TerminalId: terminal.TerminalId})
 	if err != nil {
 		t.Fatalf("TerminalOutput(nil) error = %v", err)
@@ -76,6 +79,7 @@ func TestACPHandlersTreatNilContextAsBackground(t *testing.T) {
 		t.Fatalf("TerminalOutput(nil) = %q, want ready", output.Output)
 	}
 
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	content, err := ReadFileFromDisk(nil, root, "notes.txt", nil, nil)
 	if err != nil {
 		t.Fatalf("ReadFileFromDisk(nil) error = %v", err)

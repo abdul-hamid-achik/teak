@@ -43,7 +43,7 @@ func serveAgentResponse(t *testing.T, listener net.Listener, response string) <-
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = bufio.NewReader(conn).ReadString('\n')
 		_, _ = io.WriteString(conn, response+"\n")
 	}()
@@ -96,7 +96,7 @@ func TestGetHonorsContextWhenAgentDoesNotRespond(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		close(connected)
 		<-stop
 	}()

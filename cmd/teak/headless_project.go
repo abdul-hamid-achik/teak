@@ -134,11 +134,12 @@ func runHeadlessProjectContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nEntries: %d%s\n", response.Workspace, len(response.Entries), truncatedSuffix(response.Truncated))
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nEntries: %d%s\n", response.Workspace, len(response.Entries), truncatedSuffix(response.Truncated))
 		for _, entry := range response.Entries {
-			fmt.Fprintf(stdout, "%-9s %s\n", entry.Kind, entry.Path)
+			fmt.Fprintf(&body, "%-9s %s\n", entry.Kind, entry.Path)
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	case "stat":
 		relative, err := headlessProjectRelativePath(positional[0], true)
 		if err != nil {
@@ -154,8 +155,7 @@ func runHeadlessProjectContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Path: %s\nKind: %s\nMode: %s\nBytes: %d\n", response.RelativePath, response.Kind, response.Mode, response.Bytes)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Path: %s\nKind: %s\nMode: %s\nBytes: %d\n", response.RelativePath, response.Kind, response.Mode, response.Bytes))
 	default:
 		return runHeadlessProjectMutation(ctx, operation, root, rootPath, positional, opts, stdout, stderr)
 	}
@@ -258,8 +258,7 @@ func runHeadlessProjectMutation(ctx context.Context, operation string, root *os.
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nOperation: %s\nState: %s\nNodes: %d\nBytes: %d\n", response.Workspace, response.Operation, response.State, response.Nodes, response.Bytes)
-	return 0
+	return writeHeadlessText(stdout, stderr, fmt.Sprintf("Workspace: %s\nOperation: %s\nState: %s\nNodes: %d\nBytes: %d\n", response.Workspace, response.Operation, response.State, response.Nodes, response.Bytes))
 }
 
 func headlessProjectRelativePath(raw string, allowRoot bool) (string, error) {

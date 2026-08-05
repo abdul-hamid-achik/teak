@@ -515,9 +515,9 @@ func formatResultNote(status lsp.FormatStatus, err error) string {
 // snapshot captured when formatting was requested. It deliberately accepts the
 // manager snapshot rather than a Model: formatting runs in a tea.Cmd and must
 // not observe a later root-model state.
-func ensureFormattingDocumentSnapshot(mgr *lsp.Manager, filePath string, version int, snapshot *text.Rope, client *lsp.Client, budgets ...*lspMaterializationBudget) bool {
+func ensureFormattingDocumentSnapshot(mgr *lsp.Manager, filePath string, version int, snapshot *text.Rope, client *lsp.Client, budgets ...*lspMaterializationBudget) (bool, error) {
 	if snapshot == nil {
-		return false
+		return false, nil
 	}
 	uri := lsp.FileURI(filePath)
 	budget := sharedLSPMaterializations
@@ -533,27 +533,27 @@ func ensureFormattingDocumentSnapshot(mgr *lsp.Manager, filePath string, version
 		// Never send an older didChange after normal editor input has already
 		// advanced the server document. The format result would be stale too.
 		if syncedVersion > version {
-			return false
+			return false, nil
 		}
 		if syncedVersion == version {
-			return true
+			return true, nil
 		}
 		content, ok := budget.materializeSnapshot(snapshot, nil)
 		if !ok {
-			return false
+			return false, nil
 		}
 		if mgr != nil {
 			mgr.ChangeDocument(filePath, generation, version, content)
 		} else {
 			client.DidChange(uri, version, content)
 		}
-		return true
+		return true, nil
 	}
 
 	if _, ok := client.DocumentVersion(uri); !ok {
 		content, materialized := budget.materializeSnapshot(snapshot, nil)
 		if !materialized {
-			return false
+			return false, nil
 		}
 		langID := ""
 		if mgr != nil {
@@ -562,13 +562,15 @@ func ensureFormattingDocumentSnapshot(mgr *lsp.Manager, filePath string, version
 			}
 		}
 		if mgr != nil {
-			mgr.OpenDocument(filePath, generation, langID, version, content)
+			if err := mgr.OpenDocument(filePath, generation, langID, version, content); err != nil {
+				return false, err
+			}
 		} else {
 			client.DidOpen(uri, langID, version, content)
 		}
-		return true
+		return true, nil
 	}
-	return true
+	return true, nil
 }
 
 func (m Model) requestFormatting(filePath string, cfg editor.Config, requestID int) tea.Cmd {
@@ -610,7 +612,18 @@ func (m Model) requestFormattingSnapshot(filePath string, cfg editor.Config, req
 			return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatUnsupported}
 		}
 
-		if !ensureFormattingDocumentSnapshot(mgr, filePath, baseVersion, snapshot, client, budget) {
+		synced, syncErr := ensureFormattingDocumentSnapshot(mgr, filePath, baseVersion, snapshot, client, budget)
+		if syncErr != nil {
+			return lsp.FormatResultMsg{
+				RequestID:      requestID,
+				FilePath:       filePath,
+				BaseVersion:    baseVersion,
+				HasBaseVersion: true,
+				Status:         lsp.FormatError,
+				Err:            syncErr,
+			}
+		}
+		if !synced {
 			return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatNoOp}
 		}
 

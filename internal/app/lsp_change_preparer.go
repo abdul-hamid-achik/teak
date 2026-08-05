@@ -16,7 +16,7 @@ type lspChangePayload struct {
 	path     string
 	version  int
 	snapshot *text.Rope
-	dispatch func(string)
+	dispatch func(string) tea.Msg
 
 	sequence uint64 // assigned by lspChangePreparer while holding its mutex
 }
@@ -99,8 +99,7 @@ func (p *lspChangePreparer) queue(payload lspChangePayload) tea.Cmd {
 
 	path := payload.path
 	return func() tea.Msg {
-		p.run(path)
-		return nil
+		return p.run(path)
 	}
 }
 
@@ -134,16 +133,17 @@ func (d *lspChangePrepareDocument) cancelWaitingMaterialization() {
 	d.waitCancel = nil
 }
 
-func (p *lspChangePreparer) run(path string) {
+func (p *lspChangePreparer) run(path string) tea.Msg {
 	if p == nil {
-		return
+		return nil
 	}
+	var result tea.Msg
 
 	p.mu.Lock()
 	doc := p.documents[path]
 	if doc == nil || doc.active || doc.pending == nil {
 		p.mu.Unlock()
-		return
+		return nil
 	}
 	doc.active = true
 	work := *doc.pending
@@ -169,7 +169,7 @@ func (p *lspChangePreparer) run(path string) {
 				delete(p.documents, path)
 			}
 			p.mu.Unlock()
-			return
+			return result
 		}
 
 		// A new change can arrive in the tiny window after acquire succeeds but
@@ -191,7 +191,7 @@ func (p *lspChangePreparer) run(path string) {
 				delete(p.documents, path)
 			}
 			p.mu.Unlock()
-			return
+			return result
 		default:
 		}
 
@@ -214,7 +214,7 @@ func (p *lspChangePreparer) run(path string) {
 					delete(p.documents, path)
 				}
 				p.mu.Unlock()
-				return
+				return result
 			}
 			work = *doc.pending
 			doc.pending = nil
@@ -230,7 +230,9 @@ func (p *lspChangePreparer) run(path string) {
 		// suppression and monotonic versions immediately before queuing stdin.
 		// This call is deliberately outside the preparer's mutex so another tab
 		// can submit its latest snapshot without blocking on JSON encoding.
-		work.dispatch(content)
+		if msg := work.dispatch(content); result == nil && msg != nil {
+			result = msg
+		}
 
 		p.mu.Lock()
 		if doc.pending == nil {
@@ -239,7 +241,7 @@ func (p *lspChangePreparer) run(path string) {
 				delete(p.documents, path)
 			}
 			p.mu.Unlock()
-			return
+			return result
 		}
 		work = *doc.pending
 		doc.pending = nil

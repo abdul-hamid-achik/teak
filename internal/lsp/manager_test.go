@@ -391,7 +391,9 @@ func TestManagerDocumentLifecycleDropsDelayedOpenAfterClose(t *testing.T) {
 	m.CloseDocument(path)
 	// Simulate the command that was scheduled by the file-load Update but did
 	// not run until the user had already closed the tab.
-	m.OpenDocument(path, generation, "go", 1, "late")
+	if err := m.OpenDocument(path, generation, "go", 1, "late"); err != nil {
+		t.Fatalf("delayed OpenDocument() error = %v", err)
+	}
 
 	uri := FileURI(path)
 	if _, open := client.DocumentVersion(uri); open {
@@ -411,11 +413,15 @@ func TestManagerDocumentLifecycleOrdersCloseBeforeReopen(t *testing.T) {
 	m.clients["fake-lsp"] = client
 
 	first := m.BeginDocument(path)
-	m.OpenDocument(path, first, "go", 1, "one")
+	if err := m.OpenDocument(path, first, "go", 1, "one"); err != nil {
+		t.Fatalf("first OpenDocument() error = %v", err)
+	}
 	waitForBlockedWriter(t, writer)
 	m.CloseDocument(path)
 	second := m.BeginDocument(path)
-	m.OpenDocument(path, second, "go", 1, "two")
+	if err := m.OpenDocument(path, second, "go", 1, "two"); err != nil {
+		t.Fatalf("second OpenDocument() error = %v", err)
+	}
 
 	writer.unblock()
 	messages := waitForOutboundMessages(t, writer, 3)

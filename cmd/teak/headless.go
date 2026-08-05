@@ -669,8 +669,7 @@ func runHeadlessAgentContext(ctx context.Context, args []string, stdout, stderr 
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nRun: %s\nStatus: %s\nObjective: %s\n", response.Workspace, response.Run.ID, response.Run.Status, response.Run.Spec.Objective)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Workspace: %s\nRun: %s\nStatus: %s\nObjective: %s\n", response.Workspace, response.Run.ID, response.Run.Status, response.Run.Spec.Objective))
 	}
 	if operation == "reap-stale" {
 		maxSilence, parseErr := time.ParseDuration(opts.maxSilence)
@@ -705,11 +704,12 @@ func runHeadlessAgentContext(ctx context.Context, args []string, stdout, stderr 
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nReaped: %d\n", root, response.State, len(reaped))
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nState: %s\nReaped: %d\n", root, response.State, len(reaped))
 		for _, id := range reaped {
-			fmt.Fprintf(stdout, "reaped %s\n", id)
+			fmt.Fprintf(&body, "reaped %s\n", id)
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	}
 	if operation == "cancel" {
 		path := headlessAgentStorePath(root)
@@ -741,8 +741,7 @@ func runHeadlessAgentContext(ctx context.Context, args []string, stdout, stderr 
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nRun: %s\n", root, response.State, id)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Workspace: %s\nState: %s\nRun: %s\n", root, response.State, id))
 	}
 	response, err := collectHeadlessAgentRunsContext(ctx, root)
 	if err != nil {
@@ -751,11 +750,12 @@ func runHeadlessAgentContext(ctx context.Context, args []string, stdout, stderr 
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nRuns: %d\n", root, len(response.Runs))
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nRuns: %d\n", root, len(response.Runs))
 	for _, run := range response.Runs {
-		fmt.Fprintf(stdout, "%s %-11s %s\n", run.ID, run.Status, run.Spec.Objective)
+		fmt.Fprintf(&body, "%s %-11s %s\n", run.ID, run.Status, run.Spec.Objective)
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func runHeadlessLSPContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -826,16 +826,20 @@ func runHeadlessLSPContext(ctx context.Context, args []string, stdout, stderr io
 					return code
 				}
 			} else {
-				fmt.Fprintf(stdout, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nChanged: %t\nApplied: %t\nEdits: %d\n",
+				var body strings.Builder
+				fmt.Fprintf(&body, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nChanged: %t\nApplied: %t\nEdits: %d\n",
 					response.Workspace, response.RelativePath, response.Server, response.State, response.Changed, response.Applied, response.Edits)
 				if response.Detail != "" {
-					fmt.Fprintln(stdout, response.Detail)
+					fmt.Fprintln(&body, response.Detail)
 				}
 				if response.Hint != "" {
-					fmt.Fprintf(stdout, "hint: %s\n", response.Hint)
+					fmt.Fprintf(&body, "hint: %s\n", response.Hint)
 				}
 				if response.Content != "" {
-					fmt.Fprint(stdout, response.Content)
+					body.WriteString(response.Content)
+				}
+				if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+					return code
 				}
 			}
 			if response.State == "failed" || response.State == "missing" || response.State == "unsupported" || response.State == "timed_out" || response.State == "cancelled" {
@@ -852,16 +856,20 @@ func runHeadlessLSPContext(ctx context.Context, args []string, stdout, stderr io
 				return code
 			}
 		} else {
-			fmt.Fprintf(stdout, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nDiagnostics: %d\n",
+			var body strings.Builder
+			fmt.Fprintf(&body, "Workspace: %s\nFile: %s\nServer: %s\nState: %s\nDiagnostics: %d\n",
 				response.Workspace, response.RelativePath, response.Server, response.State, len(response.Diagnostics))
 			for _, diagnostic := range response.Diagnostics {
-				fmt.Fprintf(stdout, "%s:%d:%d: %s\n", response.RelativePath, diagnostic.Line+1, diagnostic.Column+1, diagnostic.Message)
+				fmt.Fprintf(&body, "%s:%d:%d: %s\n", response.RelativePath, diagnostic.Line+1, diagnostic.Column+1, diagnostic.Message)
 			}
 			if response.Detail != "" {
-				fmt.Fprintln(stdout, response.Detail)
+				fmt.Fprintln(&body, response.Detail)
 			}
 			if response.Hint != "" {
-				fmt.Fprintf(stdout, "hint: %s\n", response.Hint)
+				fmt.Fprintf(&body, "hint: %s\n", response.Hint)
+			}
+			if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+				return code
 			}
 		}
 		if response.State == "failed" || response.State == "missing" || response.State == "unsupported" || response.State == "timed_out" || response.State == "cancelled" {
@@ -879,19 +887,20 @@ func runHeadlessLSPContext(ctx context.Context, args []string, stdout, stderr io
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\n", root)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\n", root)
 	for _, server := range response.Servers {
 		state := server.State
 		detail := server.LanguageID + " (" + strings.Join(server.Extensions, ",") + ")"
 		if server.Path != "" {
 			detail += " — " + server.Path
 		}
-		fmt.Fprintf(stdout, "%-12s %-10s %s\n", server.Command, state, detail)
+		fmt.Fprintf(&body, "%-12s %-10s %s\n", server.Command, state, detail)
 		if server.Hint != "" {
-			fmt.Fprintf(stdout, "              hint: %s\n", server.Hint)
+			fmt.Fprintf(&body, "              hint: %s\n", server.Hint)
 		}
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func runHeadlessDAPContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -927,18 +936,19 @@ func runHeadlessDAPContext(ctx context.Context, args []string, stdout, stderr io
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\n", root)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\n", root)
 	for _, adapter := range response.Adapters {
 		detail := adapter.Type + " (" + strings.Join(adapter.Extensions, ",") + ")"
 		if adapter.Path != "" {
 			detail += " — " + adapter.Path
 		}
-		fmt.Fprintf(stdout, "%-12s %-10s %s\n", adapter.Command, adapter.State, detail)
+		fmt.Fprintf(&body, "%-12s %-10s %s\n", adapter.Command, adapter.State, detail)
 		if adapter.Hint != "" {
-			fmt.Fprintf(stdout, "              hint: %s\n", adapter.Hint)
+			fmt.Fprintf(&body, "              hint: %s\n", adapter.Hint)
 		}
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func runHeadlessDAPProbeContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -993,13 +1003,17 @@ func runHeadlessDAPProbeContext(ctx context.Context, args []string, stdout, stde
 			return code
 		}
 	} else {
-		fmt.Fprintf(stdout, "Workspace: %s\nAdapter: %s %s\nState: %s\nReady: %t\n",
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nAdapter: %s %s\nState: %s\nReady: %t\n",
 			response.Workspace, response.Adapter, strings.Join(response.Args, " "), response.State, response.Ready)
 		if response.Detail != "" {
-			fmt.Fprintln(stdout, response.Detail)
+			fmt.Fprintln(&body, response.Detail)
 		}
 		if response.Hint != "" {
-			fmt.Fprintf(stdout, "hint: %s\n", response.Hint)
+			fmt.Fprintf(&body, "hint: %s\n", response.Hint)
+		}
+		if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+			return code
 		}
 	}
 	if response.State != "ready" {
@@ -1049,11 +1063,12 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nNamed sessions: %d\n", root, len(names))
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nNamed sessions: %d\n", root, len(names))
 		for _, name := range names {
-			fmt.Fprintln(stdout, name)
+			fmt.Fprintln(&body, name)
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	case "save":
 		if len(positional) != 1 || opts.name != "" {
 			return writeHeadlessError(stderr, fmt.Errorf("session save requires exactly one name"))
@@ -1069,8 +1084,7 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Saved session %q for %s\n", positional[0], root)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Saved session %q for %s\n", positional[0], root))
 	case "activate":
 		if len(positional) != 1 || opts.name != "" {
 			return writeHeadlessError(stderr, fmt.Errorf("session activate requires exactly one name"))
@@ -1086,8 +1100,7 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Activated session %q for %s\n", positional[0], root)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Activated session %q for %s\n", positional[0], root))
 	case "health":
 		if len(positional) != 0 {
 			return writeHeadlessError(stderr, fmt.Errorf("session health does not accept positional arguments"))
@@ -1112,9 +1125,13 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 				return code
 			}
 		} else {
-			fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nSessions: %d\n", root, state, len(health))
+			var body strings.Builder
+			fmt.Fprintf(&body, "Workspace: %s\nState: %s\nSessions: %d\n", root, state, len(health))
 			for _, entry := range health {
-				fmt.Fprintf(stdout, "%s: %s (%d tabs, %d issues)\n", entry.Name, entry.State, entry.Tabs, len(entry.Issues))
+				fmt.Fprintf(&body, "%s: %s (%d tabs, %d issues)\n", entry.Name, entry.State, entry.Tabs, len(entry.Issues))
+			}
+			if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+				return code
 			}
 		}
 		if state == "stale" || state == "invalid" || state == "missing" {
@@ -1164,11 +1181,12 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nRemoved: %d\n", root, response.State, len(response.Removed))
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nState: %s\nRemoved: %d\n", root, response.State, len(response.Removed))
 		for _, removed := range response.Removed {
-			fmt.Fprintf(stdout, "removed %s\n", removed)
+			fmt.Fprintf(&body, "removed %s\n", removed)
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	default:
 		if len(positional) != 0 {
 			return writeHeadlessError(stderr, fmt.Errorf("session show does not accept positional arguments"))
@@ -1185,17 +1203,18 @@ func runHeadlessSessionContext(ctx context.Context, args []string, stdout, stder
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nSession: %s\nPath: %s\n", response.Workspace, response.State, response.Path)
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nSession: %s\nPath: %s\n", response.Workspace, response.State, response.Path)
 		if response.Name != "" {
-			fmt.Fprintf(stdout, "Name: %s\n", response.Name)
+			fmt.Fprintf(&body, "Name: %s\n", response.Name)
 		}
 		if response.Detail != "" {
-			fmt.Fprintln(stdout, response.Detail)
+			fmt.Fprintln(&body, response.Detail)
 		}
 		if response.Session != nil {
-			fmt.Fprintf(stdout, "Tabs: %d\n", len(response.Session.Tabs))
+			fmt.Fprintf(&body, "Tabs: %d\n", len(response.Session.Tabs))
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	}
 }
 
@@ -1248,18 +1267,19 @@ func runHeadlessToolsContext(ctx context.Context, args []string, stdout, stderr 
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\n", root)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\n", root)
 	for _, tool := range response.Tools {
 		line := fmt.Sprintf("%-8s %-10s %s", strings.ToUpper(tool.State), tool.Name, tool.Detail)
 		if tool.Path != "" {
 			line += " (" + tool.Path + ")"
 		}
-		fmt.Fprintln(stdout, strings.TrimSpace(line))
+		fmt.Fprintln(&body, strings.TrimSpace(line))
 		if tool.Hint != "" {
-			fmt.Fprintf(stdout, "         hint: %s\n", tool.Hint)
+			fmt.Fprintf(&body, "         hint: %s\n", tool.Hint)
 		}
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func runHeadlessHitspecContext(parentCtx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -1476,20 +1496,24 @@ func writeHeadlessHitspecResponse(stdout io.Writer, response headlessHitspecVali
 		}
 		return exitCode
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nPath: %s\nState: %s\nValid: %t\nFiles: %d\n",
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nPath: %s\nState: %s\nValid: %t\nFiles: %d\n",
 		response.Workspace, response.RelativePath, response.State, response.Valid, response.Files)
 	if response.Detail != "" {
-		fmt.Fprintf(stdout, "Detail: %s\n", response.Detail)
+		fmt.Fprintf(&body, "Detail: %s\n", response.Detail)
 	}
 	for _, result := range response.Results {
 		state := "ok"
 		if !result.OK {
 			state = "invalid"
 		}
-		fmt.Fprintf(stdout, "%s %s\n", state, result.File)
+		fmt.Fprintf(&body, "%s %s\n", state, result.File)
 		for _, problem := range result.Errors {
-			fmt.Fprintf(stdout, "  %s\n", problem)
+			fmt.Fprintf(&body, "  %s\n", problem)
 		}
+	}
+	if _, err := io.WriteString(stdout, body.String()); err != nil {
+		return 1
 	}
 	return exitCode
 }
@@ -1554,7 +1578,8 @@ func runHeadlessGitContext(parentCtx context.Context, args []string, stdout, std
 			return code
 		}
 	} else {
-		fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nBranch: %s\nChanges: %d\n",
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nState: %s\nBranch: %s\nChanges: %d\n",
 			response.Workspace, response.State, response.Branch, len(response.Entries))
 		for _, entry := range response.Entries {
 			status := entry.IndexStatus + entry.WorkStatus
@@ -1562,10 +1587,13 @@ func runHeadlessGitContext(parentCtx context.Context, args []string, stdout, std
 			if entry.OriginalPath != "" {
 				path += " <- " + entry.OriginalPath
 			}
-			fmt.Fprintf(stdout, "%s %s\n", status, path)
+			fmt.Fprintf(&body, "%s %s\n", status, path)
 		}
 		if response.Detail != "" {
-			fmt.Fprintln(stdout, response.Detail)
+			fmt.Fprintln(&body, response.Detail)
+		}
+		if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+			return code
 		}
 	}
 	if response.State != "ready" {
@@ -1607,15 +1635,16 @@ func runHeadlessContextContext(ctx context.Context, args []string, stdout, stder
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\n", response.Workspace)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\n", response.Workspace)
 	if response.ProjectRoot != "" {
-		fmt.Fprintf(stdout, "Project root: %s\n", response.ProjectRoot)
+		fmt.Fprintf(&body, "Project root: %s\n", response.ProjectRoot)
 	}
-	fmt.Fprintf(stdout, "Entries: %d%s\n", len(response.Entries), truncatedSuffix(response.Truncated))
+	fmt.Fprintf(&body, "Entries: %d%s\n", len(response.Entries), truncatedSuffix(response.Truncated))
 	for _, entry := range response.Entries {
-		fmt.Fprintf(stdout, "%-9s %s\n", entry.Kind, entry.Path)
+		fmt.Fprintf(&body, "%-9s %s\n", entry.Kind, entry.Path)
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func runHeadlessBufferContext(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -1669,7 +1698,9 @@ func runHeadlessBufferContext(ctx context.Context, args []string, stdin io.Reade
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprint(stdout, response.Content)
+	if _, err := io.WriteString(stdout, response.Content); err != nil {
+		return writeHeadlessError(stderr, fmt.Errorf("write buffer content: %w", err))
+	}
 	return 0
 }
 
@@ -1725,11 +1756,12 @@ func runHeadlessSearchContext(ctx context.Context, args []string, stdout, stderr
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nQuery: %s\nResults: %d\n", root, positional[0], len(response.Results))
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nQuery: %s\nResults: %d\n", root, positional[0], len(response.Results))
 	for _, result := range response.Results {
-		fmt.Fprintf(stdout, "%s:%d:%d: %s\n", result.FilePath, result.Line+1, result.Column+1, result.Preview)
+		fmt.Fprintf(&body, "%s:%d:%d: %s\n", result.FilePath, result.Line+1, result.Column+1, result.Preview)
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 const headlessSemanticIndexTimeout = 10 * time.Minute
@@ -1884,12 +1916,16 @@ func writeHeadlessSearchResponse(stdout io.Writer, response headlessSearchRespon
 		}
 		return exitCode
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nMode: %s\nState: %s\nQuery: %s\nResults: %d\n", response.Workspace, response.Mode, response.State, response.Query, len(response.Results))
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nMode: %s\nState: %s\nQuery: %s\nResults: %d\n", response.Workspace, response.Mode, response.State, response.Query, len(response.Results))
 	if response.Detail != "" {
-		fmt.Fprintf(stdout, "Detail: %s\n", response.Detail)
+		fmt.Fprintf(&body, "Detail: %s\n", response.Detail)
 	}
 	for _, result := range response.Results {
-		fmt.Fprintf(stdout, "%s:%d:%d: %s\n", result.FilePath, result.Line+1, result.Column+1, result.Preview)
+		fmt.Fprintf(&body, "%s:%d:%d: %s\n", result.FilePath, result.Line+1, result.Column+1, result.Preview)
+	}
+	if _, err := io.WriteString(stdout, body.String()); err != nil {
+		return 1
 	}
 	return exitCode
 }
@@ -2017,24 +2053,25 @@ func runHeadlessCodemapContext(parentCtx context.Context, args []string, stdout,
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nOperation: %s\nSymbol: %s\nState: %s\nDuration: %.3fms\n",
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nOperation: %s\nSymbol: %s\nState: %s\nDuration: %.3fms\n",
 		response.Workspace, response.Operation, response.Symbol, response.State, response.DurationMS)
 	if response.Context != nil {
-		fmt.Fprintf(stdout, "Definitions: %d\nCallers: %d\nCallees: %d\nReferences: %d\nTests: %d\n",
+		fmt.Fprintf(&body, "Definitions: %d\nCallers: %d\nCallees: %d\nReferences: %d\nTests: %d\n",
 			len(response.Context.Definitions), len(response.Context.Callers), len(response.Context.Callees),
 			len(response.Context.References), len(response.Context.Tests))
 	}
 	if response.Impact != nil {
-		fmt.Fprintf(stdout, "Locations: %d\nDirect callers: %d\nBlast radius: %d\nTests: %d\n",
+		fmt.Fprintf(&body, "Locations: %d\nDirect callers: %d\nBlast radius: %d\nTests: %d\n",
 			len(response.Impact.Locations), len(response.Impact.DirectCallers), len(response.Impact.BlastRadius), len(response.Impact.Tests))
 	}
 	if response.Results != nil {
-		fmt.Fprintf(stdout, "Results: %d%s\n", len(response.Results), truncatedSuffix(response.Truncated))
+		fmt.Fprintf(&body, "Results: %d%s\n", len(response.Results), truncatedSuffix(response.Truncated))
 		for _, result := range response.Results {
-			fmt.Fprintf(stdout, "%s:%d: %s\n", result.File, result.StartLine, result.Symbol)
+			fmt.Fprintf(&body, "%s:%d: %s\n", result.File, result.StartLine, result.Symbol)
 		}
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func headlessCodemapFilePath(raw string) (string, error) {
@@ -2092,10 +2129,6 @@ func boundHeadlessCodemapImpact(result codemap.ImpactResult) (codemap.ImpactResu
 		resultTruncated = true
 	}
 	return result, resultTruncated
-}
-
-func runHeadlessExec(args []string, stdout, stderr io.Writer) int {
-	return runHeadlessExecContext(context.Background(), args, stdout, stderr)
 }
 
 func runHeadlessExecContext(parentCtx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -2183,15 +2216,19 @@ func runHeadlessExecContext(parentCtx context.Context, args []string, stdout, st
 			return code
 		}
 	} else {
-		fmt.Fprintf(stdout, "Workspace: %s\nCommand: %s %s\nState: %s\nExit code: %d\n", root, response.Command, strings.Join(response.Args, " "), response.State, response.ExitCode)
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nCommand: %s %s\nState: %s\nExit code: %d\n", root, response.Command, strings.Join(response.Args, " "), response.State, response.ExitCode)
 		if response.Stdout != "" {
-			fmt.Fprint(stdout, response.Stdout)
+			body.WriteString(response.Stdout)
 		}
 		if response.Stderr != "" {
-			fmt.Fprint(stdout, response.Stderr)
+			body.WriteString(response.Stderr)
 		}
 		if response.Detail != "" {
-			fmt.Fprintln(stdout, response.Detail)
+			fmt.Fprintln(&body, response.Detail)
+		}
+		if code := writeHeadlessText(stdout, stderr, body.String()); code != 0 {
+			return code
 		}
 	}
 	if response.State != "completed" {
@@ -2259,7 +2296,7 @@ func (b *headlessOutputBuffer) ReadFrom(r io.Reader) (int64, error) {
 	// allowing the extra byte to remain in the response.
 	n, err := b.Buffer.ReadFrom(io.LimitReader(r, remaining+1))
 	if n > remaining {
-		b.Buffer.Truncate(b.limit)
+		b.Truncate(b.limit)
 		b.markTruncated()
 	}
 	return n, err
@@ -2637,11 +2674,12 @@ func collectHeadlessLSPStatusContextWithProbe(parentCtx context.Context, root st
 				entry.Capabilities = append([]string(nil), probe.Capabilities...)
 				if probe.Err != nil {
 					entry.State = headlessLSPProtocolProbeState(probeCtx, probe.Err)
-					if entry.State == "timed_out" {
+					switch entry.State {
+					case "timed_out":
 						entry.Hint = "LSP protocol probe timed out; verify the server is responsive"
-					} else if entry.State == "cancelled" {
+					case "cancelled":
 						entry.Hint = "LSP protocol probe was cancelled"
-					} else {
+					default:
 						entry.Hint = "LSP protocol probe failed: " + probe.Err.Error()
 					}
 				} else if probe.ProtocolState == "ready" {
@@ -2651,13 +2689,14 @@ func collectHeadlessLSPStatusContextWithProbe(parentCtx context.Context, root st
 				entry.Version = probe.Version
 				entry.VersionProbe = probe.VersionState
 				if probe.Err != nil {
-					if probe.VersionState == "timed_out" {
+					switch probe.VersionState {
+					case "timed_out":
 						entry.State = "timed_out"
 						entry.Hint = "version probe timed out; verify the executable is responsive"
-					} else if probe.VersionState == "cancelled" {
+					case "cancelled":
 						entry.State = "cancelled"
 						entry.Hint = "version probe was cancelled"
-					} else {
+					default:
 						entry.State = "failed"
 						entry.Hint = "version probe failed: " + probe.Err.Error()
 					}
@@ -3906,6 +3945,18 @@ func writeHeadlessJSON(w io.Writer, value any) int {
 	return 0
 }
 
+func writeHeadlessText(stdout, stderr io.Writer, content string) int {
+	if _, err := io.WriteString(stdout, content); err != nil {
+		return writeHeadlessRuntimeError(stderr, fmt.Errorf("write response: %w", err))
+	}
+	return 0
+}
+
+func writeHeadlessRuntimeError(stderr io.Writer, err error) int {
+	_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+	return 1
+}
+
 // addHeadlessSchemaVersion gives machine-facing Teak objects one stable
 // envelope marker without forcing every response type to embed mutable
 // metadata. Existing explicit versions are preserved so a future operation
@@ -3968,7 +4019,9 @@ func writeHeadlessError(w io.Writer, err error) int {
 		}
 		return 2
 	}
-	fmt.Fprintf(w, "Error: %v\n", err)
+	if _, writeErr := fmt.Fprintf(w, "Error: %v\n", err); writeErr != nil {
+		return 1
+	}
 	return 2
 }
 

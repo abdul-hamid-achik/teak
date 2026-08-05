@@ -143,8 +143,8 @@ func TestHeadlessMCPRejectsNonScalarRequestIDs(t *testing.T) {
 
 func TestHeadlessMCPServeUnblocksWhenContextIsCancelled(t *testing.T) {
 	reader, writer := io.Pipe()
-	defer writer.Close()
-	defer reader.Close()
+	defer func() { _ = writer.Close() }()
+	defer func() { _ = reader.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -166,8 +166,8 @@ func TestHeadlessMCPServeUnblocksWhenContextIsCancelled(t *testing.T) {
 
 func TestRunHeadlessMCPContextCancellationStopsTransport(t *testing.T) {
 	reader, writer := io.Pipe()
-	defer writer.Close()
-	defer reader.Close()
+	defer func() { _ = writer.Close() }()
+	defer func() { _ = reader.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

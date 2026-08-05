@@ -64,6 +64,13 @@ var semanticRSSSampler = procmon.ProcessGroupRSS
 
 var errSemanticOutputLimit = errors.New("vecgrep output exceeds limit")
 
+// errSemanticIndexBuildStopped distinguishes the index build's own lifetime
+// ending (hard timeout or CancelIndexing) from a single setup caller being
+// canceled. Existing waiters may retry the latter as a new single-flight
+// leader, but must share the former terminal outcome instead of resurrecting
+// an index process that Teak deliberately stopped.
+var errSemanticIndexBuildStopped = errors.New("vecgrep index build stopped")
+
 const (
 	// Keep readiness observations bounded across workspaces. The cache avoids
 	// repeating a status probe for every interactive query while the TTL keeps
@@ -483,7 +490,11 @@ func beginIndexBuild(rootDir string, rssBudget uint64) (context.Context, func())
 func runIndexBuild(rootDir string, rssBudget uint64) error {
 	ctx, finish := beginIndexBuild(rootDir, rssBudget)
 	defer finish()
-	return setupVecgrepContext(ctx, rootDir)
+	err := setupVecgrepContext(ctx, rootDir)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %w", errSemanticIndexBuildStopped, ctxErr)
+	}
+	return err
 }
 
 // CancelIndexing cancels every in-flight vecgrep index build across all
@@ -559,6 +570,7 @@ func runSemanticSetupContext(ctx context.Context, rootDir string, setup func(con
 			case <-flight.done:
 				if flight.err != nil &&
 					(errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded)) &&
+					!errors.Is(flight.err, errSemanticIndexBuildStopped) &&
 					ctx.Err() == nil {
 					continue
 				}

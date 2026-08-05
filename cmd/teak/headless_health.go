@@ -177,7 +177,9 @@ func runHeadlessHealthContext(ctx context.Context, args []string, stdout, stderr
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		writeHeadlessHealthDashboard(stdout, response)
+		if err := writeHeadlessHealthDashboard(stdout, response); err != nil {
+			return writeHeadlessRuntimeError(stderr, fmt.Errorf("write health dashboard: %w", err))
+		}
 		return 0
 	case "history":
 		if opts.confirm {
@@ -196,15 +198,16 @@ func runHeadlessHealthContext(ctx context.Context, args []string, stdout, stderr
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nHistory: %s\nEntries: %d\n", response.Workspace, response.State, len(response.Snapshots))
+		var body strings.Builder
+		fmt.Fprintf(&body, "Workspace: %s\nHistory: %s\nEntries: %d\n", response.Workspace, response.State, len(response.Snapshots))
 		for _, snapshot := range response.Snapshots {
-			fmt.Fprintf(stdout, "%s %-9s tools=%d/%d lsp=%d/%d changes=%d issues=%d actions=%d\n",
+			fmt.Fprintf(&body, "%s %-9s tools=%d/%d lsp=%d/%d changes=%d issues=%d actions=%d\n",
 				snapshot.RecordedAt.Format(time.RFC3339), snapshot.State,
 				snapshot.Summary.ToolsReady, snapshot.Summary.ToolsTotal,
 				snapshot.Summary.LSPReady, snapshot.Summary.LSPTotal,
 				snapshot.Summary.ChangedFiles, snapshot.Summary.Issues, snapshot.Summary.Actions)
 		}
-		return 0
+		return writeHeadlessText(stdout, stderr, body.String())
 	case "record":
 		if !opts.confirm {
 			return writeHeadlessError(stderr, fmt.Errorf("health record requires --confirm"))
@@ -216,9 +219,8 @@ func runHeadlessHealthContext(ctx context.Context, args []string, stdout, stderr
 		if opts.json {
 			return writeHeadlessJSON(stdout, response)
 		}
-		fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nRecorded: %s\nEntries: %d\nPath: %s\n",
-			response.Workspace, response.State, response.RecordedAt.Format(time.RFC3339), response.Entries, response.Path)
-		return 0
+		return writeHeadlessText(stdout, stderr, fmt.Sprintf("Workspace: %s\nState: %s\nRecorded: %s\nEntries: %d\nPath: %s\n",
+			response.Workspace, response.State, response.RecordedAt.Format(time.RFC3339), response.Entries, response.Path))
 	case "snapshot":
 		if opts.confirm || limit != headlessDefaultHistoryLimit {
 			return writeHeadlessError(stderr, fmt.Errorf("health snapshot does not accept --confirm or --limit"))
@@ -230,17 +232,18 @@ func runHeadlessHealthContext(ctx context.Context, args []string, stdout, stderr
 	if opts.json {
 		return writeHeadlessJSON(stdout, response)
 	}
-	fmt.Fprintf(stdout, "Workspace: %s\nState: %s\nTools: %d/%d ready\nLSP: %d/%d ready\nGit changes: %d\nIssues: %d\nActions: %d\nDuration: %.2fms\n",
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nState: %s\nTools: %d/%d ready\nLSP: %d/%d ready\nGit changes: %d\nIssues: %d\nActions: %d\nDuration: %.2fms\n",
 		response.Workspace, response.State, response.Summary.ToolsReady, response.Summary.ToolsTotal,
 		response.Summary.LSPReady, response.Summary.LSPTotal, response.Summary.ChangedFiles,
 		len(response.Issues), len(response.Actions), response.DurationMS)
 	for _, issue := range response.Issues {
-		fmt.Fprintf(stdout, "issue: %s\n", issue)
+		fmt.Fprintf(&body, "issue: %s\n", issue)
 	}
 	for _, action := range response.Actions {
-		fmt.Fprintf(stdout, "action: %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
+		fmt.Fprintf(&body, "action: %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
 	}
-	return 0
+	return writeHeadlessText(stdout, stderr, body.String())
 }
 
 func collectHeadlessHealthDashboardContext(ctx context.Context, root string, limit int) (headlessHealthDashboardResponse, error) {
@@ -300,27 +303,30 @@ func summarizeHeadlessHealthTrend(current headlessHealthResponse, snapshots []he
 	return trend
 }
 
-func writeHeadlessHealthDashboard(stdout io.Writer, response headlessHealthDashboardResponse) {
-	fmt.Fprintf(stdout, "Workspace: %s\nCurrent: %s\nTools: %d/%d ready\nLSP: %d/%d ready\nGit changes: %d\nIssues: %d\nActions: %d\nDuration: %.2fms\n",
+func writeHeadlessHealthDashboard(stdout io.Writer, response headlessHealthDashboardResponse) error {
+	var body strings.Builder
+	fmt.Fprintf(&body, "Workspace: %s\nCurrent: %s\nTools: %d/%d ready\nLSP: %d/%d ready\nGit changes: %d\nIssues: %d\nActions: %d\nDuration: %.2fms\n",
 		response.Workspace, response.State, response.Current.Summary.ToolsReady, response.Current.Summary.ToolsTotal,
 		response.Current.Summary.LSPReady, response.Current.Summary.LSPTotal, response.Current.Summary.ChangedFiles,
 		len(response.Current.Issues), len(response.Current.Actions), response.Current.DurationMS)
 	if !response.Current.CollectedAt.IsZero() {
-		fmt.Fprintf(stdout, "Checked: %s\n", response.Current.CollectedAt.UTC().Format(time.RFC3339Nano))
+		fmt.Fprintf(&body, "Checked: %s\n", response.Current.CollectedAt.UTC().Format(time.RFC3339Nano))
 	}
-	fmt.Fprintf(stdout, "History: %s (%d entries)\nTrend: healthy=%d degraded=%d failed=%d other=%d\n",
+	fmt.Fprintf(&body, "History: %s (%d entries)\nTrend: healthy=%d degraded=%d failed=%d other=%d\n",
 		response.History.State, len(response.History.Snapshots), response.Trend.Healthy, response.Trend.Degraded,
 		response.Trend.Failed, response.Trend.Other)
 	if response.Trend.LatestAt != "" {
-		fmt.Fprintf(stdout, "Latest recorded: %s state=%s heap_delta=%dB duration_delta=%.2fms\n",
+		fmt.Fprintf(&body, "Latest recorded: %s state=%s heap_delta=%dB duration_delta=%.2fms\n",
 			response.Trend.LatestAt, response.Trend.LatestState, response.Trend.HeapDeltaBytes, response.Trend.DurationDeltaMS)
 	}
 	for _, issue := range response.Current.Issues {
-		fmt.Fprintf(stdout, "issue: %s\n", issue)
+		fmt.Fprintf(&body, "issue: %s\n", issue)
 	}
 	for _, action := range response.Current.Actions {
-		fmt.Fprintf(stdout, "action: %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
+		fmt.Fprintf(&body, "action: %s/%s [%s] %s\n", action.Component, action.Name, action.Action, action.Hint)
 	}
+	_, err := io.WriteString(stdout, body.String())
+	return err
 }
 
 func parseHeadlessHealthArgs(args []string) (string, headlessOptions, int, []string, bool, error) {

@@ -500,6 +500,21 @@ func (m *Model) cancelSearch() {
 	m.searchCancel = nil
 }
 
+// Cancel stops the active search and invalidates any result already queued for
+// delivery. It is idempotent so overlay close and application teardown may
+// safely converge on it. In particular, callers must cancel search waiters
+// before CancelIndexing so a late semantic-search command cannot start a new
+// index build during shutdown.
+func (m *Model) Cancel() {
+	if m == nil || (m.searchContext == nil && m.searchCancel == nil && !m.searching && !m.indexing) {
+		return
+	}
+	m.debounceGen++
+	m.cancelSearch()
+	m.searching = false
+	m.indexing = false
+}
+
 func (m *Model) replaceSearchContext() {
 	m.cancelSearch()
 	m.searchContext, m.searchCancel = context.WithCancel(context.Background())

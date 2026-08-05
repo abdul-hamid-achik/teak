@@ -204,6 +204,7 @@ language_id = "fixture"
 	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(missingConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	missing, err := collectHeadlessLSPSymbolsContext(nil, root, file)
 	if err != nil || missing.State != "missing" {
 		t.Fatalf("missing symbols response = %#v, err=%v", missing, err)
@@ -219,6 +220,7 @@ language_id = "fixture"
 	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	//nolint:staticcheck // This test verifies the documented nil-context normalization contract.
 	unsupported, err := collectHeadlessLSPHoverContext(nil, root, file, 0, 1)
 	if err != nil || unsupported.State != "unsupported" || !strings.Contains(unsupported.Detail, "hover") {
 		t.Fatalf("unsupported hover response = %#v, err=%v", unsupported, err)
