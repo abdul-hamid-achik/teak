@@ -1394,14 +1394,14 @@ func (e Editor) findMatchHighlights() []HighlightRange {
 		return nil
 	}
 	current := e.find.CurrentMatchPosition()
-	var ranges []HighlightRange
-	for _, m := range e.find.matches {
-		if m.Start.Line < startLine {
-			continue
-		}
-		if m.Start.Line > endLine {
-			break
-		}
+	first := sort.Search(len(e.find.matches), func(i int) bool {
+		return e.find.matches[i].Start.Line >= startLine
+	})
+	last := sort.Search(len(e.find.matches), func(i int) bool {
+		return e.find.matches[i].Start.Line > endLine
+	})
+	ranges := make([]HighlightRange, 0, last-first)
+	for _, m := range e.find.matches[first:last] {
 		style := e.theme.FindMatch
 		if current != nil && current.Start == m.Start && current.End == m.End {
 			style = e.theme.FindMatchCurrent
@@ -1753,10 +1753,11 @@ func (e *Editor) completionEditIsApplicable(edit overlays.AutocompleteEdit) bool
 	return true
 }
 
-// ShowFind opens the in-buffer find widget.
-func (e *Editor) ShowFind() {
+// ShowFind opens the in-buffer find widget and refreshes a preserved query.
+func (e *Editor) ShowFind() tea.Cmd {
 	e.find.SetEditorID(e.id)
 	e.find.Show()
+	return e.find.scheduleScan()
 }
 
 // HideFind closes the in-buffer find widget.

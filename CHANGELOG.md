@@ -4,6 +4,29 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-08-05
+
+### In-buffer Find Reliability
+
+- Closing the find widget now cancels its active scan and invalidates queued
+  results, so a late result cannot move the cursor after `Esc`.
+- Editing a query or toggling regex mode clears stale highlights immediately,
+  shows an explicit searching state, and reports invalid regex syntax instead
+  of presenting it as “No matches”.
+- Reopening a preserved query starts a fresh scan rather than showing an empty
+  result set until the query changes again.
+- Asynchronous scans now cover the complete 64 MiB editor file limit, are
+  canceled when superseded, and pass only the remaining 10,000-match budget to
+  the regexp engine so dense single-line files cannot create unbounded match
+  index allocations.
+
+### Performance
+
+- Visible find highlights now locate the viewport with binary search instead
+  of walking every preceding match. A 10,000-match deep-viewport benchmark on
+  Apple M5 improved from roughly 6.1–6.9 µs and 23.6 KB/5 allocations to
+  1.3–1.6 µs and 6.9 KB/1 allocation per render.
+
 ## [0.10.2] - 2026-08-05
 
 ### Reliability

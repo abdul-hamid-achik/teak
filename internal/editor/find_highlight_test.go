@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -123,5 +124,28 @@ func TestViewIncludesFindHighlights(t *testing.T) {
 	plain := ed.View()
 	if view == plain {
 		t.Fatal("view with find highlights identical to plain view — matches are not rendered")
+	}
+}
+
+func BenchmarkFindMatchHighlightsDeepViewport(b *testing.B) {
+	const lineCount = maxFindMatches
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("x\n", lineCount)))
+	ed := New(buf, ui.DefaultTheme(), DefaultConfig())
+	ed.SetSize(40, 10)
+	ed.Viewport.ScrollY = lineCount - 10
+	ed.find.visible = true
+	ed.find.matches = make([]FindMatch, lineCount)
+	for line := range lineCount {
+		ed.find.matches[line] = FindMatch{
+			Start: text.Position{Line: line},
+			End:   text.Position{Line: line, Col: 1},
+		}
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := len(ed.findMatchHighlights()); got != 10 {
+			b.Fatalf("visible highlights = %d, want 10", got)
+		}
 	}
 }

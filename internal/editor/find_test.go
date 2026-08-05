@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"strings"
 	"testing"
 
 	"teak/internal/text"
@@ -126,5 +127,32 @@ func TestFindModelMaxMatches(t *testing.T) {
 
 	if f.MatchCount() != 10000 {
 		t.Errorf("expected matches capped at 10000, got %d", f.MatchCount())
+	}
+}
+
+func TestFindMatchesBeyondFormerEightMiBCap(t *testing.T) {
+	const formerLimit = 8 << 20
+	rope := text.NewFromString(strings.Repeat("a", formerLimit+1) + "needle")
+
+	matches, _, err := findMatches(rope, "needle", false, text.Position{})
+	if err != nil {
+		t.Fatalf("findMatches() error = %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("findMatches() matches = %d, want one beyond the former 8 MiB cap", len(matches))
+	}
+	if got, want := matches[0].Start.Col, formerLimit+1; got != want {
+		t.Fatalf("match column = %d, want %d", got, want)
+	}
+}
+
+func BenchmarkFindMatchesDenseSingleLine(b *testing.B) {
+	rope := text.NewFromString(strings.Repeat("x", 1<<20))
+	b.ReportAllocs()
+	for b.Loop() {
+		matches, _, err := findMatches(rope, "x", false, text.Position{})
+		if err != nil || len(matches) != maxFindMatches {
+			b.Fatalf("findMatches() = %d matches, error %v", len(matches), err)
+		}
 	}
 }

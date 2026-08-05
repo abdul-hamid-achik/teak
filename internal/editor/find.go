@@ -1,6 +1,9 @@
 package editor
 
 import (
+	"context"
+	"errors"
+	"sort"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
@@ -24,10 +27,13 @@ const findDebounce = 120 * time.Millisecond
 // maxFindMatches bounds how many matches are retained.
 const maxFindMatches = 10000
 
-// maxFindScanBytes bounds how much of the document a single scan reads. A query
-// with no matches used to walk the whole buffer regardless of the match cap, so
-// the cost was unbounded on large files even when nothing was found.
-const maxFindScanBytes = 8 << 20
+// maxFindScanBytes matches the editor's supported file limit. Scans run off the
+// UI goroutine and are canceled when the query changes, so every buffer Teak can
+// open remains searchable without turning abandoned queries into background
+// CPU work.
+const maxFindScanBytes = int(text.MaxBufferFileBytes)
+
+var errFindScanLimit = errors.New("find scan exceeds the 64 MiB editor limit")
 
 // FindDebounceMsg fires after typing pauses and asks for a scan.
 type FindDebounceMsg struct {
@@ -41,17 +47,22 @@ type FindResultsMsg struct {
 	Generation int
 	Matches    []FindMatch
 	Current    int
+	Err        error
 }
 
 // FindModel manages in-buffer find state.
 type FindModel struct {
-	input   textinput.Model
-	visible bool
-	matches []FindMatch
-	current int
-	regex   bool
-	theme   ui.Theme
-	query   string
+	input       textinput.Model
+	visible     bool
+	matches     []FindMatch
+	current     int
+	regex       bool
+	theme       ui.Theme
+	query       string
+	errMsg      string
+	searching   bool
+	scanContext context.Context
+	scanCancel  context.CancelFunc
 
 	// generation increments on every query change so results from a superseded
 	// scan can be discarded rather than overwriting newer ones.
@@ -80,9 +91,16 @@ func (f *FindModel) Show() {
 
 // Hide closes the find widget and clears matches.
 func (f *FindModel) Hide() {
+	// Invalidate both a pending debounce tick and an in-flight scan. A result
+	// that lands after Escape must not repopulate hidden matches or move the
+	// editor cursor.
+	f.generation++
+	f.cancelScan()
 	f.visible = false
 	f.matches = nil
 	f.current = 0
+	f.errMsg = ""
+	f.searching = false
 	f.input.Blur()
 }
 
@@ -150,7 +168,14 @@ func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 // short pause. Results carry the generation so a slow scan that lands after the
 // query moved on is dropped instead of overwriting newer matches.
 func (f *FindModel) scheduleScan() tea.Cmd {
+	f.cancelScan()
 	f.generation++
+	f.errMsg = ""
+	// Results describe the previous query or regex mode until the replacement
+	// scan completes. Clear them now so UpdateFind cannot move the cursor back
+	// to a stale match while the user is still typing.
+	f.matches = nil
+	f.current = 0
 	generation := f.generation
 	editorID := f.editorID
 	if f.input.Value() == "" {
@@ -158,8 +183,11 @@ func (f *FindModel) scheduleScan() tea.Cmd {
 		// the user wait for a scan that would find nothing.
 		f.matches = nil
 		f.current = 0
+		f.searching = false
 		return nil
 	}
+	f.searching = true
+	f.scanContext, f.scanCancel = context.WithCancel(context.Background())
 	return tea.Tick(findDebounce, func(time.Time) tea.Msg {
 		return FindDebounceMsg{EditorID: editorID, Generation: generation}
 	})
@@ -172,25 +200,40 @@ func (f FindModel) ScanCmd(rope *text.Rope, cursor text.Position) tea.Cmd {
 	regex := f.regex
 	generation := f.generation
 	editorID := f.editorID
+	ctx := f.scanContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if query == "" || rope == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		matches, current := findMatches(rope, query, regex, cursor)
+		matches, current, err := findMatchesContext(ctx, rope, query, regex, cursor)
 		return FindResultsMsg{
 			EditorID:   editorID,
 			Generation: generation,
 			Matches:    matches,
 			Current:    current,
+			Err:        err,
 		}
 	}
 }
 
 // ApplyResults installs a scan result, ignoring one that has been superseded.
 func (f *FindModel) ApplyResults(msg FindResultsMsg) bool {
-	if msg.Generation != f.generation {
+	if !f.visible || msg.Generation != f.generation {
 		return false
 	}
+	f.cancelScan()
+	if msg.Err != nil {
+		f.matches = nil
+		f.current = 0
+		f.errMsg = msg.Err.Error()
+		f.searching = false
+		return true
+	}
+	f.errMsg = ""
+	f.searching = false
 	f.matches = msg.Matches
 	f.current = msg.Current
 	return true
@@ -204,32 +247,47 @@ func (f *FindModel) SetEditorID(id uint64) { f.editorID = id }
 
 // findMatches scans rope for query. It is a pure function so it can run on a
 // background goroutine.
-func findMatches(rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int) {
+func findMatches(rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int, error) {
+	return findMatchesContext(context.Background(), rope, query, regex, cursor)
+}
+
+func findMatchesContext(ctx context.Context, rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if rope == nil {
+		return nil, 0, nil
+	}
+	if rope.Len() > maxFindScanBytes {
+		return nil, 0, errFindScanLimit
+	}
 	re, err := search.CompilePattern(query, search.SearchOpts{Regex: regex})
 	if err != nil {
-		return nil, 0
+		return nil, 0, err
 	}
 
 	var matches []FindMatch
 	lineCount := rope.LineCount()
-	scanned := 0
 
 	for line := 0; line < lineCount && len(matches) < maxFindMatches; line++ {
-		lineBytes := rope.Line(line)
-		scanned += len(lineBytes) + 1
-		if scanned > maxFindScanBytes {
-			break
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
 		}
+		lineBytes := rope.Line(line)
 		lineStr := string(lineBytes)
-		for _, loc := range re.FindAllStringIndex(lineStr, -1) {
-			if len(matches) >= maxFindMatches {
-				break
-			}
+		remaining := maxFindMatches - len(matches)
+		for _, loc := range re.FindAllStringIndex(lineStr, remaining) {
 			matches = append(matches, FindMatch{
 				Start: text.Position{Line: line, Col: loc[0]},
 				End:   text.Position{Line: line, Col: loc[1]},
 			})
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	// Position the current match near the cursor.
@@ -240,7 +298,15 @@ func findMatches(rope *text.Rope, query string, regex bool, cursor text.Position
 			break
 		}
 	}
-	return matches, current
+	return matches, current, nil
+}
+
+func (f *FindModel) cancelScan() {
+	if f.scanCancel != nil {
+		f.scanCancel()
+	}
+	f.scanContext = nil
+	f.scanCancel = nil
 }
 
 // updateMatches scans immediately. Reserved for callers that must have
@@ -252,7 +318,15 @@ func (f *FindModel) updateMatches(buf *text.Buffer) {
 		f.current = 0
 		return
 	}
-	f.matches, f.current = findMatches(buf.Rope(), f.input.Value(), f.regex, buf.Cursor)
+	matches, current, err := findMatches(buf.Rope(), f.input.Value(), f.regex, buf.Cursor)
+	f.matches = matches
+	f.current = current
+	f.searching = false
+	if err != nil {
+		f.errMsg = err.Error()
+	} else {
+		f.errMsg = ""
+	}
 }
 
 // CurrentMatchPosition returns the position of the current match, or nil.
@@ -278,7 +352,11 @@ func (f FindModel) View() string {
 		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(".*")
 	}
 
-	if len(f.matches) > 0 {
+	if f.searching {
+		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord13).Render("Searching…")
+	} else if f.errMsg != "" {
+		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord11).Render(truncateToWidth(f.errMsg, 40))
+	} else if len(f.matches) > 0 {
 		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord4).Render(
 			formatMatchCount(f.current+1, len(f.matches)))
 	} else if f.query != "" {
@@ -310,15 +388,18 @@ func (f FindModel) FindMatchRangesForLine(line int) []selectionByteRange {
 	if len(f.matches) == 0 {
 		return nil
 	}
-	var ranges []selectionByteRange
-	for i, m := range f.matches {
-		if m.Start.Line > line {
-			break
-		}
-		if m.Start.Line == line {
-			ranges = append(ranges, selectionByteRange{start: m.Start.Col, end: m.End.Col})
-			_ = i
-		}
+	first := sort.Search(len(f.matches), func(i int) bool {
+		return f.matches[i].Start.Line >= line
+	})
+	last := sort.Search(len(f.matches), func(i int) bool {
+		return f.matches[i].Start.Line > line
+	})
+	if first == last {
+		return nil
+	}
+	ranges := make([]selectionByteRange, 0, last-first)
+	for _, m := range f.matches[first:last] {
+		ranges = append(ranges, selectionByteRange{start: m.Start.Col, end: m.End.Col})
 	}
 	return ranges
 }

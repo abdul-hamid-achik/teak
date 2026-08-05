@@ -270,10 +270,11 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+f":
 		if ed := m.activeEditor(); ed != nil {
 			if !ed.IsFindVisible() {
-				ed.ShowFind()
+				cmd := ed.ShowFind()
 				// The widget takes one text row; re-run the layout so the
 				// viewport shrinks instead of clipping the status bar.
 				m.relayout()
+				return m, cmd, true
 			}
 		}
 		return m, nil, true

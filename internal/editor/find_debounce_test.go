@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -76,6 +78,120 @@ func TestFindDiscardsSupersededResults(t *testing.T) {
 
 	if updated.find.MatchCount() != 0 {
 		t.Error("results from a superseded query overwrote the newer state")
+	}
+}
+
+func TestFindHideInvalidatesInFlightScan(t *testing.T) {
+	ed := findTestEditor(t, 20)
+	ed.UpdateFind(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	generation := ed.find.Generation()
+	ed.Buffer.SetCursor(text.Position{Line: 10, Col: 3})
+	ed.HideFind()
+
+	updated, _ := ed.Update(FindResultsMsg{
+		EditorID:   ed.id,
+		Generation: generation,
+		Matches:    []FindMatch{{Start: text.Position{Line: 1}, End: text.Position{Line: 1, Col: 1}}},
+	})
+
+	if got, want := updated.Buffer.Cursor, (text.Position{Line: 10, Col: 3}); got != want {
+		t.Fatalf("late hidden-find result moved cursor to %+v, want %+v", got, want)
+	}
+	if updated.find.MatchCount() != 0 {
+		t.Fatalf("late hidden-find result installed %d matches, want none", updated.find.MatchCount())
+	}
+}
+
+func TestFindHideCancelsScanContext(t *testing.T) {
+	ed := findTestEditor(t, 20)
+	ed.UpdateFind(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	ctx := ed.find.scanContext
+	if ctx == nil {
+		t.Fatal("query change did not create a cancellable scan context")
+	}
+
+	ed.HideFind()
+
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("scan context error = %v, want context.Canceled", ctx.Err())
+		}
+	default:
+		t.Fatal("HideFind did not cancel scan context")
+	}
+}
+
+func TestFindMatchesContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := findMatchesContext(ctx, text.NewFromString(strings.Repeat("needle\n", 10_000)), "needle", false, text.Position{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("findMatchesContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestFindQueryChangeClearsStaleMatchesWithoutMovingCursor(t *testing.T) {
+	ed := findTestEditor(t, 20)
+	ed.find.input.SetValue("n")
+	ed.find.query = "n"
+	ed.find.matches = []FindMatch{{Start: text.Position{Line: 1}, End: text.Position{Line: 1, Col: 1}}}
+	ed.Buffer.SetCursor(text.Position{Line: 10, Col: 3})
+
+	cmd := ed.UpdateFind(tea.KeyPressMsg{Code: 'e', Text: "e"})
+
+	if cmd == nil {
+		t.Fatal("query change did not schedule a replacement scan")
+	}
+	if got, want := ed.Buffer.Cursor, (text.Position{Line: 10, Col: 3}); got != want {
+		t.Fatalf("query change moved cursor to stale match %+v, want %+v", got, want)
+	}
+	if ed.find.MatchCount() != 0 {
+		t.Fatalf("query change retained %d stale matches", ed.find.MatchCount())
+	}
+	view := ed.FindView()
+	if !strings.Contains(view, "Searching") || strings.Contains(view, "No matches") {
+		t.Fatalf("query-change view = %q, want a pending-search state without a false no-match result", view)
+	}
+}
+
+func TestFindInvalidRegexSurfacesScanError(t *testing.T) {
+	ed := findTestEditor(t, 20)
+	ed.find.regex = true
+	ed.UpdateFind(tea.KeyPressMsg{Code: '[', Text: "["})
+
+	tick := FindDebounceMsg{EditorID: ed.id, Generation: ed.find.Generation()}
+	updated, scanCmd := ed.Update(tick)
+	if scanCmd == nil {
+		t.Fatal("invalid regex did not start the asynchronous validation scan")
+	}
+	result, ok := scanCmd().(FindResultsMsg)
+	if !ok {
+		t.Fatalf("scan returned %T, want FindResultsMsg", scanCmd())
+	}
+	if result.Err == nil {
+		t.Fatal("invalid regex scan error = nil")
+	}
+	updated, _ = updated.Update(result)
+	if view := updated.FindView(); !strings.Contains(view, "invalid pattern") {
+		t.Fatalf("find view = %q, want invalid-regex feedback", view)
+	}
+}
+
+func TestFindReopenRescansPreservedQuery(t *testing.T) {
+	ed := findTestEditor(t, 20)
+	ed.find.input.SetValue("needle")
+	ed.find.query = "needle"
+	ed.HideFind()
+
+	cmd := ed.ShowFind()
+
+	if cmd == nil {
+		t.Fatal("reopening a preserved query did not schedule a fresh scan")
+	}
+	if !ed.IsFindVisible() {
+		t.Fatal("ShowFind did not reopen the widget")
 	}
 }
 

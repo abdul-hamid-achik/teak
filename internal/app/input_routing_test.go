@@ -80,6 +80,32 @@ func TestInputRoutingGlobalShortcutDoesNotReachEditor(t *testing.T) {
 	}
 }
 
+func TestInputRoutingReopeningFindRefreshesPreservedQuery(t *testing.T) {
+	model := newInputRoutingTestModel(t)
+	openedAny, _, handled := model.handleGlobalKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+	if !handled {
+		t.Fatal("initial ctrl+f was not handled")
+	}
+	opened := openedAny.(Model)
+
+	typedAny, _ := opened.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typed := typedAny.(Model)
+	closedAny, _ := typed.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	closed := closedAny.(Model)
+	if closed.activeEditor().IsFindVisible() {
+		t.Fatal("escape did not close find before reopen")
+	}
+
+	reopenedAny, refreshCmd, handled := closed.handleGlobalKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+	reopened := reopenedAny.(Model)
+	if !handled || !reopened.activeEditor().IsFindVisible() {
+		t.Fatal("second ctrl+f did not reopen find")
+	}
+	if refreshCmd == nil {
+		t.Fatal("second ctrl+f dropped the preserved-query refresh command")
+	}
+}
+
 func TestFileTreeVisibilityShortcutsAreContextual(t *testing.T) {
 	model := newInputRoutingTestModel(t)
 	model.showTree = true
