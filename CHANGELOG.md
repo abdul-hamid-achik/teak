@@ -4,6 +4,17 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-08-05
+
+### Editor State Synchronization
+
+- Plugin-driven edits and cursor moves now pass through the same central
+  reconciliation path as interactive edits, cancelling stale completion,
+  hover, signature, and cursor-sensitive document requests.
+- External file reloads now use that reconciliation path as well, keeping
+  request invalidation, dirty/preview tab state, LSP `didChange`, and editor
+  autocmds consistent instead of maintaining a partial duplicate.
+
 ## [0.10.7] - 2026-08-05
 
 ### Headless LSP Teardown

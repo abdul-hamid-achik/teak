@@ -357,7 +357,6 @@ func (m Model) applyExternalSnapshot(path string, snapshot *text.Rope, clean boo
 		} else {
 			m.editors[i].Buffer.ReplaceRopeSnapshot(snapshot, text.Position{})
 		}
-		m.tabBar.Tabs[i].Dirty = m.editors[i].Buffer.Dirty()
 		if m.editors[i].Highlighter != nil {
 			m.editors[i].Highlighter.Invalidate()
 		}
@@ -369,17 +368,12 @@ func (m Model) applyExternalSnapshot(path string, snapshot *text.Rope, clean boo
 		cmds = append(cmds,
 			m.editors[i].ScheduleInitialTokenize(),
 			prepareExternalFoldRegionsCmd(editorID, version, snapshot),
+			m.syncEditorStateAfterUpdate(i, prevVersion, prevCursor),
 			m.triggerPluginEvents(
 				m.pluginEvent(plugin.EventBufRead, path),
 				m.pluginEvent(plugin.EventFileType, path),
 			),
-			m.triggerEditorAutocmds(path, prevVersion, m.editors[i].Buffer.Version(), prevCursor, m.editors[i].Buffer.Cursor),
 		)
-		if m.lspMgr != nil {
-			if client := m.lspMgr.ClientForFile(path); client != nil {
-				cmds = append(cmds, m.notifyLSPChange(client, &m.editors[i]))
-			}
-		}
 	}
 	if clean {
 		m.status = fmt.Sprintf("Reloaded: %s (external change)", filepath.Base(path))

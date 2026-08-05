@@ -174,6 +174,23 @@ func TestExternalReloadRebuildsDerivedEditorState(t *testing.T) {
 	}
 }
 
+func TestExternalReloadInvalidatesStaleLSPRequests(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "main.go", "disk\n", "local\n")
+	path := model.editors[0].Buffer.FilePath
+	overlayCtx := model.overlayRequests.start(overlayRequestHover)
+	documentCtx := model.documentRequests.start(documentRequestDefinition, path)
+
+	updatedAny, _ := model.reloadExternalFile(path, text.NewFromString("external\n"))
+	updated := updatedAny.(Model)
+
+	assertContextCanceled(t, "overlay request", overlayCtx)
+	assertContextCanceled(t, "document request", documentCtx)
+	if updated.tabBar.Tabs[0].Dirty {
+		t.Fatal("clean external reload left the tab dirty")
+	}
+}
+
 func TestExternalConflictSnapshotBudgetRetainsDecisionWithoutLargeRope(t *testing.T) {
 	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
 	path := filepath.Join(model.rootDir, "large.go")

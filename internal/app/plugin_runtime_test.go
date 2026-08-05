@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -10,6 +11,54 @@ import (
 	"teak/internal/plugin"
 	"teak/internal/text"
 )
+
+func TestPluginRuntimeInvalidatesStaleLSPRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		act  func(*pluginRuntime) error
+	}{
+		{
+			name: "cursor movement",
+			act: func(runtime *pluginRuntime) error {
+				return runtime.SetBufferCursor(text.Position{Col: 1})
+			},
+		},
+		{
+			name: "buffer edit",
+			act: func(runtime *pluginRuntime) error {
+				return runtime.InsertText("!")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := newInputRoutingTestModel(t)
+			ed := model.activeEditor()
+			ed.Buffer.FilePath = filepath.Join(model.rootDir, "main.go")
+			ed.Buffer.InsertAtCursor([]byte("hello"))
+			ed.Buffer.SetCursor(text.Position{})
+
+			overlayCtx := model.overlayRequests.start(overlayRequestHover)
+			documentCtx := model.documentRequests.start(documentRequestDefinition, ed.Buffer.FilePath)
+			if err := tt.act(newPluginRuntime(&model)); err != nil {
+				t.Fatalf("plugin action error = %v", err)
+			}
+
+			assertContextCanceled(t, "overlay request", overlayCtx)
+			assertContextCanceled(t, "document request", documentCtx)
+		})
+	}
+}
+
+func assertContextCanceled(t *testing.T, name string, ctx context.Context) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatalf("%s remained active", name)
+	}
+}
 
 func TestPluginRuntimeCreatesAndClosesFloat(t *testing.T) {
 	model := newInputRoutingTestModel(t)

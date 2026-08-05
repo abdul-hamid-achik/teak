@@ -83,26 +83,15 @@ func (r *pluginRuntime) syncActiveEditorAfterEdit(prevVersion int, prevCursor te
 		return err
 	}
 	ed.EnsureCursorVisible()
+	if cmd := r.model.syncEditorStateAfterUpdate(r.model.activeTab, prevVersion, prevCursor); cmd != nil {
+		r.cmds = append(r.cmds, cmd)
+	}
 	if ed.Buffer.Version() == prevVersion {
 		return nil
-	}
-	if r.model.activeTab >= 0 && r.model.activeTab < len(r.model.tabBar.Tabs) {
-		r.model.tabBar.Tabs[r.model.activeTab].Dirty = ed.Buffer.Dirty()
-		if ed.Buffer.Dirty() && r.model.tabBar.Tabs[r.model.activeTab].Preview {
-			r.model.tabBar.Tabs[r.model.activeTab].Preview = false
-		}
-	}
-	if ed.Buffer.FilePath != "" {
-		if client := r.model.lspMgr.ClientForFile(ed.Buffer.FilePath); client != nil {
-			r.cmds = append(r.cmds, r.model.notifyLSPChange(client, ed))
-		}
 	}
 	if ed.Highlighter != nil {
 		r.retokenizeEditor = ed.ID()
 		r.retokenizeVersion = ed.Buffer.Version()
-	}
-	if cmd := r.model.triggerEditorAutocmds(ed.Buffer.FilePath, prevVersion, ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor); cmd != nil {
-		r.cmds = append(r.cmds, cmd)
 	}
 	return nil
 }
@@ -197,7 +186,7 @@ func (r *pluginRuntime) SetBufferCursor(pos text.Position) error {
 	pos = r.clampPosition(ed.Buffer, pos)
 	ed.Buffer.SetCursor(pos)
 	ed.EnsureCursorVisible()
-	if cmd := r.model.triggerEditorAutocmds(ed.Buffer.FilePath, ed.Buffer.Version(), ed.Buffer.Version(), prevCursor, ed.Buffer.Cursor); cmd != nil {
+	if cmd := r.model.syncEditorStateAfterUpdate(r.model.activeTab, ed.Buffer.Version(), prevCursor); cmd != nil {
 		r.cmds = append(r.cmds, cmd)
 	}
 	return nil
