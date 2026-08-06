@@ -10,6 +10,10 @@ import (
 
 const maxLeaf = 512
 
+var errNegativeReadOffset = errors.New("text.Rope.ReadAt: negative offset")
+
+var _ io.ReaderAt = (*Rope)(nil)
+
 // Rope is a persistent (immutable) rope data structure for efficient text manipulation.
 // Each mutation returns a new Rope; the original is unchanged.
 type Rope struct {
@@ -204,6 +208,45 @@ func (r *Rope) Bytes() []byte {
 	buf := make([]byte, 0, r.len)
 	r.appendTo(&buf)
 	return buf
+}
+
+// ReadAt copies rope bytes into p beginning at off without flattening the
+// immutable tree. It implements io.ReaderAt, including returning io.EOF when
+// fewer than len(p) bytes remain. Reads visit only intersecting leaves and do
+// not allocate.
+func (r *Rope) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errNegativeReadOffset
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r == nil || off >= int64(r.len) {
+		return 0, io.EOF
+	}
+	n := r.readAt(p, int(off))
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r *Rope) readAt(p []byte, off int) int {
+	if len(p) == 0 || off >= r.len {
+		return 0
+	}
+	if r.isLeaf() {
+		return copy(p, r.value[off:])
+	}
+	leftLen := r.left.len
+	if off >= leftLen {
+		return r.right.readAt(p, off-leftLen)
+	}
+	n := r.left.readAt(p, off)
+	if n < len(p) {
+		n += r.right.readAt(p[n:], 0)
+	}
+	return n
 }
 
 // BytesContext returns a copy of the rope content, stopping between leaves if

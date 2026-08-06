@@ -3,6 +3,7 @@ package text
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 )
@@ -99,5 +100,69 @@ func TestRopeWriteToStreamsLeavesInOrder(t *testing.T) {
 	}
 	if got := dst.String(); got != content {
 		t.Fatalf("WriteTo() content mismatch: got %d bytes", len(got))
+	}
+}
+
+func TestRopeReadAtStreamsAcrossLeaves(t *testing.T) {
+	rope := join(
+		newLeafOwned([]byte("abc")),
+		join(newLeafOwned([]byte("def")), newLeafOwned([]byte("ghi"))),
+	)
+	tests := []struct {
+		name    string
+		offset  int64
+		size    int
+		want    string
+		wantEOF bool
+		wantErr bool
+	}{
+		{name: "within leaf", offset: 0, size: 2, want: "ab"},
+		{name: "across leaves", offset: 2, size: 5, want: "cdefg"},
+		{name: "partial at end", offset: 7, size: 4, want: "hi", wantEOF: true},
+		{name: "at end", offset: 9, size: 1, wantEOF: true},
+		{name: "past end", offset: 20, size: 1, wantEOF: true},
+		{name: "empty destination", offset: 9, size: 0},
+		{name: "negative offset", offset: -1, size: 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dst := make([]byte, tt.size)
+			n, err := rope.ReadAt(dst, tt.offset)
+			if tt.wantEOF {
+				if err != io.EOF {
+					t.Fatalf("ReadAt() error = %v, want io.EOF", err)
+				}
+			} else if tt.wantErr {
+				if err == nil {
+					t.Fatal("ReadAt() error = nil, want an error")
+				}
+			} else if err != nil {
+				t.Fatalf("ReadAt() error = %v", err)
+			}
+			if got := string(dst[:n]); got != tt.want {
+				t.Fatalf("ReadAt() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRopeReadAtDoesNotAllocate(t *testing.T) {
+	rope := NewFromString(strings.Repeat("0123456789", 1_000))
+	dst := make([]byte, 4<<10)
+	if n, err := rope.ReadAt(dst, 333); n != len(dst) || err != nil {
+		t.Fatalf("ReadAt() = (%d, %v), want (%d, nil)", n, err, len(dst))
+	}
+	if allocs := testing.AllocsPerRun(50, func() {
+		_, _ = rope.ReadAt(dst, 333)
+	}); allocs != 0 {
+		t.Fatalf("ReadAt() allocated %.0f times per call, want 0", allocs)
+	}
+}
+
+func TestNilRopeReadAtReturnsEOF(t *testing.T) {
+	var rope *Rope
+	dst := make([]byte, 1)
+	if n, err := rope.ReadAt(dst, 0); n != 0 || err != io.EOF {
+		t.Fatalf("ReadAt() = (%d, %v), want (0, io.EOF)", n, err)
 	}
 }

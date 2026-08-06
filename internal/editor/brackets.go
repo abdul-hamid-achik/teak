@@ -79,18 +79,21 @@ func findMatchingBracket(buf *text.Buffer, pos text.Position, budget int) (text.
 	return text.Position{}, false
 }
 
-// findForward scans bounded Rope slices to avoid copying a document in a
-// render frame. An unlimited budget is used only by FindMatchingBracket.
+// findForward scans bounded Rope chunks into one reusable buffer. An unlimited
+// budget is used only by FindMatchingBracket.
 func findForward(rope *text.Rope, offset int, open, close byte, budget int) (text.Position, bool) {
 	depth := 1
 	start := offset + 1
 	end := rope.Len()
+	var storage [bracketScanChunkBytes]byte
 	if budget >= 0 {
 		end = min(end, start+budget)
 	}
 	for start < end {
 		chunkEnd := min(end, start+bracketScanChunkBytes)
-		chunk := rope.Slice(start, chunkEnd).Bytes()
+		chunk := storage[:chunkEnd-start]
+		n, _ := rope.ReadAt(chunk, int64(start))
+		chunk = chunk[:n]
 		for i, ch := range chunk {
 			switch ch {
 			case open:
@@ -102,7 +105,10 @@ func findForward(rope *text.Rope, offset int, open, close byte, budget int) (tex
 				}
 			}
 		}
-		start = chunkEnd
+		if n == 0 {
+			break
+		}
+		start += n
 	}
 	return text.Position{}, false
 }
@@ -110,13 +116,16 @@ func findForward(rope *text.Rope, offset int, open, close byte, budget int) (tex
 func findBackward(rope *text.Rope, offset int, open, close byte, budget int) (text.Position, bool) {
 	depth := 1
 	start := 0
+	var storage [bracketScanChunkBytes]byte
 	if budget >= 0 {
 		start = max(0, offset-budget)
 	}
 	end := offset
 	for end > start {
 		chunkStart := max(start, end-bracketScanChunkBytes)
-		chunk := rope.Slice(chunkStart, end).Bytes()
+		chunk := storage[:end-chunkStart]
+		n, _ := rope.ReadAt(chunk, int64(chunkStart))
+		chunk = chunk[:n]
 		for i := len(chunk) - 1; i >= 0; i-- {
 			switch chunk[i] {
 			case close:
@@ -127,6 +136,9 @@ func findBackward(rope *text.Rope, offset int, open, close byte, budget int) (te
 					return rope.OffsetToPosition(chunkStart + i), true
 				}
 			}
+		}
+		if n == 0 {
+			break
 		}
 		end = chunkStart
 	}

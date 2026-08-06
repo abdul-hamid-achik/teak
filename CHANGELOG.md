@@ -4,6 +4,26 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.32] - 2026-08-05
+
+### Allocation-Free Bracket Scanning
+
+- The immutable rope now implements `io.ReaderAt`, copying only intersecting
+  leaves into caller-owned storage without flattening, exposing mutable leaf
+  bytes, or allocating.
+- Bounded forward and backward bracket matching reuse one 4 KiB stack buffer
+  instead of building sixteen temporary rope slices while navigating around an
+  unmatched bracket.
+- Cross-leaf reads, partial EOF, invalid offsets, nil ropes, large bidirectional
+  matches, scan budgets, and zero-allocation behavior have dedicated tests.
+- A paired Apple M5 benchmark over the 64 KiB interactive scan budget dropped
+  from 39.3-45.4 microseconds, 79.8 KB, and 141 allocations to 17.7-18.7
+  microseconds with zero allocated bytes and zero allocations.
+- Doctor Glyphrun specs with available LSP fixtures now allow the documented
+  2-second language budget plus 3-second general-tool budget before declaring
+  a hang. Their 9-second wait remains below the 10-second process hard limit,
+  eliminating the exact 5.005-second CI timeout observed during verification.
+
 ## [0.10.31] - 2026-08-05
 
 ### Streaming UTF-8 Edit Validation

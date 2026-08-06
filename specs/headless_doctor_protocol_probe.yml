@@ -29,7 +29,9 @@ steps:
     - wait:
         process:
             exitCode: 0
-        timeoutMs: 5000
+        # Doctor may legitimately consume its 2s language budget followed by
+        # its 3s general-tool budget. Keep slack below the target's 10s hard cap.
+        timeoutMs: 9000
 outcomes:
     - id: protocol_probe_ready
       description: the installed server is verified through the LSP handshake

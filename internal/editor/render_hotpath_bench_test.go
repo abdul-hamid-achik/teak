@@ -27,6 +27,16 @@ func BenchmarkFindMatchingBracketWithinBudget(b *testing.B) {
 	}
 }
 
+func BenchmarkFindMatchingBracketWithinBudgetBackward(b *testing.B) {
+	buf := text.NewBufferFromBytes([]byte(strings.Repeat("x", 2*MaxBracketScanBytes) + ")"))
+	pos := text.Position{Line: 0, Col: 2 * MaxBracketScanBytes}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = FindMatchingBracketWithinBudget(buf, pos, MaxBracketScanBytes)
+	}
+}
+
 func BenchmarkFoldStateLargeSparseRegions(b *testing.B) {
 	regions := make([]FoldRegion, 0, 10_000)
 	for i := 0; i < 10_000; i++ {

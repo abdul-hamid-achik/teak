@@ -37,6 +37,49 @@ func TestFindMatchingBracketWithinBudgetDegradesWithoutMaterializingDocument(t *
 	if want := 128*1024 + 1; match != (text.Position{Line: 0, Col: want}) {
 		t.Fatalf("match = %+v, want column %d", match, want)
 	}
+	closing := text.Position{Line: 0, Col: 128*1024 + 1}
+	if _, found := FindMatchingBracketWithinBudget(buf, closing, 1024); found {
+		t.Fatal("backward match beyond the scan budget must not be reported")
+	}
+	match, found = FindMatchingBracketWithinBudget(buf, closing, 256*1024)
+	if !found || match != (text.Position{}) {
+		t.Fatalf("backward match = (%+v, %v), want ({0 0}, true)", match, found)
+	}
+}
+
+var (
+	bracketPositionSink text.Position
+	bracketFoundSink    bool
+)
+
+func TestFindMatchingBracketWithinBudgetDoesNotAllocate(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		pos     text.Position
+	}{
+		{
+			name:    "forward",
+			content: "(" + strings.Repeat("x", 2*MaxBracketScanBytes),
+			pos:     text.Position{},
+		},
+		{
+			name:    "backward",
+			content: strings.Repeat("x", 2*MaxBracketScanBytes) + ")",
+			pos:     text.Position{Line: 0, Col: 2 * MaxBracketScanBytes},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := text.NewBufferFromBytes([]byte(tt.content))
+			allocs := testing.AllocsPerRun(20, func() {
+				bracketPositionSink, bracketFoundSink = FindMatchingBracketWithinBudget(buf, tt.pos, MaxBracketScanBytes)
+			})
+			if allocs != 0 {
+				t.Fatalf("bracket scan allocated %.0f times per call, want 0", allocs)
+			}
+		})
+	}
 }
 
 func TestFoldStateBuildsAndReusesVisibleIndex(t *testing.T) {
