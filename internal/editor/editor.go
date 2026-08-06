@@ -149,6 +149,10 @@ type Editor struct {
 	clipboardGeneration     uint64
 	clipboardCopyGeneration uint64
 	pasteGeneration         uint64
+	lineTransformGeneration uint64
+	lineTransformCancel     context.CancelFunc
+	lineTransformPending    bool
+	lineTransformQueue      []text.LineTransform
 	wrapDegraded            bool
 	wrapLayoutVersion       int
 	wrapLayoutTabSize       int
@@ -427,6 +431,9 @@ func (e *Editor) refreshWordWrapAfterBufferChange() {
 func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		if e.lineTransformPending && !isLineTransformKey(msg.String()) {
+			e.cancelLineTransforms()
+		}
 		// Context menu intercepts keys when visible
 		if e.contextMenu.Visible {
 			switch msg.String() {
@@ -536,6 +543,8 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 			e.Highlighter.Invalidate()
 		}
 		return e, e.scheduleRetokenize()
+	case LineTransformPreparedMsg:
+		return e.handleLineTransformPrepared(msg)
 	case ClipboardCopyPreparedMsg:
 		if msg.EditorID != e.id || msg.Generation != e.clipboardCopyGeneration || msg.Version != e.Buffer.Version() {
 			return e, nil
@@ -982,20 +991,30 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		}
 		edited = result == text.StructuralEditApplied
 	case "alt+up":
-		e.Buffer.MoveLineUp()
-		edited = true
+		if cmd, allowed := e.multilineEditWithinBudget("Move line"); !allowed {
+			return e, cmd
+		}
+		return e, e.requestLineTransform(text.LineTransformMoveUp)
 	case "alt+down":
-		e.Buffer.MoveLineDown()
-		edited = true
+		if cmd, allowed := e.multilineEditWithinBudget("Move line"); !allowed {
+			return e, cmd
+		}
+		return e, e.requestLineTransform(text.LineTransformMoveDown)
 	case "alt+shift+up":
-		e.Buffer.DuplicateLineUp()
-		edited = true
+		if cmd, allowed := e.multilineEditWithinBudget("Duplicate line"); !allowed {
+			return e, cmd
+		}
+		return e, e.requestLineTransform(text.LineTransformDuplicateUp)
 	case "alt+shift+down":
-		e.Buffer.DuplicateLineDown()
-		edited = true
+		if cmd, allowed := e.multilineEditWithinBudget("Duplicate line"); !allowed {
+			return e, cmd
+		}
+		return e, e.requestLineTransform(text.LineTransformDuplicateDown)
 	case "ctrl+shift+k":
-		e.Buffer.DeleteLine()
-		edited = true
+		if cmd, allowed := e.multilineEditWithinBudget("Delete line"); !allowed {
+			return e, cmd
+		}
+		return e, e.requestLineTransform(text.LineTransformDelete)
 	case "ctrl+d":
 		if !e.Buffer.SelectNextOccurrence() {
 			editorID := e.id

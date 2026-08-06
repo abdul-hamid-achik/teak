@@ -1207,6 +1207,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editor.PastePreparedMsg:
 		return m.handlePastePrepared(msg)
 
+	case editor.LineTransformPreparedMsg:
+		return m.handleLineTransformPrepared(msg)
+
 	case editor.ClipboardCopyPreparedMsg:
 		return m.handleClipboardCopyPrepared(msg)
 
@@ -1930,6 +1933,21 @@ func (m Model) handlePastePrepared(msg editor.PastePreparedMsg) (tea.Model, tea.
 	}
 	if msg.SourceErr != nil {
 		m.status = "Clipboard integration unavailable; pasted local copy"
+	}
+	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
+}
+
+func (m Model) handleLineTransformPrepared(msg editor.LineTransformPreparedMsg) (tea.Model, tea.Cmd) {
+	idx := m.editorIndexForAsyncMessage(msg.EditorID)
+	if idx < 0 {
+		return m, nil
+	}
+	previousVersion := m.editors[idx].Buffer.Version()
+	previousCursor := m.editors[idx].Buffer.Cursor
+	updated, cmd := m.editors[idx].Update(msg)
+	m.setEditor(idx, updated)
+	if updated.Buffer.Version() == previousVersion {
+		return m, cmd
 	}
 	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(idx, previousVersion, previousCursor))
 }

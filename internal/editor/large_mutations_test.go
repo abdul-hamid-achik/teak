@@ -179,7 +179,7 @@ func TestMultiLineCommandsCountAllCollapsedCursors(t *testing.T) {
 	}
 	ed.Buffer.RestoreSelections(selections, len(selections)-1)
 
-	for _, key := range []string{"ctrl+]", "ctrl+/", "shift+tab"} {
+	for _, key := range []string{"ctrl+]", "ctrl+/", "shift+tab", "alt+up", "alt+down", "alt+shift+up", "alt+shift+down", "ctrl+shift+k"} {
 		updated, cmd := ed.Update(tea.KeyPressMsg{Text: key})
 		if cmd == nil {
 			t.Fatalf("%s did not report the aggregate multiline budget", key)

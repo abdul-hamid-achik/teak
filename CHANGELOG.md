@@ -4,6 +4,31 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-06
+
+### Multicursor Line Operations
+
+- Move line, duplicate line, and delete line now operate across the complete
+  selection set. Contiguous selections move as one block; independent cursors
+  duplicate independently, preserving each resulting caret on the copied text.
+- Each non-local line operation is one atomic Undo/version transaction. Cursors
+  and selection endpoints are rebased through swaps, insertions, and deletions,
+  including EOF and trailing-empty-line cases.
+- Work that can touch a pathological logical line now runs from an immutable
+  rope snapshot in a cancellable command instead of materializing text inside
+  Bubble Tea's `Update`. Repeated structural shortcuts queue up to 32 requests;
+  typing or navigation cancels stale work before it can install a late result.
+- The root app router now forwards prepared line transformations to the owning
+  editor and runs the normal dirty-state, LSP synchronization, and retokenize
+  follow-up after the snapshot commits.
+- A giant 8 MiB line can be duplicated without a contiguous source copy: the
+  snapshot preparation benchmark takes about 265 ns/op, allocates 601 bytes,
+  and shares the immutable rope leaves on an Apple M5.
+- Regression coverage includes independent and adjacent cursors, forward and
+  reversed selections, EOF deletion, trailing empty lines, atomic Undo,
+  cancellation, queued commands, stale snapshots, root routing, race safety,
+  and giant-line allocation bounds.
+
 ## [0.17.0] - 2026-08-06
 
 ### Structural Multicursor Editing

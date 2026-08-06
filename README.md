@@ -15,11 +15,11 @@ work out of the UI update loop.
   rename, code actions, document symbols, and formatting through LSP
 - **Workspace navigation** — preview and pinned tabs, editor splits, file tree,
   quick open, command palette, and project-wide search
-- **Editing tools** — consistent multicursor navigation, deletion, paired
-  delimiters, per-cursor automatic indentation, structural indent/dedent and
-  comment toggling, and multi-selection clipboard operations; Unicode-aware
-  word and display-column navigation; code folding, find and replace,
-  undo/redo, and file watching
+- **Editing tools** — consistent multicursor navigation, line movement and
+  duplication, deletion, paired delimiters, per-cursor automatic indentation,
+  structural indent/dedent and comment toggling, and multi-selection clipboard
+  operations; Unicode-aware word and display-column navigation; code folding,
+  find and replace, undo/redo, and file watching
 - **Integrated workflows** — Git status and commits, problems panel, Go
   debugging with Delve, and an ACP-compatible AI agent panel
 - **Customizable UI** — built-in settings, Lua plugins, mouse support, system

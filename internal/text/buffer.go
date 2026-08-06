@@ -2230,130 +2230,29 @@ func (b *Buffer) ToggleLineComment(prefix string) StructuralEditResult {
 	return b.applyStructuralLineEdits(edits)
 }
 
-// MoveLineUp swaps the current line with the line above.
+// MoveLineUp swaps every selected line block with the line above it.
 func (b *Buffer) MoveLineUp() {
-	if b.Cursor.Line == 0 {
-		return
-	}
-	b.undo.Save(b.rope, b.Cursor, false)
-	curLine := b.Cursor.Line
-	curContent := b.rope.Line(curLine)
-	aboveContent := b.rope.Line(curLine - 1)
-
-	// Replace above line with current, and current with above
-	curStart := b.rope.LineStart(curLine)
-	aboveStart := b.rope.LineStart(curLine - 1)
-
-	// Delete both lines and re-insert swapped
-	// Current line: from curStart to curStart+len(curContent)+1 (incl newline)
-	// Above line: from aboveStart to aboveStart+len(aboveContent)+1 (incl newline)
-	// Simpler: just swap the content bytes
-	aboveLen := len(aboveContent)
-	curLen := len(curContent)
-
-	// Delete current line content (not newline)
-	b.rope = b.rope.Delete(curStart, curLen)
-	b.rope = b.rope.Insert(curStart, aboveContent)
-
-	// Delete above line content (not newline)
-	b.rope = b.rope.Delete(aboveStart, aboveLen)
-	b.rope = b.rope.Insert(aboveStart, curContent)
-
-	cursor := b.Cursor
-	cursor.Line--
-	b.SetCursor(cursor)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // line swap is non-local for incremental sync
+	b.applyLineTransform(LineTransformMoveUp)
 }
 
-// MoveLineDown swaps the current line with the line below.
+// MoveLineDown swaps every selected line block with the line below it.
 func (b *Buffer) MoveLineDown() {
-	if b.Cursor.Line >= b.rope.LineCount()-1 {
-		return
-	}
-	b.undo.Save(b.rope, b.Cursor, false)
-	curLine := b.Cursor.Line
-	curContent := b.rope.Line(curLine)
-	belowContent := b.rope.Line(curLine + 1)
-
-	belowStart := b.rope.LineStart(curLine + 1)
-	curStart := b.rope.LineStart(curLine)
-
-	belowLen := len(belowContent)
-	curLen := len(curContent)
-
-	// Delete below line content first (higher offset)
-	b.rope = b.rope.Delete(belowStart, belowLen)
-	b.rope = b.rope.Insert(belowStart, curContent)
-
-	// Delete current line content
-	b.rope = b.rope.Delete(curStart, curLen)
-	b.rope = b.rope.Insert(curStart, belowContent)
-
-	cursor := b.Cursor
-	cursor.Line++
-	b.SetCursor(cursor)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // line swap is non-local for incremental sync
+	b.applyLineTransform(LineTransformMoveDown)
 }
 
-// DuplicateLineDown duplicates the current line below.
+// DuplicateLineDown duplicates every independent selected line block below.
 func (b *Buffer) DuplicateLineDown() {
-	b.undo.Save(b.rope, b.Cursor, false)
-	content := b.rope.Line(b.Cursor.Line)
-	lineStart := b.rope.LineStart(b.Cursor.Line)
-	// Insert newline + copy after the current line
-	insert := append([]byte{'\n'}, content...)
-	b.rope = b.rope.Insert(lineStart+len(content), insert)
-	cursor := b.Cursor
-	cursor.Line++
-	b.SetCursor(cursor)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // line duplicate is non-local for incremental sync
+	b.applyLineTransform(LineTransformDuplicateDown)
 }
 
-// DuplicateLineUp duplicates the current line above.
+// DuplicateLineUp duplicates every independent selected line block above.
 func (b *Buffer) DuplicateLineUp() {
-	b.undo.Save(b.rope, b.Cursor, false)
-	content := b.rope.Line(b.Cursor.Line)
-	lineStart := b.rope.LineStart(b.Cursor.Line)
-	insert := append(append([]byte{}, content...), '\n')
-	b.rope = b.rope.Insert(lineStart, insert)
-	// Cursor stays on the same content (now one line down), but we want it on the duplicate above
-	// So don't change Cursor.Line
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // line duplicate is non-local for incremental sync
+	b.applyLineTransform(LineTransformDuplicateUp)
 }
 
-// DeleteLine deletes the current line.
+// DeleteLine deletes every unique selected line block.
 func (b *Buffer) DeleteLine() {
-	b.undo.Save(b.rope, b.Cursor, false)
-	lineStart := b.rope.LineStart(b.Cursor.Line)
-	lineLen := len(b.rope.Line(b.Cursor.Line))
-
-	if b.Cursor.Line < b.rope.LineCount()-1 {
-		// Delete line content + trailing newline
-		b.rope = b.rope.Delete(lineStart, lineLen+1)
-	} else if b.Cursor.Line > 0 {
-		// Last line: delete preceding newline + content
-		b.rope = b.rope.Delete(lineStart-1, lineLen+1)
-		cursor := b.Cursor
-		cursor.Line--
-		b.SetCursor(cursor)
-	} else {
-		// Only line: replace with empty
-		b.rope = b.rope.Delete(lineStart, lineLen)
-	}
-	cursor := b.Cursor
-	cursor.Col = min(cursor.Col, b.rope.LineLen(cursor.Line))
-	b.SetCursor(cursor)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // complex operation, fall back to full sync
+	b.applyLineTransform(LineTransformDelete)
 }
 
 // IndentLines indents every unique logical line targeted by the selections.

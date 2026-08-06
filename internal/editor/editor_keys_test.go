@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"slices"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -381,13 +382,13 @@ func TestEditorCtrlDeleteWord(t *testing.T) {
 func TestEditorAltUpDownMoveLine(t *testing.T) {
 	e := newEditor("line1\nline2\nline3", 0, 0)
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "alt+down"})
+	e = applyPreparedLineKey(t, e, "alt+down")
 	lines := string(e.Buffer.Line(0))
 	if lines == "line1" {
 		t.Error("alt+down should move current line down")
 	}
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "alt+up"})
+	e = applyPreparedLineKey(t, e, "alt+up")
 	// Should move back; just ensure no crash
 }
 
@@ -395,14 +396,14 @@ func TestEditorAltShiftUpDownDuplicateLine(t *testing.T) {
 	e := newEditor("hello\nworld", 0, 0)
 	origLineCount := e.Buffer.LineCount()
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "alt+shift+down"})
+	e = applyPreparedLineKey(t, e, "alt+shift+down")
 	if e.Buffer.LineCount() <= origLineCount {
 		t.Error("alt+shift+down should duplicate line")
 	}
 
 	e = newEditor("hello\nworld", 1, 0)
 	origLineCount = e.Buffer.LineCount()
-	e, _ = e.Update(tea.KeyPressMsg{Text: "alt+shift+up"})
+	e = applyPreparedLineKey(t, e, "alt+shift+up")
 	if e.Buffer.LineCount() <= origLineCount {
 		t.Error("alt+shift+up should duplicate line")
 	}
@@ -412,10 +413,98 @@ func TestEditorCtrlShiftKDeleteLine(t *testing.T) {
 	e := newEditor("line1\nline2\nline3", 1, 0)
 	origLineCount := e.Buffer.LineCount()
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+shift+k"})
+	e = applyPreparedLineKey(t, e, "ctrl+shift+k")
 	if e.Buffer.LineCount() >= origLineCount {
 		t.Error("ctrl+shift+k should delete line")
 	}
+}
+
+func TestEditorLineCommandsTransformEveryCursor(t *testing.T) {
+	e := newEditor("a\nb\nc\nd", 1, 0)
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 1}, Head: text.Position{Line: 1}},
+		{Anchor: text.Position{Line: 3}, Head: text.Position{Line: 3}},
+	}, 0)
+	e = applyPreparedLineKey(t, e, "alt+up")
+	if got, want := editorContent(e), "b\na\nd\nc"; got != want {
+		t.Fatalf("multicursor move content = %q, want %q", got, want)
+	}
+	if got, want := e.Buffer.Selections.All(), []text.Selection{
+		{Anchor: text.Position{Line: 0}, Head: text.Position{Line: 0}},
+		{Anchor: text.Position{Line: 2}, Head: text.Position{Line: 2}},
+	}; !slices.Equal(got, want) {
+		t.Fatalf("multicursor move selections = %#v, want %#v", got, want)
+	}
+
+	e = newEditor("a\nb\nc\nd", 0, 0)
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0}, Head: text.Position{Line: 0}},
+		{Anchor: text.Position{Line: 2}, Head: text.Position{Line: 2}},
+	}, 1)
+	e = applyPreparedLineKey(t, e, "alt+shift+down")
+	if got, want := editorContent(e), "a\na\nb\nc\nc\nd"; got != want {
+		t.Fatalf("multicursor duplicate content = %q, want %q", got, want)
+	}
+
+	e = newEditor("a\nb\nc\nd", 0, 0)
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0}, Head: text.Position{Line: 0}},
+		{Anchor: text.Position{Line: 2}, Head: text.Position{Line: 2}},
+	}, 1)
+	e = applyPreparedLineKey(t, e, "ctrl+shift+k")
+	if got, want := editorContent(e), "b\nd"; got != want {
+		t.Fatalf("multicursor delete content = %q, want %q", got, want)
+	}
+}
+
+func TestEditorLineTransformIsSnapshotBasedAndCancelable(t *testing.T) {
+	e := newEditor("a\nb\nc", 1, 0)
+	before := e.Buffer.Rope()
+	updated, cmd := e.Update(tea.KeyPressMsg{Text: "alt+down"})
+	if cmd == nil {
+		t.Fatal("line move did not schedule a snapshot command")
+	}
+	if updated.Buffer.Rope() != before {
+		t.Fatal("line move mutated the buffer during Update")
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "left"})
+	if updated.lineTransformPending {
+		t.Fatal("navigation did not cancel a pending line transform")
+	}
+	updated, _ = updated.Update(cmd())
+	if updated.Buffer.Rope() != before {
+		t.Fatal("canceled line transform installed a stale result")
+	}
+}
+
+func TestEditorLineTransformQueuesRepeatedCommands(t *testing.T) {
+	e := newEditor("a\nb\nc", 1, 0)
+	updated, cmd := e.Update(tea.KeyPressMsg{Text: "alt+down"})
+	if cmd == nil {
+		t.Fatal("first line move did not schedule a command")
+	}
+	updated, second := updated.Update(tea.KeyPressMsg{Text: "alt+down"})
+	if second != nil || len(updated.lineTransformQueue) != 1 {
+		t.Fatalf("second line move = cmd %v queue %d, want queued command", second, len(updated.lineTransformQueue))
+	}
+	if !updated.lineTransformPending {
+		t.Fatal("queued line move lost the active request")
+	}
+	updated, next := updated.Update(cmd())
+	if !updated.lineTransformPending || next == nil {
+		t.Fatal("first result did not start the queued line move")
+	}
+}
+
+func applyPreparedLineKey(t *testing.T, e Editor, key string) Editor {
+	t.Helper()
+	updated, cmd := e.Update(tea.KeyPressMsg{Text: key})
+	if cmd == nil {
+		t.Fatalf("%s did not schedule a prepared line transform", key)
+	}
+	msg := cmd()
+	updated, _ = updated.Update(msg)
+	return updated
 }
 
 func TestEditorEnterAutoIndent(t *testing.T) {
