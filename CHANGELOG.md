@@ -4,6 +4,27 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.34] - 2026-08-05
+
+### Lazy Viewport Line Materialization
+
+- The unwrapped viewport now renders ordinary syntax-highlighted rows directly
+  from the highlighter cache without first copying and converting rope lines
+  whose bytes are never inspected.
+- Line bytes are loaded only for selections, plugin highlights, plain text, or
+  the one or two rows containing a matched bracket. Selection detection can
+  identify empty cursor-only rows before asking for the line length.
+- Dedicated tests prove token-only frames leave the rope-line cache untouched
+  while bracket rendering still materializes the matched row and applies its
+  style on demand.
+- Paired Apple M5 viewport benchmarks against v0.10.33 remove 48 allocations
+  and 3,072 bytes per 24-row highlighted frame, and 96 allocations and 6,144
+  bytes per 48-row frame. Plain-text frames remove 48 allocations and 3,072
+  bytes, while selection frames remove 42 allocations and 2,688 bytes.
+- Render time remains neutral to modestly faster: 48 highlighted rows measure
+  about 315-325 microseconds versus 322-329 microseconds, and the plain-text
+  path remains about 232-235 microseconds.
+
 ## [0.10.33] - 2026-08-05
 
 ### Single-Allocation Line Reads

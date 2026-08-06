@@ -175,6 +175,43 @@ func TestViewportRenderLineCacheInvalidatesWithRopeVersion(t *testing.T) {
 	}
 }
 
+func TestViewportTokenizedRenderDoesNotMaterializeRopeLines(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("package main\nvar alpha = 1\nvar beta = 2\n"))
+	theme := ui.DefaultTheme()
+	hl := highlight.New("main.go", theme)
+	hl.Tokenize(buf.Bytes())
+	for line := range 3 {
+		if tokens := hl.Line(line); len(tokens) == 0 {
+			t.Fatalf("line %d has no tokens; test would exercise the plain-text path", line)
+		}
+	}
+
+	v := Viewport{Width: 80, Height: 3}
+	if rendered := v.Render(buf, theme, hl, nil, nil); rendered == "" {
+		t.Fatal("tokenized viewport rendered no output")
+	}
+	if v.renderLineCacheRope != nil {
+		t.Fatal("token-only viewport materialized rope line bytes it never renders")
+	}
+}
+
+func TestViewportTokenizedRenderMaterializesBracketRowOnDemand(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("package main\nvar answer = (42)\n"))
+	buf.SetCursor(text.Position{Line: 1, Col: 13})
+	theme := ui.DefaultTheme()
+	hl := highlight.New("main.go", theme)
+	hl.Tokenize(buf.Bytes())
+	v := Viewport{Width: 80, Height: 2}
+
+	rendered := v.Render(buf, theme, hl, nil, nil)
+	if v.renderLineCacheRope != buf.Rope() || v.renderLineCacheLine != 1 {
+		t.Fatalf("bracket render cached rope %p line %d, want current rope line 1", v.renderLineCacheRope, v.renderLineCacheLine)
+	}
+	if bracket := theme.BracketMatch.Render("("); !strings.Contains(rendered, bracket) {
+		t.Fatalf("rendered viewport does not contain styled bracket %q", bracket)
+	}
+}
+
 func TestViewportWrapRenderOutputStaysViewportBoundedForLongLine(t *testing.T) {
 	line := strings.Repeat("identifier ", 25_000) + "\t你"
 	buf := text.NewBufferFromBytes([]byte(line))

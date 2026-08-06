@@ -124,6 +124,21 @@ func (it *selectionRangeIterator) Ranges(line, lineLen int) []selectionByteRange
 	return it.ranges
 }
 
+// HasNonEmpty reports whether line intersects a real selection without
+// requiring the line's byte length. Calling Ranges for the same line remains
+// O(1) because SelectionLineIterator retains its last result.
+func (it *selectionRangeIterator) HasNonEmpty(line int) bool {
+	if it == nil || it.selections == nil {
+		return false
+	}
+	for _, selection := range it.selections.ForLine(line) {
+		if !selection.IsEmpty() {
+			return true
+		}
+	}
+	return false
+}
+
 func (v *Viewport) tabSize() int {
 	if v.TabSize == 0 {
 		return 4
@@ -291,13 +306,27 @@ func (v *Viewport) RenderWithFoldsHighlights(buf *text.Buffer, theme ui.Theme, h
 		sb.WriteByte(' ') // padding between gutter and text
 		// text content
 		if line < buf.LineCount() {
-			lineBytes, lineContent := v.renderLineContent(buf, line)
-			lineLen := len(lineBytes)
-			lineHighlights := pluginHighlightRangesForLine(pluginHighlights, line, lineLen)
-
-			// Check for ALL selections on this line
-			selectionRanges := selectionIterator.Ranges(line, lineLen)
+			// Token-only rows render directly from the highlighter cache. Defer
+			// copying rope bytes until a selection, plugin highlight, bracket, or
+			// plain-text branch actually inspects the line content.
+			var lineBytes []byte
+			lineLoaded := false
+			var selectionRanges []selectionByteRange
+			if selectionIterator.HasNonEmpty(line) {
+				lineBytes = v.renderLine(buf, line)
+				lineLoaded = true
+				selectionRanges = selectionIterator.Ranges(line, len(lineBytes))
+			}
 			hasSelection := len(selectionRanges) > 0
+
+			var lineHighlights []HighlightRange
+			if hasPluginHighlightForLine(pluginHighlights, line) {
+				if !lineLoaded {
+					lineBytes = v.renderLine(buf, line)
+					lineLoaded = true
+				}
+				lineHighlights = pluginHighlightRangesForLine(pluginHighlights, line, len(lineBytes))
+			}
 
 			// Check for syntax highlighting tokens
 			var tokens []highlight.StyledToken
@@ -308,13 +337,15 @@ func (v *Viewport) RenderWithFoldsHighlights(buf *text.Buffer, theme ui.Theme, h
 			if hasSelection {
 				sb.WriteString(v.renderLineWithMultipleSelectionsTabs(lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
 			} else if len(lineHighlights) > 0 {
+				_, lineContent := v.renderLineContent(buf, line)
 				rendered := v.renderLineWithHighlights(lineContent, tokens, lineHighlights, line == buf.Cursor.Line, textWidth, theme)
 				if hasBracketMatch {
 					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
 				}
 				sb.WriteString(rendered)
 			} else if len(tokens) > 0 {
-				if hasBracketMatch {
+				if hasBracketMatch && (bracketPos1.Line == line || bracketPos2.Line == line) {
+					_, lineContent := v.renderLineContent(buf, line)
 					rendered := v.renderLineWithTokens(tokens, line == buf.Selections.PrimaryCursor().Line, textWidth, theme)
 					rendered = v.applyBracketHighlight(rendered, lineContent, line, bracketPos1, bracketPos2, textWidth, theme)
 					sb.WriteString(rendered)
@@ -323,6 +354,9 @@ func (v *Viewport) RenderWithFoldsHighlights(buf *text.Buffer, theme ui.Theme, h
 				}
 			} else {
 				// plain text rendering
+				if !lineLoaded {
+					lineBytes = v.renderLine(buf, line)
+				}
 				displayed := applyScrollX(expandTabsForDisplay(lineBytes, v.tabSize()), v.ScrollX)
 				displayed = truncateToWidth(displayed, textWidth)
 				padLen := max(0, textWidth-displayWidth(displayed))
@@ -371,6 +405,15 @@ func pluginHighlightRangesForLine(ranges []HighlightRange, line, lineLen int) []
 		selected = append(selected, highlight)
 	}
 	return selected
+}
+
+func hasPluginHighlightForLine(ranges []HighlightRange, line int) bool {
+	for _, highlight := range ranges {
+		if highlight.Line == line {
+			return true
+		}
+	}
+	return false
 }
 
 func inheritedPluginHighlightStyle(style, base lipgloss.Style) lipgloss.Style {
