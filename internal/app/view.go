@@ -251,17 +251,10 @@ func (m Model) View() tea.View {
 	v.MouseMode = tea.MouseModeCellMotion
 
 	if !m.editorInputCaptured() && !welcomeActive && !m.isActiveDiffTab() && m.focus == FocusEditor && m.activeEditor() != nil {
+		body := m.activeEditorBodyRect()
 		cx, cy := m.activeEditor().CursorPosition()
-		if m.height >= compactTerminalHeight && m.treeVisible() {
-			cx += m.treeWidth() + 1
-		}
-		if m.split.enabled && !m.split.vertical && m.split.focused == 1 && m.split.secondTab == m.activeTab {
-			// Pane B is rendered after pane A and the divider. The editor's
-			// CursorPosition is local to its own viewport, so the terminal
-			// cursor needs the same horizontal offset as the split renderer.
-			cx += m.split.paneAWidth(m.splitEditorWidth()) + 1
-		}
-		cy += 1 // +1 for tab bar
+		cx += body.x
+		cy += body.y
 		if cy >= 0 && cy < m.height-1 && cx >= 0 && cx < m.width {
 			cursor := tea.NewCursor(cx, cy)
 			cursor.Shape = tea.CursorBar

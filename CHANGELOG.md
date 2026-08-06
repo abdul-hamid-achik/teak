@@ -9,8 +9,10 @@ All notable changes to the Teak editor project.
 - The native terminal cursor now follows the focused pane in side-by-side split
   views, including the sidebar offset. Pane B no longer leaves the caret
   blinking over pane A's text.
+- LSP and completion popups now anchor and clip inside the focused split pane,
+  instead of spilling across the divider or appearing over the other editor.
 - Added regression coverage for split cursor placement with and without the
-  file tree visible.
+  file tree visible and for split-pane popup containment.
 
 ## [0.18.0] - 2026-08-06
 

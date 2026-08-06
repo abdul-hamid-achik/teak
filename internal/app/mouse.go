@@ -153,6 +153,22 @@ func (m Model) mouseLayout() mouseLayout {
 	return layout
 }
 
+// activeEditorBodyRect returns the terminal rectangle owned by the focused
+// editor pane. The full editorBody is correct for a single editor, while a
+// side-by-side split needs the pane-A or pane-B sub-rectangle so native cursor
+// placement, LSP popups, and mouse hit-testing share the same origin.
+func (m Model) activeEditorBodyRect() mouseRect {
+	layout := m.mouseLayout()
+	body := layout.editorBody
+	if !m.split.enabled || m.split.vertical {
+		return body
+	}
+	if m.split.focused == 1 && m.split.secondTab == m.activeTab && layout.editorPaneB.width > 0 {
+		return layout.editorPaneB
+	}
+	return newMouseRect(body.x, body.y, min(body.width, m.split.paneAWidth(body.width)), body.height)
+}
+
 // inPaneB reports whether a point falls in the second editor pane.
 func (l mouseLayout) inPaneB(x, y int) bool {
 	return l.editorPaneB.contains(x, y)

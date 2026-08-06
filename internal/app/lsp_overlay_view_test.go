@@ -62,6 +62,28 @@ func TestLSPOverlayPlacementUsesSpaceAboveCursorWhenNeeded(t *testing.T) {
 	}
 }
 
+func TestLSPOverlayPlacementStaysInsideFocusedSplitPane(t *testing.T) {
+	m := newViewTestModel(t, false)
+	m.editors = append(m.editors, m.editors[0])
+	m.toggleSplit()
+	m.relayout()
+	m.cycleSplitFocus()
+	ed := m.activeEditor()
+	ed.ShowAutocomplete([]overlays.AutocompleteItem{{Label: "completion", Detail: "func", InsertText: "completion"}})
+
+	p, ok := m.currentLSPOverlayPlacement()
+	if !ok {
+		t.Fatal("currentLSPOverlayPlacement() = not visible")
+	}
+	body := m.activeEditorBodyRect()
+	if p.x < body.x || p.y < body.y || p.x+p.width > body.x+body.width || p.y+p.height > body.y+body.height {
+		t.Fatalf("split popup %#v escapes focused pane %#v", p, body)
+	}
+	if p.x < m.split.paneAWidth(m.splitEditorWidth())+1 {
+		t.Fatalf("split popup x=%d is over pane A; pane B starts at least at %d", p.x, m.split.paneAWidth(m.splitEditorWidth())+1)
+	}
+}
+
 func TestLSPOverlayIsSuppressedWhenEditorHasNoFreeRow(t *testing.T) {
 	m := newViewTestModel(t, false)
 	m.width = 40

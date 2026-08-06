@@ -38,7 +38,7 @@ func (m Model) lspOverlayPlacement(ed *editor.Editor, overlay string) (lspOverla
 	if ed == nil || overlay == "" {
 		return lspOverlayPlacement{}, false
 	}
-	body := m.mouseLayout().editorBody
+	body := m.activeEditorBodyRect()
 	if body.width <= 0 || body.height <= 1 {
 		return lspOverlayPlacement{}, false
 	}
