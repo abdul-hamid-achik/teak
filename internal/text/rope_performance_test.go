@@ -454,6 +454,29 @@ func BenchmarkRopeLineAccessSequential(b *testing.B) {
 	}
 }
 
+// BenchmarkRopeLineCopySequential measures retrieving the owned line bytes
+// used by rendering and editing paths, rather than only locating line starts.
+func BenchmarkRopeLineCopySequential(b *testing.B) {
+	line := strings.Repeat("x", 79) + "\n"
+	r := NewFromString(strings.Repeat(line, 10000))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = r.Line(i % 10000)
+	}
+}
+
+func BenchmarkRopeLineCopyAcrossLeaves(b *testing.B) {
+	r := NewFromString(strings.Repeat("x", 64<<10) + "\ntail")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = r.Line(0)
+	}
+}
+
 // BenchmarkRopePositionToOffset benchmarks position to offset conversion
 func BenchmarkRopePositionToOffset(b *testing.B) {
 	line := strings.Repeat("x", 79) + "\n"

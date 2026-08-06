@@ -62,7 +62,11 @@ func TestWorkspaceEditPreparationAllocationBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("close workspace root: %v", err)
+		}
+	})
 	workspaceEdit := lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
 		lsp.FileURI(path): edits,
 	}}
@@ -134,7 +138,11 @@ func BenchmarkPrepareWorkspaceEditFourThousandEdits(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer root.Close()
+	b.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			b.Errorf("close workspace root: %v", err)
+		}
+	})
 	workspaceEdit := lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
 		lsp.FileURI(path): edits,
 	}}

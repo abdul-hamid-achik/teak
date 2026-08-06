@@ -8,11 +8,6 @@ import (
 	"teak/internal/overlay"
 )
 
-func lspCodeActionsToPickerItems(actions []lsp.CodeAction, metadata lsp.DocumentRequestMetadata) []overlay.PickerItem {
-	items, _ := lspCodeActionsToPickerItemsContext(context.Background(), actions, metadata)
-	return items
-}
-
 func lspCodeActionsToPickerItemsContext(ctx context.Context, actions []lsp.CodeAction, metadata lsp.DocumentRequestMetadata) ([]overlay.PickerItem, error) {
 	if ctx == nil {
 		ctx = context.Background()

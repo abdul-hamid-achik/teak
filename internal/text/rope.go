@@ -583,15 +583,21 @@ func (r *Rope) Line(line int) []byte {
 	start := r.LineStart(line)
 	end := r.LineStart(line + 1)
 	if end > start && end <= r.len {
-		// remove the trailing newline
-		b := r.Slice(start, end).Bytes()
-		if len(b) > 0 && b[len(b)-1] == '\n' {
-			b = b[:len(b)-1]
+		// Remove the trailing newline without first constructing a temporary
+		// sub-rope. Line returns owned bytes, so one result allocation remains
+		// necessary to preserve Rope's immutability.
+		if line >= 0 && line < r.newlines {
+			end--
 		}
-		return b
+	} else {
+		// Last line (no trailing newline), including the empty line after a
+		// document-ending newline.
+		end = r.len
 	}
-	// last line (no trailing newline)
-	return r.Slice(start, r.len).Bytes()
+
+	b := make([]byte, end-start)
+	_, _ = r.ReadAt(b, int64(start))
+	return b
 }
 
 // LineLen returns the length in bytes of the given line, excluding the newline.

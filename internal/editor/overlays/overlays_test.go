@@ -205,6 +205,7 @@ func TestAutocompleteCurrentFilterErrorClosesPopup(t *testing.T) {
 
 func TestFilterAutocompleteItemsContextEdges(t *testing.T) {
 	items := []AutocompleteItem{{Label: "Alpha"}, {Label: "beta"}}
+	//nolint:staticcheck // Exercise the function's defensive nil-context fallback.
 	all, err := filterAutocompleteItemsContext(nil, items, "")
 	if err != nil || len(all) != len(items) {
 		t.Fatalf("empty-prefix projection = %d, %v", len(all), err)

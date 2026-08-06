@@ -196,6 +196,50 @@ func TestLineOperations(t *testing.T) {
 	}
 }
 
+func TestLineAcrossLeavesReturnsOwnedBytes(t *testing.T) {
+	longLine := strings.Repeat("a", maxLeaf+37)
+	r := NewFromString(longLine + "\n\nlast")
+
+	tests := []struct {
+		name string
+		line int
+		want string
+	}{
+		{name: "line spanning leaves", line: 0, want: longLine},
+		{name: "empty line", line: 1, want: ""},
+		{name: "last line without newline", line: 2, want: "last"},
+		{name: "past last line", line: 3, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.Line(tt.line)
+			if string(got) != tt.want {
+				t.Fatalf("Line(%d) = %q, want %q", tt.line, got, tt.want)
+			}
+			if len(got) > 0 {
+				got[0] = 'z'
+				if r.String() != longLine+"\n\nlast" {
+					t.Fatal("mutating Line result changed the immutable rope")
+				}
+			}
+		})
+	}
+}
+
+func TestLineAcrossLeavesAllocatesOnlyResult(t *testing.T) {
+	r := NewFromString(strings.Repeat("x", 64<<10) + "\ntail")
+	if got := len(r.Line(0)); got != 64<<10 {
+		t.Fatalf("Line(0) length = %d, want %d", got, 64<<10)
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		_ = r.Line(0)
+	})
+	if allocs > 1 {
+		t.Fatalf("Line(0) allocated %.0f times, want at most the returned byte slice", allocs)
+	}
+}
+
 func TestPositionToOffset(t *testing.T) {
 	text := "abc\ndef\nghi"
 	r := NewFromString(text)

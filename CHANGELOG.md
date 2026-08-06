@@ -4,6 +4,28 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.33] - 2026-08-05
+
+### Single-Allocation Line Reads
+
+- `Rope.Line` now copies directly from intersecting immutable leaves into its
+  caller-owned result instead of constructing and flattening a temporary
+  sub-rope. Returned bytes remain safe to mutate without changing the rope.
+- Cross-leaf, empty, final, and out-of-range lines have dedicated behavior and
+  ownership tests. A regression budget requires a 64 KiB line read to allocate
+  only its result slice.
+- On an Apple M5, a normal 80-byte line dropped from 252 bytes and three
+  allocations to 80 bytes and one allocation, while improving from about 300
+  to 242-252 nanoseconds. A 64 KiB cross-leaf line dropped from 74.6 KB and 11
+  allocations to 65.5 KB and one allocation, and from roughly 8.5-9.5 to
+  5.9-6.9 microseconds.
+- Existing viewport benchmarks confirm 57 fewer allocations per 24-line frame
+  and 114 fewer per 48-line frame, covering both highlighted and first-frame
+  plain-text rendering.
+- Release linting now checks `os.Root` cleanup errors in workspace-edit tests,
+  documents the autocomplete nil-context edge case, and removes a superseded
+  synchronous code-action picker helper.
+
 ## [0.10.32] - 2026-08-05
 
 ### Allocation-Free Bracket Scanning
