@@ -400,6 +400,26 @@ func TestEditorEnterAutoIndent(t *testing.T) {
 	}
 }
 
+func TestEditorEnterAutoIndentsEveryCursorIndependently(t *testing.T) {
+	e := newEditor("  alpha\n\tbeta", 0, 7)
+	e.Buffer.Selections.Add(text.Selection{
+		Anchor: text.Position{Line: 1, Col: 5},
+		Head:   text.Position{Line: 1, Col: 5},
+	})
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "enter"})
+
+	if got, want := editorContent(e), "  alpha\n  \n\tbeta\n\t"; got != want {
+		t.Fatalf("content after Enter = %q, want %q", got, want)
+	}
+	if got, want := e.Buffer.Selections.All(), []text.Selection{
+		{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 2}},
+		{Anchor: text.Position{Line: 3, Col: 1}, Head: text.Position{Line: 3, Col: 1}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("selections after Enter = %#v, want %#v", got, want)
+	}
+}
+
 func TestEditorEnterNoAutoIndent(t *testing.T) {
 	e := newEditor("    hello", 0, 9)
 	e.Config.AutoIndent = false

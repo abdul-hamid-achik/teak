@@ -4,6 +4,36 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-06
+
+### Bounded Multicursor Auto-Indent
+
+- Enter with auto-indent now computes the leading whitespace independently for
+  every cursor or selected range instead of copying the primary cursor's
+  indentation across the complete selection set. Forward and reversed ranges
+  collapse at their ordered insertion point as one undoable edit.
+- Auto-indent reads directly from intersecting rope leaves and shares a 64 KiB
+  scan-and-copy budget across at most 1,000 selections. A pathological prefix
+  exceeding its fair share falls back to a plain newline, so Enter always
+  remains responsive and usable.
+- Normalization now coalesces collapsed cursors that fall inside a selected
+  half-open range, transferring primary focus to the retained range. Cursors at
+  the range end remain independent, preventing competing byte edits without
+  losing valid adjacent cursors.
+- Ordinary multicursor typing and paste now use the same validated selection
+  transaction as paired delimiters and auto-indent, removing a second copy of
+  the replacement, cursor-rebase, Undo, version, and LSP full-sync logic.
+- On an Apple M5, Enter on an 8 MiB indentation takes about 18.8-19.0
+  microseconds and allocates 74,346 bytes, down from about 35.7 MiB before the
+  bounded rope read. A 1,000-cursor atomic transaction remains about 200-204
+  microseconds.
+- Regression coverage includes independent spaces and tabs, mixed forward and
+  reversed ranges, incremental single-edit metadata, one-step Undo, interior
+  cursor coalescing, half-open boundaries, and giant-line allocation limits.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.4%; `internal/editor` is 84.3% and
+  `internal/text` is 82.6%.
+
 ## [0.15.0] - 2026-08-06
 
 ### Atomic Multicursor Delimiters

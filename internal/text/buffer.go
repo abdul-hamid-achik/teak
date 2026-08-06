@@ -15,6 +15,13 @@ import (
 // an unbounded stream.
 const MaxBufferFileBytes int64 = 64 << 20
 
+// maxInteractiveAutoIndentBytes bounds the aggregate indentation inspected and
+// copied by one Enter keypress. The budget is divided across active selections
+// so a thousand cursors or one pathological whitespace-only line cannot make
+// Update perform document-sized work. An indentation exceeding its fair share
+// falls back to a plain newline for that selection.
+const maxInteractiveAutoIndentBytes = 64 << 10
+
 var (
 	ErrBufferFileTooLarge   = errors.New("buffer file exceeds the 64 MiB editor limit")
 	ErrBufferFileNotRegular = errors.New("buffer input is not a regular file")
@@ -330,50 +337,19 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 	// span; ranges are half-open and adjacent selections intentionally remain
 	// independent edits.
 	b.Selections.Normalize()
-	type replacement struct {
-		start int
-		end   int
-	}
-	replacements := make([]replacement, len(b.Selections.selections))
+	edits := make([]EditOp, len(b.Selections.selections))
 	for i, sel := range b.Selections.selections {
 		start, end := sel.Ordered()
-		replacements[i] = replacement{
-			start: b.rope.PositionToOffset(start),
-			end:   b.rope.PositionToOffset(end),
+		startOffset := b.rope.PositionToOffset(start)
+		endOffset := b.rope.PositionToOffset(end)
+		edits[i] = EditOp{
+			Offset: startOffset,
+			Delete: endOffset - startOffset,
+			Insert: text,
+			Cursor: startOffset + len(text),
 		}
 	}
-	primary := b.Selections.primary
-
-	b.undo.Save(b.rope, b.Cursor, false)
-
-	// Apply from end to beginning so every offset remains relative to the
-	// original rope. A replacement is delete+insert at its start offset.
-	for i := len(replacements) - 1; i >= 0; i-- {
-		replacement := replacements[i]
-		if replacement.end > replacement.start {
-			b.rope = b.rope.Delete(replacement.start, replacement.end-replacement.start)
-		}
-		b.rope = b.rope.Insert(replacement.start, text)
-	}
-
-	// Rebase each collapsed cursor into the final document. Earlier edits shift
-	// every following replacement by their net byte delta.
-	collapsed := make([]Selection, len(replacements))
-	shift := 0
-	for i, replacement := range replacements {
-		newOffset := replacement.start + shift + len(text)
-		pos := b.rope.OffsetToPosition(newOffset)
-		collapsed[i] = Selection{Anchor: pos, Head: pos}
-		shift += len(text) - (replacement.end - replacement.start)
-	}
-	b.Selections = &Selections{selections: collapsed, primary: primary}
-	b.Cursor = b.Selections.PrimaryCursor()
-
-	b.dirty = true
-	b.version++
-
-	// Multi-cursor edits require a full-sync fallback for LSP.
-	b.lastChange = nil
+	b.ApplySelectionEdits(edits)
 }
 
 // ApplySelectionEdits applies one ordered, non-overlapping replacement per
@@ -478,10 +454,62 @@ func (b *Buffer) InsertNewline() {
 	b.InsertAtCursor([]byte{'\n'})
 }
 
-// InsertNewlineWithIndent inserts a newline and copies leading whitespace from the current line.
+// InsertNewlineWithIndent inserts a newline at every selection and copies the
+// leading whitespace of each insertion line. Prefix reads share a fixed budget
+// and the resulting replacements are committed as one undoable transaction.
 func (b *Buffer) InsertNewlineWithIndent() {
-	ws := LeadingWhitespace(b.rope.Line(b.Cursor.Line))
-	b.InsertAtCursor(append([]byte{'\n'}, ws...))
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		b.Selections = NewSelections(b.ClampPosition(b.Cursor))
+	}
+	b.Selections.Normalize()
+	selectionCount := b.Selections.Count()
+	perSelectionLimit := maxInteractiveAutoIndentBytes / selectionCount
+	scratch := make([]byte, perSelectionLimit+1)
+	edits := make([]EditOp, selectionCount)
+	for i, selection := range b.Selections.All() {
+		start, end := selection.Ordered()
+		startOffset, startOK := b.rope.PositionToOffsetUncached(start)
+		endOffset, endOK := b.rope.PositionToOffsetUncached(end)
+		if !startOK || !endOK || endOffset < startOffset {
+			return
+		}
+
+		indentLen := b.leadingWhitespaceLen(start.Line, perSelectionLimit, scratch)
+		insert := []byte{'\n'}
+		if indentLen > 0 {
+			insert = make([]byte, indentLen+1)
+			insert[0] = '\n'
+			copy(insert[1:], scratch[:indentLen])
+		}
+		edits[i] = EditOp{
+			Offset: startOffset,
+			Delete: endOffset - startOffset,
+			Insert: insert,
+			Cursor: startOffset + len(insert),
+		}
+	}
+	b.ApplySelectionEdits(edits)
+}
+
+// leadingWhitespaceLen copies at most limit+1 bytes from a logical line into
+// scratch and returns its complete leading-whitespace length when it fits. A
+// zero result means either no indentation or a prefix larger than the budget;
+// callers deliberately treat both as a plain newline. Rope.ReadAt visits only
+// intersecting leaves and avoids materializing the containing line.
+func (b *Buffer) leadingWhitespaceLen(line, limit int, scratch []byte) int {
+	if limit <= 0 || len(scratch) < limit+1 {
+		return 0
+	}
+	lineStart := b.rope.LineStart(line)
+	n, _ := b.rope.ReadAt(scratch[:limit+1], int64(lineStart))
+	indentLen := 0
+	for indentLen < n && (scratch[indentLen] == ' ' || scratch[indentLen] == '\t') {
+		indentLen++
+	}
+	if indentLen > limit {
+		return 0
+	}
+	return indentLen
 }
 
 // DedentLine removes up to tabSize leading spaces from the current line, adjusting the cursor.

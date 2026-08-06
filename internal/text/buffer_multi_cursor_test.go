@@ -124,6 +124,69 @@ func TestSelectionsNormalizeDeduplicatesCollapsedCursors(t *testing.T) {
 	}
 }
 
+func TestSelectionsNormalizeCoalescesCursorsInsideRanges(t *testing.T) {
+	tests := []struct {
+		name        string
+		selections  []Selection
+		primary     int
+		want        []Selection
+		wantPrimary int
+	}{
+		{
+			name: "cursor in middle transfers primary to range",
+			selections: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+				{Anchor: Position{0, 2}, Head: Position{0, 2}},
+			},
+			primary: 1,
+			want: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+			},
+			wantPrimary: 0,
+		},
+		{
+			name: "cursor at range start is absorbed regardless of input order",
+			selections: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 0}},
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+			},
+			primary: 0,
+			want: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+			},
+			wantPrimary: 0,
+		},
+		{
+			name: "cursor at half-open range end remains independent",
+			selections: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+				{Anchor: Position{0, 5}, Head: Position{0, 5}},
+			},
+			primary: 1,
+			want: []Selection{
+				{Anchor: Position{0, 0}, Head: Position{0, 5}},
+				{Anchor: Position{0, 5}, Head: Position{0, 5}},
+			},
+			wantPrimary: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Selections{selections: append([]Selection(nil), tt.selections...), primary: tt.primary, dirty: true}
+
+			s.Normalize()
+
+			if got := s.All(); !selectionSlicesEqual(got, tt.want) {
+				t.Errorf("Normalize() = %#v, want %#v", got, tt.want)
+			}
+			if got := s.PrimaryIndex(); got != tt.wantPrimary {
+				t.Errorf("PrimaryIndex() = %d, want %d", got, tt.wantPrimary)
+			}
+		})
+	}
+}
+
 func TestSelectionsSetPrimary(t *testing.T) {
 	s := NewSelections(Position{0, 0})
 	s.Add(Selection{Anchor: Position{1, 0}, Head: Position{1, 5}})
@@ -747,7 +810,10 @@ func TestBufferUndoRedoWithMultiSelection(t *testing.T) {
 	if b.Content() != "hello\nworld" {
 		t.Errorf("After undo: got %q, want %q", b.Content(), "hello\nworld")
 	}
-	if got, want := b.Selections.Primary(), (Selection{Anchor: Position{0, 0}, Head: Position{0, 0}}); got != want {
+	// Add makes the second cursor primary. The atomic edit reconciles the
+	// compatibility Buffer.Cursor field before saving Undo, so history restores
+	// that active cursor instead of the stale first-cursor value.
+	if got, want := b.Selections.Primary(), (Selection{Anchor: Position{1, 0}, Head: Position{1, 0}}); got != want {
 		t.Errorf("selection after undo = %#v, want %#v", got, want)
 	}
 
@@ -783,6 +849,32 @@ func TestBufferInsertAtMultipleSelectedRangesReplacesEachRange(t *testing.T) {
 	}
 	if b.LastChange() != nil {
 		t.Errorf("LastChange() = %#v, want nil for multi-selection replacement", b.LastChange())
+	}
+}
+
+func TestBufferInsertAtCursorCoalescesCursorInsideSelectedRange(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abcdef"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 0}, Head: Position{Line: 0, Col: 5}},
+		{Anchor: Position{Line: 0, Col: 2}, Head: Position{Line: 0, Col: 2}},
+	}, 1)
+
+	b.InsertAtCursor([]byte("X"))
+
+	if got, want := b.Content(), "Xf"; got != want {
+		t.Fatalf("Content() = %q, want %q", got, want)
+	}
+	if got, want := b.Selections.All(), []Selection{
+		{Anchor: Position{Line: 0, Col: 1}, Head: Position{Line: 0, Col: 1}},
+	}; !selectionSlicesEqual(got, want) {
+		t.Errorf("Selections = %#v, want %#v", got, want)
+	}
+	if got, want := b.LastChange(), (&EditChange{
+		StartLine: 0, StartCol: 0,
+		EndLine: 0, EndCol: 5,
+		Text: "X",
+	}); got == nil || *got != *want {
+		t.Errorf("LastChange() = %#v, want %#v", got, want)
 	}
 }
 

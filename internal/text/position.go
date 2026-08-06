@@ -154,13 +154,21 @@ func (s *Selections) normalize() {
 		if si.Line != sj.Line {
 			return si.Line < sj.Line
 		}
-		return si.Col < sj.Col
+		if si.Col != sj.Col {
+			return si.Col < sj.Col
+		}
+		// A range owns its half-open span. Sort it before a cursor at the
+		// same start so the sweep below can coalesce that cursor regardless
+		// of the order in which callers added the selections.
+		return !indexed[i].selection.IsEmpty() && indexed[j].selection.IsEmpty()
 	})
 
 	// Selections use half-open ranges: [start, end). Thus adjacent ranges are
-	// distinct (end == next start), while a later range starting before the end
-	// of a retained range overlaps it. Collapsed cursors have no width, so they
-	// may coexist with a text selection but duplicate cursors are coalesced.
+	// distinct (end == next start), while a later range or cursor starting before
+	// the end of a retained range overlaps it. Collapsed cursors outside ranges
+	// may coexist with selected text, while interior and duplicate cursors are
+	// coalesced. This guarantees that one edit per normalized selection never
+	// addresses competing bytes.
 	// When a primary selection is coalesced, focus transfers to its canonical
 	// retained selection; this keeps primary valid after normalization.
 	normalized := make([]Selection, 0, len(s.selections))
@@ -172,6 +180,12 @@ func (s *Selections) normalize() {
 	for _, item := range indexed {
 		start, end := item.selection.Ordered()
 		if start == end {
+			if lastRange >= 0 && positionLess(start, lastRangeEnd) {
+				if item.primary {
+					primary = lastRange
+				}
+				continue
+			}
 			if lastCursor >= 0 && normalized[lastCursor].Anchor == start && normalized[lastCursor].Head == start {
 				if item.primary {
 					primary = lastCursor
