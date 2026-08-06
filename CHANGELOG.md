@@ -4,6 +4,30 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.35] - 2026-08-05
+
+### Single-Copy Clipboard Selections
+
+- The immutable rope now exposes `StringRange`, which traverses only the
+  intersecting leaves into an exactly-sized `strings.Builder` instead of
+  constructing a temporary sub-rope and contiguous byte slice first. Its
+  negative, reversed, empty, out-of-range, cross-leaf, and nil bounds match
+  `Slice` semantics.
+- `Rope.String` uses the same direct traversal, halving the storage allocated
+  for whole-document string snapshots while preserving immutable ownership.
+- Deferred copy and cut preparation now sends the selected rope range directly
+  to the clipboard string. Invalid UTF-8 still fails before a cut can mutate
+  the live buffer, and the existing 16 MiB clipboard limit remains enforced
+  before materialization.
+- Allocation guardrails require range and whole-rope strings to allocate only
+  their returned storage, and clipboard preparation to avoid all temporary-rope
+  allocations.
+- On an Apple M5, converting a 1 MiB rope dropped from about 124-136
+  microseconds, 2.10 MB, and two allocations to 81-86 microseconds, 1.05 MB,
+  and one allocation. Preparing a 1 MiB clipboard selection dropped from
+  132-141 microseconds, 2.10 MB, and 28 allocations to 70-76 microseconds,
+  1.05 MB, and one benchmarked allocation.
+
 ## [0.10.34] - 2026-08-05
 
 ### Lazy Viewport Line Materialization

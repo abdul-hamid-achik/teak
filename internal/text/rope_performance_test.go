@@ -477,6 +477,16 @@ func BenchmarkRopeLineCopyAcrossLeaves(b *testing.B) {
 	}
 }
 
+func BenchmarkRopeStringAcrossLeaves(b *testing.B) {
+	r := NewFromString(strings.Repeat("abcdefgh", 128<<10))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = r.String()
+	}
+}
+
 // BenchmarkRopePositionToOffset benchmarks position to offset conversion
 func BenchmarkRopePositionToOffset(b *testing.B) {
 	line := strings.Repeat("x", 79) + "\n"

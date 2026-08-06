@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -197,7 +198,48 @@ func (r *Rope) LineCount() int {
 
 // String returns the full text as a string.
 func (r *Rope) String() string {
-	return string(r.Bytes())
+	if r == nil {
+		return ""
+	}
+	return r.StringRange(0, r.len)
+}
+
+// StringRange returns bytes [start, end) as an immutable string without first
+// constructing a temporary sub-rope or contiguous byte slice. Bounds match
+// Slice: negative values clamp to zero, an end past the document clamps to its
+// length, and empty or reversed ranges return an empty string.
+func (r *Rope) StringRange(start, end int) string {
+	if r == nil {
+		return ""
+	}
+	start = max(start, 0)
+	end = min(max(end, 0), r.len)
+	if start >= end || start >= r.len {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(end - start)
+	r.appendRangeToBuilder(&builder, start, end)
+	return builder.String()
+}
+
+func (r *Rope) appendRangeToBuilder(builder *strings.Builder, start, end int) {
+	if r.isLeaf() {
+		_, _ = builder.Write(r.value[start:end])
+		return
+	}
+	leftLen := r.left.len
+	if end <= leftLen {
+		r.left.appendRangeToBuilder(builder, start, end)
+		return
+	}
+	if start >= leftLen {
+		r.right.appendRangeToBuilder(builder, start-leftLen, end-leftLen)
+		return
+	}
+	r.left.appendRangeToBuilder(builder, start, leftLen)
+	r.right.appendRangeToBuilder(builder, 0, end-leftLen)
 }
 
 // Bytes returns the full text as a byte slice.

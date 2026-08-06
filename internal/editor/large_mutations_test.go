@@ -10,6 +10,8 @@ import (
 	"teak/internal/ui"
 )
 
+var clipboardCopyPreparedBenchmarkSink ClipboardCopyPreparedMsg
+
 func TestClipboardSelectionOverLimitIsRejectedBeforeMaterializing(t *testing.T) {
 	content := strings.Repeat("x", clipboard.MaxClipboardBytes+1)
 	ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
@@ -125,6 +127,28 @@ func TestCutDoesNotDeleteWhenClipboardPreparationFails(t *testing.T) {
 	}
 }
 
+func TestPrepareClipboardCopyAvoidsTemporaryRopeAllocations(t *testing.T) {
+	content := strings.Repeat("c", 64<<10)
+	snapshot := text.NewFromString("prefix" + content + "suffix")
+	cmd := prepareClipboardCopyCmd(
+		1, 1, 1, snapshot,
+		text.Position{Line: 0, Col: len("prefix")},
+		text.Position{Line: 0, Col: len("prefix") + len(content)},
+		len("prefix"), len("prefix")+len(content), false,
+	)
+	prepared := cmd().(ClipboardCopyPreparedMsg)
+	if prepared.Err != nil || prepared.Content != content {
+		t.Fatalf("prepared copy = (%d bytes, %v), want %d bytes", len(prepared.Content), prepared.Err, len(content))
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		clipboardCopyPreparedBenchmarkSink = cmd().(ClipboardCopyPreparedMsg)
+	})
+	if allocs > 2 {
+		t.Fatalf("clipboard preparation allocated %.0f times, want only content and message storage", allocs)
+	}
+}
+
 func TestMultiLineCommandsRejectOversizedSelection(t *testing.T) {
 	content := strings.Repeat("line\n", MaxSynchronousMultilineEditLines+1)
 	ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
@@ -161,6 +185,23 @@ func BenchmarkEditorLargeCopyUpdate(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = ed.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	}
+}
+
+func BenchmarkPrepareClipboardCopyOneMiB(b *testing.B) {
+	content := strings.Repeat("c", 1<<20)
+	snapshot := text.NewFromString("prefix" + content + "suffix")
+	cmd := prepareClipboardCopyCmd(
+		1, 1, 1, snapshot,
+		text.Position{Line: 0, Col: len("prefix")},
+		text.Position{Line: 0, Col: len("prefix") + len(content)},
+		len("prefix"), len("prefix")+len(content), false,
+	)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		clipboardCopyPreparedBenchmarkSink = cmd().(ClipboardCopyPreparedMsg)
 	}
 }
 

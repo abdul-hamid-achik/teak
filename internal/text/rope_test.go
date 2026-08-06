@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 )
 
+var ropeStringSink string
+
 func TestNewCopiesCallerBytes(t *testing.T) {
 	data := []byte("caller-owned bytes")
 	rope := New(data)
@@ -436,6 +438,64 @@ func TestSlice(t *testing.T) {
 	s2 := r.Slice(6, 11)
 	if s2.String() != "world" {
 		t.Errorf("Slice(6,11) = %q, want %q", s2.String(), "world")
+	}
+}
+
+func TestStringRangeMatchesSliceBounds(t *testing.T) {
+	r := NewFromString("hello world")
+	tests := []struct {
+		name       string
+		start, end int
+		want       string
+	}{
+		{name: "full", start: 0, end: 11, want: "hello world"},
+		{name: "prefix", start: 0, end: 5, want: "hello"},
+		{name: "middle", start: 6, end: 11, want: "world"},
+		{name: "negative start", start: -5, end: 5, want: "hello"},
+		{name: "end past document", start: 6, end: 100, want: "world"},
+		{name: "negative end", start: -5, end: -1, want: ""},
+		{name: "reversed", start: 8, end: 3, want: ""},
+		{name: "past document", start: 20, end: 30, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := r.StringRange(tt.start, tt.end); got != tt.want {
+				t.Fatalf("StringRange(%d, %d) = %q, want %q", tt.start, tt.end, got, tt.want)
+			}
+		})
+	}
+
+	long := strings.Repeat("a", maxLeaf+37) + "界" + strings.Repeat("b", maxLeaf+19)
+	r = NewFromString(long)
+	start, end := maxLeaf-11, maxLeaf+61
+	if got, want := r.StringRange(start, end), long[start:end]; got != want {
+		t.Fatalf("cross-leaf StringRange() = %q, want %q", got, want)
+	}
+
+	var nilRope *Rope
+	if got := nilRope.StringRange(0, 1); got != "" {
+		t.Fatalf("nil StringRange() = %q, want empty", got)
+	}
+}
+
+func TestRopeStringAndRangeAllocateOnlyResult(t *testing.T) {
+	r := NewFromString(strings.Repeat("x", 64<<10))
+	tests := []struct {
+		name string
+		read func() string
+	}{
+		{name: "full string", read: r.String},
+		{name: "range", read: func() string { return r.StringRange(1, r.Len()-1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(20, func() {
+				ropeStringSink = tt.read()
+			})
+			if allocs > 1 {
+				t.Fatalf("allocated %.0f times, want at most the returned string", allocs)
+			}
+		})
 	}
 }
 

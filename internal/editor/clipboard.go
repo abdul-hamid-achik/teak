@@ -99,7 +99,7 @@ func clipboardOperationLimitCmd(editorID uint64, operation string) tea.Cmd {
 
 func prepareClipboardCopyCmd(editorID, generation uint64, version int, snapshot *text.Rope, start, end text.Position, startOffset, endOffset int, cut bool) tea.Cmd {
 	return func() tea.Msg {
-		content := string(snapshot.Slice(startOffset, endOffset).Bytes())
+		content := snapshot.StringRange(startOffset, endOffset)
 		return ClipboardCopyPreparedMsg{
 			EditorID: editorID, Generation: generation, Version: version,
 			Start: start, End: end, Content: content, Cut: cut, Err: clipboard.Store(content),
