@@ -4,6 +4,39 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-06
+
+### Multi-selection Clipboard
+
+- Copy and Cut now collect every non-empty selection in document order,
+  joining their text with newlines for interoperable system and terminal
+  clipboards. A collapsed primary cursor no longer hides selected secondary
+  ranges.
+- Cut validates the complete live selection snapshot before deleting. Changing
+  any secondary range while clipboard preparation is in flight preserves the
+  document, while a matching cut removes all selected ranges as one undoable
+  edit and retains neighboring collapsed cursors.
+- The 16 MiB clipboard limit now covers the combined ranges and their
+  separators before any text is materialized. Invalid UTF-8 and stale results
+  still cannot mutate the buffer.
+- The immutable rope can compose disjoint byte ranges directly into one
+  exactly-sized string. Clipboard preparation retains its existing allocation
+  budget without constructing a temporary string or sub-rope for each
+  selection.
+- On an Apple M5, preparing 1 MiB from three ranges takes about 72-74
+  microseconds and one allocation; the single-range path remains about 68-71
+  microseconds and one allocation.
+- Left/Right and Ctrl+Left/Right collapse each active selection to its
+  directional edge; already-collapsed cursors in the same set continue moving.
+  Cursor movement now reads individual runes from the rope and re-normalizes
+  converged selections instead of copying whole logical lines.
+- Regression coverage includes reversed and mixed selections, stale secondary
+  ranges, combined-size rejection, atomic Undo, range composition ownership,
+  and horizontal movement on an 8 MiB logical line.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.3%; `internal/editor` is 84.3% and
+  `internal/text` is 82.2%.
+
 ## [0.13.0] - 2026-08-05
 
 ### Complete Multicursor Commands

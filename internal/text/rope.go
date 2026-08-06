@@ -26,6 +26,12 @@ type Rope struct {
 	depth    int
 }
 
+// ByteRange identifies a half-open range in absolute rope byte offsets.
+type ByteRange struct {
+	Start int
+	End   int
+}
+
 // fibonacci numbers for rebalancing threshold
 var fibs = func() []int {
 	f := make([]int, 64)
@@ -221,6 +227,63 @@ func (r *Rope) StringRange(start, end int) string {
 	var builder strings.Builder
 	builder.Grow(end - start)
 	r.appendRangeToBuilder(&builder, start, end)
+	return builder.String()
+}
+
+// StringRanges composes disjoint byte ranges into one immutable string,
+// inserting separator between non-empty ranges. It grows one builder for the
+// final result and appends directly from rope leaves, avoiding one temporary
+// string allocation per range. Individual bounds match StringRange.
+func (r *Rope) StringRanges(ranges []ByteRange, separator string) string {
+	if r == nil || len(ranges) == 0 {
+		return ""
+	}
+	const maxInt = int(^uint(0) >> 1)
+	total := 0
+	valid := 0
+	canGrow := true
+	for _, selected := range ranges {
+		start := max(selected.Start, 0)
+		end := min(max(selected.End, 0), r.len)
+		if start >= end || start >= r.len {
+			continue
+		}
+		addition := end - start
+		if valid > 0 {
+			if len(separator) > maxInt-addition {
+				canGrow = false
+			} else {
+				addition += len(separator)
+			}
+		}
+		if !canGrow || addition > maxInt-total {
+			canGrow = false
+		} else {
+			total += addition
+		}
+		valid++
+	}
+	if valid == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	if canGrow {
+		builder.Grow(total)
+	}
+	written := 0
+	for _, selected := range ranges {
+		start := max(selected.Start, 0)
+		end := min(max(selected.End, 0), r.len)
+		if start >= end || start >= r.len {
+			continue
+		}
+		if written > 0 {
+			builder.WriteString(separator)
+		}
+		r.appendRangeToBuilder(&builder, start, end)
+		written++
+	}
 	return builder.String()
 }
 

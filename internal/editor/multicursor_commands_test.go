@@ -183,3 +183,70 @@ func TestEditorCtrlDeleteWordEditsEveryCursor(t *testing.T) {
 		{Anchor: text.Position{Line: 1, Col: 0}, Head: text.Position{Line: 1, Col: 0}},
 	})
 }
+
+func TestEditorHorizontalNavigationCollapsesSelectionsToDirectionalEdges(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want []text.Selection
+	}{
+		{
+			name: "left",
+			key:  "left",
+			want: []text.Selection{
+				{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 1}},
+				{Anchor: text.Position{Line: 1, Col: 0}, Head: text.Position{Line: 1, Col: 0}},
+			},
+		},
+		{
+			name: "right",
+			key:  "right",
+			want: []text.Selection{
+				{Anchor: text.Position{Line: 0, Col: 3}, Head: text.Position{Line: 0, Col: 3}},
+				{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 2}},
+			},
+		},
+		{
+			name: "word left",
+			key:  "ctrl+left",
+			want: []text.Selection{
+				{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 1}},
+				{Anchor: text.Position{Line: 1, Col: 0}, Head: text.Position{Line: 1, Col: 0}},
+			},
+		},
+		{
+			name: "word right",
+			key:  "ctrl+right",
+			want: []text.Selection{
+				{Anchor: text.Position{Line: 0, Col: 3}, Head: text.Position{Line: 0, Col: 3}},
+				{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 2}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ed := newEditor("abcd\nefgh", 0, 0)
+			ed.Buffer.RestoreSelections([]text.Selection{
+				{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 3}},
+				{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 0}},
+			}, 1)
+
+			ed, _ = ed.Update(tea.KeyPressMsg{Text: tt.key})
+			requireEditorSelections(t, ed, tt.want)
+		})
+	}
+}
+
+func TestEditorHorizontalNavigationMovesCollapsedCursorsBesideSelections(t *testing.T) {
+	ed := newEditor("abcd\nefgh", 0, 0)
+	ed.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 3}},
+		{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 2}},
+	}, 1)
+
+	ed, _ = ed.Update(tea.KeyPressMsg{Text: "left"})
+	requireEditorSelections(t, ed, []text.Selection{
+		{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 1}},
+		{Anchor: text.Position{Line: 1, Col: 1}, Head: text.Position{Line: 1, Col: 1}},
+	})
+}

@@ -658,6 +658,28 @@ func TestBufferMoveCursorsDeduplicatesCollisionAndKeepsPrimary(t *testing.T) {
 	}
 }
 
+func TestBufferHorizontalMultiCursorMovementBoundsGiantLineWork(t *testing.T) {
+	const giantLineBytes = 8 << 20
+	b := NewBufferFromBytes([]byte(strings.Repeat("x", giantLineBytes)))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 1}, Head: Position{Line: 0, Col: 1}},
+		{Anchor: Position{Line: 0, Col: giantLineBytes - 1}, Head: Position{Line: 0, Col: giantLineBytes - 1}},
+	}, 1)
+
+	result := testing.Benchmark(func(bench *testing.B) {
+		for bench.Loop() {
+			b.MoveCursors(DirRight)
+			b.MoveCursors(DirLeft)
+		}
+	})
+	if got := result.AllocedBytesPerOp(); got > 256<<10 {
+		t.Fatalf("horizontal movement allocated %d B/op for an 8 MiB line; want below 256 KiB", got)
+	}
+	if got, want := b.Selections.Count(), 2; got != want {
+		t.Fatalf("cursor count = %d, want %d", got, want)
+	}
+}
+
 func TestBufferMoveCursorsRespectsLineBounds(t *testing.T) {
 	b := NewBufferFromBytes([]byte("hello"))
 

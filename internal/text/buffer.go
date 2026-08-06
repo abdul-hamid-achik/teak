@@ -934,17 +934,32 @@ func (b *Buffer) CursorToLineEnd() {
 
 // MoveCursors moves all cursors in the given direction.
 func (b *Buffer) MoveCursors(dir Direction) {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	b.Selections.Normalize()
 	for i := range b.Selections.selections {
 		sel := &b.Selections.selections[i]
-		collapsed := sel.Anchor == sel.Head
+		sel.Anchor = b.ClampPosition(sel.Anchor)
 		sel.Head = b.ClampPosition(sel.Head)
+		if !sel.IsEmpty() && (dir == DirLeft || dir == DirRight) {
+			start, end := sel.Ordered()
+			target := start
+			if dir == DirRight {
+				target = end
+			}
+			sel.Anchor = target
+			sel.Head = target
+			continue
+		}
 
 		switch dir {
 		case DirLeft:
 			if sel.Head.Col > 0 {
-				lineContent := b.rope.Line(sel.Head.Line)
-				_, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col])
-				sel.Head.Col -= size
+				offset := b.rope.PositionToOffset(sel.Head)
+				if _, size, ok := b.rope.RuneBefore(offset); ok {
+					sel.Head.Col -= size
+				}
 			} else if sel.Head.Line > 0 {
 				sel.Head.Line--
 				sel.Head.Col = b.rope.LineLen(sel.Head.Line)
@@ -952,9 +967,10 @@ func (b *Buffer) MoveCursors(dir Direction) {
 		case DirRight:
 			lineLen := b.rope.LineLen(sel.Head.Line)
 			if sel.Head.Col < lineLen {
-				lineContent := b.rope.Line(sel.Head.Line)
-				_, size := utf8.DecodeRune(lineContent[sel.Head.Col:])
-				sel.Head.Col += size
+				offset := b.rope.PositionToOffset(sel.Head)
+				if _, size, ok := b.rope.RuneAt(offset); ok {
+					sel.Head.Col += size
+				}
 			} else if sel.Head.Line < b.rope.LineCount()-1 {
 				sel.Head.Line++
 				sel.Head.Col = 0
@@ -969,12 +985,10 @@ func (b *Buffer) MoveCursors(dir Direction) {
 			}
 		}
 
-		// Update anchor if not extending selection
-		if collapsed {
-			sel.Anchor = sel.Head
-		}
+		sel.Anchor = sel.Head
 	}
 
+	b.Selections.dirty = true
 	b.Selections.Normalize()
 	// Update b.Cursor to match primary
 	b.Cursor = b.Selections.PrimaryCursor()
@@ -982,16 +996,22 @@ func (b *Buffer) MoveCursors(dir Direction) {
 
 // ExtendCursors extends all selections in the given direction.
 func (b *Buffer) ExtendCursors(dir Direction) {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	b.Selections.Normalize()
 	for i := range b.Selections.selections {
 		sel := &b.Selections.selections[i]
+		sel.Anchor = b.ClampPosition(sel.Anchor)
 		sel.Head = b.ClampPosition(sel.Head)
 
 		switch dir {
 		case DirLeft:
 			if sel.Head.Col > 0 {
-				lineContent := b.rope.Line(sel.Head.Line)
-				_, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col])
-				sel.Head.Col -= size
+				offset := b.rope.PositionToOffset(sel.Head)
+				if _, size, ok := b.rope.RuneBefore(offset); ok {
+					sel.Head.Col -= size
+				}
 			} else if sel.Head.Line > 0 {
 				sel.Head.Line--
 				sel.Head.Col = b.rope.LineLen(sel.Head.Line)
@@ -999,9 +1019,10 @@ func (b *Buffer) ExtendCursors(dir Direction) {
 		case DirRight:
 			lineLen := b.rope.LineLen(sel.Head.Line)
 			if sel.Head.Col < lineLen {
-				lineContent := b.rope.Line(sel.Head.Line)
-				_, size := utf8.DecodeRune(lineContent[sel.Head.Col:])
-				sel.Head.Col += size
+				offset := b.rope.PositionToOffset(sel.Head)
+				if _, size, ok := b.rope.RuneAt(offset); ok {
+					sel.Head.Col += size
+				}
 			} else if sel.Head.Line < b.rope.LineCount()-1 {
 				sel.Head.Line++
 				sel.Head.Col = 0
@@ -1018,17 +1039,36 @@ func (b *Buffer) ExtendCursors(dir Direction) {
 		// Don't update anchor - we're extending
 	}
 
+	b.Selections.dirty = true
 	b.Selections.Normalize()
 	b.Cursor = b.Selections.PrimaryCursor()
 }
 
-func (b *Buffer) transformSelections(move func(Position) Position, extend bool) {
+type selectionCollapseMode uint8
+
+const (
+	collapseAfterMove selectionCollapseMode = iota
+	collapseToStart
+	collapseToEnd
+)
+
+func (b *Buffer) transformSelections(move func(Position) Position, extend bool, collapse selectionCollapseMode) {
 	if b.Selections == nil || b.Selections.Count() == 0 || move == nil {
 		return
 	}
 	b.Selections.Normalize()
 	for i := range b.Selections.selections {
 		sel := &b.Selections.selections[i]
+		if !extend && !sel.IsEmpty() && collapse != collapseAfterMove {
+			start, end := sel.Ordered()
+			target := start
+			if collapse == collapseToEnd {
+				target = end
+			}
+			sel.Anchor = target
+			sel.Head = target
+			continue
+		}
 		sel.Head = move(b.ClampPosition(sel.Head))
 		if !extend {
 			sel.Anchor = sel.Head
@@ -1048,7 +1088,7 @@ func (b *Buffer) MoveCursorsWordLeft() {
 	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
 	b.transformSelections(func(pos Position) Position {
 		return b.wordPositionLeft(pos, budget)
-	}, false)
+	}, false, collapseToStart)
 }
 
 func (b *Buffer) MoveCursorsWordRight() {
@@ -1058,7 +1098,7 @@ func (b *Buffer) MoveCursorsWordRight() {
 	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
 	b.transformSelections(func(pos Position) Position {
 		return b.wordPositionRight(pos, budget)
-	}, false)
+	}, false, collapseToEnd)
 }
 
 func (b *Buffer) ExtendCursorsWordLeft() {
@@ -1068,7 +1108,7 @@ func (b *Buffer) ExtendCursorsWordLeft() {
 	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
 	b.transformSelections(func(pos Position) Position {
 		return b.wordPositionLeft(pos, budget)
-	}, true)
+	}, true, collapseAfterMove)
 }
 
 func (b *Buffer) ExtendCursorsWordRight() {
@@ -1078,35 +1118,35 @@ func (b *Buffer) ExtendCursorsWordRight() {
 	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
 	b.transformSelections(func(pos Position) Position {
 		return b.wordPositionRight(pos, budget)
-	}, true)
+	}, true, collapseAfterMove)
 }
 
 func (b *Buffer) MoveCursorsToLineStart() {
 	b.transformSelections(func(pos Position) Position {
 		pos.Col = 0
 		return pos
-	}, false)
+	}, false, collapseAfterMove)
 }
 
 func (b *Buffer) MoveCursorsToLineEnd() {
 	b.transformSelections(func(pos Position) Position {
 		pos.Col = b.rope.LineLen(pos.Line)
 		return pos
-	}, false)
+	}, false, collapseAfterMove)
 }
 
 func (b *Buffer) ExtendCursorsToLineStart() {
 	b.transformSelections(func(pos Position) Position {
 		pos.Col = 0
 		return pos
-	}, true)
+	}, true, collapseAfterMove)
 }
 
 func (b *Buffer) ExtendCursorsToLineEnd() {
 	b.transformSelections(func(pos Position) Position {
 		pos.Col = b.rope.LineLen(pos.Line)
 		return pos
-	}, true)
+	}, true, collapseAfterMove)
 }
 
 // MoveCursorsByLines moves every cursor by a bounded logical-line delta. Page
@@ -1120,7 +1160,7 @@ func (b *Buffer) MoveCursorsByLines(delta int) {
 	b.transformSelections(func(pos Position) Position {
 		pos.Line = min(lastLine, max(0, pos.Line+delta))
 		return b.ClampPosition(pos)
-	}, false)
+	}, false, collapseAfterMove)
 }
 
 // Save writes the buffer to its FilePath.

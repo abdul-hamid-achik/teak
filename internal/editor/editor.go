@@ -685,40 +685,56 @@ func (e Editor) selectionClipboardCopy(cut bool) (Editor, tea.Cmd, bool) {
 	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		return e, nil, false
 	}
-	selection := e.Buffer.Selections.Primary()
-	if selection.IsEmpty() {
-		return e, nil, false
-	}
-	start, end := selection.Ordered()
+	e.Buffer.Selections.Normalize()
+	selections := append([]text.Selection(nil), e.Buffer.Selections.All()...)
+	primary := e.Buffer.Selections.PrimaryIndex()
 	snapshot := e.Buffer.Rope()
-	// Do not initialize Rope's whole-document line index just to copy a
-	// selection. The uncached conversion walks tree metadata without flattening
-	// the document, including for a selection that ends at line end.
-	startOffset, startOK := snapshot.PositionToOffsetUncached(start)
-	endOffset, endOK := snapshot.PositionToOffsetUncached(end)
-	if !startOK || !endOK {
-		return e, nil, false
-	}
-	if endOffset <= startOffset {
-		return e, nil, false
-	}
-	if endOffset-startOffset > clipboard.MaxClipboardBytes {
-		operation := "Copy"
-		if cut {
-			operation = "Cut"
+	ranges := make([]text.ByteRange, 0, len(selections))
+	totalBytes := 0
+	for _, selection := range selections {
+		if selection.IsEmpty() {
+			continue
 		}
-		return e, clipboardOperationLimitCmd(e.id, operation), true
+		start, end := selection.Ordered()
+		// Do not initialize Rope's whole-document line index just to copy a
+		// selection. The uncached conversion walks tree metadata without
+		// flattening the document, including at a line boundary.
+		startOffset, startOK := snapshot.PositionToOffsetUncached(start)
+		endOffset, endOK := snapshot.PositionToOffsetUncached(end)
+		if !startOK || !endOK || endOffset <= startOffset {
+			continue
+		}
+		separatorBytes := 0
+		if len(ranges) > 0 {
+			separatorBytes = 1
+		}
+		selectionBytes := endOffset - startOffset
+		if totalBytes > clipboard.MaxClipboardBytes-separatorBytes ||
+			selectionBytes > clipboard.MaxClipboardBytes-totalBytes-separatorBytes {
+			operation := "Copy"
+			if cut {
+				operation = "Cut"
+			}
+			return e, clipboardOperationLimitCmd(e.id, operation), true
+		}
+		totalBytes += separatorBytes + selectionBytes
+		ranges = append(ranges, text.ByteRange{Start: startOffset, End: endOffset})
+	}
+	if len(ranges) == 0 {
+		return e, nil, false
 	}
 	e.clipboardCopyGeneration++
-	return e, prepareClipboardCopyCmd(e.id, e.clipboardCopyGeneration, e.Buffer.Version(), snapshot, start, end, startOffset, endOffset, cut), true
+	return e, prepareClipboardSelectionsCopyCmd(
+		e.id, e.clipboardCopyGeneration, e.Buffer.Version(), snapshot,
+		selections, primary, ranges, cut,
+	), true
 }
 
 func (e Editor) handlePreparedClipboardCopy(msg ClipboardCopyPreparedMsg) (Editor, tea.Cmd) {
 	copyCmd := copyToClipboardCmd(e.id, msg.Content)
-	if !msg.Cut || !e.matchesPrimarySelection(msg.Start, msg.End) {
+	if !msg.Cut || !e.matchesSelectionSnapshot(msg.Selections, msg.Primary) {
 		return e, copyCmd
 	}
-	e.Buffer.SetSelection(msg.Start, msg.End)
 	e.Buffer.DeleteSelection()
 	e.refreshWordWrapAfterBufferChange()
 	e.EnsureCursorVisible()
@@ -728,12 +744,21 @@ func (e Editor) handlePreparedClipboardCopy(msg ClipboardCopyPreparedMsg) (Edito
 	return e, tea.Batch(copyCmd, e.scheduleRetokenize())
 }
 
-func (e Editor) matchesPrimarySelection(start, end text.Position) bool {
+func (e Editor) matchesSelectionSnapshot(selections []text.Selection, primary int) bool {
 	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		return false
 	}
-	gotStart, gotEnd := e.Buffer.Selections.Primary().Ordered()
-	return gotStart == start && gotEnd == end
+	e.Buffer.Selections.Normalize()
+	current := e.Buffer.Selections.All()
+	if len(current) != len(selections) || e.Buffer.Selections.PrimaryIndex() != primary {
+		return false
+	}
+	for i := range current {
+		if current[i] != selections[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e Editor) selectedLineSpan() int {
@@ -767,19 +792,9 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	switch key {
 	// --- Navigation ---
 	case "left":
-		if e.hasMultipleCursors() {
-			e.Buffer.MoveCursors(text.DirLeft)
-		} else {
-			e.Buffer.MoveCursor(text.DirLeft)
-			e.Buffer.ClearSelection()
-		}
+		e.Buffer.MoveCursors(text.DirLeft)
 	case "right":
-		if e.hasMultipleCursors() {
-			e.Buffer.MoveCursors(text.DirRight)
-		} else {
-			e.Buffer.MoveCursor(text.DirRight)
-			e.Buffer.ClearSelection()
-		}
+		e.Buffer.MoveCursors(text.DirRight)
 	case "up":
 		if e.hasMultipleCursors() {
 			e.Buffer.MoveCursors(text.DirUp)
@@ -793,19 +808,9 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.moveCursorVertical(1, false)
 		}
 	case "ctrl+left":
-		if e.hasMultipleCursors() {
-			e.Buffer.MoveCursorsWordLeft()
-		} else {
-			e.Buffer.MoveCursorWordLeft()
-			e.Buffer.ClearSelection()
-		}
+		e.Buffer.MoveCursorsWordLeft()
 	case "ctrl+right":
-		if e.hasMultipleCursors() {
-			e.Buffer.MoveCursorsWordRight()
-		} else {
-			e.Buffer.MoveCursorWordRight()
-			e.Buffer.ClearSelection()
-		}
+		e.Buffer.MoveCursorsWordRight()
 	case "home":
 		if e.hasMultipleCursors() {
 			e.Buffer.MoveCursorsToLineStart()

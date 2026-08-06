@@ -478,6 +478,30 @@ func TestStringRangeMatchesSliceBounds(t *testing.T) {
 	}
 }
 
+func TestStringRangesComposesWithoutTemporaryRangeStrings(t *testing.T) {
+	content := strings.Repeat("a", maxLeaf+17) + "middle" + strings.Repeat("b", maxLeaf+23)
+	r := NewFromString(content)
+	ranges := []ByteRange{
+		{Start: 0, End: 11},
+		{Start: maxLeaf + 17, End: maxLeaf + 23},
+		{Start: len(content) - 13, End: len(content)},
+	}
+	if got, want := r.StringRanges(ranges, "\n"), strings.Repeat("a", 11)+"\nmiddle\n"+strings.Repeat("b", 13); got != want {
+		t.Fatalf("StringRanges() = %q, want %q", got, want)
+	}
+	if got := r.StringRanges([]ByteRange{{Start: 10, End: 5}, {Start: -5, End: 3}}, "|"); got != "aaa" {
+		t.Fatalf("StringRanges() with clamped ranges = %q, want aaa", got)
+	}
+
+	largeRanges := []ByteRange{{Start: 1, End: r.Len() / 2}, {Start: r.Len() / 2, End: r.Len() - 1}}
+	allocs := testing.AllocsPerRun(20, func() {
+		ropeStringSink = r.StringRanges(largeRanges, "\n")
+	})
+	if allocs > 1 {
+		t.Fatalf("StringRanges() allocated %.0f times, want only the returned string", allocs)
+	}
+}
+
 func TestRopeStringAndRangeAllocateOnlyResult(t *testing.T) {
 	r := NewFromString(strings.Repeat("x", 64<<10))
 	tests := []struct {

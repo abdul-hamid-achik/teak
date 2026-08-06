@@ -23,6 +23,8 @@ type ClipboardCopyPreparedMsg struct {
 	Version    int
 	Start      text.Position
 	End        text.Position
+	Selections []text.Selection
+	Primary    int
 	Content    string
 	Cut        bool
 	Err        error
@@ -98,12 +100,36 @@ func clipboardOperationLimitCmd(editorID uint64, operation string) tea.Cmd {
 }
 
 func prepareClipboardCopyCmd(editorID, generation uint64, version int, snapshot *text.Rope, start, end text.Position, startOffset, endOffset int, cut bool) tea.Cmd {
+	selection := text.Selection{Anchor: start, Head: end}
+	return prepareClipboardSelectionsCopyCmd(
+		editorID, generation, version, snapshot,
+		[]text.Selection{selection}, 0,
+		[]text.ByteRange{{Start: startOffset, End: endOffset}},
+		cut,
+	)
+}
+
+func prepareClipboardSelectionsCopyCmd(
+	editorID, generation uint64,
+	version int,
+	snapshot *text.Rope,
+	selections []text.Selection,
+	primary int,
+	ranges []text.ByteRange,
+	cut bool,
+) tea.Cmd {
 	return func() tea.Msg {
-		content := snapshot.StringRange(startOffset, endOffset)
-		return ClipboardCopyPreparedMsg{
+		result := ClipboardCopyPreparedMsg{
 			EditorID: editorID, Generation: generation, Version: version,
-			Start: start, End: end, Content: content, Cut: cut, Err: clipboard.Store(content),
+			Selections: selections, Primary: primary, Cut: cut,
 		}
+		if primary >= 0 && primary < len(selections) {
+			start, end := selections[primary].Ordered()
+			result.Start, result.End = start, end
+		}
+		result.Content = snapshot.StringRanges(ranges, "\n")
+		result.Err = clipboard.Store(result.Content)
+		return result
 	}
 }
 

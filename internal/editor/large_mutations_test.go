@@ -205,6 +205,30 @@ func BenchmarkPrepareClipboardCopyOneMiB(b *testing.B) {
 	}
 }
 
+func BenchmarkPrepareClipboardCopyMultiRangeOneMiB(b *testing.B) {
+	content := strings.Repeat("c", 1<<20)
+	snapshot := text.NewFromString("prefix" + content + "suffix")
+	third := len(content) / 3
+	base := len("prefix")
+	selections := []text.Selection{
+		{Anchor: text.Position{Col: base}, Head: text.Position{Col: base + third}},
+		{Anchor: text.Position{Col: base + third}, Head: text.Position{Col: base + 2*third}},
+		{Anchor: text.Position{Col: base + 2*third}, Head: text.Position{Col: base + len(content)}},
+	}
+	ranges := []text.ByteRange{
+		{Start: base, End: base + third},
+		{Start: base + third, End: base + 2*third},
+		{Start: base + 2*third, End: base + len(content)},
+	}
+	cmd := prepareClipboardSelectionsCopyCmd(1, 1, 1, snapshot, selections, 2, ranges, false)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		clipboardCopyPreparedBenchmarkSink = cmd().(ClipboardCopyPreparedMsg)
+	}
+}
+
 func BenchmarkEditorMultilineIndentBudget(b *testing.B) {
 	content := strings.Repeat("line\n", MaxSynchronousMultilineEditLines)
 	// Indent mutates the buffer, so each iteration needs fresh, unindented
