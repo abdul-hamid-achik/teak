@@ -46,6 +46,11 @@ const (
 	// results large enough to affect a frame out of Update. The hard 16 MiB
 	// limit remains owned by clipboard.MaxClipboardBytes.
 	asyncPasteThresholdBytes = 64 << 10
+	// maxVerticalColumnScanBytes bounds display-column mapping on a logical
+	// line. Ordinary code reaches the exact terminal column; an exceptional
+	// giant line falls back to its UTF-8-safe byte column rather than scanning
+	// work proportional to the document inside Update.
+	maxVerticalColumnScanBytes = 64 << 10
 	// MaxSynchronousMultilineEditLines bounds line-by-line comment/indent
 	// operations. On Apple M5, the worst-case indent benchmark is ~0.5ms at
 	// this budget; 10,000 lines took ~305ms and allocated ~1.5GiB.
@@ -138,6 +143,13 @@ type Editor struct {
 	wrapDegraded            bool
 	wrapLayoutVersion       int
 	wrapLayoutTabSize       int
+	verticalGoalColumn      int
+	verticalGoalCursor      text.Position
+	verticalGoalVersion     int
+	verticalGoalTabSize     int
+	verticalGoalValid       bool
+	verticalGoalWrapped     bool
+	verticalGoalDisplay     bool
 }
 
 // tokenizeScheduler is shared by value-copied Editor models. Bubble Tea runs
@@ -282,6 +294,9 @@ func (e *Editor) invalidateTokenizeLane(lane *tokenizeLane) {
 // SetSize sets the available editor dimensions.
 func (e *Editor) SetSize(width, height int) {
 	unchangedSize := e.Viewport.Width == width && e.Viewport.Height == height
+	if !unchangedSize {
+		e.verticalGoalValid = false
+	}
 	e.Viewport.Width = width
 	e.Viewport.Height = height
 	if !e.Config.WordWrap || e.Buffer == nil {
@@ -745,20 +760,38 @@ func (e Editor) multilineEditWithinBudget(operation string) (tea.Cmd, bool) {
 func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	versionBefore := e.Buffer.Version()
 	edited := false
-	switch msg.String() {
+	key := msg.String()
+	if !isVerticalNavigationKey(key) {
+		e.verticalGoalValid = false
+	}
+	switch key {
 	// --- Navigation ---
 	case "left":
-		e.Buffer.MoveCursor(text.DirLeft)
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursors(text.DirLeft)
+		} else {
+			e.Buffer.MoveCursor(text.DirLeft)
+			e.Buffer.ClearSelection()
+		}
 	case "right":
-		e.Buffer.MoveCursor(text.DirRight)
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursors(text.DirRight)
+		} else {
+			e.Buffer.MoveCursor(text.DirRight)
+			e.Buffer.ClearSelection()
+		}
 	case "up":
-		e.Buffer.MoveCursor(text.DirUp)
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursors(text.DirUp)
+		} else {
+			e.moveCursorVertical(-1, false)
+		}
 	case "down":
-		e.Buffer.MoveCursor(text.DirDown)
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursors(text.DirDown)
+		} else {
+			e.moveCursorVertical(1, false)
+		}
 	case "ctrl+left":
 		e.Buffer.MoveCursorWordLeft()
 		e.Buffer.ClearSelection()
@@ -778,16 +811,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.CursorToDocEnd()
 		e.Buffer.ClearSelection()
 	case "pgup":
-		if e.Wrap != nil && e.Config.WordWrap {
-			e.moveCursorByWrappedRows(-e.Viewport.Height)
-		} else {
-			target := max(0, e.Buffer.Cursor.Line-e.Viewport.Height)
-			e.Buffer.SetCursor(text.Position{
-				Line: target,
-				Col:  min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target)),
-			})
-		}
-		e.Buffer.ClearSelection()
+		e.moveCursorVertical(-e.Viewport.Height, false)
 		if e.Wrap == nil || !e.Config.WordWrap {
 			e.Viewport.ScrollUp(e.Viewport.Height)
 		}
@@ -796,17 +820,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			return e, e.scheduleRetokenizeImmediate()
 		}
 	case "pgdown":
-		if e.Wrap != nil && e.Config.WordWrap {
-			e.moveCursorByWrappedRows(e.Viewport.Height)
-		} else {
-			maxLine := e.Buffer.LineCount() - 1
-			target := min(maxLine, e.Buffer.Cursor.Line+e.Viewport.Height)
-			e.Buffer.SetCursor(text.Position{
-				Line: target,
-				Col:  min(e.Buffer.Cursor.Col, e.Buffer.Rope().LineLen(target)),
-			})
-		}
-		e.Buffer.ClearSelection()
+		e.moveCursorVertical(e.Viewport.Height, false)
 		if e.Wrap == nil || !e.Config.WordWrap {
 			e.Viewport.ScrollDown(e.Viewport.Height, e.Buffer.LineCount()-1)
 		}
@@ -817,13 +831,29 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	// --- Selection ---
 	case "shift+left":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirLeft) })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursors(text.DirLeft)
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirLeft) })
+		}
 	case "shift+right":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirRight) })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursors(text.DirRight)
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirRight) })
+		}
 	case "shift+up":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirUp) })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursors(text.DirUp)
+		} else {
+			e.moveCursorVertical(-1, true)
+		}
 	case "shift+down":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursor(text.DirDown) })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursors(text.DirDown)
+		} else {
+			e.moveCursorVertical(1, true)
+		}
 	case "ctrl+shift+left":
 		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursorWordLeft() })
 	case "ctrl+shift+right":
@@ -1039,8 +1069,17 @@ func (e Editor) completionPrefix() string {
 // must dismiss anchored overlays such as hover.
 func isNavigationKey(key string) bool {
 	switch key {
-	case "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+	case "up", "down", "left", "right", "home", "end", "pgup", "pgdown", "pageup", "pagedown",
+		"shift+up", "shift+down", "shift+left", "shift+right",
 		"ctrl+up", "ctrl+down", "ctrl+left", "ctrl+right", "ctrl+home", "ctrl+end":
+		return true
+	}
+	return false
+}
+
+func isVerticalNavigationKey(key string) bool {
+	switch key {
+	case "up", "down", "shift+up", "shift+down", "pgup", "pgdown", "pageup", "pagedown":
 		return true
 	}
 	return false
@@ -1347,12 +1386,128 @@ func (e Editor) visibleTokenRange() (int, int) {
 	return e.Viewport.ScrollY, e.Viewport.ScrollY + e.Viewport.Height
 }
 
-func (e *Editor) moveCursorByWrappedRows(delta int) {
-	if e.Wrap == nil || e.Buffer == nil || e.Buffer.LineCount() == 0 {
+func (e *Editor) moveCursorVertical(delta int, extend bool) {
+	if delta == 0 || e.Buffer == nil || e.Buffer.LineCount() == 0 {
 		return
 	}
+	wrapped := e.Wrap != nil && e.Config.WordWrap
+	goal, displayGoal := e.verticalColumnGoal(wrapped)
+	var target text.Position
+	var ok bool
+	if wrapped {
+		target, ok = e.wrappedVerticalTarget(delta, goal)
+	} else {
+		target = text.Position{
+			Line: e.verticalTargetLine(delta),
+		}
+		target.Col = e.verticalTargetColumn(target.Line, goal, displayGoal)
+		ok = true
+	}
+	if !ok {
+		return
+	}
+	move := func() { e.Buffer.SetCursor(target) }
+	if extend {
+		e.Buffer.ExtendSelection(move)
+	} else {
+		move()
+		e.Buffer.ClearSelection()
+	}
+	e.verticalGoalCursor = e.Buffer.Cursor
+	e.verticalGoalVersion = e.Buffer.Version()
+}
+
+func (e Editor) hasMultipleCursors() bool {
+	return e.Buffer != nil && e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 1
+}
+
+func (e *Editor) verticalColumnGoal(wrapped bool) (int, bool) {
+	if e.verticalGoalValid &&
+		e.verticalGoalCursor == e.Buffer.Cursor &&
+		e.verticalGoalVersion == e.Buffer.Version() &&
+		e.verticalGoalTabSize == e.Viewport.tabSize() &&
+		e.verticalGoalWrapped == wrapped {
+		return e.verticalGoalColumn, e.verticalGoalDisplay
+	}
+
+	goal := e.Buffer.Cursor.Col
+	displayGoal := false
+	if wrapped {
+		line := e.Buffer.Line(e.Buffer.Cursor.Line)
+		_, goal = e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
+		displayGoal = true
+	} else if displayCol, ok := e.boundedDisplayColumn(e.Buffer.Cursor); ok {
+		goal = displayCol
+		displayGoal = true
+	}
+
+	e.verticalGoalColumn = goal
+	e.verticalGoalCursor = e.Buffer.Cursor
+	e.verticalGoalVersion = e.Buffer.Version()
+	e.verticalGoalTabSize = e.Viewport.tabSize()
+	e.verticalGoalValid = true
+	e.verticalGoalWrapped = wrapped
+	e.verticalGoalDisplay = displayGoal
+	return goal, displayGoal
+}
+
+func (e *Editor) verticalTargetLine(delta int) int {
+	totalLines := e.Buffer.LineCount()
+	if e.Folds.HasCollapsedRegions() {
+		current := e.Folds.BufferLineToVisual(e.Buffer.Cursor.Line, totalLines)
+		last := max(0, e.Folds.TotalVisibleLines(totalLines)-1)
+		return e.Folds.VisualLineToBuffer(min(last, max(0, current+delta)), totalLines)
+	}
+	return min(totalLines-1, max(0, e.Buffer.Cursor.Line+delta))
+}
+
+func (e *Editor) verticalTargetColumn(line, goal int, displayGoal bool) int {
+	fallback := e.Buffer.ClampPosition(text.Position{Line: line, Col: goal}).Col
+	if !displayGoal {
+		return fallback
+	}
+
+	lineLen := e.Buffer.Rope().LineLen(line)
+	prefixLen := min(lineLen, max(utf8.UTFMax, (goal+1)*utf8.UTFMax))
+	prefixLen = min(prefixLen, maxVerticalColumnScanBytes)
+	lineStart := e.Buffer.Rope().LineStart(line)
+	for {
+		prefixLen = e.Buffer.ClampPosition(text.Position{Line: line, Col: prefixLen}).Col
+		prefix := e.Buffer.Rope().StringRange(lineStart, lineStart+prefixLen)
+		prefixDisplay := displayColumnString(prefix, e.Viewport.tabSize())
+		if goal <= prefixDisplay || prefixLen == lineLen {
+			return byteColumnAtDisplayString(prefix, goal, e.Viewport.tabSize())
+		}
+		if prefixLen >= maxVerticalColumnScanBytes {
+			return fallback
+		}
+		next := min(lineLen, min(maxVerticalColumnScanBytes, prefixLen*2+utf8.UTFMax))
+		if next <= prefixLen {
+			return fallback
+		}
+		prefixLen = next
+	}
+}
+
+func (e *Editor) boundedDisplayColumn(pos text.Position) (int, bool) {
+	pos = e.Buffer.ClampPosition(pos)
+	if pos.Col > maxVerticalColumnScanBytes {
+		return pos.Col, false
+	}
+	lineStart := e.Buffer.Rope().LineStart(pos.Line)
+	prefix := e.Buffer.Rope().StringRange(lineStart, lineStart+pos.Col)
+	if len(prefix) != pos.Col {
+		return pos.Col, false
+	}
+	return displayColumnString(prefix, e.Viewport.tabSize()), true
+}
+
+func (e *Editor) wrappedVerticalTarget(delta, goal int) (text.Position, bool) {
+	if e.Wrap == nil || e.Buffer == nil || e.Buffer.LineCount() == 0 {
+		return text.Position{}, false
+	}
 	line := e.Buffer.Line(e.Buffer.Cursor.Line)
-	currentOffset, currentCol := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
+	currentOffset, _ := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, e.Buffer.Cursor.Col, line)
 	currentVisual := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + currentOffset
 	targetVisual := max(0, currentVisual+delta)
 	if e.Wrap.TotalRowsKnown() {
@@ -1362,14 +1517,14 @@ func (e *Editor) moveCursorByWrappedRows(delta int) {
 	targetContent := e.Buffer.Line(targetLine)
 	start, end, displayStart, ok := e.Wrap.SegmentBoundsForLine(targetLine, targetOffset, targetContent)
 	if !ok {
-		return
+		return text.Position{}, false
 	}
 	endDisplay := advanceDisplayColumn(targetContent, start, end, displayStart, e.Viewport.tabSize())
-	targetDisplay := min(displayStart+currentCol, endDisplay)
-	e.Buffer.SetCursor(text.Position{
+	targetDisplay := min(displayStart+goal, endDisplay)
+	return text.Position{
 		Line: targetLine,
 		Col:  byteColumnAtDisplayFrom(targetContent, start, displayStart, targetDisplay, e.Viewport.tabSize()),
-	})
+	}, true
 }
 
 // View renders the editor content.
@@ -1803,7 +1958,18 @@ func (e *Editor) EnsureCursorVisible() {
 	if e.Folds.HasCollapsedRegions() {
 		folds = &e.Folds
 	}
-	e.Viewport.ensureCursorVisibleWithFolds(e.Buffer, e.Buffer.Cursor, textWidth, folds, margin)
+	displayCol, ok := e.boundedDisplayColumn(e.Buffer.Cursor)
+	if !ok {
+		displayCol = e.Buffer.Cursor.Col
+	}
+	e.Viewport.ensureCursorVisibleAtDisplayColumn(
+		e.Buffer.Cursor,
+		e.Buffer.LineCount(),
+		displayCol,
+		textWidth,
+		folds,
+		margin,
+	)
 }
 
 // ShowAutocomplete displays completion items.

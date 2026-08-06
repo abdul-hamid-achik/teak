@@ -706,10 +706,37 @@ func (b *Buffer) ClampPosition(pos Position) Position {
 	if pos.Col < 0 {
 		pos.Col = 0
 	}
-	if lineLen := b.rope.LineLen(pos.Line); pos.Col > lineLen {
-		pos.Col = lineLen
-	}
+	pos.Col = b.clampLineColumn(pos.Line, pos.Col)
 	return pos
+}
+
+// clampLineColumn confines a byte column to its line and repairs positions
+// inside a valid multi-byte rune. It probes at most utf8.UTFMax bytes directly
+// from the rope, so cursor movement never materializes a potentially enormous
+// logical line inside Update. A stray continuation byte is malformed input in
+// its own right and remains a navigable one-byte position.
+func (b *Buffer) clampLineColumn(line, col int) int {
+	lineLen := b.rope.LineLen(line)
+	col = max(0, min(col, lineLen))
+	if col == 0 || col == lineLen {
+		return col
+	}
+
+	lineStart := b.rope.LineStart(line)
+	offset := lineStart + col
+	if utf8.RuneStart(b.rope.ByteAt(offset)) {
+		return col
+	}
+
+	start := offset
+	for start > lineStart && offset-start < utf8.UTFMax && !utf8.RuneStart(b.rope.ByteAt(start)) {
+		start--
+	}
+	_, size, ok := b.rope.RuneAt(start)
+	if ok && size > 1 && start+size > offset {
+		return start - lineStart
+	}
+	return col
 }
 
 // ClampCursor confines the cursor and every selection to the current content.
@@ -812,6 +839,7 @@ func mapPositionAfterReplace(oldRope, newRope *Rope, pos Position, startOff, end
 
 // MoveCursor moves the cursor in the given direction.
 func (b *Buffer) MoveCursor(dir Direction) {
+	b.Cursor = b.ClampPosition(b.Cursor)
 	switch dir {
 	case DirLeft:
 		if b.Cursor.Col > 0 {
@@ -838,13 +866,11 @@ func (b *Buffer) MoveCursor(dir Direction) {
 		}
 	case DirUp:
 		if b.Cursor.Line > 0 {
-			b.Cursor.Line--
-			b.Cursor.Col = min(b.Cursor.Col, b.rope.LineLen(b.Cursor.Line))
+			b.Cursor = b.ClampPosition(Position{Line: b.Cursor.Line - 1, Col: b.Cursor.Col})
 		}
 	case DirDown:
 		if b.Cursor.Line < b.rope.LineCount()-1 {
-			b.Cursor.Line++
-			b.Cursor.Col = min(b.Cursor.Col, b.rope.LineLen(b.Cursor.Line))
+			b.Cursor = b.ClampPosition(Position{Line: b.Cursor.Line + 1, Col: b.Cursor.Col})
 		}
 	}
 	// Keep the primary selection aligned with the cursor. Normal movement is
@@ -902,7 +928,8 @@ func (b *Buffer) CursorToLineEnd() {
 func (b *Buffer) MoveCursors(dir Direction) {
 	for i := range b.Selections.selections {
 		sel := &b.Selections.selections[i]
-		oldHead := sel.Head
+		collapsed := sel.Anchor == sel.Head
+		sel.Head = b.ClampPosition(sel.Head)
 
 		switch dir {
 		case DirLeft:
@@ -926,18 +953,16 @@ func (b *Buffer) MoveCursors(dir Direction) {
 			}
 		case DirUp:
 			if sel.Head.Line > 0 {
-				sel.Head.Line--
-				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+				sel.Head = b.ClampPosition(Position{Line: sel.Head.Line - 1, Col: sel.Head.Col})
 			}
 		case DirDown:
 			if sel.Head.Line < b.rope.LineCount()-1 {
-				sel.Head.Line++
-				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+				sel.Head = b.ClampPosition(Position{Line: sel.Head.Line + 1, Col: sel.Head.Col})
 			}
 		}
 
 		// Update anchor if not extending selection
-		if sel.Anchor == oldHead {
+		if collapsed {
 			sel.Anchor = sel.Head
 		}
 	}
@@ -951,6 +976,7 @@ func (b *Buffer) MoveCursors(dir Direction) {
 func (b *Buffer) ExtendCursors(dir Direction) {
 	for i := range b.Selections.selections {
 		sel := &b.Selections.selections[i]
+		sel.Head = b.ClampPosition(sel.Head)
 
 		switch dir {
 		case DirLeft:
@@ -974,13 +1000,11 @@ func (b *Buffer) ExtendCursors(dir Direction) {
 			}
 		case DirUp:
 			if sel.Head.Line > 0 {
-				sel.Head.Line--
-				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+				sel.Head = b.ClampPosition(Position{Line: sel.Head.Line - 1, Col: sel.Head.Col})
 			}
 		case DirDown:
 			if sel.Head.Line < b.rope.LineCount()-1 {
-				sel.Head.Line++
-				sel.Head.Col = min(sel.Head.Col, b.rope.LineLen(sel.Head.Line))
+				sel.Head = b.ClampPosition(Position{Line: sel.Head.Line + 1, Col: sel.Head.Col})
 			}
 		}
 		// Don't update anchor - we're extending
@@ -1427,10 +1451,10 @@ func (b *Buffer) AddCursorAbove() {
 	selections := b.Selections.All()
 	for _, sel := range selections {
 		if sel.Head.Line > 0 {
-			newPos := Position{
+			newPos := b.ClampPosition(Position{
 				Line: sel.Head.Line - 1,
 				Col:  min(sel.Head.Col, b.rope.LineLen(sel.Head.Line-1)),
-			}
+			})
 			b.Selections.Add(Selection{Anchor: newPos, Head: newPos})
 		}
 	}
@@ -1447,10 +1471,10 @@ func (b *Buffer) AddCursorBelow() {
 	for i := len(selections) - 1; i >= 0; i-- {
 		sel := selections[i]
 		if sel.Head.Line < b.rope.LineCount()-1 {
-			newPos := Position{
+			newPos := b.ClampPosition(Position{
 				Line: sel.Head.Line + 1,
 				Col:  min(sel.Head.Col, b.rope.LineLen(sel.Head.Line+1)),
-			}
+			})
 			b.Selections.Add(Selection{Anchor: newPos, Head: newPos})
 		}
 	}

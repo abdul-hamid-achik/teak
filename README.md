@@ -15,8 +15,8 @@ work out of the UI update loop.
   rename, code actions, document symbols, and formatting through LSP
 - **Workspace navigation** — preview and pinned tabs, editor splits, file tree,
   quick open, command palette, and project-wide search
-- **Editing tools** — multiple cursors, Unicode-aware word navigation and
-  selection, code folding, find and replace, undo/redo, automatic indentation,
+- **Editing tools** — multiple cursors, Unicode-aware word and display-column
+  navigation, code folding, find and replace, undo/redo, automatic indentation,
   and file watching
 - **Integrated workflows** — Git status and commits, problems panel, Go
   debugging with Delve, and an ACP-compatible AI agent panel

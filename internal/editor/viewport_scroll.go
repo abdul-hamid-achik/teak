@@ -53,13 +53,21 @@ func clampScrollMargin(margin, height int) int {
 // pushed ScrollY far past the end of the collapsed document and the viewport
 // rendered blank, with no way back except scrolling manually.
 func (v *Viewport) ensureCursorVisibleWithFolds(buf *text.Buffer, cursor text.Position, textWidth int, folds *FoldState, margin int) {
+	if cursor.Line < 0 || cursor.Line >= buf.LineCount() {
+		return
+	}
+	lineContent := buf.Line(cursor.Line)
+	col := min(max(0, cursor.Col), len(lineContent))
+	v.ensureCursorVisibleAtDisplayColumn(cursor, buf.LineCount(), displayColumn(lineContent, col, v.tabSize()), textWidth, folds, margin)
+}
+
+func (v *Viewport) ensureCursorVisibleAtDisplayColumn(cursor text.Position, lineCount, displayCol, textWidth int, folds *FoldState, margin int) {
 	margin = clampScrollMargin(margin, v.Height)
 	scrollLine := cursor.Line
 	maxScroll := -1
 	if folds != nil {
-		totalLines := buf.LineCount()
-		scrollLine = folds.BufferLineToVisual(cursor.Line, totalLines)
-		maxScroll = max(folds.TotalVisibleLines(totalLines)-v.Height, 0)
+		scrollLine = folds.BufferLineToVisual(cursor.Line, lineCount)
+		maxScroll = max(folds.TotalVisibleLines(lineCount)-v.Height, 0)
 	}
 
 	if scrollLine < v.ScrollY+margin {
@@ -75,19 +83,9 @@ func (v *Viewport) ensureCursorVisibleWithFolds(buf *text.Buffer, cursor text.Po
 		v.ScrollY = 0
 	}
 
-	if cursor.Line < 0 || cursor.Line >= buf.LineCount() {
-		return
-	}
 	if textWidth < 1 {
 		textWidth = 1
 	}
-
-	lineContent := buf.Line(cursor.Line)
-	col := cursor.Col
-	if col > len(lineContent) {
-		col = len(lineContent)
-	}
-	displayCol := displayColumn(lineContent, col, v.tabSize())
 	if displayCol < v.ScrollX {
 		v.ScrollX = displayCol
 	}

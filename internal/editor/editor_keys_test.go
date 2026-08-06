@@ -225,6 +225,22 @@ func TestEditorPageUpDown(t *testing.T) {
 	}
 }
 
+func TestEditorPageMovementNeverLandsInsideUTF8(t *testing.T) {
+	e := newEditor("ab\néx\ncd", 0, 1)
+	e.Viewport.Height = 1
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "pgdown"})
+	if got, want := e.Buffer.Cursor, (text.Position{Line: 1, Col: len("é")}); got != want {
+		t.Fatalf("pgdown cursor = %+v, want %+v", got, want)
+	}
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "pgdown"})
+	e, _ = e.Update(tea.KeyPressMsg{Text: "pgup"})
+	if got, want := e.Buffer.Cursor, (text.Position{Line: 1, Col: len("é")}); got != want {
+		t.Fatalf("pgup cursor = %+v, want %+v", got, want)
+	}
+}
+
 func TestEditorNavigationKeepsCollapsedSelectionAtCursor(t *testing.T) {
 	e := newEditor("abcd", 0, 0)
 

@@ -41,6 +41,109 @@ func TestClampPositionConfinesLineAndColumn(t *testing.T) {
 	}
 }
 
+func TestClampPositionAlignsValidUTF8ButPreservesMalformedBytes(t *testing.T) {
+	buf := NewBufferFromBytes([]byte{'a', '\n', 0xc3, 0xa9, 'x', '\n', 'a', 0x80, 'x'})
+
+	tests := []struct {
+		name string
+		in   Position
+		want Position
+	}{
+		{name: "inside valid multibyte rune", in: Position{Line: 1, Col: 1}, want: Position{Line: 1, Col: 0}},
+		{name: "after valid multibyte rune", in: Position{Line: 1, Col: 2}, want: Position{Line: 1, Col: 2}},
+		{name: "stray continuation byte", in: Position{Line: 2, Col: 1}, want: Position{Line: 2, Col: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buf.ClampPosition(tt.in); got != tt.want {
+				t.Fatalf("ClampPosition(%+v) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVerticalCursorMovementNeverLandsInsideUTF8(t *testing.T) {
+	tests := []struct {
+		name  string
+		start Position
+		dir   Direction
+		want  Position
+	}{
+		{name: "down", start: Position{Line: 0, Col: 1}, dir: DirDown, want: Position{Line: 1, Col: 0}},
+		{name: "up", start: Position{Line: 2, Col: 1}, dir: DirUp, want: Position{Line: 1, Col: 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := NewBufferFromBytes([]byte("ab\néx\ncd"))
+			buf.SetCursor(tt.start)
+			buf.MoveCursor(tt.dir)
+			if got := buf.Cursor; got != tt.want {
+				t.Fatalf("cursor = %+v, want %+v", got, tt.want)
+			}
+			buf.InsertAtCursor([]byte("!"))
+			if got, want := buf.Content(), "ab\n!éx\ncd"; got != want {
+				t.Fatalf("content after safe insertion = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestVerticalMultiCursorMovementNeverLandsInsideUTF8(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("ab\néx\ncd"))
+	buf.SetCursor(Position{Line: 0, Col: 1})
+	buf.Selections.Add(Selection{
+		Anchor: Position{Line: 2, Col: 1},
+		Head:   Position{Line: 2, Col: 1},
+	})
+
+	buf.MoveCursors(DirUp)
+	if got, want := buf.Selections.All(), []Selection{
+		{Anchor: Position{Line: 0, Col: 1}, Head: Position{Line: 0, Col: 1}},
+		{Anchor: Position{Line: 1, Col: 0}, Head: Position{Line: 1, Col: 0}},
+	}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("MoveCursors(DirUp) = %#v, want %#v", got, want)
+	}
+}
+
+func TestVerticalMultiCursorExtensionNeverLandsInsideUTF8(t *testing.T) {
+	buf := NewBufferFromBytes([]byte("ab\néx\ncd"))
+	buf.SetCursor(Position{Line: 0, Col: 1})
+	buf.Selections.Add(Selection{
+		Anchor: Position{Line: 2, Col: 1},
+		Head:   Position{Line: 2, Col: 1},
+	})
+
+	buf.ExtendCursors(DirUp)
+	for i, sel := range buf.Selections.All() {
+		if sel.Head.Line == 1 && sel.Head.Col != 0 {
+			t.Fatalf("selection %d head = %+v, want UTF-8 boundary at col 0", i, sel.Head)
+		}
+	}
+}
+
+func TestAddVerticalCursorNeverLandsInsideUTF8(t *testing.T) {
+	tests := []struct {
+		name  string
+		start Position
+		add   func(*Buffer)
+	}{
+		{name: "below", start: Position{Line: 0, Col: 1}, add: (*Buffer).AddCursorBelow},
+		{name: "above", start: Position{Line: 2, Col: 1}, add: (*Buffer).AddCursorAbove},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := NewBufferFromBytes([]byte("ab\néx\ncd"))
+			buf.SetCursor(tt.start)
+			tt.add(buf)
+			for i, sel := range buf.Selections.All() {
+				if sel.Head.Line == 1 && sel.Head.Col != 0 {
+					t.Fatalf("selection %d = %+v, want UTF-8 boundary at col 0", i, sel)
+				}
+			}
+		})
+	}
+}
+
 func TestClampCursorConfinesSelections(t *testing.T) {
 	buf := NewBufferFromBytes([]byte("abcdef\nghijkl\nmnopqr"))
 	buf.SetSelection(Position{Line: 2, Col: 5}, Position{Line: 2, Col: 6})

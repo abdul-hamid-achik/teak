@@ -29,6 +29,18 @@ func displayColumn(raw []byte, byteCol, tabSize int) int {
 	return advanceDisplayColumn(raw, 0, byteCol, 0, tabSize)
 }
 
+func displayColumnString(raw string, tabSize int) int {
+	displayCol := 0
+	for _, r := range raw {
+		if r == '\t' {
+			displayCol += tabWidth(displayCol, tabSize)
+			continue
+		}
+		displayCol += max(0, runewidth.RuneWidth(r))
+	}
+	return displayCol
+}
+
 // advanceDisplayColumn advances from a known raw byte boundary and terminal
 // display column. It avoids allocating rendered text and is the primitive used
 // by cached wrapped segments.
@@ -109,6 +121,35 @@ func byteColumnAtDisplay(raw []byte, displayCol, tabSize int) int {
 			}
 			size = decoded
 			width = max(0, runewidth.RuneWidth(r))
+		}
+		end := start + width
+		if displayCol < end {
+			if raw[i] == '\t' && displayCol-start > width/2 {
+				return i + 1
+			}
+			return i
+		}
+		if displayCol == end {
+			return i + size
+		}
+		col = end
+		i += size
+	}
+	return len(raw)
+}
+
+func byteColumnAtDisplayString(raw string, displayCol, tabSize int) int {
+	if displayCol <= 0 {
+		return 0
+	}
+	col := 0
+	for i := 0; i < len(raw); {
+		start := col
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		width := max(0, runewidth.RuneWidth(r))
+		if raw[i] == '\t' {
+			size = 1
+			width = tabWidth(col, tabSize)
 		}
 		end := start + width
 		if displayCol < end {

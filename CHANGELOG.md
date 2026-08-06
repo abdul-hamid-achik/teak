@@ -4,6 +4,29 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-05
+
+### Display-Column Cursor Navigation
+
+- Up, Down, Page Up, Page Down, and their selection variants now preserve the
+  terminal display column across UTF-8 runes, wide characters, and tab stops.
+- Consecutive vertical movement retains its preferred column through shorter
+  lines and resets that goal after horizontal movement, edits, tab-size
+  changes, or viewport resizing.
+- Arrow navigation follows visible rows: collapsed folds are skipped and word
+  wrap moves within wrapped rows before crossing logical lines.
+- Arrow and Shift+Arrow now move or extend every active cursor instead of
+  silently collapsing a multicursor set to its primary cursor.
+- Buffer clamping and all vertical cursor creation paths repair positions
+  inside valid multibyte runes while preserving malformed continuation bytes as
+  individually navigable input. Rope and LSP coordinates remain byte offsets.
+- Display-column scans are capped at 64 KiB with a UTF-8-safe byte-column
+  fallback. A regression guard exercises movement into an 8 MiB logical line
+  and rejects document-sized allocation.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.4%; `internal/editor` is 84.2% and
+  `internal/text` is 84.6%.
+
 ## [0.11.0] - 2026-08-05
 
 ### Unicode-Aware Word Editing
