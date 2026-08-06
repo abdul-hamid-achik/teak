@@ -1228,6 +1228,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("%s is limited to %d lines", msg.Operation, msg.MaxLines)
 		return m, nil
 
+	case editor.StructuralEditLimitMsg:
+		m.status = fmt.Sprintf("%s is limited to scanning %d KiB of leading whitespace", msg.Operation, msg.MaxBytes>>10)
+		return m, nil
+
 	case FileSavedMsg:
 		return m.handleFileSaved(msg)
 

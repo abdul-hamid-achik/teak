@@ -4,6 +4,37 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-06
+
+### Structural Multicursor Editing
+
+- Indent, dedent, and toggle-comment now transform every selected range and
+  collapsed cursor instead of silently applying only to the primary selection.
+  Overlapping line spans are coalesced so each logical line is edited once.
+- Independent comment blocks retain independent toggle state: one cursor can
+  comment an ordinary line while another uncomments an already-commented line
+  in the same atomic command. Blank lines are skipped without shifting content
+  across newline boundaries.
+- Structural edits now share one validated transaction, one Undo snapshot, and
+  one document-version increment while rebasing every cursor and selection.
+  No-op dedents leave the buffer clean and do not create Undo history.
+- Shift+Tab removes either one leading tab or up to the configured number of
+  spaces at every cursor. Half-open selections ending at column zero continue
+  to exclude that endpoint line.
+- The editor counts unique lines across the complete selection set before
+  synchronous structural work, closing the path where many collapsed cursors
+  bypassed the 128-line limit.
+- Comment-prefix inspection reads directly from the immutable rope and shares
+  a fixed 64 KiB budget. An 8 MiB indentation is rejected without mutation in
+  about 1.02-1.25 ms with 440 bytes allocated on an Apple M5; indenting the
+  maximum 128 lines takes about 38.2-38.4 microseconds.
+- Regression coverage includes mixed spaces and tabs, independent comment
+  states, blank lines, atomic Undo, cursor affinity, no-op history, aggregate
+  line budgets, and giant-line allocation bounds.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.4%; `internal/editor` is 84.3% and
+  `internal/text` is 83.1%.
+
 ## [0.16.0] - 2026-08-06
 
 ### Bounded Multicursor Auto-Indent

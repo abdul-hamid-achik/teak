@@ -119,6 +119,21 @@ func TestEditorShiftTabNoIndent(t *testing.T) {
 	}
 }
 
+func TestEditorShiftTabDedentsEveryCursor(t *testing.T) {
+	e := newEditor("    alpha\n\tbeta\n  gamma", 0, 5)
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0, Col: 5}, Head: text.Position{Line: 0, Col: 5}},
+		{Anchor: text.Position{Line: 1, Col: 2}, Head: text.Position{Line: 1, Col: 2}},
+		{Anchor: text.Position{Line: 2, Col: 3}, Head: text.Position{Line: 2, Col: 3}},
+	}, 2)
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "shift+tab"})
+
+	if got, want := editorContent(e), "alpha\nbeta\ngamma"; got != want {
+		t.Fatalf("content after Shift+Tab = %q, want %q", got, want)
+	}
+}
+
 func TestEditorCtrlBracketIndent(t *testing.T) {
 	e := newEditor("hello", 0, 0)
 
@@ -127,6 +142,20 @@ func TestEditorCtrlBracketIndent(t *testing.T) {
 	got := editorContent(e)
 	if got != "    hello" {
 		t.Errorf("ctrl+] should indent, got %q", got)
+	}
+}
+
+func TestEditorCtrlBracketIndentsEveryCursor(t *testing.T) {
+	e := newEditor("alpha\nbeta", 0, 0)
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0, Col: 0}, Head: text.Position{Line: 0, Col: 0}},
+		{Anchor: text.Position{Line: 1, Col: 0}, Head: text.Position{Line: 1, Col: 0}},
+	}, 1)
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+]"})
+
+	if got, want := editorContent(e), "    alpha\n    beta"; got != want {
+		t.Fatalf("content after Ctrl+] = %q, want %q", got, want)
 	}
 }
 
@@ -630,6 +659,21 @@ func TestEditorCommentToggleRemove(t *testing.T) {
 	got := editorContent(e)
 	if got != "hello" {
 		t.Errorf("toggle comment should remove comment prefix, got %q", got)
+	}
+}
+
+func TestEditorCommentToggleTransformsEveryIndependentCursor(t *testing.T) {
+	e := newEditor("  alpha\n\t// beta", 0, 2)
+	e.Config.CommentPrefix = "//"
+	e.Buffer.RestoreSelections([]text.Selection{
+		{Anchor: text.Position{Line: 0, Col: 2}, Head: text.Position{Line: 0, Col: 2}},
+		{Anchor: text.Position{Line: 1, Col: 3}, Head: text.Position{Line: 1, Col: 3}},
+	}, 1)
+
+	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+/"})
+
+	if got, want := editorContent(e), "  // alpha\n\tbeta"; got != want {
+		t.Fatalf("content after Ctrl+/ = %q, want %q", got, want)
 	}
 }
 

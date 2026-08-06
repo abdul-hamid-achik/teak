@@ -169,6 +169,50 @@ func TestMultiLineCommandsRejectOversizedSelection(t *testing.T) {
 	}
 }
 
+func TestMultiLineCommandsCountAllCollapsedCursors(t *testing.T) {
+	content := strings.Repeat("    line\n", MaxSynchronousMultilineEditLines+1)
+	ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
+	selections := make([]text.Selection, MaxSynchronousMultilineEditLines+1)
+	for line := range selections {
+		pos := text.Position{Line: line, Col: 4}
+		selections[line] = text.Selection{Anchor: pos, Head: pos}
+	}
+	ed.Buffer.RestoreSelections(selections, len(selections)-1)
+
+	for _, key := range []string{"ctrl+]", "ctrl+/", "shift+tab"} {
+		updated, cmd := ed.Update(tea.KeyPressMsg{Text: key})
+		if cmd == nil {
+			t.Fatalf("%s did not report the aggregate multiline budget", key)
+		}
+		msg, ok := cmd().(MultilineEditLimitMsg)
+		if !ok || msg.MaxLines != MaxSynchronousMultilineEditLines {
+			t.Fatalf("%s limit message = %#v", key, msg)
+		}
+		if updated.Buffer.Rope() != ed.Buffer.Rope() {
+			t.Fatalf("%s changed a selection set above the line budget", key)
+		}
+	}
+}
+
+func TestToggleCommentReportsStructuralPrefixLimit(t *testing.T) {
+	content := strings.Repeat(" ", text.MaxStructuralPrefixBytes+1) + "value"
+	ed := New(text.NewBufferFromBytes([]byte(content)), ui.DefaultTheme(), DefaultConfig())
+	ed.Config.CommentPrefix = "//"
+	ed.Buffer.SetCursor(text.Position{Line: 0, Col: len(content)})
+
+	updated, cmd := ed.Update(tea.KeyPressMsg{Text: "ctrl+/"})
+	if cmd == nil {
+		t.Fatal("over-budget comment toggle did not report its structural prefix limit")
+	}
+	msg, ok := cmd().(StructuralEditLimitMsg)
+	if !ok || msg.Operation != "Toggle comment" || msg.MaxBytes != text.MaxStructuralPrefixBytes {
+		t.Fatalf("limit message = %#v, want toggle-comment prefix limit", msg)
+	}
+	if updated.Buffer.Rope() != ed.Buffer.Rope() || updated.Buffer.Dirty() {
+		t.Fatal("over-budget comment toggle changed the buffer")
+	}
+}
+
 func BenchmarkEditorLargePasteUpdate(b *testing.B) {
 	content := strings.Repeat("p", asyncPasteThresholdBytes+1)
 	ed := New(text.NewBufferFromBytes([]byte("base")), ui.DefaultTheme(), DefaultConfig())

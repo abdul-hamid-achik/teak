@@ -52,8 +52,8 @@ const (
 	// work proportional to the document inside Update.
 	maxVerticalColumnScanBytes = 64 << 10
 	// MaxSynchronousMultilineEditLines bounds line-by-line comment/indent
-	// operations. On Apple M5, the worst-case indent benchmark is ~0.5ms at
-	// this budget; 10,000 lines took ~305ms and allocated ~1.5GiB.
+	// operations. On Apple M5, the worst-case indent benchmark is ~0.04ms at
+	// this budget; larger selections are rejected before per-line rope work.
 	MaxSynchronousMultilineEditLines = 128
 )
 
@@ -86,6 +86,15 @@ type MultilineEditLimitMsg struct {
 	EditorID  uint64
 	Operation string
 	MaxLines  int
+}
+
+// StructuralEditLimitMsg lets the app explain a structural command rejected
+// before mutation because leading-whitespace inspection exceeded its fixed
+// synchronous byte budget.
+type StructuralEditLimitMsg struct {
+	EditorID  uint64
+	Operation string
+	MaxBytes  int
 }
 
 // RetokenizeMsg triggers syntax re-tokenization after edits or scrolls.
@@ -762,15 +771,7 @@ func (e Editor) matchesSelectionSnapshot(selections []text.Selection, primary in
 }
 
 func (e Editor) selectedLineSpan() int {
-	startLine, endLine := e.Buffer.Cursor.Line, e.Buffer.Cursor.Line
-	if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty() {
-		start, end := e.Buffer.Selections.Primary().Ordered()
-		startLine, endLine = start.Line, end.Line
-		if end.Col == 0 && endLine > startLine {
-			endLine--
-		}
-	}
-	return endLine - startLine + 1
+	return e.Buffer.SelectedLineCount()
 }
 
 func (e Editor) multilineEditWithinBudget(operation string) (tea.Cmd, bool) {
@@ -956,15 +957,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.InsertAtCursor(text.IndentString(e.Config.TabSize))
 		edited = true
 	case "shift+tab":
-		if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 && !e.Buffer.Selections.Primary().IsEmpty() {
-			if cmd, allowed := e.multilineEditWithinBudget("Dedent"); !allowed {
-				return e, cmd
-			}
-			e.Buffer.DedentLines(e.Config.TabSize)
-		} else {
-			e.Buffer.DedentLine(e.Config.TabSize)
+		if cmd, allowed := e.multilineEditWithinBudget("Dedent"); !allowed {
+			return e, cmd
 		}
-		edited = true
+		edited = e.Buffer.DedentLines(e.Config.TabSize) == text.StructuralEditApplied
 	case "ctrl+z":
 		e.Buffer.Undo()
 		edited = true
@@ -977,8 +973,14 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		if cmd, allowed := e.multilineEditWithinBudget("Toggle comment"); !allowed {
 			return e, cmd
 		}
-		e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
-		edited = true
+		result := e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
+		if result == text.StructuralEditLimit {
+			editorID := e.id
+			return e, func() tea.Msg {
+				return StructuralEditLimitMsg{EditorID: editorID, Operation: "Toggle comment", MaxBytes: text.MaxStructuralPrefixBytes}
+			}
+		}
+		edited = result == text.StructuralEditApplied
 	case "alt+up":
 		e.Buffer.MoveLineUp()
 		edited = true
@@ -1023,8 +1025,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		if cmd, allowed := e.multilineEditWithinBudget("Indent"); !allowed {
 			return e, cmd
 		}
-		e.Buffer.IndentLines(e.Config.TabSize)
-		edited = true
+		edited = e.Buffer.IndentLines(e.Config.TabSize) == text.StructuralEditApplied
 
 	case "esc", "escape":
 		e.hover.Hide()
@@ -2317,7 +2318,16 @@ func (e Editor) dispatchContextMenuAction(action string) (Editor, tea.Cmd) {
 		if cmd, allowed := e.multilineEditWithinBudget("Toggle comment"); !allowed {
 			return e, cmd
 		}
-		e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
+		result := e.Buffer.ToggleLineComment(e.Config.CommentPrefix)
+		if result == text.StructuralEditLimit {
+			editorID := e.id
+			return e, func() tea.Msg {
+				return StructuralEditLimitMsg{EditorID: editorID, Operation: "Toggle comment", MaxBytes: text.MaxStructuralPrefixBytes}
+			}
+		}
+		if result != text.StructuralEditApplied {
+			return e, nil
+		}
 		e.refreshWordWrapAfterBufferChange()
 		e.EnsureCursorVisible()
 		if e.Highlighter != nil {

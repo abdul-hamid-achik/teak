@@ -104,8 +104,16 @@ func TestLargeEditLimitsSurfaceStatus(t *testing.T) {
 	updatedAny, _ = updated.Update(editor.MultilineEditLimitMsg{
 		EditorID: updated.activeEditor().ID(), Operation: "Indent", MaxLines: 128,
 	})
-	if got := updatedAny.(Model).status; got == "" {
+	updated = updatedAny.(Model)
+	if got := updated.status; got == "" {
 		t.Fatal("multiline limit did not surface a status")
+	}
+
+	updatedAny, _ = updated.Update(editor.StructuralEditLimitMsg{
+		EditorID: updated.activeEditor().ID(), Operation: "Toggle comment", MaxBytes: 64 << 10,
+	})
+	if got := updatedAny.(Model).status; !strings.Contains(got, "64 KiB") {
+		t.Fatalf("structural prefix limit status = %q, want 64 KiB", got)
 	}
 }
 

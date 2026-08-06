@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"sort"
-	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -21,6 +20,22 @@ const MaxBufferFileBytes int64 = 64 << 20
 // Update perform document-sized work. An indentation exceeding its fair share
 // falls back to a plain newline for that selection.
 const maxInteractiveAutoIndentBytes = 64 << 10
+
+// MaxStructuralPrefixBytes bounds synchronous leading-whitespace inspection
+// for structural commands such as ToggleLineComment. The editor additionally
+// caps the number of targeted lines; together the limits keep Update work
+// independent of pathological logical-line length and total document size.
+const MaxStructuralPrefixBytes = 64 << 10
+
+// StructuralEditResult describes whether a synchronous structural command
+// changed text, was a valid no-op, or refused work above its prefix budget.
+type StructuralEditResult uint8
+
+const (
+	StructuralEditNoChange StructuralEditResult = iota
+	StructuralEditApplied
+	StructuralEditLimit
+)
 
 var (
 	ErrBufferFileTooLarge   = errors.New("buffer file exceeds the 64 MiB editor limit")
@@ -512,26 +527,16 @@ func (b *Buffer) leadingWhitespaceLen(line, limit int, scratch []byte) int {
 	return indentLen
 }
 
-// DedentLine removes up to tabSize leading spaces from the current line, adjusting the cursor.
-func (b *Buffer) DedentLine(tabSize int) {
-	lineContent := b.rope.Line(b.Cursor.Line)
-	n := Dedent(lineContent, tabSize)
+// DedentLine removes one leading tab or up to tabSize leading spaces from the
+// current line, adjusting the cursor.
+func (b *Buffer) DedentLine(tabSize int) StructuralEditResult {
+	line := b.Cursor.Line
+	b.SetCursor(b.ClampPosition(b.Cursor))
+	n := b.dedentBytesAtLine(line, tabSize)
 	if n == 0 {
-		return
+		return StructuralEditNoChange
 	}
-	b.undo.Save(b.rope, b.Cursor, false)
-	lineStart := b.rope.LineStart(b.Cursor.Line)
-	b.rope = b.rope.Delete(lineStart, n)
-	b.dirty = true
-	b.version++
-	cursor := b.Cursor
-	cursor.Col = max(0, cursor.Col-n)
-	b.SetCursor(cursor)
-	b.lastChange = &EditChange{
-		StartLine: b.Cursor.Line, StartCol: 0,
-		EndLine: b.Cursor.Line, EndCol: n,
-		Text: "",
-	}
+	return b.applyStructuralLineEdits([]structuralLineEdit{{line: line, delete: n}})
 }
 
 // Backspace deletes the character before the cursor.
@@ -1919,127 +1924,310 @@ func (b *Buffer) SelectLine() {
 	}
 }
 
-// lineColDelta describes a column-level edit on one line: delta bytes were
-// inserted (positive) or deleted (negative) starting at col.
-type lineColDelta struct {
-	col   int
-	delta int
+type selectedLineRange struct {
+	start int
+	end   int // inclusive
 }
 
-// rebasePositionsForLineEdits shifts the cursor and every selection through
-// column-level edits applied to lines startLine..startLine+len(deltas)-1.
-// Positions at or before the edit column keep their place, positions inside a
-// deleted range collapse onto the edit column, and everything else is clamped
-// to the new line length. Structural line edits used to skip this
-// reconciliation, leaving the cursor past the end of a shortened line or
-// pointing at shifted text.
-func (b *Buffer) rebasePositionsForLineEdits(startLine int, deltas []lineColDelta) {
-	adjust := func(pos Position) Position {
-		idx := pos.Line - startLine
-		if idx < 0 || idx >= len(deltas) {
-			return pos
-		}
-		edit := deltas[idx]
-		if edit.delta == 0 || pos.Col <= edit.col {
-			return pos
-		}
-		col := pos.Col + edit.delta
-		if col < edit.col {
-			col = edit.col
-		}
-		if lineLen := len(b.rope.Line(pos.Line)); col > lineLen {
-			col = lineLen
-		}
-		return Position{Line: pos.Line, Col: col}
+// selectedLineRanges projects normalized character selections onto logical
+// line blocks. Half-open selection endpoints at column zero do not include the
+// endpoint line. Overlapping blocks merge so no structural command can edit a
+// line twice; callers choose whether adjacent blocks retain independent toggle
+// semantics or merge into one union.
+func (b *Buffer) selectedLineRanges(mergeAdjacent bool) []selectedLineRange {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		b.Selections = NewSelections(b.ClampPosition(b.Cursor))
 	}
-	b.Cursor = adjust(b.Cursor)
-	if b.Selections == nil {
-		return
-	}
-	rebased := make([]Selection, len(b.Selections.selections))
-	for i, sel := range b.Selections.selections {
-		rebased[i] = Selection{Anchor: adjust(sel.Anchor), Head: adjust(sel.Head)}
-	}
-	b.Selections = &Selections{selections: rebased, primary: b.Selections.primary}
-}
-
-// ToggleLineComment toggles a line comment prefix on the current line or selection range.
-func (b *Buffer) ToggleLineComment(prefix string) {
-	if prefix == "" {
-		return
-	}
-	startLine := b.Cursor.Line
-	endLine := b.Cursor.Line
-	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
-		s, e := b.Selections.Primary().Ordered()
-		startLine = s.Line
-		endLine = e.Line
-		if e.Col == 0 && endLine > startLine {
+	b.Selections.Normalize()
+	lastLine := max(0, b.rope.LineCount()-1)
+	ranges := make([]selectedLineRange, 0, b.Selections.Count())
+	for _, selection := range b.Selections.All() {
+		start, end := selection.Ordered()
+		startLine := min(lastLine, max(0, start.Line))
+		endLine := min(lastLine, max(startLine, end.Line))
+		if !selection.IsEmpty() && end.Col == 0 && endLine > startLine {
 			endLine--
 		}
+		ranges = append(ranges, selectedLineRange{start: startLine, end: endLine})
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start != ranges[j].start {
+			return ranges[i].start < ranges[j].start
+		}
+		return ranges[i].end < ranges[j].end
+	})
+	merged := ranges[:0]
+	for _, selected := range ranges {
+		if len(merged) == 0 {
+			merged = append(merged, selected)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		joins := selected.start <= last.end
+		if mergeAdjacent {
+			joins = selected.start <= last.end+1
+		}
+		if joins {
+			last.end = max(last.end, selected.end)
+			continue
+		}
+		merged = append(merged, selected)
+	}
+	return merged
+}
+
+// SelectedLineCount returns the number of unique logical lines targeted by
+// the current selection set. The editor uses it before synchronous structural
+// commands so many collapsed cursors cannot bypass the multiline budget.
+func (b *Buffer) SelectedLineCount() int {
+	total := 0
+	for _, selected := range b.selectedLineRanges(true) {
+		total += selected.end - selected.start + 1
+	}
+	return total
+}
+
+type structuralLineEdit struct {
+	line       int
+	col        int
+	delete     int
+	insert     []byte
+	shiftAtCol bool
+}
+
+// applyStructuralLineEdits validates one edit per logical line, applies the
+// immutable-rope mutations from bottom to top, then rebases every cursor and
+// selection through the per-line column delta. It records exactly one Undo
+// snapshot, document version, and full-sync LSP change.
+func (b *Buffer) applyStructuralLineEdits(edits []structuralLineEdit) StructuralEditResult {
+	if len(edits) == 0 {
+		return StructuralEditNoChange
+	}
+	valid := edits[:0]
+	for _, edit := range edits {
+		if edit.delete == 0 && len(edit.insert) == 0 {
+			continue
+		}
+		if edit.line < 0 || edit.line >= b.rope.LineCount() || edit.col < 0 || edit.delete < 0 ||
+			bytes.IndexByte(edit.insert, '\n') >= 0 {
+			return StructuralEditNoChange
+		}
+		lineLen := b.rope.LineLen(edit.line)
+		if edit.col > lineLen || edit.delete > lineLen-edit.col {
+			return StructuralEditNoChange
+		}
+		valid = append(valid, edit)
+	}
+	if len(valid) == 0 {
+		return StructuralEditNoChange
+	}
+	edits = valid
+	sort.Slice(edits, func(i, j int) bool {
+		if edits[i].line != edits[j].line {
+			return edits[i].line < edits[j].line
+		}
+		return edits[i].col < edits[j].col
+	})
+	for i := 1; i < len(edits); i++ {
+		if edits[i-1].line == edits[i].line {
+			return StructuralEditNoChange
+		}
 	}
 
-	// Check if all lines are commented
-	allCommented := true
-	commentPrefix := prefix + " "
-	for line := startLine; line <= endLine; line++ {
-		content := b.rope.Line(line)
-		trimmed := trimLeadingWhitespace(content)
-		if len(trimmed) == 0 {
-			continue // skip empty lines
-		}
-		if !strings.HasPrefix(string(trimmed), commentPrefix) && !strings.HasPrefix(string(trimmed), prefix) {
-			allCommented = false
-			break
-		}
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		b.Selections = NewSelections(b.ClampPosition(b.Cursor))
 	}
-
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 	b.undo.Save(b.rope, b.Cursor, false)
-	deltas := make([]lineColDelta, endLine-startLine+1)
-
-	if allCommented {
-		// Uncomment: remove prefix in reverse order
-		for line := endLine; line >= startLine; line-- {
-			content := b.rope.Line(line)
-			idx := strings.Index(string(content), prefix)
-			if idx < 0 {
-				continue
-			}
-			removeLen := len(prefix)
-			lineStart := b.rope.LineStart(line)
-			// Also remove trailing space after prefix
-			if idx+removeLen < len(content) && content[idx+removeLen] == ' ' {
-				removeLen++
-			}
-			b.rope = b.rope.Delete(lineStart+idx, removeLen)
-			deltas[line-startLine] = lineColDelta{col: idx, delta: -removeLen}
+	for i := len(edits) - 1; i >= 0; i-- {
+		edit := edits[i]
+		offset := b.rope.LineStart(edit.line) + edit.col
+		if edit.delete > 0 {
+			b.rope = b.rope.Delete(offset, edit.delete)
 		}
-	} else {
-		// Comment: find min indent, insert prefix at that column in reverse order
-		minIndent := -1
-		for line := startLine; line <= endLine; line++ {
-			content := b.rope.Line(line)
-			if len(trimLeadingWhitespace(content)) == 0 {
-				continue
-			}
-			indent := len(content) - len(trimLeadingWhitespace(content))
-			if minIndent < 0 || indent < minIndent {
-				minIndent = indent
-			}
-		}
-		if minIndent < 0 {
-			minIndent = 0
-		}
-		for line := endLine; line >= startLine; line-- {
-			lineStart := b.rope.LineStart(line)
-			b.rope = b.rope.Insert(lineStart+minIndent, []byte(commentPrefix))
-			deltas[line-startLine] = lineColDelta{col: minIndent, delta: len(commentPrefix)}
+		if len(edit.insert) > 0 {
+			b.rope = b.rope.Insert(offset, edit.insert)
 		}
 	}
-	b.rebasePositionsForLineEdits(startLine, deltas)
+
+	adjust := func(pos Position) Position {
+		idx := sort.Search(len(edits), func(i int) bool { return edits[i].line >= pos.Line })
+		if idx >= len(edits) || edits[idx].line != pos.Line {
+			return pos
+		}
+		edit := edits[idx]
+		delta := len(edit.insert) - edit.delete
+		if delta == 0 || pos.Col < edit.col || (pos.Col == edit.col && !edit.shiftAtCol) {
+			return pos
+		}
+		col := max(edit.col, pos.Col+delta)
+		col = min(col, b.rope.LineLen(pos.Line))
+		return Position{Line: pos.Line, Col: col}
+	}
+	primary := b.Selections.PrimaryIndex()
+	rebased := make([]Selection, len(b.Selections.selections))
+	for i, selection := range b.Selections.selections {
+		rebased[i] = Selection{Anchor: adjust(selection.Anchor), Head: adjust(selection.Head)}
+	}
+	b.Selections = &Selections{selections: rebased, primary: primary, dirty: true}
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 	b.dirty = true
 	b.version++
-	b.lastChange = nil // multi-line structural edit; use full-sync fallback
+	b.lastChange = nil
+	return StructuralEditApplied
+}
+
+func (b *Buffer) dedentBytesAtLine(line, tabSize int) int {
+	if tabSize <= 0 || line < 0 || line >= b.rope.LineCount() || b.rope.LineLen(line) == 0 {
+		return 0
+	}
+	start := b.rope.LineStart(line)
+	first, ok := b.rope.ByteAtSafe(start)
+	if !ok {
+		return 0
+	}
+	if first == '\t' {
+		return 1
+	}
+	n := 0
+	lineLen := b.rope.LineLen(line)
+	for n < tabSize && n < lineLen {
+		current, exists := b.rope.ByteAtSafe(start + n)
+		if !exists || current != ' ' {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+type commentLineInfo struct {
+	line      int
+	indent    int
+	empty     bool
+	commented bool
+	remove    int
+}
+
+// inspectCommentLine finds indentation and an optional comment marker without
+// materializing the logical line. budget is shared by the complete command;
+// returning false rejects the transaction before Undo or text can change.
+func (b *Buffer) inspectCommentLine(line int, prefix []byte, budget *int) (commentLineInfo, bool) {
+	info := commentLineInfo{line: line}
+	lineLen := b.rope.LineLen(line)
+	lineStart := b.rope.LineStart(line)
+	for info.indent < lineLen {
+		if *budget <= 0 {
+			return commentLineInfo{}, false
+		}
+		current, ok := b.rope.ByteAtSafe(lineStart + info.indent)
+		if !ok {
+			return commentLineInfo{}, false
+		}
+		*budget = *budget - 1
+		if current != ' ' && current != '\t' {
+			break
+		}
+		info.indent++
+	}
+	if info.indent == lineLen {
+		info.empty = true
+		return info, true
+	}
+	if len(prefix) > lineLen-info.indent {
+		return info, true
+	}
+	for i, want := range prefix {
+		if *budget <= 0 {
+			return commentLineInfo{}, false
+		}
+		got, ok := b.rope.ByteAtSafe(lineStart + info.indent + i)
+		if !ok {
+			return commentLineInfo{}, false
+		}
+		*budget = *budget - 1
+		if got != want {
+			return info, true
+		}
+	}
+	info.commented = true
+	info.remove = len(prefix)
+	spaceOffset := info.indent + len(prefix)
+	if spaceOffset < lineLen {
+		if *budget <= 0 {
+			return commentLineInfo{}, false
+		}
+		next, ok := b.rope.ByteAtSafe(lineStart + spaceOffset)
+		if !ok {
+			return commentLineInfo{}, false
+		}
+		*budget = *budget - 1
+		if next == ' ' {
+			info.remove++
+		}
+	}
+	return info, true
+}
+
+// ToggleLineComment toggles every independent selection block. Overlapping
+// line spans merge to prevent double edits, while adjacent collapsed cursors
+// remain independent so one can comment as another uncomments. Blank lines are
+// skipped, and the entire command is rejected if prefix inspection exceeds the
+// fixed synchronous byte budget.
+func (b *Buffer) ToggleLineComment(prefix string) StructuralEditResult {
+	if prefix == "" {
+		return StructuralEditNoChange
+	}
+	if len(prefix) > MaxStructuralPrefixBytes {
+		return StructuralEditLimit
+	}
+	blocks := b.selectedLineRanges(false)
+	budget := MaxStructuralPrefixBytes
+	prefixBytes := []byte(prefix)
+	commentPrefix := []byte(prefix + " ")
+	edits := make([]structuralLineEdit, 0, b.SelectedLineCount())
+	for _, block := range blocks {
+		infos := make([]commentLineInfo, 0, block.end-block.start+1)
+		allCommented := true
+		nonEmpty := 0
+		minIndent := -1
+		for line := block.start; line <= block.end; line++ {
+			info, ok := b.inspectCommentLine(line, prefixBytes, &budget)
+			if !ok {
+				return StructuralEditLimit
+			}
+			infos = append(infos, info)
+			if info.empty {
+				continue
+			}
+			nonEmpty++
+			allCommented = allCommented && info.commented
+			if minIndent < 0 || info.indent < minIndent {
+				minIndent = info.indent
+			}
+		}
+		if nonEmpty == 0 {
+			continue
+		}
+		for _, info := range infos {
+			if info.empty {
+				continue
+			}
+			if allCommented {
+				edits = append(edits, structuralLineEdit{line: info.line, col: info.indent, delete: info.remove})
+				continue
+			}
+			edits = append(edits, structuralLineEdit{
+				line:       info.line,
+				col:        minIndent,
+				insert:     commentPrefix,
+				shiftAtCol: true,
+			})
+		}
+	}
+	return b.applyStructuralLineEdits(edits)
 }
 
 // MoveLineUp swaps the current line with the line above.
@@ -2168,61 +2356,31 @@ func (b *Buffer) DeleteLine() {
 	b.lastChange = nil // complex operation, fall back to full sync
 }
 
-// IndentLines indents the current line or all lines in selection.
-func (b *Buffer) IndentLines(tabSize int) {
-	startLine := b.Cursor.Line
-	endLine := b.Cursor.Line
-	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
-		s, e := b.Selections.Primary().Ordered()
-		startLine = s.Line
-		endLine = e.Line
-		if e.Col == 0 && endLine > startLine {
-			endLine--
+// IndentLines indents every unique logical line targeted by the selections.
+func (b *Buffer) IndentLines(tabSize int) StructuralEditResult {
+	indent := IndentString(tabSize)
+	if len(indent) == 0 {
+		return StructuralEditNoChange
+	}
+	edits := make([]structuralLineEdit, 0, b.SelectedLineCount())
+	for _, selected := range b.selectedLineRanges(true) {
+		for line := selected.start; line <= selected.end; line++ {
+			edits = append(edits, structuralLineEdit{line: line, insert: indent})
 		}
 	}
-
-	b.undo.Save(b.rope, b.Cursor, false)
-	indent := IndentString(tabSize)
-	for line := endLine; line >= startLine; line-- {
-		lineStart := b.rope.LineStart(line)
-		b.rope = b.rope.Insert(lineStart, indent)
-	}
-	deltas := make([]lineColDelta, endLine-startLine+1)
-	for i := range deltas {
-		deltas[i] = lineColDelta{col: 0, delta: len(indent)}
-	}
-	b.rebasePositionsForLineEdits(startLine, deltas)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // multi-line indent: fall back to full sync
+	return b.applyStructuralLineEdits(edits)
 }
 
-// DedentLines removes one level of indentation from the current line or selection.
-func (b *Buffer) DedentLines(tabSize int) {
-	startLine := b.Cursor.Line
-	endLine := b.Cursor.Line
-	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
-		s, e := b.Selections.Primary().Ordered()
-		startLine = s.Line
-		endLine = e.Line
-		if e.Col == 0 && endLine > startLine {
-			endLine--
+// DedentLines removes one indentation level from every unique logical line
+// targeted by the selections.
+func (b *Buffer) DedentLines(tabSize int) StructuralEditResult {
+	edits := make([]structuralLineEdit, 0, b.SelectedLineCount())
+	for _, selected := range b.selectedLineRanges(true) {
+		for line := selected.start; line <= selected.end; line++ {
+			if n := b.dedentBytesAtLine(line, tabSize); n > 0 {
+				edits = append(edits, structuralLineEdit{line: line, delete: n})
+			}
 		}
 	}
-
-	b.undo.Save(b.rope, b.Cursor, false)
-	deltas := make([]lineColDelta, endLine-startLine+1)
-	for line := endLine; line >= startLine; line-- {
-		content := b.rope.Line(line)
-		n := Dedent(content, tabSize)
-		if n > 0 {
-			lineStart := b.rope.LineStart(line)
-			b.rope = b.rope.Delete(lineStart, n)
-			deltas[line-startLine] = lineColDelta{col: 0, delta: -n}
-		}
-	}
-	b.rebasePositionsForLineEdits(startLine, deltas)
-	b.dirty = true
-	b.version++
-	b.lastChange = nil // multi-line dedent: fall back to full sync
+	return b.applyStructuralLineEdits(edits)
 }
