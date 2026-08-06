@@ -79,8 +79,8 @@ func TestWorkspaceEditPreparationAllocationBudget(t *testing.T) {
 		}
 		workspaceEditPreparationSink = preparation
 	})
-	if allocs > 30_000 {
-		t.Fatalf("workspace edit preparation allocations = %.0f, want <= 30000", allocs)
+	if allocs > 1_000 {
+		t.Fatalf("workspace edit preparation allocations = %.0f, want <= 1000", allocs)
 	}
 }
 

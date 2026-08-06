@@ -642,6 +642,105 @@ func (r *Rope) ByteAtSafe(offset int) (byte, bool) {
 	return r.ByteAt(offset), true
 }
 
+// ValidUTF8Range reports whether bytes [start, end) form valid UTF-8 without
+// materializing the range. Validation streams across leaves, so it also works
+// when a multi-byte sequence spans a leaf boundary.
+func (r *Rope) ValidUTF8Range(start, end int) bool {
+	if r == nil {
+		return start == 0 && end == 0
+	}
+	if start < 0 || end < start || end > r.len {
+		return false
+	}
+	if start == end {
+		return true
+	}
+	var validator utf8RangeValidator
+	return r.validUTF8Range(start, end, &validator) && validator.pendingLen == 0
+}
+
+type utf8RangeValidator struct {
+	pending    [utf8.UTFMax]byte
+	pendingLen int
+}
+
+func (r *Rope) validUTF8Range(start, end int, validator *utf8RangeValidator) bool {
+	if start >= end {
+		return true
+	}
+	if r.isLeaf() {
+		return validator.consume(r.value[start:end])
+	}
+	leftLen := r.left.len
+	if start < leftLen && !r.left.validUTF8Range(start, min(end, leftLen), validator) {
+		return false
+	}
+	if end > leftLen {
+		return r.right.validUTF8Range(max(0, start-leftLen), end-leftLen, validator)
+	}
+	return true
+}
+
+func (v *utf8RangeValidator) consume(data []byte) bool {
+	for len(data) > 0 {
+		if v.pendingLen > 0 {
+			sequenceLen := utf8SequenceLen(v.pending[0])
+			remaining := sequenceLen - v.pendingLen
+			take := min(remaining, len(data))
+			copy(v.pending[v.pendingLen:], data[:take])
+			v.pendingLen += take
+			data = data[take:]
+			if v.pendingLen < sequenceLen {
+				return true
+			}
+			if !utf8.Valid(v.pending[:sequenceLen]) {
+				return false
+			}
+			v.pendingLen = 0
+			continue
+		}
+
+		ascii := 0
+		for ascii < len(data) && data[ascii] < utf8.RuneSelf {
+			ascii++
+		}
+		data = data[ascii:]
+		if len(data) == 0 {
+			return true
+		}
+
+		sequenceLen := utf8SequenceLen(data[0])
+		if sequenceLen == 0 {
+			return false
+		}
+		if len(data) < sequenceLen {
+			copy(v.pending[:], data)
+			v.pendingLen = len(data)
+			return true
+		}
+		if !utf8.Valid(data[:sequenceLen]) {
+			return false
+		}
+		data = data[sequenceLen:]
+	}
+	return true
+}
+
+func utf8SequenceLen(first byte) int {
+	switch {
+	case first < utf8.RuneSelf:
+		return 1
+	case first >= 0xc2 && first <= 0xdf:
+		return 2
+	case first >= 0xe0 && first <= 0xef:
+		return 3
+	case first >= 0xf0 && first <= 0xf4:
+		return 4
+	default:
+		return 0
+	}
+}
+
 // RuneAt decodes the UTF-8 rune beginning at offset without materializing its
 // containing line. At most four bytes are read from the persistent tree.
 func (r *Rope) RuneAt(offset int) (rune, int, bool) {

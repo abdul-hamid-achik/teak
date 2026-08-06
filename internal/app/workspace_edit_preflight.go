@@ -57,6 +57,12 @@ func prepareTextEditRanges(ctx context.Context, rope *text.Rope, edits []lsp.Tex
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	lineCacheCapacity := min(len(edits), maxWorkspaceTextEdits)
+	validator := strictTextEditPositionValidator{
+		rope:      rope,
+		lineCount: rope.LineCount(),
+		lines:     make(map[int]strictTextEditLine, lineCacheCapacity),
+	}
 	ranges := make([]preparedTextEdit, 0, len(edits))
 	for i, edit := range edits {
 		if i&255 == 0 {
@@ -64,11 +70,11 @@ func prepareTextEditRanges(ctx context.Context, rope *text.Rope, edits []lsp.Tex
 				return nil, err
 			}
 		}
-		start, err := strictTextEditPositionOffset(rope, edit.StartLine, edit.StartCol)
+		start, err := validator.offset(edit.StartLine, edit.StartCol)
 		if err != nil {
 			return nil, fmt.Errorf("invalid edit start: %w", err)
 		}
-		end, err := strictTextEditPositionOffset(rope, edit.EndLine, edit.EndCol)
+		end, err := validator.offset(edit.EndLine, edit.EndCol)
 		if err != nil {
 			return nil, fmt.Errorf("invalid edit end: %w", err)
 		}
@@ -96,21 +102,47 @@ func prepareTextEditRanges(ctx context.Context, rope *text.Rope, edits []lsp.Tex
 	return ranges, nil
 }
 
-func strictTextEditPositionOffset(rope *text.Rope, line, col int) (int, error) {
-	if line < 0 || line >= rope.LineCount() {
+type strictTextEditLine struct {
+	start     int
+	length    int
+	validUTF8 bool
+}
+
+type strictTextEditPositionValidator struct {
+	rope      *text.Rope
+	lineCount int
+	lines     map[int]strictTextEditLine
+}
+
+func (v *strictTextEditPositionValidator) offset(line, col int) (int, error) {
+	if line < 0 || line >= v.lineCount {
 		return 0, fmt.Errorf("line %d is outside document", line)
 	}
-	lineBytes := rope.Line(line)
-	if col < 0 || col > len(lineBytes) {
+	lineInfo, ok := v.lines[line]
+	if !ok {
+		lineInfo.start = v.rope.LineStart(line)
+		lineEnd := v.rope.Len()
+		if line < v.lineCount-1 {
+			lineEnd = v.rope.LineStart(line+1) - 1
+		}
+		lineInfo.length = lineEnd - lineInfo.start
+		lineInfo.validUTF8 = v.rope.ValidUTF8Range(lineInfo.start, lineEnd)
+		v.lines[line] = lineInfo
+	}
+	if col < 0 || col > lineInfo.length {
 		return 0, fmt.Errorf("column %d is outside line %d", col, line)
 	}
-	if !utf8.Valid(lineBytes) {
+	if !lineInfo.validUTF8 {
 		return 0, fmt.Errorf("line %d is not valid UTF-8", line)
 	}
-	if col < len(lineBytes) && !utf8.RuneStart(lineBytes[col]) {
-		return 0, fmt.Errorf("column %d splits a UTF-8 sequence", col)
+	offset := lineInfo.start + col
+	if col < lineInfo.length {
+		value, _ := v.rope.ByteAtSafe(offset)
+		if !utf8.RuneStart(value) {
+			return 0, fmt.Errorf("column %d splits a UTF-8 sequence", col)
+		}
 	}
-	return rope.LineStart(line) + col, nil
+	return offset, nil
 }
 
 func preflightWorkspaceFileOperationAtRoot(root *os.Root, rootDir string, op lsp.WorkspaceFileOperation) error {

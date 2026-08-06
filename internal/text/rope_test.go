@@ -250,6 +250,80 @@ func TestPositionToOffsetUncachedDoesNotScanWholeDocument(t *testing.T) {
 	}
 }
 
+func TestValidUTF8RangeStreamsAcrossLeaves(t *testing.T) {
+	splitRune := join(
+		newLeafOwned([]byte{0xf0, 0x9f}),
+		newLeafOwned([]byte{0x99, 0x82}),
+	)
+	invalid := join(
+		newLeafOwned([]byte{0xc0}),
+		newLeafOwned([]byte{0xaf}),
+	)
+	tests := []struct {
+		name       string
+		rope       *Rope
+		start, end int
+		want       bool
+	}{
+		{name: "valid rune split across leaves", rope: splitRune, start: 0, end: 4, want: true},
+		{name: "incomplete prefix", rope: splitRune, start: 0, end: 2, want: false},
+		{name: "continuation suffix", rope: splitRune, start: 2, end: 4, want: false},
+		{name: "invalid overlong sequence", rope: invalid, start: 0, end: 2, want: false},
+		{name: "empty range", rope: splitRune, start: 2, end: 2, want: true},
+		{name: "invalid negative bound", rope: splitRune, start: -1, end: 2, want: false},
+		{name: "invalid reversed bound", rope: splitRune, start: 3, end: 2, want: false},
+		{name: "invalid high bound", rope: splitRune, start: 0, end: 5, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rope.ValidUTF8Range(tt.start, tt.end); got != tt.want {
+				t.Fatalf("ValidUTF8Range(%d, %d) = %v, want %v", tt.start, tt.end, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidUTF8RangeMatchesStandardLibrary(t *testing.T) {
+	parts := [][]byte{
+		{'a', 0xf0},
+		{0x9f},
+		{0x99, 0x82, 'b', 0xc0},
+		{0xaf, 0xe2},
+		{0x82, 0xac, 'c'},
+	}
+	data := make([]byte, 0)
+	var rope *Rope
+	for _, part := range parts {
+		data = append(data, part...)
+		leaf := newLeafOwned(part)
+		if rope == nil {
+			rope = leaf
+		} else {
+			rope = join(rope, leaf)
+		}
+	}
+	for start := 0; start <= len(data); start++ {
+		for end := start; end <= len(data); end++ {
+			want := utf8.Valid(data[start:end])
+			if got := rope.ValidUTF8Range(start, end); got != want {
+				t.Fatalf("ValidUTF8Range(%d, %d) = %v, want %v for %x", start, end, got, want, data[start:end])
+			}
+		}
+	}
+}
+
+func TestValidUTF8RangeDoesNotAllocate(t *testing.T) {
+	rope := NewFromString(strings.Repeat("ab🙂cd", 1_000))
+	if !rope.ValidUTF8Range(0, rope.Len()) {
+		t.Fatal("ValidUTF8Range rejected valid content")
+	}
+	if allocs := testing.AllocsPerRun(50, func() {
+		rope.ValidUTF8Range(0, rope.Len())
+	}); allocs != 0 {
+		t.Fatalf("ValidUTF8Range allocated %.0f times per call, want 0", allocs)
+	}
+}
+
 func TestOffsetToPosition(t *testing.T) {
 	text := "abc\ndef\nghi"
 	r := NewFromString(text)

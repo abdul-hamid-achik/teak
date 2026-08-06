@@ -1,12 +1,39 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"teak/internal/config"
 	"teak/internal/lsp"
+	"teak/internal/text"
 )
+
+func TestPrepareTextEditRangesRejectsInvalidUTF8Lines(t *testing.T) {
+	rope := text.New([]byte{'a', 0xff, 'b'})
+	tests := []struct {
+		name string
+		col  int
+		want string
+	}{
+		{name: "invalid line", col: 0, want: "line 0 is not valid UTF-8"},
+		{name: "bounds checked first", col: 4, want: "column 4 is outside line 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := prepareTextEditRanges(context.Background(), rope, []lsp.TextEdit{{
+				StartLine: 0,
+				StartCol:  tt.col,
+				EndLine:   0,
+				EndCol:    tt.col,
+			}})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("prepareTextEditRanges() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
 
 func TestFormatResultRejectsInvalidEditsWithoutMutatingBuffer(t *testing.T) {
 	tooMany := make([]lsp.TextEdit, maxWorkspaceTextEdits+1)

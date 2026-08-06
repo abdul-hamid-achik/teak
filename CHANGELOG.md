@@ -4,6 +4,26 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.31] - 2026-08-05
+
+### Streaming UTF-8 Edit Validation
+
+- LSP formatting and workspace-edit validation now checks UTF-8 directly
+  across immutable rope leaves instead of materializing every referenced line.
+  Multi-byte sequences split across leaves retain standard-library validity
+  semantics without introducing a document-sized line-offset table.
+- A request-scoped cache reuses each touched line's start, length, and validity
+  for both endpoints while preserving line, column, malformed UTF-8, and rune
+  boundary error ordering.
+- Exhaustive subrange comparisons against `utf8.Valid`, split-leaf malformed
+  input tests, and zero-allocation rope checks cover the streaming path.
+  Preparation allocation budgets are tightened to 500 for formatting and
+  1,000 for complete workspace edits with 1,024 replacements.
+- With 4,096 one-byte edits on an Apple M5, formatting preparation now takes
+  about 0.77-0.79 ms, 478 KB, and 64 allocations; workspace preparation takes
+  about 0.77-0.78 ms, 479 KB, and 66 allocations. The previous v0.10.30 path
+  took about 2.7-3.5 ms and 24.6 thousand allocations.
+
 ## [0.10.30] - 2026-08-05
 
 ### Linear LSP Text Edit Preparation

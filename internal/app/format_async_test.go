@@ -406,8 +406,8 @@ func TestPrepareFormattingAllocationBudget(t *testing.T) {
 		}
 		benchmarkFormatPreparedSink = prepared
 	})
-	if allocs > 20_000 {
-		t.Fatalf("format preparation allocations = %.0f, want <= 20000", allocs)
+	if allocs > 500 {
+		t.Fatalf("format preparation allocations = %.0f, want <= 500", allocs)
 	}
 }
 
