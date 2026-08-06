@@ -4,6 +4,30 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-05
+
+### Complete Multicursor Commands
+
+- Ctrl+Left/Right and Home/End, including their Shift selection variants, plus
+  Page Up/Down now transform every active cursor instead of collapsing the set
+  to its primary cursor.
+- Ctrl+Backspace and Ctrl+Delete apply selected and word-sized deletion ranges
+  across all cursors as one undoable edit. Overlapping ranges are merged before
+  the immutable rope is changed, and every surviving cursor is rebased through
+  the resulting document.
+- Mixed selections retain collapsed cursors while deleting non-empty ranges;
+  cursors that converge after an edit are normalized without corrupting the
+  primary cursor.
+- Word navigation no longer materializes an entire logical line in the UI
+  update path. Each command has a shared 64 KiB scan budget, divided among
+  active cursors, so even thousand-cursor edits stay bounded.
+- Regression coverage includes real editor key routing, mixed and overlapping
+  deletion ranges, undo/redo, cursor rebasing between separate ranges, and an
+  8 MiB single-token allocation guard.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.3%; `internal/editor` is 84.2% and
+  `internal/text` is 82.7%.
+
 ## [0.12.0] - 2026-08-05
 
 ### Display-Column Cursor Navigation

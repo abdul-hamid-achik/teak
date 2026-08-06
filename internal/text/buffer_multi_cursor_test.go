@@ -238,8 +238,8 @@ func TestBufferDeleteSelectionsMultipleRebasesPrimaryCursor(t *testing.T) {
 	if b.Content() != "o\nd\nfoo" {
 		t.Fatalf("got %q, want %q", b.Content(), "o\nd\nfoo")
 	}
-	if b.Selections.Count() != 1 {
-		t.Fatalf("Count() = %d, want 1", b.Selections.Count())
+	if b.Selections.Count() != 2 {
+		t.Fatalf("Count() = %d, want 2", b.Selections.Count())
 	}
 	if got := b.Selections.Primary().Head; got != (Position{1, 0}) {
 		t.Errorf("primary cursor = %v, want {1 0}", got)
@@ -249,6 +249,173 @@ func TestBufferDeleteSelectionsMultipleRebasesPrimaryCursor(t *testing.T) {
 	}
 	if b.LastChange() != nil {
 		t.Errorf("LastChange() = %#v, want nil for multi-selection delete", b.LastChange())
+	}
+}
+
+func TestBufferDeleteSelectionPreservesCollapsedCursors(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abc\ndef"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 1}, Head: Position{Line: 0, Col: 2}},
+		{Anchor: Position{Line: 1, Col: 2}, Head: Position{Line: 1, Col: 2}},
+	}, 1)
+
+	b.DeleteSelection()
+
+	if got, want := b.Content(), "ac\ndef"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	want := []Selection{
+		{Anchor: Position{Line: 0, Col: 1}, Head: Position{Line: 0, Col: 1}},
+		{Anchor: Position{Line: 1, Col: 2}, Head: Position{Line: 1, Col: 2}},
+	}
+	if got := b.Selections.All(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selections = %#v, want %#v", got, want)
+	}
+	if got, want := b.Cursor, (Position{Line: 1, Col: 2}); got != want {
+		t.Fatalf("primary cursor = %+v, want %+v", got, want)
+	}
+}
+
+func TestBufferDeleteSelectionRebasesCursorBetweenDeletedRanges(t *testing.T) {
+	b := NewBufferFromBytes([]byte("abc def ghi"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 0}, Head: Position{Line: 0, Col: 3}},
+		{Anchor: Position{Line: 0, Col: 5}, Head: Position{Line: 0, Col: 5}},
+		{Anchor: Position{Line: 0, Col: 8}, Head: Position{Line: 0, Col: 11}},
+	}, 1)
+
+	b.DeleteSelection()
+
+	if got, want := b.Content(), " def "; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	if got, want := b.Cursor, (Position{Line: 0, Col: 2}); got != want {
+		t.Fatalf("middle cursor = %+v, want %+v", got, want)
+	}
+}
+
+func TestBufferBackspaceWordAppliesAtEverySelection(t *testing.T) {
+	b := NewBufferFromBytes([]byte("one two\nred blue"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: len("one ")}, Head: Position{Line: 0, Col: len("one two")}},
+		{Anchor: Position{Line: 1, Col: len("red blue")}, Head: Position{Line: 1, Col: len("red blue")}},
+	}, 1)
+
+	b.BackspaceWord()
+
+	if got, want := b.Content(), "one \nred "; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	want := []Selection{
+		{Anchor: Position{Line: 0, Col: len("one ")}, Head: Position{Line: 0, Col: len("one ")}},
+		{Anchor: Position{Line: 1, Col: len("red ")}, Head: Position{Line: 1, Col: len("red ")}},
+	}
+	if got := b.Selections.All(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selections = %#v, want %#v", got, want)
+	}
+}
+
+func TestBufferDeleteWordAppliesAtEveryCursor(t *testing.T) {
+	b := NewBufferFromBytes([]byte("one two\nred blue"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 0}, Head: Position{Line: 0, Col: 0}},
+		{Anchor: Position{Line: 1, Col: 0}, Head: Position{Line: 1, Col: 0}},
+	}, 1)
+
+	b.DeleteWord()
+
+	if got, want := b.Content(), "two\nblue"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	want := []Selection{
+		{Anchor: Position{Line: 0, Col: 0}, Head: Position{Line: 0, Col: 0}},
+		{Anchor: Position{Line: 1, Col: 0}, Head: Position{Line: 1, Col: 0}},
+	}
+	if got := b.Selections.All(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selections = %#v, want %#v", got, want)
+	}
+}
+
+func TestBufferWordDeletionMergesOverlappingCursorRanges(t *testing.T) {
+	tests := []struct {
+		name       string
+		positions  []Position
+		delete     func(*Buffer)
+		want       string
+		wantCursor Position
+	}{
+		{
+			name:       "forward",
+			positions:  []Position{{Line: 0, Col: 0}, {Line: 0, Col: 2}},
+			delete:     (*Buffer).DeleteWord,
+			want:       "soup",
+			wantCursor: Position{},
+		},
+		{
+			name:       "backward",
+			positions:  []Position{{Line: 0, Col: 6}, {Line: 0, Col: len("alphabet")}},
+			delete:     (*Buffer).BackspaceWord,
+			want:       " soup",
+			wantCursor: Position{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBufferFromBytes([]byte("alphabet soup"))
+			selections := make([]Selection, len(tt.positions))
+			for i, pos := range tt.positions {
+				selections[i] = Selection{Anchor: pos, Head: pos}
+			}
+			b.RestoreSelections(selections, len(selections)-1)
+
+			tt.delete(b)
+
+			if got := b.Content(); got != tt.want {
+				t.Fatalf("content = %q, want %q", got, tt.want)
+			}
+			if got := b.Selections.Count(); got != 1 {
+				t.Fatalf("selection count = %d, want coalesced cursor", got)
+			}
+			if got := b.Cursor; got != tt.wantCursor {
+				t.Fatalf("cursor = %+v, want %+v", got, tt.wantCursor)
+			}
+		})
+	}
+}
+
+func TestBufferMultiCursorWordDeleteUndoRestoresContent(t *testing.T) {
+	b := NewBufferFromBytes([]byte("one two\nred blue"))
+	b.RestoreSelections([]Selection{
+		{Anchor: Position{Line: 0, Col: 0}, Head: Position{Line: 0, Col: 0}},
+		{Anchor: Position{Line: 1, Col: 0}, Head: Position{Line: 1, Col: 0}},
+	}, 1)
+
+	b.DeleteWord()
+	b.Undo()
+	if got, want := b.Content(), "one two\nred blue"; got != want {
+		t.Fatalf("content after undo = %q, want %q", got, want)
+	}
+	b.Redo()
+	if got, want := b.Content(), "two\nblue"; got != want {
+		t.Fatalf("content after redo = %q, want %q", got, want)
+	}
+}
+
+func TestWordNavigationBoundsGiantTokenWork(t *testing.T) {
+	const giantTokenBytes = 8 << 20
+	b := NewBufferFromBytes([]byte(strings.Repeat("x", giantTokenBytes)))
+
+	result := testing.Benchmark(func(bench *testing.B) {
+		for bench.Loop() {
+			b.SetCursor(Position{})
+			b.MoveCursorWordRight()
+		}
+	})
+	if got, want := b.Cursor.Col, maxInteractiveWordNavigationBytes; got != want {
+		t.Fatalf("bounded word jump = %d bytes, want %d", got, want)
+	}
+	if got := result.AllocedBytesPerOp(); got > 512<<10 {
+		t.Fatalf("word navigation allocated %d B/op for an 8 MiB token; want below 512 KiB", got)
 	}
 }
 

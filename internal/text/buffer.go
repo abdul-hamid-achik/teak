@@ -510,6 +510,97 @@ func (b *Buffer) allSelectionsEmpty() bool {
 	return true
 }
 
+type cursorDeleteRange struct {
+	start int
+	end   int
+}
+
+// applyCursorDeletionRanges deletes one original-document range per selection
+// and rebases every resulting cursor through the union of those ranges. Word
+// operations can overlap when several cursors sit in the same token, so ranges
+// are merged before mutating the immutable rope. The target for each cursor is
+// its own range start; collapsed no-op ranges preserve cursors that coexist
+// with selected text elsewhere in the document.
+func (b *Buffer) applyCursorDeletionRanges(ranges []cursorDeleteRange) bool {
+	if b.Selections == nil || len(ranges) != b.Selections.Count() {
+		return false
+	}
+	docLen := b.rope.Len()
+	changed := false
+	for i := range ranges {
+		ranges[i].start = max(0, min(ranges[i].start, docLen))
+		ranges[i].end = max(ranges[i].start, min(ranges[i].end, docLen))
+		changed = changed || ranges[i].end > ranges[i].start
+	}
+	if !changed {
+		return false
+	}
+
+	unions := make([]cursorDeleteRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r.end > r.start {
+			unions = append(unions, r)
+		}
+	}
+	sort.Slice(unions, func(i, j int) bool {
+		if unions[i].start != unions[j].start {
+			return unions[i].start < unions[j].start
+		}
+		return unions[i].end < unions[j].end
+	})
+	merged := unions[:0]
+	for _, r := range unions {
+		if len(merged) == 0 || r.start > merged[len(merged)-1].end {
+			merged = append(merged, r)
+			continue
+		}
+		merged[len(merged)-1].end = max(merged[len(merged)-1].end, r.end)
+	}
+
+	primary := b.Selections.PrimaryIndex()
+	b.Cursor = b.Selections.PrimaryCursor()
+	b.undo.Save(b.rope, b.Cursor, false)
+	for i := len(merged) - 1; i >= 0; i-- {
+		r := merged[i]
+		b.rope = b.rope.Delete(r.start, r.end-r.start)
+	}
+
+	rebased := make([]Selection, len(ranges))
+	for i, r := range ranges {
+		target := r.start
+		shift := 0
+		mappedTarget := target
+		mapped := false
+		for _, deleted := range merged {
+			switch {
+			case target < deleted.start:
+				mappedTarget = target - shift
+				mapped = true
+			case target <= deleted.end:
+				mappedTarget = deleted.start - shift
+				mapped = true
+			default:
+				shift += deleted.end - deleted.start
+			}
+			if mapped {
+				break
+			}
+		}
+		if !mapped {
+			mappedTarget = target - shift
+		}
+		pos := b.rope.OffsetToPosition(mappedTarget)
+		rebased[i] = Selection{Anchor: pos, Head: pos}
+	}
+	b.Selections = &Selections{selections: rebased, primary: primary, dirty: true}
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
+	b.dirty = true
+	b.version++
+	b.lastChange = nil
+	return true
+}
+
 // deleteAtCursors applies Backspace (backward=true) or Delete (backward=false)
 // once at every collapsed cursor. Each deletion shifts every following cursor,
 // so edits are applied end-to-start against the original rope and all
@@ -518,70 +609,32 @@ func (b *Buffer) allSelectionsEmpty() bool {
 // the next multi-cursor edit.
 func (b *Buffer) deleteAtCursors(backward bool) {
 	b.Selections.Normalize()
-	type delRange struct {
-		start int
-		end   int
-	}
-	ranges := make([]delRange, 0, len(b.Selections.selections))
+	ranges := make([]cursorDeleteRange, 0, len(b.Selections.selections))
 	for _, sel := range b.Selections.selections {
 		offset := b.rope.PositionToOffset(sel.Head)
 		if backward {
 			if offset == 0 {
-				ranges = append(ranges, delRange{start: offset, end: offset})
+				ranges = append(ranges, cursorDeleteRange{start: offset, end: offset})
 				continue
 			}
 			delLen := 1
-			if sel.Head.Col > 0 {
-				lineContent := b.rope.Line(sel.Head.Line)
-				if sel.Head.Col <= len(lineContent) {
-					if _, size := utf8.DecodeLastRune(lineContent[:sel.Head.Col]); size > 0 {
-						delLen = size
-					}
-				}
+			if _, size, ok := b.rope.RuneBefore(offset); ok && size > 0 {
+				delLen = size
 			}
-			ranges = append(ranges, delRange{start: offset - delLen, end: offset})
+			ranges = append(ranges, cursorDeleteRange{start: offset - delLen, end: offset})
 			continue
 		}
 		if offset >= b.rope.Len() {
-			ranges = append(ranges, delRange{start: offset, end: offset})
+			ranges = append(ranges, cursorDeleteRange{start: offset, end: offset})
 			continue
 		}
 		delLen := 1
-		lineContent := b.rope.Line(sel.Head.Line)
-		if sel.Head.Col < len(lineContent) {
-			if _, size := utf8.DecodeRune(lineContent[sel.Head.Col:]); size > 0 {
-				delLen = size
-			}
+		if _, size, ok := b.rope.RuneAt(offset); ok && size > 0 {
+			delLen = size
 		}
-		ranges = append(ranges, delRange{start: offset, end: offset + delLen})
+		ranges = append(ranges, cursorDeleteRange{start: offset, end: offset + delLen})
 	}
-
-	primary := b.Selections.primary
-	b.undo.Save(b.rope, b.Cursor, false)
-
-	// Apply from end to beginning so every range stays relative to the
-	// original rope.
-	for i := len(ranges) - 1; i >= 0; i-- {
-		if r := ranges[i]; r.end > r.start {
-			b.rope = b.rope.Delete(r.start, r.end-r.start)
-		}
-	}
-
-	// Rebase each cursor: it lands at its range start, shifted left by every
-	// deletion that happened before it.
-	shift := 0
-	rebased := make([]Selection, len(ranges))
-	for i, r := range ranges {
-		pos := b.rope.OffsetToPosition(r.start + shift)
-		rebased[i] = Selection{Anchor: pos, Head: pos}
-		shift -= r.end - r.start
-	}
-	b.Selections = &Selections{selections: rebased, primary: primary}
-	b.Cursor = b.Selections.PrimaryCursor()
-	b.dirty = true
-	b.version++
-	// Multi-cursor edits require a full-sync fallback for LSP.
-	b.lastChange = nil
+	b.applyCursorDeletionRanges(ranges)
 }
 
 // DeleteSelection removes all active selections.
@@ -618,63 +671,18 @@ func (b *Buffer) DeleteSelection() {
 		return
 	}
 
-	// Multiple selections: delete all
-	originalSelections := make([]Selection, len(b.Selections.selections))
-	copy(originalSelections, b.Selections.selections)
-	primarySelection := originalSelections[b.Selections.primary]
-	primaryStart, _ := primarySelection.Ordered()
-	primaryStartOff := b.rope.PositionToOffset(primaryStart)
-
-	b.undo.Save(b.rope, b.Cursor, false)
-
-	type selectionRange struct {
-		start int
-		end   int
-	}
-	ranges := make([]selectionRange, 0, len(originalSelections))
-	for _, sel := range originalSelections {
-		if sel.IsEmpty() {
-			continue
-		}
+	// Multiple selections retain one rebased cursor per original selection,
+	// including collapsed cursors which have no text to delete themselves.
+	b.Selections.Normalize()
+	ranges := make([]cursorDeleteRange, len(b.Selections.selections))
+	for i, sel := range b.Selections.selections {
 		start, end := sel.Ordered()
-		startOff := b.rope.PositionToOffset(start)
-		endOff := b.rope.PositionToOffset(end)
-		if endOff > startOff {
-			ranges = append(ranges, selectionRange{start: startOff, end: endOff})
+		ranges[i] = cursorDeleteRange{
+			start: b.rope.PositionToOffset(start),
+			end:   b.rope.PositionToOffset(end),
 		}
 	}
-	if len(ranges) == 0 {
-		b.Selections = NewSelections(primaryStart)
-		b.Cursor = primaryStart
-		return
-	}
-	sort.Slice(ranges, func(i, j int) bool {
-		if ranges[i].start != ranges[j].start {
-			return ranges[i].start > ranges[j].start
-		}
-		return ranges[i].end > ranges[j].end
-	})
-
-	// Delete from end to beginning
-	deletedBeforePrimary := 0
-	for _, r := range ranges {
-		if r.end <= primaryStartOff {
-			deletedBeforePrimary += r.end - r.start
-		}
-		b.rope = b.rope.Delete(r.start, r.end-r.start)
-	}
-
-	b.dirty = true
-	b.version++
-
-	newPrimaryOff := primaryStartOff - deletedBeforePrimary
-	if newPrimaryOff < 0 {
-		newPrimaryOff = 0
-	}
-	newPrimary := b.rope.OffsetToPosition(newPrimaryOff)
-	b.Cursor = newPrimary
-	b.Selections = NewSelections(newPrimary)
-	b.lastChange = nil
+	b.applyCursorDeletionRanges(ranges)
 }
 
 // SetCursor sets the cursor position and updates the primary selection.
@@ -1014,6 +1022,107 @@ func (b *Buffer) ExtendCursors(dir Direction) {
 	b.Cursor = b.Selections.PrimaryCursor()
 }
 
+func (b *Buffer) transformSelections(move func(Position) Position, extend bool) {
+	if b.Selections == nil || b.Selections.Count() == 0 || move == nil {
+		return
+	}
+	b.Selections.Normalize()
+	for i := range b.Selections.selections {
+		sel := &b.Selections.selections[i]
+		sel.Head = move(b.ClampPosition(sel.Head))
+		if !extend {
+			sel.Anchor = sel.Head
+		}
+	}
+	b.Selections.dirty = true
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
+}
+
+// MoveCursorsWordLeft and MoveCursorsWordRight move every active cursor while
+// sharing one bounded scan budget across the whole selection set.
+func (b *Buffer) MoveCursorsWordLeft() {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+	b.transformSelections(func(pos Position) Position {
+		return b.wordPositionLeft(pos, budget)
+	}, false)
+}
+
+func (b *Buffer) MoveCursorsWordRight() {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+	b.transformSelections(func(pos Position) Position {
+		return b.wordPositionRight(pos, budget)
+	}, false)
+}
+
+func (b *Buffer) ExtendCursorsWordLeft() {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+	b.transformSelections(func(pos Position) Position {
+		return b.wordPositionLeft(pos, budget)
+	}, true)
+}
+
+func (b *Buffer) ExtendCursorsWordRight() {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return
+	}
+	budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+	b.transformSelections(func(pos Position) Position {
+		return b.wordPositionRight(pos, budget)
+	}, true)
+}
+
+func (b *Buffer) MoveCursorsToLineStart() {
+	b.transformSelections(func(pos Position) Position {
+		pos.Col = 0
+		return pos
+	}, false)
+}
+
+func (b *Buffer) MoveCursorsToLineEnd() {
+	b.transformSelections(func(pos Position) Position {
+		pos.Col = b.rope.LineLen(pos.Line)
+		return pos
+	}, false)
+}
+
+func (b *Buffer) ExtendCursorsToLineStart() {
+	b.transformSelections(func(pos Position) Position {
+		pos.Col = 0
+		return pos
+	}, true)
+}
+
+func (b *Buffer) ExtendCursorsToLineEnd() {
+	b.transformSelections(func(pos Position) Position {
+		pos.Col = b.rope.LineLen(pos.Line)
+		return pos
+	}, true)
+}
+
+// MoveCursorsByLines moves every cursor by a bounded logical-line delta. Page
+// navigation uses it to preserve a multicursor set; ClampPosition keeps each
+// byte column on a valid UTF-8 boundary when target lines differ in encoding.
+func (b *Buffer) MoveCursorsByLines(delta int) {
+	if delta == 0 {
+		return
+	}
+	lastLine := max(0, b.rope.LineCount()-1)
+	b.transformSelections(func(pos Position) Position {
+		pos.Line = min(lastLine, max(0, pos.Line+delta))
+		return b.ClampPosition(pos)
+	}, false)
+}
+
 // Save writes the buffer to its FilePath.
 func (b *Buffer) Save() error {
 	if b.FilePath == "" {
@@ -1110,6 +1219,11 @@ const (
 	wordRuneSpace
 )
 
+// maxInteractiveWordNavigationBytes caps all word-boundary text copied by one
+// keyboard command. Multicursor commands divide this budget among cursors, so
+// a thousand cursors cannot turn Ctrl+Arrow into document-sized work in Update.
+const maxInteractiveWordNavigationBytes = 64 << 10
+
 func classifyWordRune(r rune) wordRuneClass {
 	switch {
 	case r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r):
@@ -1156,18 +1270,10 @@ func trimLeadingWhitespace(b []byte) []byte {
 	return bytes.TrimLeft(b, " \t")
 }
 
-// MoveCursorWordLeft moves the cursor to the start of the previous word.
-func (b *Buffer) MoveCursorWordLeft() {
-	defer b.syncPrimarySelection()
-	line := b.rope.Line(b.Cursor.Line)
-	col := wordRuneBoundary(line, b.Cursor.Col)
-
+func wordColumnLeft(line []byte, col int) int {
+	col = wordRuneBoundary(line, col)
 	if col == 0 {
-		if b.Cursor.Line > 0 {
-			b.Cursor.Line--
-			b.Cursor.Col = b.rope.LineLen(b.Cursor.Line)
-		}
-		return
+		return 0
 	}
 
 	// Skip whitespace backwards
@@ -1179,8 +1285,7 @@ func (b *Buffer) MoveCursorWordLeft() {
 		col = start
 	}
 	if col == 0 {
-		b.Cursor.Col = 0
-		return
+		return 0
 	}
 
 	// Skip same-class characters backwards
@@ -1192,22 +1297,14 @@ func (b *Buffer) MoveCursorWordLeft() {
 		}
 		col = start
 	}
-	b.Cursor.Col = col
+	return col
 }
 
-// MoveCursorWordRight moves the cursor to the start of the next word.
-func (b *Buffer) MoveCursorWordRight() {
-	defer b.syncPrimarySelection()
-	line := b.rope.Line(b.Cursor.Line)
-	col := wordRuneBoundary(line, b.Cursor.Col)
+func wordColumnRight(line []byte, col int) int {
+	col = wordRuneBoundary(line, col)
 	lineLen := len(line)
-
 	if col >= lineLen {
-		if b.Cursor.Line < b.rope.LineCount()-1 {
-			b.Cursor.Line++
-			b.Cursor.Col = 0
-		}
-		return
+		return lineLen
 	}
 
 	// Skip same-class characters forward
@@ -1230,21 +1327,87 @@ func (b *Buffer) MoveCursorWordRight() {
 		}
 		col += size
 	}
-	b.Cursor.Col = col
+	return col
+}
+
+func (b *Buffer) wordPositionLeft(pos Position, budget int) Position {
+	pos = b.ClampPosition(pos)
+	if pos.Col == 0 {
+		if pos.Line > 0 {
+			pos.Line--
+			pos.Col = b.rope.LineLen(pos.Line)
+		}
+		return pos
+	}
+	budget = max(utf8.UTFMax, budget)
+	startCol := max(0, pos.Col-budget)
+	startCol = b.ClampPosition(Position{Line: pos.Line, Col: startCol}).Col
+	lineStart := b.rope.LineStart(pos.Line)
+	segment := []byte(b.rope.StringRange(lineStart+startCol, lineStart+pos.Col))
+	pos.Col = startCol + wordColumnLeft(segment, len(segment))
+	return pos
+}
+
+func (b *Buffer) wordPositionRight(pos Position, budget int) Position {
+	pos = b.ClampPosition(pos)
+	lineLen := b.rope.LineLen(pos.Line)
+	if pos.Col >= lineLen {
+		if pos.Line < b.rope.LineCount()-1 {
+			pos.Line++
+			pos.Col = 0
+		}
+		return pos
+	}
+	budget = max(utf8.UTFMax, budget)
+	endCol := min(lineLen, pos.Col+budget)
+	endCol = b.ClampPosition(Position{Line: pos.Line, Col: endCol}).Col
+	lineStart := b.rope.LineStart(pos.Line)
+	segment := []byte(b.rope.StringRange(lineStart+pos.Col, lineStart+endCol))
+	pos.Col += wordColumnRight(segment, 0)
+	return pos
+}
+
+// MoveCursorWordLeft moves the cursor to the start of the previous word.
+func (b *Buffer) MoveCursorWordLeft() {
+	b.SetCursor(b.wordPositionLeft(b.Cursor, maxInteractiveWordNavigationBytes))
+}
+
+// MoveCursorWordRight moves the cursor to the start of the next word.
+func (b *Buffer) MoveCursorWordRight() {
+	b.SetCursor(b.wordPositionRight(b.Cursor, maxInteractiveWordNavigationBytes))
 }
 
 // BackspaceWord deletes from the cursor to the start of the previous word.
 func (b *Buffer) BackspaceWord() {
-	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
+	if b.Selections != nil && b.Selections.Count() > 1 {
+		b.Selections.Normalize()
+		budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+		ranges := make([]cursorDeleteRange, len(b.Selections.selections))
+		for i, sel := range b.Selections.selections {
+			start, end := sel.Ordered()
+			if sel.IsEmpty() {
+				start = b.wordPositionLeft(sel.Head, budget)
+				end = sel.Head
+			}
+			ranges[i] = cursorDeleteRange{
+				start: b.rope.PositionToOffset(start),
+				end:   b.rope.PositionToOffset(end),
+			}
+		}
+		b.applyCursorDeletionRanges(ranges)
+		return
+	}
+	if b.Selections != nil && b.Selections.Count() == 1 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
 	startPos := b.Cursor
-	b.MoveCursorWordLeft()
-	if startPos == b.Cursor {
+	target := b.wordPositionLeft(startPos, maxInteractiveWordNavigationBytes)
+	b.SetCursor(target)
+	if startPos == target {
 		return
 	}
-	startOff := b.rope.PositionToOffset(b.Cursor)
+	startOff := b.rope.PositionToOffset(target)
 	endOff := b.rope.PositionToOffset(startPos)
 	n := endOff - startOff
 	b.undo.Save(b.rope, startPos, false)
@@ -1256,13 +1419,30 @@ func (b *Buffer) BackspaceWord() {
 
 // DeleteWord deletes from the cursor to the start of the next word.
 func (b *Buffer) DeleteWord() {
-	if b.Selections != nil && b.Selections.Count() > 0 && !b.Selections.Primary().IsEmpty() {
+	if b.Selections != nil && b.Selections.Count() > 1 {
+		b.Selections.Normalize()
+		budget := max(utf8.UTFMax, maxInteractiveWordNavigationBytes/b.Selections.Count())
+		ranges := make([]cursorDeleteRange, len(b.Selections.selections))
+		for i, sel := range b.Selections.selections {
+			start, end := sel.Ordered()
+			if sel.IsEmpty() {
+				start = sel.Head
+				end = b.wordPositionRight(sel.Head, budget)
+			}
+			ranges[i] = cursorDeleteRange{
+				start: b.rope.PositionToOffset(start),
+				end:   b.rope.PositionToOffset(end),
+			}
+		}
+		b.applyCursorDeletionRanges(ranges)
+		return
+	}
+	if b.Selections != nil && b.Selections.Count() == 1 && !b.Selections.Primary().IsEmpty() {
 		b.DeleteSelection()
 		return
 	}
 	saved := b.Cursor
-	b.MoveCursorWordRight()
-	endPos := b.Cursor
+	endPos := b.wordPositionRight(saved, maxInteractiveWordNavigationBytes)
 	b.SetCursor(saved)
 	if saved == endPos {
 		return
@@ -1272,6 +1452,7 @@ func (b *Buffer) DeleteWord() {
 	n := endOff - startOff
 	b.undo.Save(b.rope, b.Cursor, false)
 	b.rope = b.rope.Delete(startOff, n)
+	b.SetCursor(saved)
 	b.dirty = true
 	b.version++
 	b.lastChange = &EditChange{

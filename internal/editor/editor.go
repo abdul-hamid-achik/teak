@@ -793,17 +793,33 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.moveCursorVertical(1, false)
 		}
 	case "ctrl+left":
-		e.Buffer.MoveCursorWordLeft()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsWordLeft()
+		} else {
+			e.Buffer.MoveCursorWordLeft()
+			e.Buffer.ClearSelection()
+		}
 	case "ctrl+right":
-		e.Buffer.MoveCursorWordRight()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsWordRight()
+		} else {
+			e.Buffer.MoveCursorWordRight()
+			e.Buffer.ClearSelection()
+		}
 	case "home":
-		e.Buffer.CursorToLineStart()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsToLineStart()
+		} else {
+			e.Buffer.CursorToLineStart()
+			e.Buffer.ClearSelection()
+		}
 	case "end":
-		e.Buffer.CursorToLineEnd()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsToLineEnd()
+		} else {
+			e.Buffer.CursorToLineEnd()
+			e.Buffer.ClearSelection()
+		}
 	case "ctrl+home":
 		e.Buffer.CursorToDocStart()
 		e.Buffer.ClearSelection()
@@ -811,7 +827,11 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.CursorToDocEnd()
 		e.Buffer.ClearSelection()
 	case "pgup":
-		e.moveCursorVertical(-e.Viewport.Height, false)
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsByLines(-e.Viewport.Height)
+		} else {
+			e.moveCursorVertical(-e.Viewport.Height, false)
+		}
 		if e.Wrap == nil || !e.Config.WordWrap {
 			e.Viewport.ScrollUp(e.Viewport.Height)
 		}
@@ -820,7 +840,11 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			return e, e.scheduleRetokenizeImmediate()
 		}
 	case "pgdown":
-		e.moveCursorVertical(e.Viewport.Height, false)
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsByLines(e.Viewport.Height)
+		} else {
+			e.moveCursorVertical(e.Viewport.Height, false)
+		}
 		if e.Wrap == nil || !e.Config.WordWrap {
 			e.Viewport.ScrollDown(e.Viewport.Height, e.Buffer.LineCount()-1)
 		}
@@ -855,13 +879,29 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.moveCursorVertical(1, true)
 		}
 	case "ctrl+shift+left":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursorWordLeft() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsWordLeft()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursorWordLeft() })
+		}
 	case "ctrl+shift+right":
-		e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursorWordRight() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsWordRight()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.MoveCursorWordRight() })
+		}
 	case "shift+home":
-		e.Buffer.ExtendSelection(func() { e.Buffer.CursorToLineStart() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsToLineStart()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.CursorToLineStart() })
+		}
 	case "shift+end":
-		e.Buffer.ExtendSelection(func() { e.Buffer.CursorToLineEnd() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsToLineEnd()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.CursorToLineEnd() })
+		}
 	case "ctrl+shift+home":
 		e.Buffer.ExtendSelection(func() { e.Buffer.CursorToDocStart() })
 	case "ctrl+shift+end":
