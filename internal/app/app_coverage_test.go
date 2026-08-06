@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -460,7 +461,7 @@ func TestAppFormatResultNote(t *testing.T) {
 	}
 }
 
-// TestAppApplyTextEdits tests applying text edits to buffer
+// TestAppApplyTextEdits tests preparing and applying text edits to a rope.
 func TestAppApplyTextEdits(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Session.Enabled = false
@@ -481,7 +482,6 @@ func TestAppApplyTextEdits(t *testing.T) {
 	ed.Buffer = text.NewBufferFromBytes([]byte("hello world"))
 	model.editors[0] = *ed
 
-	// Test applyTextEditsToBuffer
 	edits := []lsp.TextEdit{
 		{
 			StartLine: 0,
@@ -492,13 +492,16 @@ func TestAppApplyTextEdits(t *testing.T) {
 		},
 	}
 
-	count := applyTextEditsToBuffer(ed.Buffer, edits)
-	if count != 1 {
-		t.Errorf("Expected 1 edit applied, got %d", count)
+	prepared, err := prepareTextEditRanges(context.Background(), ed.Buffer.Rope(), edits)
+	if err != nil {
+		t.Fatalf("prepareTextEditRanges() error = %v", err)
 	}
-
-	if ed.Buffer.Content() != "goodbye world" {
-		t.Errorf("Expected 'goodbye world', got %q", ed.Buffer.Content())
+	result, err := applyPreparedTextEdits(context.Background(), ed.Buffer.Rope(), prepared)
+	if err != nil {
+		t.Fatalf("applyPreparedTextEdits() error = %v", err)
+	}
+	if got, want := result.String(), "goodbye world"; got != want {
+		t.Errorf("prepared result = %q, want %q", got, want)
 	}
 }
 

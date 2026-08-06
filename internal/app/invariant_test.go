@@ -378,8 +378,8 @@ func TestFormatHandlerOnlyDispatchesPreparation(t *testing.T) {
 	found := false
 	dispatches := false
 	banned := map[string]bool{
-		"validateFormattingTextEdits": true,
-		"applyTextEditsToBuffer":      true,
+		"prepareFormattingTextEdits": true,
+		"applyPreparedTextEdits":     true,
 	}
 	forEachPackageFile(t, func(_ string, fset *token.FileSet, file *ast.File) {
 		for _, declaration := range file.Decls {

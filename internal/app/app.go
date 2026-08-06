@@ -6083,32 +6083,6 @@ func (m Model) findEditorByPath(path string) int {
 	return -1
 }
 
-func applyTextEditsToBuffer(buf *text.Buffer, edits []lsp.TextEdit) int {
-	sortedEdits := make([]lsp.TextEdit, len(edits))
-	copy(sortedEdits, edits)
-	slices.SortFunc(sortedEdits, func(a, b lsp.TextEdit) int {
-		if a.StartLine != b.StartLine {
-			return b.StartLine - a.StartLine
-		}
-		return b.StartCol - a.StartCol
-	})
-
-	applied := 0
-	for _, te := range sortedEdits {
-		start := text.Position{Line: te.StartLine, Col: te.StartCol}
-		end := text.Position{Line: te.EndLine, Col: te.EndCol}
-		buf.ReplaceRange(start, end, []byte(te.NewText))
-		applied++
-	}
-	if applied > 0 {
-		// These edits can shorten the document arbitrarily (a formatter
-		// collapsing blank lines, a code action deleting a block), leaving the
-		// cursor past the new end of the buffer.
-		buf.ClampCursor()
-	}
-	return applied
-}
-
 // openCommandPalette pushes a Picker overlay with available commands.
 func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 	m.cancelActiveEditorDrag()

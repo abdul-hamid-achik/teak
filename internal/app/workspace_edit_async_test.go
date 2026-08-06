@@ -12,7 +12,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
 	"teak/internal/lsp"
+	"teak/internal/text"
 )
+
+var workspaceEditPreparationSink workspaceEditPreparation
 
 func runWorkspaceEditCommands(t *testing.T, model Model, cmd tea.Cmd) Model {
 	t.Helper()
@@ -43,6 +46,112 @@ func applyWorkspaceEditAsyncForTest(t *testing.T, model Model, edit lsp.Workspac
 	t.Helper()
 	updated, cmd := model.startWorkspaceEditAsync(edit, workspaceEditContinuation{})
 	return runWorkspaceEditCommands(t, updated, cmd)
+}
+
+func TestWorkspaceEditPreparationAllocationBudget(t *testing.T) {
+	const editCount = 1024
+	rootDir := t.TempDir()
+	path := filepath.Join(rootDir, "main.go")
+	content := strings.Repeat("x\n", editCount)
+	source := text.NewFromString(content)
+	edits := make([]lsp.TextEdit, editCount)
+	for line := range edits {
+		edits[line] = lsp.TextEdit{StartLine: line, EndLine: line, EndCol: 1, NewText: "y"}
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	workspaceEdit := lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		lsp.FileURI(path): edits,
+	}}
+	snapshots := []workspaceEditBufferSnapshot{{
+		EditorID: 1,
+		Path:     path,
+		Rope:     source,
+	}}
+
+	allocs := testing.AllocsPerRun(1, func() {
+		preparation, err := prepareWorkspaceEdit(context.Background(), rootDir, root, workspaceEdit, snapshots)
+		if err != nil {
+			t.Fatalf("prepareWorkspaceEdit() error = %v", err)
+		}
+		workspaceEditPreparationSink = preparation
+	})
+	if allocs > 30_000 {
+		t.Fatalf("workspace edit preparation allocations = %.0f, want <= 30000", allocs)
+	}
+}
+
+func TestWorkspaceEditSequentialBatchesReusePreparedSnapshot(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	index := addDirtyEditor(t, &model, "main.go", "abc\n", "abc\n")
+	path := model.editors[index].Buffer.FilePath
+	model.editors[index].Buffer.SetCursor(text.Position{Line: 0, Col: 3})
+
+	updated := applyWorkspaceEditAsyncForTest(t, model, lsp.WorkspaceEdit{
+		DocumentChanges: []lsp.WorkspaceDocumentChange{
+			{
+				URI: lsp.FileURI(path),
+				Edits: []lsp.TextEdit{{
+					StartLine: 0,
+					EndLine:   0,
+					EndCol:    3,
+					NewText:   "one\ntwo",
+				}},
+			},
+			{
+				URI: lsp.FileURI(path),
+				Edits: []lsp.TextEdit{{
+					StartLine: 1,
+					EndLine:   1,
+					EndCol:    3,
+					NewText:   "THREE",
+				}},
+			},
+		},
+	})
+
+	if got, want := updated.editors[index].Buffer.Content(), "one\nTHREE\n"; got != want {
+		t.Fatalf("workspace edit content = %q, want %q", got, want)
+	}
+	if got, want := updated.editors[index].Buffer.Cursor, (text.Position{Line: 1, Col: 5}); got != want {
+		t.Fatalf("workspace edit cursor = %+v, want %+v", got, want)
+	}
+}
+
+func BenchmarkPrepareWorkspaceEditFourThousandEdits(b *testing.B) {
+	const editCount = 4096
+	rootDir := b.TempDir()
+	path := filepath.Join(rootDir, "main.go")
+	content := strings.Repeat("x\n", editCount)
+	edits := make([]lsp.TextEdit, editCount)
+	for line := range edits {
+		edits[line] = lsp.TextEdit{StartLine: line, EndLine: line, EndCol: 1, NewText: "y"}
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer root.Close()
+	workspaceEdit := lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		lsp.FileURI(path): edits,
+	}}
+	snapshots := []workspaceEditBufferSnapshot{{
+		EditorID: 1,
+		Path:     path,
+		Rope:     text.NewFromString(content),
+	}}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		preparation, err := prepareWorkspaceEdit(context.Background(), rootDir, root, workspaceEdit, snapshots)
+		if err != nil {
+			b.Fatal(err)
+		}
+		workspaceEditPreparationSink = preparation
+	}
 }
 
 func TestWorkspaceEditAsyncDiscardsStaleLiveSnapshotAndAcknowledgesOnce(t *testing.T) {

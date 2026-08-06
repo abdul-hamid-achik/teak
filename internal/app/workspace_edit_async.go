@@ -203,9 +203,9 @@ func prepareWorkspaceEditCmd(
 	}
 }
 
-// prepareWorkspaceEdit owns all filesystem and rope work. The resulting ropes
-// share immutable leaves with the snapshots, so Update only swaps a prepared
-// pointer after rechecking the editor identities and versions it captured.
+// prepareWorkspaceEdit owns all filesystem and rope work. Update only swaps a
+// prepared immutable pointer after rechecking the editor identities and
+// versions captured here.
 func prepareWorkspaceEdit(
 	ctx context.Context,
 	rootDir string,
@@ -345,10 +345,19 @@ func prepareWorkspaceEdit(
 			}
 			budget.newBytes += len(textEdit.NewText)
 		}
-		if err := validateTextEditRanges(doc.buffer, edits); err != nil {
+		source := doc.buffer.Rope()
+		preparedEdits, err := prepareTextEditRanges(ctx, source, edits)
+		if err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(path), err)
 		}
-		doc.Applied += applyTextEditsToBuffer(doc.buffer, edits)
+		result, err := applyPreparedTextEdits(ctx, source, preparedEdits)
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+		cursor := mapPositionThroughTextEdits(source, result, doc.buffer.Cursor, preparedEdits)
+		doc.buffer = text.NewBufferFromRope(result)
+		doc.buffer.SetCursor(cursor)
+		doc.Applied += len(preparedEdits)
 		if int64(doc.buffer.Rope().Len()) > maxWorkspaceEditAggregateBytes {
 			return fmt.Errorf("%s would exceed the workspace edit aggregate budget", filepath.Base(path))
 		}

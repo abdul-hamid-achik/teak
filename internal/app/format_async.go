@@ -77,31 +77,132 @@ func prepareFormatCmd(ctx context.Context, request formatPreparationRequest, edi
 			return prepared
 		}
 
-		buffer := text.NewBufferFromRope(request.Source)
-		buffer.SetCursor(request.Cursor)
-		buffer.RestoreSelections(request.Selections, request.Primary)
-		if err := validateFormattingTextEdits(buffer, edits); err != nil {
+		preparedEdits, err := prepareFormattingTextEdits(ctx, request.Source, edits)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				prepared.Err = ctxErr
+				return prepared
+			}
 			prepared.Err = fmt.Errorf("invalid formatting edits: %w", err)
 			return prepared
 		}
-		if err := ctx.Err(); err != nil {
+
+		result, err := applyPreparedTextEdits(ctx, request.Source, preparedEdits)
+		if err != nil {
+			prepared.Err = err
+			return prepared
+		}
+		resultCursor, resultSelections, resultPrimary, err := mapFormattingSelections(
+			ctx,
+			request.Source,
+			result,
+			request.Cursor,
+			request.Selections,
+			request.Primary,
+			preparedEdits,
+		)
+		if err != nil {
 			prepared.Err = err
 			return prepared
 		}
 
-		prepared.Applied = applyTextEditsToBuffer(buffer, edits)
-		if err := ctx.Err(); err != nil {
-			prepared.Err = err
-			return prepared
-		}
-		prepared.Result = buffer.Rope()
-		prepared.ResultCursor = buffer.Cursor
-		if buffer.Selections != nil {
-			prepared.ResultSelections = append([]text.Selection(nil), buffer.Selections.All()...)
-			prepared.ResultPrimary = buffer.Selections.PrimaryIndex()
-		}
+		prepared.Applied = len(preparedEdits)
+		prepared.Result = result
+		prepared.ResultCursor = resultCursor
+		prepared.ResultSelections = resultSelections
+		prepared.ResultPrimary = resultPrimary
 		return prepared
 	}
+}
+
+func applyPreparedTextEdits(ctx context.Context, source *text.Rope, edits []preparedTextEdit) (*text.Rope, error) {
+	if len(edits) == 0 {
+		return source, ctx.Err()
+	}
+
+	finalLen := int64(source.Len())
+	for i, edit := range edits {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		finalLen += int64(len(edit.newText)) - int64(edit.end-edit.start)
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if finalLen < 0 || finalLen > maxInt {
+		return nil, fmt.Errorf("edited document size is not representable")
+	}
+
+	sourceBytes, err := source.BytesContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]byte, 0, int(finalLen))
+	previousEnd := 0
+	for i, edit := range edits {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, sourceBytes[previousEnd:edit.start]...)
+		result = append(result, edit.newText...)
+		previousEnd = edit.end
+	}
+	result = append(result, sourceBytes[previousEnd:]...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return text.NewOwned(result), nil
+}
+
+func mapFormattingSelections(
+	ctx context.Context,
+	source, result *text.Rope,
+	cursor text.Position,
+	selections []text.Selection,
+	primary int,
+	edits []preparedTextEdit,
+) (text.Position, []text.Selection, int, error) {
+	base := text.NewBufferFromRope(source)
+	base.SetCursor(cursor)
+	base.RestoreSelections(selections, primary)
+	baseSelections := base.Selections.All()
+	mapped := make([]text.Selection, len(baseSelections))
+	for i, selection := range baseSelections {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return text.Position{}, nil, 0, err
+			}
+		}
+		mapped[i] = text.Selection{
+			Anchor: mapPositionThroughTextEdits(source, result, selection.Anchor, edits),
+			Head:   mapPositionThroughTextEdits(source, result, selection.Head, edits),
+		}
+	}
+
+	normalized := text.NewBufferFromRope(result)
+	normalized.RestoreSelections(mapped, base.Selections.PrimaryIndex())
+	return normalized.Cursor,
+		append([]text.Selection(nil), normalized.Selections.All()...),
+		normalized.Selections.PrimaryIndex(),
+		ctx.Err()
+}
+
+func mapPositionThroughTextEdits(source, result *text.Rope, position text.Position, edits []preparedTextEdit) text.Position {
+	offset := source.PositionToOffset(position)
+	delta := 0
+	for _, edit := range edits {
+		if offset < edit.start {
+			break
+		}
+		if offset < edit.end {
+			return result.OffsetToPosition(edit.start + delta + len(edit.newText))
+		}
+		delta += len(edit.newText) - (edit.end - edit.start)
+	}
+	return result.OffsetToPosition(offset + delta)
 }
 
 func (m Model) handleFormatPrepared(msg formatPreparedMsg) (tea.Model, tea.Cmd) {

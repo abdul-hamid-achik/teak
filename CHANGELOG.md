@@ -4,6 +4,26 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.10.30] - 2026-08-05
+
+### Linear LSP Text Edit Preparation
+
+- Formatting and workspace edits now validate server ranges into one sorted
+  offset representation, copy the source snapshot once, and assemble the
+  resulting immutable rope in a single ascending pass. The old path rebuilt a
+  persistent rope and remapped editor state once per edit.
+- Cursor, primary selection, multicursor ranges, UTF-8 byte boundaries, adjacent
+  edits, and sequential workspace-edit batches retain their previous behavior.
+  Preparation checks cancellation throughout validation, assembly, and
+  selection mapping.
+- Deterministic differential tests compare the linear path with the former
+  sequential algorithm across table-driven edge cases and 200 generated edit
+  sets. Allocation budgets guard both formatting and workspace preparation.
+- With 4,096 one-byte edits on an Apple M5, formatting preparation dropped from
+  about 93 ms, 309 MB, and 3.35 million allocations to about 2.30-2.57 ms,
+  707 KB, and 24.6 thousand allocations. Workspace-edit preparation reaches
+  the same roughly 2.47 ms profile.
+
 ## [0.10.29] - 2026-08-05
 
 ### Responsive Atomic Formatting

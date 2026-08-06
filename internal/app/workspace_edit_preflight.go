@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"slices"
@@ -22,52 +23,62 @@ type workspaceEditBudget struct {
 	newBytes  int
 }
 
-// validateFormattingTextEdits applies the same strict range rules as
-// workspace edits, with a single-document budget suitable for an untrusted
-// formatting response. Validation must complete before the live buffer is
-// changed because Buffer.ReplaceRange deliberately clamps user-facing cursor
-// positions for interactive editing.
-func validateFormattingTextEdits(buf *text.Buffer, edits []lsp.TextEdit) error {
+type preparedTextEdit struct {
+	start   int
+	end     int
+	newText string
+}
+
+// prepareFormattingTextEdits applies the same strict range rules as workspace
+// edits, with a single-document budget suitable for an untrusted response.
+func prepareFormattingTextEdits(ctx context.Context, rope *text.Rope, edits []lsp.TextEdit) ([]preparedTextEdit, error) {
 	if len(edits) > maxWorkspaceTextEdits {
-		return fmt.Errorf("formatting result exceeds %d text edits", maxWorkspaceTextEdits)
+		return nil, fmt.Errorf("formatting result exceeds %d text edits", maxWorkspaceTextEdits)
 	}
 
 	newBytes := 0
-	for _, edit := range edits {
+	for i, edit := range edits {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if len(edit.NewText) > maxWorkspaceNewTextBytes-newBytes {
-			return fmt.Errorf("formatting result exceeds %d bytes of replacement text", maxWorkspaceNewTextBytes)
+			return nil, fmt.Errorf("formatting result exceeds %d bytes of replacement text", maxWorkspaceNewTextBytes)
 		}
 		newBytes += len(edit.NewText)
 	}
-	return validateTextEditRanges(buf, edits)
+	return prepareTextEditRanges(ctx, rope, edits)
 }
 
-// validateTextEditRanges verifies positions against byte-oriented LSP UTF-8
-// coordinates. It is shared by workspace edits and formatting so every
-// server-originated edit has identical range and overlap semantics.
-func validateTextEditRanges(buf *text.Buffer, edits []lsp.TextEdit) error {
-	type editRange struct {
-		start int
-		end   int
+// prepareTextEditRanges verifies byte-oriented LSP UTF-8 coordinates and
+// returns one sorted representation shared by workspace edits and formatting.
+func prepareTextEditRanges(ctx context.Context, rope *text.Rope, edits []lsp.TextEdit) ([]preparedTextEdit, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	ranges := make([]editRange, 0, len(edits))
-	rope := buf.Rope()
-	for _, edit := range edits {
+	ranges := make([]preparedTextEdit, 0, len(edits))
+	for i, edit := range edits {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		start, err := strictTextEditPositionOffset(rope, edit.StartLine, edit.StartCol)
 		if err != nil {
-			return fmt.Errorf("invalid edit start: %w", err)
+			return nil, fmt.Errorf("invalid edit start: %w", err)
 		}
 		end, err := strictTextEditPositionOffset(rope, edit.EndLine, edit.EndCol)
 		if err != nil {
-			return fmt.Errorf("invalid edit end: %w", err)
+			return nil, fmt.Errorf("invalid edit end: %w", err)
 		}
 		if end < start {
-			return fmt.Errorf("edit range ends before it starts")
+			return nil, fmt.Errorf("edit range ends before it starts")
 		}
-		ranges = append(ranges, editRange{start: start, end: end})
+		ranges = append(ranges, preparedTextEdit{start: start, end: end, newText: edit.NewText})
 	}
 
-	slices.SortFunc(ranges, func(a, b editRange) int {
+	slices.SortFunc(ranges, func(a, b preparedTextEdit) int {
 		if a.start != b.start {
 			return a.start - b.start
 		}
@@ -76,10 +87,13 @@ func validateTextEditRanges(buf *text.Buffer, edits []lsp.TextEdit) error {
 	for i := 1; i < len(ranges); i++ {
 		if ranges[i].start < ranges[i-1].end ||
 			(ranges[i].start == ranges[i-1].start && ranges[i].end == ranges[i-1].end) {
-			return fmt.Errorf("overlapping or ambiguous edits")
+			return nil, fmt.Errorf("overlapping or ambiguous edits")
 		}
 	}
-	return nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ranges, nil
 }
 
 func strictTextEditPositionOffset(rope *text.Rope, line, col int) (int, error) {
