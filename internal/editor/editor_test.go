@@ -609,6 +609,23 @@ func TestEditorUpdateMouseClickDoubleClick(t *testing.T) {
 	}
 }
 
+func TestEditorDoubleClickSelectsWholeUnicodeWord(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("café κόσμος"))
+	editor := New(buf, ui.DefaultTheme(), DefaultConfig())
+	editor.SetSize(80, 24)
+	click := tea.MouseClickMsg{
+		Button: tea.MouseLeft,
+		X:      editor.effectiveGutterWidth() + 3,
+		Y:      0,
+	}
+
+	editor, _ = editor.Update(click)
+	editor, _ = editor.Update(click)
+	if got, want := string(editor.Buffer.SelectedText()), "café"; got != want {
+		t.Fatalf("double-click selected %q, want %q", got, want)
+	}
+}
+
 func TestEditorUpdateMouseWheel(t *testing.T) {
 	buf := text.NewBufferFromBytes([]byte("line1\nline2\nline3\nline4\nline5"))
 	editor := New(buf, ui.DefaultTheme(), DefaultConfig())

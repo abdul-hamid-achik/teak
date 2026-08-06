@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -1072,14 +1073,59 @@ func (b *Buffer) SelectedText() []byte {
 	return b.rope.Slice(startOff, endOff).Bytes()
 }
 
-// Word boundary helpers
+// Word boundary helpers retain byte offsets for Rope and LSP positions while
+// classifying complete UTF-8 runes. Letters, numbers, combining marks, and
+// underscore form words; Unicode whitespace separates them; every other rune
+// belongs to the punctuation/symbol class. Invalid bytes decode one at a time
+// as RuneError and therefore remain a safely navigable symbol run.
+type wordRuneClass uint8
 
-func isWordByte(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+const (
+	wordRuneSymbol wordRuneClass = iota
+	wordRuneWord
+	wordRuneSpace
+)
+
+func classifyWordRune(r rune) wordRuneClass {
+	switch {
+	case r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r):
+		return wordRuneWord
+	case unicode.IsSpace(r):
+		return wordRuneSpace
+	default:
+		return wordRuneSymbol
+	}
 }
 
-func isSpaceByte(b byte) bool {
-	return b == ' ' || b == '\t'
+func wordRuneAt(line []byte, col int) (wordRuneClass, int) {
+	r, size := utf8.DecodeRune(line[col:])
+	return classifyWordRune(r), size
+}
+
+func wordRuneBefore(line []byte, col int) (int, wordRuneClass) {
+	r, size := utf8.DecodeLastRune(line[:col])
+	return col - size, classifyWordRune(r)
+}
+
+// wordRuneBoundary clamps a possibly stale direct Cursor assignment to the
+// start of its rune so word motion never leaves the cursor on a continuation
+// byte. Normal editor paths already provide boundary-aligned columns.
+func wordRuneBoundary(line []byte, col int) int {
+	col = max(0, min(col, len(line)))
+	if col == len(line) || utf8.RuneStart(line[col]) {
+		return col
+	}
+	start := col
+	for start > 0 && !utf8.RuneStart(line[start]) {
+		start--
+	}
+	_, size := utf8.DecodeRune(line[start:])
+	if size > 1 && start+size > col {
+		return start
+	}
+	// A stray continuation byte is its own invalid one-byte symbol, not part
+	// of the preceding rune.
+	return col
 }
 
 func trimLeadingWhitespace(b []byte) []byte {
@@ -1090,7 +1136,7 @@ func trimLeadingWhitespace(b []byte) []byte {
 func (b *Buffer) MoveCursorWordLeft() {
 	defer b.syncPrimarySelection()
 	line := b.rope.Line(b.Cursor.Line)
-	col := b.Cursor.Col
+	col := wordRuneBoundary(line, b.Cursor.Col)
 
 	if col == 0 {
 		if b.Cursor.Line > 0 {
@@ -1100,13 +1146,13 @@ func (b *Buffer) MoveCursorWordLeft() {
 		return
 	}
 
-	if col > len(line) {
-		col = len(line)
-	}
-
 	// Skip whitespace backwards
-	for col > 0 && isSpaceByte(line[col-1]) {
-		col--
+	for col > 0 {
+		start, class := wordRuneBefore(line, col)
+		if class != wordRuneSpace {
+			break
+		}
+		col = start
 	}
 	if col == 0 {
 		b.Cursor.Col = 0
@@ -1114,14 +1160,13 @@ func (b *Buffer) MoveCursorWordLeft() {
 	}
 
 	// Skip same-class characters backwards
-	if isWordByte(line[col-1]) {
-		for col > 0 && isWordByte(line[col-1]) {
-			col--
+	_, targetClass := wordRuneBefore(line, col)
+	for col > 0 {
+		start, class := wordRuneBefore(line, col)
+		if class != targetClass {
+			break
 		}
-	} else {
-		for col > 0 && !isWordByte(line[col-1]) && !isSpaceByte(line[col-1]) {
-			col--
-		}
+		col = start
 	}
 	b.Cursor.Col = col
 }
@@ -1130,7 +1175,7 @@ func (b *Buffer) MoveCursorWordLeft() {
 func (b *Buffer) MoveCursorWordRight() {
 	defer b.syncPrimarySelection()
 	line := b.rope.Line(b.Cursor.Line)
-	col := b.Cursor.Col
+	col := wordRuneBoundary(line, b.Cursor.Col)
 	lineLen := len(line)
 
 	if col >= lineLen {
@@ -1142,19 +1187,24 @@ func (b *Buffer) MoveCursorWordRight() {
 	}
 
 	// Skip same-class characters forward
-	if isWordByte(line[col]) {
-		for col < lineLen && isWordByte(line[col]) {
-			col++
-		}
-	} else if !isSpaceByte(line[col]) {
-		for col < lineLen && !isWordByte(line[col]) && !isSpaceByte(line[col]) {
-			col++
+	targetClass, _ := wordRuneAt(line, col)
+	if targetClass != wordRuneSpace {
+		for col < lineLen {
+			class, size := wordRuneAt(line, col)
+			if class != targetClass {
+				break
+			}
+			col += size
 		}
 	}
 
 	// Skip whitespace forward
-	for col < lineLen && isSpaceByte(line[col]) {
-		col++
+	for col < lineLen {
+		class, size := wordRuneAt(line, col)
+		if class != wordRuneSpace {
+			break
+		}
+		col += size
 	}
 	b.Cursor.Col = col
 }
@@ -1240,34 +1290,33 @@ func (b *Buffer) ExtendSelection(move func()) {
 	}
 }
 
-// SelectWordAtCursor selects the word under the cursor using isWordByte boundaries.
+// SelectWordAtCursor selects the Unicode word or symbol run under the cursor.
 func (b *Buffer) SelectWordAtCursor() {
 	line := b.rope.Line(b.Cursor.Line)
-	col := b.Cursor.Col
+	col := wordRuneBoundary(line, b.Cursor.Col)
 	if col >= len(line) {
 		return
 	}
-	ch := line[col]
-	if isSpaceByte(ch) {
+	class, size := wordRuneAt(line, col)
+	if class == wordRuneSpace {
 		return
 	}
 
-	start, end := col, col
-	if isWordByte(ch) {
-		for start > 0 && isWordByte(line[start-1]) {
-			start--
+	start := col
+	for start > 0 {
+		previous, previousClass := wordRuneBefore(line, start)
+		if previousClass != class {
+			break
 		}
-		for end < len(line) && isWordByte(line[end]) {
-			end++
+		start = previous
+	}
+	end := col + size
+	for end < len(line) {
+		nextClass, nextSize := wordRuneAt(line, end)
+		if nextClass != class {
+			break
 		}
-	} else {
-		// Punctuation: select contiguous punctuation
-		for start > 0 && !isWordByte(line[start-1]) && !isSpaceByte(line[start-1]) {
-			start--
-		}
-		for end < len(line) && !isWordByte(line[end]) && !isSpaceByte(line[end]) {
-			end++
-		}
+		end += nextSize
 	}
 	b.SetSelection(
 		Position{Line: b.Cursor.Line, Col: start},

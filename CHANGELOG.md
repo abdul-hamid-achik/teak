@@ -4,6 +4,23 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-05
+
+### Unicode-Aware Word Editing
+
+- Word navigation, selection, deletion, double-click selection, and initial
+  occurrence selection now classify complete UTF-8 runes instead of bytes.
+- Unicode letters, numbers, combining marks, and underscore form words;
+  Unicode whitespace separates them; punctuation and symbols remain grouped.
+- Rope, buffer, change-record, and LSP positions remain UTF-8 byte offsets.
+  Word operations align stale mid-rune cursor columns safely, while stray
+  invalid continuation bytes remain navigable one byte at a time.
+- Tests cover accented Latin, Greek, CJK, decomposed combining text, fullwidth
+  digits, emoji modifiers, non-breaking spaces, invalid UTF-8, ASCII behavior,
+  deletion change records, and real editor double-click handling.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.3%; `internal/text` is 83.9%.
+
 ## [0.10.35] - 2026-08-05
 
 ### Single-Copy Clipboard Selections
