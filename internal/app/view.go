@@ -255,6 +255,12 @@ func (m Model) View() tea.View {
 		if m.height >= compactTerminalHeight && m.treeVisible() {
 			cx += m.treeWidth() + 1
 		}
+		if m.split.enabled && !m.split.vertical && m.split.focused == 1 && m.split.secondTab == m.activeTab {
+			// Pane B is rendered after pane A and the divider. The editor's
+			// CursorPosition is local to its own viewport, so the terminal
+			// cursor needs the same horizontal offset as the split renderer.
+			cx += m.split.paneAWidth(m.splitEditorWidth()) + 1
+		}
 		cy += 1 // +1 for tab bar
 		if cy >= 0 && cy < m.height-1 && cx >= 0 && cx < m.width {
 			cursor := tea.NewCursor(cx, cy)
@@ -269,19 +275,7 @@ func (m Model) View() tea.View {
 
 // renderSplitPanes renders two editor panes side by side with a divider.
 func (m Model) renderSplitPanes() string {
-	aw := m.agentPanelWidth()
-	agentExtra := 0
-	if m.showAgent && aw > 0 {
-		agentExtra = aw + 1
-	}
-	tw := 0
-	if m.treeVisible() {
-		tw = m.treeWidth() + 1
-	}
-	totalWidth := m.width - tw - agentExtra
-	if totalWidth < 1 {
-		totalWidth = 1
-	}
+	totalWidth := m.splitEditorWidth()
 
 	paneAW := m.split.paneAWidth(totalWidth)
 	paneBW := m.split.paneBWidth(totalWidth)
@@ -317,6 +311,24 @@ func (m Model) renderSplitPanes() string {
 	divider := strings.Join(dividerLines, "\n")
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, paneAView, divider, paneBView)
+}
+
+// splitEditorWidth returns the horizontal space available to the two panes.
+// Keeping this calculation in one place prevents the renderer and native
+// cursor from disagreeing about pane-B's terminal offset when side panels are
+// visible.
+func (m Model) splitEditorWidth() int {
+	agentExtra := 0
+	if m.showAgent {
+		if width := m.agentPanelWidth(); width > 0 {
+			agentExtra = width + 1
+		}
+	}
+	treeExtra := 0
+	if m.treeVisible() {
+		treeExtra = m.treeWidth() + 1
+	}
+	return max(1, m.width-treeExtra-agentExtra)
 }
 
 func clipViewLines(content string, width int) string {

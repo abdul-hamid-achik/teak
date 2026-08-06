@@ -4,6 +4,14 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+### TUI Split Focus
+
+- The native terminal cursor now follows the focused pane in side-by-side split
+  views, including the sidebar offset. Pane B no longer leaves the caret
+  blinking over pane A's text.
+- Added regression coverage for split cursor placement with and without the
+  file tree visible.
+
 ## [0.18.0] - 2026-08-06
 
 ### Multicursor Line Operations

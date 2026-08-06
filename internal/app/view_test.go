@@ -308,6 +308,32 @@ func TestModelViewTreeOffsetsCursor(t *testing.T) {
 	}
 }
 
+func TestModelViewSplitOffsetsFocusedPaneCursor(t *testing.T) {
+	for _, showTree := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tree-%t", showTree), func(t *testing.T) {
+			m := newViewTestModel(t, showTree)
+			m.editors = append(m.editors, m.editors[0])
+			m.showAgent = false
+			m.toggleSplit()
+			m.relayout()
+			m.cycleSplitFocus()
+
+			localX, localY := m.activeEditor().CursorPosition()
+			v := m.View()
+			if v.Cursor == nil {
+				t.Fatal("Cursor = nil, want focused split-pane cursor")
+			}
+			wantX := m.split.paneAWidth(m.splitEditorWidth()) + 1 + localX
+			if showTree {
+				wantX += m.treeWidth() + 1
+			}
+			if v.Cursor.X != wantX || v.Cursor.Y != localY+1 {
+				t.Fatalf("split cursor = (%d,%d), want (%d,%d)", v.Cursor.X, v.Cursor.Y, wantX, localY+1)
+			}
+		})
+	}
+}
+
 func TestModelViewHelpOverlaySuppressesCursor(t *testing.T) {
 	m := newViewTestModel(t, false)
 	m.showHelp = true
