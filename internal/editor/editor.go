@@ -928,13 +928,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 
 	// --- Editing ---
 	case "backspace":
-		// Delete both brackets when backspacing between empty pair
-		if IsBetweenBrackets(e.Buffer, e.Buffer.Cursor) {
-			start := text.Position{Line: e.Buffer.Cursor.Line, Col: e.Buffer.Cursor.Col - 1}
-			end := text.Position{Line: e.Buffer.Cursor.Line, Col: e.Buffer.Cursor.Col + 1}
-			e.Buffer.ReplaceRange(start, end, nil)
-			e.Buffer.SetCursor(start)
-			edited = true
+		if e.hasMultipleCursors() || IsBetweenBrackets(e.Buffer, e.Buffer.Cursor) {
+			if edits, ok := backspaceSelectionEdits(e.Buffer); ok {
+				edited = e.Buffer.ApplySelectionEdits(edits)
+			}
 			break
 		}
 		e.Buffer.Backspace()
@@ -1035,22 +1032,21 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	default:
 		if msg.Text != "" {
 			ch := msg.Text[0]
-			// Skip over closing bracket if it's already the next character
-			if len(msg.Text) == 1 && IsCloseBracket(ch) {
-				line := e.Buffer.Line(e.Buffer.Cursor.Line)
-				if e.Buffer.Cursor.Col < len(line) && line[e.Buffer.Cursor.Col] == ch {
-					e.Buffer.MoveCursor(text.DirRight)
-					break
+			if len(msg.Text) == 1 {
+				if close := AutoClosePair(ch); close != 0 {
+					if edits, ok := autoCloseSelectionEdits(e.Buffer, ch, close); ok {
+						edited = e.Buffer.ApplySelectionEdits(edits)
+						break
+					}
+				}
+				if IsCloseBracket(ch) {
+					if edits, ok := closingBracketSelectionEdits(e.Buffer, ch); ok {
+						edited = e.Buffer.ApplySelectionEdits(edits)
+						break
+					}
 				}
 			}
 			e.Buffer.InsertAtCursor([]byte(msg.Text))
-			// Auto-close bracket
-			if len(msg.Text) == 1 {
-				if close := AutoClosePair(ch); close != 0 {
-					e.Buffer.InsertAtCursor([]byte{close})
-					e.Buffer.MoveCursor(text.DirLeft)
-				}
-			}
 			edited = true
 		}
 	}

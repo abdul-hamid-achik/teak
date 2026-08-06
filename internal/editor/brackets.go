@@ -166,3 +166,97 @@ func IsBetweenBrackets(buf *text.Buffer, cursor text.Position) bool {
 	after, ok := rope.ByteAtSafe(afterOffset)
 	return ok && IsOpenBracket(before) && bracketPairs[before] == after
 }
+
+func selectionOffsets(rope *text.Rope, selection text.Selection) (int, int, bool) {
+	start, end := selection.Ordered()
+	startOffset, startOK := rope.PositionToOffsetUncached(start)
+	endOffset, endOK := rope.PositionToOffsetUncached(end)
+	return startOffset, endOffset, startOK && endOK && endOffset >= startOffset
+}
+
+func autoCloseSelectionEdits(buf *text.Buffer, open, close byte) ([]text.EditOp, bool) {
+	if buf == nil || buf.Selections == nil || buf.Selections.Count() == 0 {
+		return nil, false
+	}
+	buf.Selections.Normalize()
+	rope := buf.Rope()
+	edits := make([]text.EditOp, buf.Selections.Count())
+	for i, selection := range buf.Selections.All() {
+		start, end, ok := selectionOffsets(rope, selection)
+		if !ok {
+			return nil, false
+		}
+		edits[i] = text.EditOp{
+			Offset: start,
+			Delete: end - start,
+			Insert: []byte{open, close},
+			Cursor: start + 1,
+		}
+	}
+	return edits, true
+}
+
+func closingBracketSelectionEdits(buf *text.Buffer, close byte) ([]text.EditOp, bool) {
+	if buf == nil || buf.Selections == nil || buf.Selections.Count() == 0 {
+		return nil, false
+	}
+	buf.Selections.Normalize()
+	rope := buf.Rope()
+	edits := make([]text.EditOp, buf.Selections.Count())
+	for i, selection := range buf.Selections.All() {
+		start, end, ok := selectionOffsets(rope, selection)
+		if !ok {
+			return nil, false
+		}
+		if !selection.IsEmpty() {
+			edits[i] = text.EditOp{
+				Offset: start,
+				Delete: end - start,
+				Insert: []byte{close},
+				Cursor: start + 1,
+			}
+			continue
+		}
+		edits[i] = text.EditOp{Offset: start, Cursor: start + 1}
+		if next, exists := rope.ByteAtSafe(start); !exists || next != close {
+			edits[i].Insert = []byte{close}
+		}
+	}
+	return edits, true
+}
+
+func backspaceSelectionEdits(buf *text.Buffer) ([]text.EditOp, bool) {
+	if buf == nil || buf.Selections == nil || buf.Selections.Count() == 0 {
+		return nil, false
+	}
+	buf.Selections.Normalize()
+	rope := buf.Rope()
+	edits := make([]text.EditOp, buf.Selections.Count())
+	for i, selection := range buf.Selections.All() {
+		start, end, ok := selectionOffsets(rope, selection)
+		if !ok {
+			return nil, false
+		}
+		if !selection.IsEmpty() {
+			edits[i] = text.EditOp{Offset: start, Delete: end - start, Cursor: start}
+			continue
+		}
+		if start == 0 {
+			edits[i] = text.EditOp{Offset: start, Cursor: start}
+			continue
+		}
+		before, beforeOK := rope.ByteAtSafe(start - 1)
+		after, afterOK := rope.ByteAtSafe(start)
+		if beforeOK && afterOK && IsOpenBracket(before) && bracketPairs[before] == after {
+			edits[i] = text.EditOp{Offset: start - 1, Delete: 2, Cursor: start - 1}
+			continue
+		}
+		_, size, exists := rope.RuneBefore(start)
+		if !exists || size <= 0 {
+			edits[i] = text.EditOp{Offset: start, Cursor: start}
+			continue
+		}
+		edits[i] = text.EditOp{Offset: start - size, Delete: size, Cursor: start - size}
+	}
+	return edits, true
+}

@@ -376,6 +376,103 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 	b.lastChange = nil
 }
 
+// ApplySelectionEdits applies one ordered, non-overlapping replacement per
+// normalized selection. Every operation addresses the original immutable rope
+// and supplies its cursor in the document after that replacement alone. The
+// method validates the complete set before saving Undo or changing state,
+// applies text from end to start, then rebases every cursor through earlier
+// replacements. A cursor-only set moves selections without dirtying the
+// document; multiple text edits use the LSP full-sync fallback.
+func (b *Buffer) ApplySelectionEdits(ops []EditOp) bool {
+	if b.Selections == nil || b.Selections.Count() == 0 {
+		return false
+	}
+	b.Selections.Normalize()
+	if len(ops) != b.Selections.Count() {
+		return false
+	}
+
+	const maxInt = int(^uint(0) >> 1)
+	docLen := b.rope.Len()
+	finalLen := docLen
+	previousEnd := 0
+	changed := false
+	for i, op := range ops {
+		if op.Offset < 0 || op.Offset > docLen || op.Delete < 0 || op.Delete > docLen-op.Offset {
+			return false
+		}
+		end := op.Offset + op.Delete
+		if i > 0 && op.Offset < previousEnd {
+			return false
+		}
+		previousEnd = end
+		if len(op.Insert) > maxInt-(finalLen-op.Delete) {
+			return false
+		}
+		finalLen += len(op.Insert) - op.Delete
+		if op.Cursor < 0 || op.Cursor > docLen-op.Delete+len(op.Insert) {
+			return false
+		}
+		if op.Delete > 0 || len(op.Insert) > 0 {
+			if op.Cursor < op.Offset || op.Cursor > op.Offset+len(op.Insert) {
+				return false
+			}
+			changed = true
+		}
+	}
+
+	oldRope := b.rope
+	primary := b.Selections.PrimaryIndex()
+	b.Cursor = b.Selections.PrimaryCursor()
+	if changed {
+		isTypedInsert := len(ops) == 1 && ops[0].Delete == 0 &&
+			isTypedRune(ops[0].Insert) && ops[0].Cursor == ops[0].Offset+len(ops[0].Insert)
+		b.undo.Save(b.rope, b.Cursor, isTypedInsert)
+		for i := len(ops) - 1; i >= 0; i-- {
+			op := ops[i]
+			if op.Delete > 0 {
+				b.rope = b.rope.Delete(op.Offset, op.Delete)
+			}
+			if len(op.Insert) > 0 {
+				b.rope = b.rope.Insert(op.Offset, op.Insert)
+			}
+		}
+	}
+
+	collapsed := make([]Selection, len(ops))
+	shift := 0
+	for i, op := range ops {
+		target := op.Cursor + shift
+		target = max(0, min(target, finalLen))
+		pos := b.rope.OffsetToPosition(target)
+		collapsed[i] = Selection{Anchor: pos, Head: pos}
+		shift += len(op.Insert) - op.Delete
+	}
+	b.Selections = &Selections{selections: collapsed, primary: primary, dirty: true}
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
+
+	if !changed {
+		return false
+	}
+	b.undo.MarkCharInsertEnd(b.Cursor)
+	b.dirty = true
+	b.version++
+	if len(ops) == 1 {
+		op := ops[0]
+		start := oldRope.OffsetToPosition(op.Offset)
+		end := oldRope.OffsetToPosition(op.Offset + op.Delete)
+		b.lastChange = &EditChange{
+			StartLine: start.Line, StartCol: start.Col,
+			EndLine: end.Line, EndCol: end.Col,
+			Text: string(op.Insert),
+		}
+	} else {
+		b.lastChange = nil
+	}
+	return true
+}
+
 // InsertNewline inserts a newline at the cursor.
 func (b *Buffer) InsertNewline() {
 	b.InsertAtCursor([]byte{'\n'})

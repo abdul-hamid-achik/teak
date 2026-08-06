@@ -4,6 +4,33 @@ All notable changes to the Teak editor project.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-06
+
+### Atomic Multicursor Delimiters
+
+- Opening delimiters now auto-close at every cursor and replace every selected
+  range, leaving each caret inside its pair as one undoable edit.
+- Closing delimiters independently skip an existing match or insert a missing
+  character at each cursor. A skip-only command moves the cursors without
+  dirtying the buffer or incrementing its document version.
+- Backspace now handles mixed selected ranges, empty delimiter pairs, ordinary
+  text, UTF-8 runes, and cursors at the start of the document atomically across
+  the complete selection set.
+- The text buffer has a validated selection-edit transaction that rejects
+  overlapping or invalid operations before mutation, rebases every resulting
+  cursor, saves one Undo snapshot, and preserves precise incremental LSP sync
+  for single edits while using the existing full-sync fallback for multicursor
+  edits.
+- Delimiter handling no longer materializes logical lines in the key-update
+  path. A 1,000-cursor transaction takes about 197-199 microseconds on an Apple
+  M5.
+- Regression coverage includes mixed skip/insert commands, selected ranges,
+  Unicode deletion, atomic Undo, document boundaries, invalid overlap, and 300
+  deterministic randomized transactions checked against a byte-slice model.
+- Full verification passes with the race detector and three stable Glyphrun
+  runs. Aggregate statement coverage is 76.3%; `internal/editor` is 84.3% and
+  `internal/text` is 82.4%.
+
 ## [0.14.0] - 2026-08-06
 
 ### Multi-selection Clipboard

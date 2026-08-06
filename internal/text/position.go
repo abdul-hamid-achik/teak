@@ -40,11 +40,15 @@ func (s Selection) IsEmpty() bool {
 	return s.Anchor == s.Head
 }
 
-// EditOp represents a single atomic edit operation.
+// EditOp represents one replacement in a set of atomic selection edits.
+// Offset and Delete address the original document. Cursor is an absolute byte
+// offset in the document after this replacement alone; edits before it are
+// rebased by Buffer.ApplySelectionEdits.
 type EditOp struct {
 	Offset ByteOffset
 	Delete int
 	Insert []byte
+	Cursor ByteOffset
 }
 
 // Selections manages multiple selections with a primary selection.
