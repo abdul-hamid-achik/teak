@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -259,6 +260,25 @@ func TestSearchReplaceStatusNamesActiveFile(t *testing.T) {
 
 // --- F8-tabbar: middle-click closes safely, right-click is inert ---
 
+// The zone manager publishes bounds from an async worker goroutine, so a
+// single render can race zone.Get; poll briefly the way the other zone-based
+// tests do (theme_test.go, picker_mouse_dismiss_test.go).
+func awaitTabZone(t *testing.T, m Model, id string) *zone.ZoneInfo {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_ = m.View()
+		info := zone.Get(id)
+		if info != nil && !info.IsZero() {
+			return info
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("zone %q was not rendered within deadline", id)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func tabLabelClickPoint(t *testing.T, m Model, idx int) (int, int) {
 	t.Helper()
 	if idx < 0 || idx >= len(m.tabBar.Tabs) {
@@ -266,11 +286,7 @@ func tabLabelClickPoint(t *testing.T, m Model, idx int) (int, int) {
 	}
 	// Rendering the view registers the tab zones with the zone manager, exactly
 	// as a real frame does.
-	_ = m.View()
-	info := zone.Get(editor.TabZoneID(m.tabBar.Tabs[idx]))
-	if info.IsZero() {
-		t.Fatalf("tab %d label zone was not rendered", idx)
-	}
+	info := awaitTabZone(t, m, editor.TabZoneID(m.tabBar.Tabs[idx]))
 	return info.StartX, info.StartY
 }
 
@@ -351,11 +367,7 @@ func TestTabBarRightClickOnCloseZoneDoesNotClose(t *testing.T) {
 	m := newViewTestModel(t, false)
 	addDirtyEditor(t, &m, "second.go", "package second\n", "package second\n")
 	m.relayout()
-	_ = m.View()
-	info := zone.Get(editor.TabCloseZoneID(m.tabBar.Tabs[1]))
-	if info.IsZero() {
-		t.Fatal("tab 1 close zone was not rendered")
-	}
+	info := awaitTabZone(t, m, editor.TabCloseZoneID(m.tabBar.Tabs[1]))
 
 	updatedAny, _ := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseRight, X: info.StartX, Y: info.StartY}))
 	updated := updatedAny.(Model)
