@@ -451,7 +451,9 @@ func (f FindModel) View() string {
 
 func formatMatchCount(current, total int) string {
 	if total > 999 {
-		return "999+ matches"
+		// Keep the current-of-total position; the capped total is marked with
+		// "+" instead of replacing the indicator and losing where the user is.
+		return itoa(current) + "/999+"
 	}
 	return itoa(current) + "/" + itoa(total)
 }

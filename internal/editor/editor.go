@@ -1251,6 +1251,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			if e.autocomplete.Visible {
 				e.autocomplete.Hide()
 			}
+			e.dismissPositionAnchoredPopups()
 			e.Buffer.SetCursor(pos)
 		}
 		e.contextMenu.Show(e.buildEditorMenuItems(), m.X, m.Y)
@@ -1286,6 +1287,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			if e.autocomplete.Visible {
 				e.autocomplete.Hide()
 			}
+			e.dismissPositionAnchoredPopups()
 			e.Buffer.SetSelection(anchor, pos)
 		} else {
 			now := time.Now()
@@ -1301,6 +1303,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			if e.autocomplete.Visible {
 				e.autocomplete.Hide()
 			}
+			e.dismissPositionAnchoredPopups()
 			e.Buffer.SetCursor(pos)
 
 			switch e.clickCount {
@@ -2101,6 +2104,20 @@ func (e *Editor) HideHover() {
 	e.hover.Hide()
 }
 
+// dismissPositionAnchoredPopups hides the hover and signature-help popups.
+// Both are anchored to a buffer position, so any click that moves the cursor
+// or a selection head leaves them pointing at the wrong location; only
+// clicks that reach the text area call this, because the app routes clicks
+// inside an open popup to the popup itself.
+func (e *Editor) dismissPositionAnchoredPopups() {
+	if e.hover.Visible {
+		e.hover.Hide()
+	}
+	if e.signatureHelp.Visible {
+		e.signatureHelp.Hide()
+	}
+}
+
 // ShowSignatureHelp displays signature help.
 func (e *Editor) ShowSignatureHelp(help *overlays.SignatureData) {
 	e.signatureHelp.Show(help)
@@ -2359,6 +2376,9 @@ func (e Editor) buildEditorMenuItems() []ContextMenuItem {
 		{Label: "Paste", Shortcut: "Ctrl+V", Action: "paste"},
 		{Label: ""}, // separator
 		{Label: "Select All", Shortcut: "Ctrl+A", Action: "select_all"},
+		{Label: ""}, // separator
+		{Label: "Find", Shortcut: "Ctrl+F", Action: "find"},
+		{Label: "Go to Line", Shortcut: "Ctrl+G", Action: "go_to_line"},
 	}
 
 	if e.HasLSP {
@@ -2367,6 +2387,7 @@ func (e Editor) buildEditorMenuItems() []ContextMenuItem {
 			ContextMenuItem{Label: "Go to Definition", Shortcut: "F12", Action: "goto_definition"},
 			ContextMenuItem{Label: "Find References", Action: "find_references"},
 			ContextMenuItem{Label: "Rename Symbol", Action: "rename_symbol"},
+			ContextMenuItem{Label: "Format Document", Shortcut: "Ctrl+Alt+F", Action: "format_document"},
 		)
 	}
 

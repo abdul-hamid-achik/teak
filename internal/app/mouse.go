@@ -80,6 +80,19 @@ func contextMenuRect(x, y int, view string) mouseRect {
 	return newMouseRect(x, y, width, len(lines))
 }
 
+// isAppRoutedContextAction reports whether a context menu action must be
+// handled by the app layer rather than reconciled as an editor edit: the LSP
+// trio talks to the language server, while Find, Format Document and Go to
+// Line open app-owned widgets and dialogs.
+func isAppRoutedContextAction(action string) bool {
+	switch action {
+	case "goto_definition", "find_references", "rename_symbol",
+		"find", "go_to_line", "format_document":
+		return true
+	}
+	return false
+}
+
 // mouseLayout is the input counterpart of View's terminal geometry.
 // Every routed surface owns an explicit rectangle and all remaining cells are
 // chrome, so coordinates cannot leak to a component rendered behind them.
@@ -322,7 +335,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		prevCursor := editorModel.Buffer.Cursor
 		result, cmd, action := editorModel.ClickContextMenuItem(relY)
 		m.setEditor(m.activeTab, result)
-		if action == "goto_definition" || action == "find_references" || action == "rename_symbol" {
+		if isAppRoutedContextAction(action) {
 			return m.handleContextMenuAction(action)
 		}
 		syncCmd := m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)

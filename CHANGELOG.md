@@ -2,6 +2,27 @@
 
 All notable changes to the Teak editor project.
 
+## [0.20.0] - 2026-08-29
+
+### TUI Feedback and Affordances
+
+- Status-bar messages now expire (six seconds after your next interaction)
+  instead of living for the whole session, and a stale message no longer
+  suppresses the hover diagnostic under the cursor. The expiry tick is armed
+  only on interactions that carry no command of their own, so no command is
+  ever batched away — pinned by a dedicated regression test.
+- The editor context menu gains Find (`Ctrl+F`), Go to Line (`Ctrl+G`), and —
+  with a language server connected — Format Document (`Ctrl+Alt+F`), routed
+  exactly like their keyboard shortcuts.
+- The welcome screen now points at Quick Open (`Ctrl+P`).
+- In project search, up/down now always move the result cursor when the
+  replace row is visible (focus cycling moved to `Tab`/`Shift+Tab`, with
+  `Shift+Tab` directional); `F3` continuity, middle-click tab close, and the
+  other search/input fixes shipped earlier in 0.19.0 remain.
+- The in-buffer find counter keeps your position at the cap (`5/999+`
+  instead of `999+ matches`), and a buffer click now also dismisses hover and
+  signature-help popups anchored to the old position.
+
 ## [0.19.0] - 2026-08-29
 
 ### Quality Sweep Follow-ups

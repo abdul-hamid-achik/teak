@@ -359,3 +359,17 @@ func TestWelcomeUpdateSettledStopsAnimation(t *testing.T) {
 		t.Error("expected to be settled after 200 frames")
 	}
 }
+
+func TestWelcomeViewContainsQuickOpenHint(t *testing.T) {
+	welcome := NewWelcome(ui.DefaultTheme())
+	welcome.SetSize(80, 24)
+
+	view := welcome.View()
+
+	if !strings.Contains(view, "Ctrl+P") {
+		t.Error("expected Ctrl+P hint")
+	}
+	if !strings.Contains(view, "Quick Open") {
+		t.Error("expected 'Quick Open' hint")
+	}
+}

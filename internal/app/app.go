@@ -196,6 +196,9 @@ type modelState struct {
 	theme                     ui.Theme
 	activeThemeName           string // theme represented by the live, cached style models
 	status                    string
+	statusSeq                 int  // generation of the current status; stale expiry timers are ignored
+	statusNeedsTimer          bool // the current status still needs an expiry tick scheduled
+	statusTimerArmed          bool // an expiry tick for the current status generation is scheduled
 	width                     int
 	height                    int
 	showHelp                  bool
@@ -629,6 +632,7 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 	// give the user one startup notice instead of silently keeping defaults.
 	if len(appCfg.LoadWarnings) > 0 {
 		m.status = "Config warnings: " + strings.Join(appCfg.LoadWarnings, "; ")
+		m.statusSeq++
 		log.Warn("config loaded with warnings", "warnings", appCfg.LoadWarnings)
 	}
 
@@ -798,6 +802,18 @@ func (m Model) sessionSnapshot() (session.State, bool) {
 
 type sessionAutoSaveMsg struct{}
 
+// statusMessageLifetime is how long a status-bar message stays on screen
+// before the slot returns to the hover diagnostic. It is a variable so tests
+// can shrink it.
+var statusMessageLifetime = 6 * time.Second
+
+// statusExpiredMsg clears the status message scheduled statusMessageLifetime
+// ago. seq guards against an older timer clearing a newer message: every new
+// status advances statusSeq, so a stale timer's seq no longer matches.
+type statusExpiredMsg struct {
+	seq int
+}
+
 type sessionSaveResultMsg struct {
 	generation uint64
 	err        error
@@ -950,6 +966,19 @@ func (m Model) handleSessionSaveResult(msg sessionSaveResultMsg) (Model, tea.Cmd
 	return m, m.nextSessionAutoSaveTick()
 }
 
+// startupStatusExpiryCmd returns the expiry tick for a status message set
+// during construction, before any Update could schedule one. It returns nil
+// when there is nothing to expire.
+func (m Model) startupStatusExpiryCmd() tea.Cmd {
+	if m.modelState == nil || m.status == "" {
+		return nil
+	}
+	seq := m.statusSeq
+	return tea.Tick(statusMessageLifetime, func(time.Time) tea.Msg {
+		return statusExpiredMsg{seq: seq}
+	})
+}
+
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
 	if m.modelState == nil {
@@ -1006,6 +1035,11 @@ func (m Model) Init() tea.Cmd {
 		}))
 	}
 
+	// A status set during construction (config load warnings) expires too.
+	if cmd := m.startupStatusExpiryCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
 	// Start DAP event listener
 	cmds = append(cmds, m.listenDAP())
 
@@ -1021,8 +1055,65 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// Update implements tea.Model.
+// Update implements tea.Model. It wraps update with status-message expiry:
+// a status message that stays in the slot is eventually cleared so feedback
+// does not occupy the status bar forever and suppress the hover diagnostic
+// rendered there when idle.
+//
+// The timer replaces only a nil command on a user-interaction message, one
+// interaction after the status was set. Composing the tick onto a non-nil
+// command would change that command's shape, because a batched command
+// invoked outside the Bubble Tea runtime yields a BatchMsg instead of running
+// its members. Tying the sweep to the next interaction also guarantees the
+// message stays readable until the user does something else. Every status
+// change advances statusSeq, so a timer armed for an older message can never
+// clear a newer one.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var prevStatus string
+	if m.modelState != nil {
+		prevStatus = m.status
+	}
+	model, cmd := m.update(msg)
+	next, ok := model.(Model)
+	if !ok {
+		return model, cmd
+	}
+	if next.status != prevStatus {
+		// Invalidate any timer armed for the previous message and require a
+		// fresh one for the new status.
+		next.statusTimerArmed = false
+		next.statusNeedsTimer = next.status != ""
+		if next.statusNeedsTimer {
+			next.statusSeq++
+		}
+	}
+	if _, fired := msg.(statusExpiredMsg); fired {
+		// The armed timer is spent whether or not its sequence still matched;
+		// a stale fire is re-armed by the next interaction.
+		next.statusTimerArmed = false
+	}
+	if next.statusNeedsTimer && !next.statusTimerArmed && cmd == nil && isUserInteractionMsg(msg) {
+		seq := next.statusSeq
+		next.statusTimerArmed = true
+		cmd = tea.Tick(statusMessageLifetime, func(time.Time) tea.Msg {
+			return statusExpiredMsg{seq: seq}
+		})
+	}
+	return next, cmd
+}
+
+// isUserInteractionMsg reports whether a message originates from the user
+// rather than from Teak's own asynchronous machinery.
+func isUserInteractionMsg(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg, tea.MouseMotionMsg,
+		tea.MouseWheelMsg, tea.MouseReleaseMsg:
+		return true
+	}
+	return false
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m = m.ensureState()
 	if _, ok := msg.(shutdownCompleteMsg); ok {
 		m.quitApproved = true
@@ -1427,6 +1518,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editor.ContextMenuActionMsg:
 		return m.handleContextMenuAction(msg.Action)
+
+	case statusExpiredMsg:
+		if msg.seq == m.statusSeq {
+			m.status = ""
+		}
+		return m, nil
 
 	case editor.BreakpointClickMsg:
 		return m.handleBreakpointClick(msg)
@@ -5053,6 +5150,27 @@ func (m Model) handleContextMenuAction(action string) (tea.Model, tea.Cmd) {
 		m.renameMode = true
 		m.renameInput = ""
 		return m, nil
+	case "find":
+		// Same behavior as the Ctrl+F binding: reveal the in-buffer find
+		// widget and shrink the viewport by its row.
+		if ed := m.activeEditor(); ed != nil && !ed.IsFindVisible() {
+			cmd := ed.ShowFind()
+			m.relayout()
+			return m, cmd
+		}
+		return m, nil
+	case "go_to_line":
+		m.goToLineMode = true
+		m.goToLineInput = ""
+		return m, nil
+	case "format_document":
+		// Same behavior as the Ctrl+Alt+F binding; the menu item is gated on
+		// HasLSP in the editor, the request itself guards on a file path.
+		ed := m.activeEditor()
+		if ed == nil || ed.Buffer.FilePath == "" {
+			return m, nil
+		}
+		return m, m.requestFormatting(ed.Buffer.FilePath, ed.Config, 0)
 	}
 	return m, nil
 }

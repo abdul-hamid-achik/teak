@@ -247,16 +247,27 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		case "tab":
+		case "tab", "shift+tab":
+			// Focus cycling between the find and replace inputs belongs to
+			// Tab/Shift+Tab only. Up/down always move the result cursor; when
+			// they cycled focus instead, keyboard result navigation became
+			// unreachable in replace mode. Tab moves forward (find → replace),
+			// Shift+Tab moves back, so the pair stays directional.
 			if m.showReplace {
-				if m.focusedInput == 0 {
+				if m.focusedInput == 0 && msg.String() == "tab" {
 					m.focusedInput = 1
 					m.input.Blur()
 					return m, m.replaceInput.Focus()
 				}
-				m.focusedInput = 0
-				m.replaceInput.Blur()
-				return m, m.input.Focus()
+				if m.focusedInput == 1 && msg.String() == "shift+tab" {
+					m.focusedInput = 0
+					m.replaceInput.Blur()
+					return m, m.input.Focus()
+				}
+				return m, nil
+			}
+			if msg.String() != "tab" {
+				return m, nil
 			}
 			if m.mode == ModeText {
 				m.mode = ModeSemantic
@@ -295,22 +306,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up":
-			if m.showReplace && m.focusedInput == 1 {
-				m.focusedInput = 0
-				m.replaceInput.Blur()
-				return m, m.input.Focus()
-			}
 			if m.cursor > 0 {
 				m.cursor--
 				m.ensureCursorVisible()
 			}
 			return m, nil
 		case "down":
-			if m.showReplace && m.focusedInput == 0 {
-				m.focusedInput = 1
-				m.input.Blur()
-				return m, m.replaceInput.Focus()
-			}
 			if m.cursor < len(m.results)-1 {
 				m.cursor++
 				m.ensureCursorVisible()

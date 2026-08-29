@@ -296,3 +296,24 @@ func TestFindModelOriginCaptureAndReset(t *testing.T) {
 		t.Fatal("Hide kept the visited flag")
 	}
 }
+
+func TestFormatMatchCountKeepsPositionAtCap(t *testing.T) {
+	tests := []struct {
+		name    string
+		current int
+		total   int
+		want    string
+	}{
+		{"under cap", 3, 12, "3/12"},
+		{"exactly at cap", 3, 999, "3/999"},
+		{"over cap keeps position", 5, 1200, "5/999+"},
+		{"over cap large current", 1042, 5000, "1042/999+"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatMatchCount(tt.current, tt.total); got != tt.want {
+				t.Fatalf("formatMatchCount(%d, %d) = %q, want %q", tt.current, tt.total, got, tt.want)
+			}
+		})
+	}
+}

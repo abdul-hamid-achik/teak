@@ -109,6 +109,7 @@ func (w *Welcome) View() string {
 	hints := []struct{ key, desc string }{
 		{"Ctrl+B", "Toggle file tree"},
 		{"Ctrl+F", "Find in file"},
+		{"Ctrl+P", "Quick Open"},
 		{"Ctrl+Q", "Quit"},
 		{"F1", "Help"},
 	}
