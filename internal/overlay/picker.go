@@ -210,14 +210,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
-			p.Cancel()
-			p.pendingSelect = false
-			p.dismissed = true
-			if p.dismissAction != nil {
-				action := p.dismissAction
-				return p, func() tea.Msg { return action }
-			}
-			return p, func() tea.Msg { return PickerCloseMsg{} }
+			return p, p.dismiss()
 		case "enter":
 			if p.pending() {
 				p.pendingSelect = true
@@ -261,10 +254,21 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		if boxZone := zone.Get(p.boxZoneID()); boxZone != nil && mouse.Button == tea.MouseLeft && !boxZone.InBounds(msg) {
+			// A left click outside the rendered box dismisses the picker,
+			// exactly like Escape. The click stays consumed by the overlay
+			// stack's modal routing, so it never reaches the editor or the
+			// tree underneath. Zone bounds come from the last scanned frame,
+			// which is how item hit-testing already resolves positions. An
+			// unpublished zone is treated as inside: zone bounds arrive from
+			// an async scan worker, and dismissing before the first frame is
+			// published would eat an in-box click under scripted input.
+			return p, p.dismiss()
+		}
 		if p.pending() {
 			return p, nil
 		}
-		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
 			start, end := p.visibleRange()
 			for i := start; i < end; i++ {
@@ -419,7 +423,10 @@ func (p *Picker) View() string {
 		Padding(1, 2).
 		Width(boxWidth)
 
-	return boxStyle.Render(content)
+	// The box zone spans the entire rendered dialog (border and padding
+	// included) so Update can distinguish "inside the picker, missed every
+	// item" from "outside the picker" on mouse clicks.
+	return zone.Mark(p.boxZoneID(), boxStyle.Render(content))
 }
 
 // IsDismissed implements Overlay.
@@ -633,6 +640,25 @@ func (p *Picker) ensureVisible() {
 
 func (p *Picker) itemZoneID(idx int) string {
 	return p.zoneID + "-item-" + itoa(idx)
+}
+
+// boxZoneID identifies the zone covering the whole rendered picker box.
+func (p *Picker) boxZoneID() string {
+	return p.zoneID + "-box"
+}
+
+// dismiss cancels in-flight work and closes the picker, emitting the same
+// message Escape produces. Escape and the outside-box click path must stay
+// indistinguishable to owners.
+func (p *Picker) dismiss() tea.Cmd {
+	p.Cancel()
+	p.pendingSelect = false
+	p.dismissed = true
+	if p.dismissAction != nil {
+		action := p.dismissAction
+		return func() tea.Msg { return action }
+	}
+	return func() tea.Msg { return PickerCloseMsg{} }
 }
 
 func countStr(cur, total int) string {

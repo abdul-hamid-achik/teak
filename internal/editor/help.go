@@ -50,6 +50,8 @@ var helpGroups = []bindingGroup{
 			{"Shift+Arrows", "Select characters"},
 			{"Ctrl+Shift+Left/Right", "Select words"},
 			{"Shift+Home/End", "Select to line edge"},
+			{"Ctrl+Shift+Home/End", "Select to document start/end"},
+			{"Ctrl+Alt+Up/Down", "Add cursor above / below"},
 			{"Ctrl+A", "Select all"},
 			{"Ctrl+D", "Select next occurrence"},
 			{"Ctrl+U", "Select all occurrences"},
@@ -92,6 +94,7 @@ var helpGroups = []bindingGroup{
 			{"Ctrl+Shift+F", "Text search"},
 			{"Tab in search", "Toggle text / semantic search"},
 			{"F3 / Shift+F3", "Next / previous result"},
+			{"Ctrl+R (find widget)", "Toggle regex search"},
 		},
 	},
 	{
@@ -120,7 +123,7 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"Ctrl+B", "Toggle file tree"},
 			{"/ (file tree)", "Filter project files"},
-			{"Ctrl+H (file tree)", "Toggle hidden files"},
+			{"Ctrl+H / Ctrl+. (file tree)", "Toggle hidden files"},
 			{"Ctrl+K (file tree)", "Toggle ignored files"},
 			{"Ctrl+\\", "Toggle editor split"},
 			{"Ctrl+Shift+\\", "Close editor split"},
@@ -145,6 +148,7 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"F5", "Start debugging"},
 			{"Shift+F5", "Stop debugging"},
+			{"F9", "Toggle breakpoint"},
 			{"C", "Continue"},
 			{"N", "Step over"},
 			{"I", "Step in"},

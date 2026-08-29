@@ -203,6 +203,37 @@ func TestAuditInputOverlaysKeepInputIsolated(t *testing.T) {
 	})
 }
 
+// TestGoToLineInvalidInputReportsStatus closes the dialog like every sibling
+// modal but must also tell the user why nothing happened instead of silently
+// discarding the input.
+func TestGoToLineInvalidInputReportsStatus(t *testing.T) {
+	m := newInputRoutingTestModel(t)
+	m.activeEditor().Buffer.LoadContent([]byte("zero\none\ntwo"))
+	m.goToLineMode = true
+	m.goToLineInput = "abc"
+
+	updatedAny, _ := m.handleGoToLineInput(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated := updatedAny.(Model)
+	if updated.goToLineMode || updated.goToLineInput != "" {
+		t.Fatalf("go-to-line state after invalid input = mode %v input %q", updated.goToLineMode, updated.goToLineInput)
+	}
+	if !strings.Contains(updated.status, "Not a line number") || !strings.Contains(updated.status, "abc") {
+		t.Fatalf("status = %q, want invalid-input feedback mentioning the input", updated.status)
+	}
+	if updated.activeEditor().Buffer.Cursor.Line != 0 {
+		t.Fatalf("invalid input moved cursor to line %d, want unchanged 0", updated.activeEditor().Buffer.Cursor.Line)
+	}
+
+	// Numeric overflow is the reachable variant of the same failure.
+	updated.goToLineMode = true
+	updated.goToLineInput = strings.Repeat("9", 32)
+	updatedAny, _ = updated.handleGoToLineInput(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated = updatedAny.(Model)
+	if !strings.Contains(updated.status, "Not a line number") {
+		t.Fatalf("overflow status = %q, want invalid-input feedback", updated.status)
+	}
+}
+
 func TestAuditQuickOpenResultHandlesStaleSuccessAndFailure(t *testing.T) {
 	m := newInputRoutingTestModel(t)
 	m.width, m.height = 100, 30

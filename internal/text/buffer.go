@@ -1279,6 +1279,20 @@ func (b *Buffer) ExtendCursorsToLineEnd() {
 	}, true, collapseAfterMove)
 }
 
+func (b *Buffer) ExtendCursorsToDocStart() {
+	b.transformSelections(func(pos Position) Position {
+		return Position{Line: 0, Col: 0}
+	}, true, collapseAfterMove)
+}
+
+func (b *Buffer) ExtendCursorsToDocEnd() {
+	lastLine := b.rope.LineCount() - 1
+	lastCol := b.rope.LineLen(lastLine)
+	b.transformSelections(func(pos Position) Position {
+		return Position{Line: lastLine, Col: lastCol}
+	}, true, collapseAfterMove)
+}
+
 // MoveCursorsByLines moves every cursor by a bounded logical-line delta. Page
 // navigation uses it to preserve a multicursor set; ClampPosition keeps each
 // byte column on a valid UTF-8 boundary when target lines differ in encoding.
@@ -1831,6 +1845,21 @@ func (b *Buffer) AddCursorBelow() {
 	}
 	b.Selections.Normalize()
 	b.Cursor = b.Selections.PrimaryCursor()
+}
+
+// DropSecondaryCursors collapses a multi-cursor selection set back to a single
+// caret at the primary cursor. It is the keyboard escape hatch for multi-cursor
+// modes: without it, a stray Ctrl+D chain or Ctrl+U leaves every subsequent
+// keystroke editing N places until a mouse click defuses it. A single selection
+// is left untouched. The change is cursor-only, so history, version, the dirty
+// flag, and the incremental change record are all preserved.
+func (b *Buffer) DropSecondaryCursors() {
+	if b.Selections == nil || b.Selections.Count() <= 1 {
+		return
+	}
+	cursor := b.Selections.PrimaryCursor()
+	b.Selections = NewSelections(cursor)
+	b.Cursor = cursor
 }
 
 // SplitSelectionIntoLines splits the current selection into multiple selections,

@@ -432,29 +432,35 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		m.openSettingsOverlay()
 		return m, nil, true
 	case "f8":
-		if m.problemsPanel.ProblemCount() > 0 {
-			m.problemsPanel.SelectNext()
-			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
-				pos := text.Position{Line: prob.Line, Col: prob.Col}
-				m.setPendingCursor(prob.FilePath, pos)
-				model, cmd := m.openFile(prob.FilePath)
-				updated := model.(Model)
-				updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
-				return updated, cmd, true
-			}
+		if m.problemsPanel.ProblemCount() == 0 {
+			// Mirror findNext's "No search results": a silently swallowed
+			// keypress looks identical to a broken shortcut.
+			m.status = "No problems"
+			return m, nil, true
+		}
+		m.problemsPanel.SelectNext()
+		if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+			pos := text.Position{Line: prob.Line, Col: prob.Col}
+			m.setPendingCursor(prob.FilePath, pos)
+			model, cmd := m.openFile(prob.FilePath)
+			updated := model.(Model)
+			updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
+			return updated, cmd, true
 		}
 		return m, nil, true
 	case "shift+f8":
-		if m.problemsPanel.ProblemCount() > 0 {
-			m.problemsPanel.SelectPrev()
-			if prob := m.problemsPanel.SelectedProblem(); prob != nil {
-				pos := text.Position{Line: prob.Line, Col: prob.Col}
-				m.setPendingCursor(prob.FilePath, pos)
-				model, cmd := m.openFile(prob.FilePath)
-				updated := model.(Model)
-				updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
-				return updated, cmd, true
-			}
+		if m.problemsPanel.ProblemCount() == 0 {
+			m.status = "No problems"
+			return m, nil, true
+		}
+		m.problemsPanel.SelectPrev()
+		if prob := m.problemsPanel.SelectedProblem(); prob != nil {
+			pos := text.Position{Line: prob.Line, Col: prob.Col}
+			m.setPendingCursor(prob.FilePath, pos)
+			model, cmd := m.openFile(prob.FilePath)
+			updated := model.(Model)
+			updated.status = fmt.Sprintf("Problem %d/%d", updated.problemsPanel.SelectedIndex()+1, updated.problemsPanel.ProblemCount())
+			return updated, cmd, true
 		}
 		return m, nil, true
 	default:

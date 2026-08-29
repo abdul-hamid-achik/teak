@@ -340,17 +340,20 @@ list.
 | Commands | `Ctrl+Shift+P` | Command palette |
 | Commands | `Ctrl+,` | Settings |
 | Search | `Ctrl+F` | Find in the active file |
+| Search | `Ctrl+R` (find widget) | Toggle regex search |
 | Search | `Ctrl+H` | Find and replace |
 | Search | `Ctrl+Shift+F` | Search the project |
 | Search | `Tab` | Switch text/semantic project search |
 | File tree | `/` (tree focus) | Filter project files |
-| File tree | `Ctrl+H` (tree focus) | Toggle hidden files |
+| File tree | `Ctrl+H` / `Ctrl+.` (tree focus) | Toggle hidden files |
 | File tree | `Ctrl+K` (tree focus) | Toggle Git-ignored files |
 | Editing | `Ctrl+/` | Toggle comment |
 | Editing | `Alt+Up/Down` | Move line |
 | Editing | `Alt+Shift+Up/Down` | Duplicate line |
 | Selection | `Ctrl+D` | Select next occurrence |
 | Selection | `Ctrl+U` | Select all occurrences |
+| Selection | `Ctrl+Alt+Up/Down` | Add cursor above / below |
+| Selection | `Ctrl+Shift+Home/End` | Extend selection to document start/end |
 | LSP | `Ctrl+Space` | Completion |
 | LSP | `Alt+K` | Hover information |
 | LSP | `Ctrl+K` | Code actions |
@@ -364,6 +367,7 @@ list.
 | Splits | `F6` | Switch split focus |
 | Problems | `F8` / `Shift+F8` | Next / previous problem |
 | Debugging | `F5` / `Shift+F5` | Start / stop debugging |
+| Debugging | `F9` | Toggle breakpoint |
 | General | `F1` | Shortcut reference |
 | General | `Ctrl+Q` | Quit |
 
@@ -655,6 +659,7 @@ task verify
 task perf-tools
 task perf-tools-test
 task run -- main.go
+task install   # install to GOBIN for global `teak` usage
 
 # Go
 go build ./...

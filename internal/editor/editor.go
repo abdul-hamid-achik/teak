@@ -464,7 +464,7 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		if e.find.Visible() {
 			switch msg.String() {
 			case "esc", "escape":
-				e.find.Hide()
+				e.escapeFind()
 				return e, nil
 			case "enter", "f3":
 				e.UpdateFind(msg)
@@ -484,7 +484,9 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 		// Autocomplete intercepts some keys when visible
 		if e.autocomplete.Visible {
 			switch msg.String() {
-			case "left", "right", "home", "end", "ctrl+home", "ctrl+end":
+			case "left", "right", "home", "end", "ctrl+home", "ctrl+end",
+				"shift+left", "shift+right", "shift+home", "shift+end",
+				"ctrl+shift+home", "ctrl+shift+end":
 				// Navigation moves the cursor away from the completion point,
 				// so the popup must not linger on stale suggestions.
 				e.autocomplete.Hide()
@@ -918,9 +920,17 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.Buffer.ExtendSelection(func() { e.Buffer.CursorToLineEnd() })
 		}
 	case "ctrl+shift+home":
-		e.Buffer.ExtendSelection(func() { e.Buffer.CursorToDocStart() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsToDocStart()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.CursorToDocStart() })
+		}
 	case "ctrl+shift+end":
-		e.Buffer.ExtendSelection(func() { e.Buffer.CursorToDocEnd() })
+		if e.hasMultipleCursors() {
+			e.Buffer.ExtendCursorsToDocEnd()
+		} else {
+			e.Buffer.ExtendSelection(func() { e.Buffer.CursorToDocEnd() })
+		}
 	case "ctrl+a":
 		e.Buffer.SelectAll()
 
@@ -972,10 +982,10 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		edited = e.Buffer.DedentLines(e.Config.TabSize) == text.StructuralEditApplied
 	case "ctrl+z":
 		e.Buffer.Undo()
-		edited = true
+		edited = e.Buffer.Version() != versionBefore
 	case "ctrl+shift+z", "ctrl+y":
 		e.Buffer.Redo()
-		edited = true
+		edited = e.Buffer.Version() != versionBefore
 
 	// --- New shortcuts ---
 	case "ctrl+/":
@@ -1049,6 +1059,11 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	case "esc", "escape":
 		e.hover.Hide()
 		e.signatureHelp.Hide()
+		// Esc also defuses armed secondary cursors (Ctrl+D chains, Ctrl+U,
+		// AddCursorAbove/Below): without this, a stray Esc leaves N cursors
+		// armed and the next keystroke edits N places. Overlays above already
+		// consumed this key, so by the time we get here no popup is open.
+		e.Buffer.DropSecondaryCursors()
 	default:
 		if msg.Text != "" {
 			ch := msg.Text[0]
@@ -2158,6 +2173,7 @@ func (e *Editor) AutocompleteScroll(delta int) {
 // that at the cursor instead of replacing the range leaves the prefix behind
 // (typing "fm" and accepting "fmt" produced "fmfmt").
 func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
+	versionBefore := e.Buffer.Version()
 	if item.HasEdit && e.completionEditIsApplicable(item.Edit) {
 		start := text.Position{Line: item.Edit.StartLine, Col: item.Edit.StartCol}
 		end := text.Position{Line: item.Edit.EndLine, Col: item.Edit.EndCol}
@@ -2169,7 +2185,9 @@ func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
 	}
 	e.refreshWordWrapAfterBufferChange()
 	e.EnsureCursorVisible()
-	if e.Highlighter != nil {
+	// An empty InsertText mutates nothing; invalidating anyway would shift
+	// tokens by the previous edit's stale line delta.
+	if e.Highlighter != nil && e.Buffer.Version() != versionBefore {
 		e.invalidateHighlightForLastChange()
 	}
 }
@@ -2209,11 +2227,51 @@ func (e *Editor) completionEditIsApplicable(edit overlays.AutocompleteEdit) bool
 	return true
 }
 
-// ShowFind opens the in-buffer find widget and refreshes a preserved query.
+// ShowFind opens the in-buffer find widget. A non-empty primary selection
+// seeds the query and is scanned immediately; otherwise a preserved query is
+// refreshed through the debounced path.
 func (e *Editor) ShowFind() tea.Cmd {
 	e.find.SetEditorID(e.id)
+	// Snapshot where the editor is now, before a seeded scan can move the
+	// cursor, so Escape without navigation can rewind here.
+	e.find.CaptureOrigin(e.Buffer)
+	if e.Buffer != nil && e.find.SeedFromSelection(e.Buffer) {
+		e.find.Show()
+		// Matches are already computed; move to the current one the way the
+		// debounced path does when its results arrive.
+		if m := e.find.CurrentMatchPosition(); m != nil {
+			e.Buffer.SetCursor(m.Start)
+			e.EnsureCursorVisible()
+		}
+		return nil
+	}
 	e.find.Show()
 	return e.find.scheduleScan()
+}
+
+// escapeFind closes the find widget. Bailing out without navigating to a match
+// rewinds the cursor and selections to where they were when the widget opened;
+// once the user has stepped through matches, the cursor stays on the current
+// match, matching VS Code and Helix.
+func (e *Editor) escapeFind() {
+	origin := e.find.origin
+	restore := origin.valid && !e.find.visited && e.Buffer != nil
+	e.find.Hide()
+	if !restore {
+		return
+	}
+	// The document can shrink while the widget is open (formatting, a code
+	// action), so confine the snapshot before installing it.
+	clamped := make([]text.Selection, len(origin.selections))
+	for i, sel := range origin.selections {
+		clamped[i] = text.Selection{
+			Anchor: e.Buffer.ClampPosition(sel.Anchor),
+			Head:   e.Buffer.ClampPosition(sel.Head),
+		}
+	}
+	e.Buffer.RestoreSelections(clamped, origin.primary)
+	e.Buffer.Cursor = e.Buffer.ClampPosition(origin.cursor)
+	e.EnsureCursorVisible()
 }
 
 // HideFind closes the in-buffer find widget.

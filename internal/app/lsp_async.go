@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/lsp"
@@ -130,6 +131,19 @@ func (m Model) acceptsOverlayResult(kind overlayRequestKind, metadata lsp.Overla
 		m.overlayRequests.current(kind) == metadata.Generation
 }
 
+// lspRequestRoutineErr reports request outcomes that are routine degradation
+// rather than failures the status bar should surface: supersession
+// cancellation, and a server that exited mid-request (its restart is already
+// reported separately). For requests that fire automatically — while typing
+// or on file open — the per-method timeout budget is routine too: a slow
+// cold-start server would otherwise print a deadline error on every keystroke.
+func lspRequestRoutineErr(err error, auto bool) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, lsp.ErrClientNotRunning) {
+		return true
+	}
+	return auto && errors.Is(err, context.DeadlineExceeded)
+}
+
 func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 	editor := m.activeEditor()
 	if editor == nil || editor.Buffer.FilePath == "" {
@@ -149,7 +163,13 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 			return nil
 		}
 		items, err := client.CompletionContext(requestContext, lsp.FileURI(filePath), line, column)
-		if err != nil || len(items) == 0 {
+		if lspRequestRoutineErr(err, false) {
+			return nil
+		}
+		if err != nil {
+			return lsp.LspErrorMsg{Method: "textDocument/completion", Message: err.Error()}
+		}
+		if len(items) == 0 {
 			return nil
 		}
 		return lsp.CompletionResultMsg{
@@ -178,7 +198,13 @@ func (m Model) requestHover() (tea.Model, tea.Cmd) {
 			return nil
 		}
 		result, err := client.HoverContext(requestContext, lsp.FileURI(filePath), line, column)
-		if err != nil || result == nil {
+		if lspRequestRoutineErr(err, false) {
+			return nil
+		}
+		if err != nil {
+			return lsp.LspErrorMsg{Method: "textDocument/hover", Message: err.Error()}
+		}
+		if result == nil {
 			return nil
 		}
 		return lsp.HoverResultMsg{
@@ -207,7 +233,13 @@ func (m Model) requestSignatureHelp() (Model, tea.Cmd) {
 			return nil
 		}
 		help, err := client.SignatureHelpContext(requestContext, lsp.FileURI(filePath), line, column)
-		if err != nil || help == nil {
+		if lspRequestRoutineErr(err, true) {
+			return nil
+		}
+		if err != nil {
+			return lsp.LspErrorMsg{Method: "textDocument/signatureHelp", Message: err.Error()}
+		}
+		if help == nil {
 			return nil
 		}
 		return lsp.SignatureHelpResultMsg{

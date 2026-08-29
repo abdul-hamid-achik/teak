@@ -561,7 +561,7 @@ type callResult struct {
 	Error  *jsonrpcError
 }
 
-var errClientNotRunning = errors.New("client not running")
+var ErrClientNotRunning = errors.New("client not running")
 
 func capabilityEnabled(v any) bool {
 	switch vv := v.(type) {
@@ -1179,13 +1179,13 @@ func (c *Client) callInternal(ctx context.Context, method string, params any, re
 	c.mu.Lock()
 	if requireRunning && !c.running {
 		c.mu.Unlock()
-		return nil, errClientNotRunning
+		return nil, ErrClientNotRunning
 	}
 	if requireRunning && c.readDone != nil {
 		select {
 		case <-c.readDone:
 			c.mu.Unlock()
-			return nil, errClientNotRunning
+			return nil, ErrClientNotRunning
 		default:
 		}
 	}
@@ -1233,12 +1233,12 @@ func (c *Client) callInternal(ctx context.Context, method string, params any, re
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return nil, errClientNotRunning
+		return nil, ErrClientNotRunning
 	case <-c.readDone:
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return nil, errClientNotRunning
+		return nil, ErrClientNotRunning
 	}
 }
 
@@ -1262,7 +1262,7 @@ func isExpectedShutdownError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errClientNotRunning) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrClientNotRunning) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -1347,12 +1347,12 @@ func (c *Client) enqueueOutbound(ctx context.Context, data, replacementData []by
 	processDone := c.processDone
 	c.mu.RUnlock()
 	if stdin == nil {
-		return false, errClientNotRunning
+		return false, ErrClientNotRunning
 	}
 	if processDone != nil {
 		select {
 		case <-processDone:
-			return false, errClientNotRunning
+			return false, ErrClientNotRunning
 		default:
 		}
 	}
@@ -1443,10 +1443,10 @@ func (c *Client) waitForOutboundWrite(ctx context.Context, item *outboundMessage
 		// server. The caller sends $/cancelRequest behind it before returning.
 		return true, ctx.Err()
 	case <-processDone:
-		if c.cancelQueuedOutbound(item, errClientNotRunning) {
-			return false, errClientNotRunning
+		if c.cancelQueuedOutbound(item, ErrClientNotRunning) {
+			return false, ErrClientNotRunning
 		}
-		return true, errClientNotRunning
+		return true, ErrClientNotRunning
 	}
 }
 
@@ -1501,7 +1501,7 @@ func (c *Client) outboundLoop() {
 			case <-wake:
 				continue
 			case <-processDone:
-				c.failQueuedOutbound(errClientNotRunning)
+				c.failQueuedOutbound(ErrClientNotRunning)
 				return
 			}
 		}
@@ -1593,7 +1593,7 @@ func (c *Client) sendEncoded(data []byte) error {
 	stdin := c.stdin
 	c.mu.RUnlock()
 	if stdin == nil {
-		return errClientNotRunning
+		return ErrClientNotRunning
 	}
 	if _, err := io.WriteString(stdin, header); err != nil {
 		return err

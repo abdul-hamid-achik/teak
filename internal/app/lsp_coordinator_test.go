@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"testing"
 
 	"teak/internal/lsp"
@@ -344,5 +345,100 @@ func TestLSPCoordinatorAggregateDiagnostics(t *testing.T) {
 	allDiags := coord.AggregateDiagnostics()
 	if len(allDiags) != 3 {
 		t.Errorf("expected 3 total diagnostics, got %d", len(allDiags))
+	}
+}
+
+// publishDiagnostics publishes one diagnostic for the nth test file.
+func publishDiagnostics(t *testing.T, coord *LSPCoordinator, fileIndex int) {
+	t.Helper()
+	coord.HandleMessage(lsp.DiagnosticsMsg{
+		URI:         lsp.FileURI(fmt.Sprintf("/evict/file%04d.go", fileIndex)),
+		Diagnostics: []lsp.Diagnostic{{Severity: 1, Message: "error"}},
+	})
+}
+
+// TestDiagnosticsEvictionRemovesOldestFiles pins the eviction policy: the
+// first-inserted files are dropped when the cache exceeds its cap. Map
+// iteration order is random, so anything else evicts an arbitrary file.
+func TestDiagnosticsEvictionRemovesOldestFiles(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	const overflow = 3
+	for i := 0; i < maxLSPDiagnosticsFiles+overflow; i++ {
+		publishDiagnostics(t, coord, i)
+	}
+
+	for i := 0; i < overflow; i++ {
+		path := fmt.Sprintf("/evict/file%04d.go", i)
+		if got := coord.GetDiagnostics(path); len(got) != 0 {
+			t.Errorf("oldest file %s survived eviction with %d diagnostics", path, len(got))
+		}
+	}
+	for i := overflow; i < maxLSPDiagnosticsFiles+overflow; i++ {
+		path := fmt.Sprintf("/evict/file%04d.go", i)
+		if got := coord.GetDiagnostics(path); len(got) != 1 {
+			t.Errorf("newest file %s was evicted (got %d diagnostics, want 1)", path, len(got))
+		}
+	}
+	if total := len(coord.AggregateDiagnostics()); total != maxLSPDiagnosticsFiles {
+		t.Errorf("aggregate diagnostics = %d, want cap %d", total, maxLSPDiagnosticsFiles)
+	}
+}
+
+// Re-publishing an existing file updates its diagnostics without refreshing
+// its insertion position: the file remains the oldest and is evicted first.
+func TestDiagnosticsEvictionKeepsInsertionOrderOnUpdate(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	for i := 0; i < maxLSPDiagnosticsFiles; i++ {
+		publishDiagnostics(t, coord, i)
+	}
+	publishDiagnostics(t, coord, 0)
+	publishDiagnostics(t, coord, maxLSPDiagnosticsFiles)
+
+	if got := coord.GetDiagnostics("/evict/file0000.go"); len(got) != 0 {
+		t.Errorf("re-published oldest file survived eviction with %d diagnostics", len(got))
+	}
+	if got := coord.GetDiagnostics("/evict/file0001.go"); len(got) != 1 {
+		t.Errorf("second-oldest file = %d diagnostics, want 1", len(got))
+	}
+	if got := coord.GetDiagnostics(fmt.Sprintf("/evict/file%04d.go", maxLSPDiagnosticsFiles)); len(got) != 1 {
+		t.Errorf("newest file = %d diagnostics, want 1", len(got))
+	}
+}
+
+// A cleared file must leave the eviction order too, or a later eviction
+// "removes" a file that is already gone and leaves the cache above its cap.
+func TestDiagnosticsEvictionSkipsClearedFiles(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	for i := 0; i < maxLSPDiagnosticsFiles; i++ {
+		publishDiagnostics(t, coord, i)
+	}
+	coord.ClearDiagnostics("/evict/file0000.go")
+	for i := maxLSPDiagnosticsFiles; i < maxLSPDiagnosticsFiles+2; i++ {
+		publishDiagnostics(t, coord, i)
+	}
+
+	if total := len(coord.AggregateDiagnostics()); total != maxLSPDiagnosticsFiles {
+		t.Errorf("aggregate diagnostics = %d, want cap %d", total, maxLSPDiagnosticsFiles)
+	}
+	if got := coord.GetDiagnostics("/evict/file0001.go"); len(got) != 0 {
+		t.Errorf("oldest remaining file = %d diagnostics, want evicted", len(got))
+	}
+	if got := coord.GetDiagnostics(fmt.Sprintf("/evict/file%04d.go", maxLSPDiagnosticsFiles+1)); len(got) != 1 {
+		t.Errorf("newest file = %d diagnostics, want 1", len(got))
+	}
+}
+
+// StorePreparedDiagnostics shares the same cache and must evict by age too.
+func TestPreparedDiagnosticsEvictionRemovesOldestFiles(t *testing.T) {
+	coord := NewLSPCoordinator(nil)
+	for i := 0; i <= maxLSPDiagnosticsFiles; i++ {
+		coord.StorePreparedDiagnostics(fmt.Sprintf("/evict/prepared%04d.go", i), []lsp.Diagnostic{{Message: "error"}})
+	}
+
+	if got := coord.GetDiagnostics("/evict/prepared0000.go"); len(got) != 0 {
+		t.Errorf("oldest prepared file survived eviction with %d diagnostics", len(got))
+	}
+	if got := coord.GetDiagnostics(fmt.Sprintf("/evict/prepared%04d.go", maxLSPDiagnosticsFiles)); len(got) != 1 {
+		t.Errorf("newest prepared file = %d diagnostics, want 1", len(got))
 	}
 }

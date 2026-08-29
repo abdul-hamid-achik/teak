@@ -10,6 +10,11 @@ tasks:
     generates:
       - bin/teak
 
+  install:
+    desc: Install teak to GOBIN for global command-line use
+    cmds:
+      - go install ./cmd/teak
+
   test:
     desc: Run all tests
     cmds:

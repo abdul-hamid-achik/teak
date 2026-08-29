@@ -437,7 +437,7 @@ func TestOutboundRequestReturnsWhenProcessStopsDuringBlockedWrite(t *testing.T) 
 
 	select {
 	case err := <-result:
-		if !errors.Is(err, errClientNotRunning) {
+		if !errors.Is(err, ErrClientNotRunning) {
 			t.Fatalf("stopped request error = %v, want client-not-running", err)
 		}
 	case <-time.After(time.Second):

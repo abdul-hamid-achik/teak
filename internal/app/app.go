@@ -1768,6 +1768,17 @@ func (m Model) handleTreeFilterReady(msg filetree.FilterReadyMsg) (tea.Model, te
 // --- search overlay ---
 
 func (m Model) handleSearchOpenResult(msg search.OpenResultMsg) (tea.Model, tea.Cmd) {
+	// Opening a result closes the overlay, but the results must survive for
+	// F3/Shift+F3 exactly as the Esc path preserves them. The index tracks the
+	// entry that was opened so navigation continues from there instead of
+	// reporting "No search results" on the next keystroke.
+	if results := m.searchM.Results(); len(results) > 0 {
+		m.lastSearchResults = results
+		m.lastSearchIndex = 0
+		if msg.Index >= 0 && msg.Index < len(results) {
+			m.lastSearchIndex = msg.Index
+		}
+	}
 	m.showSearch = false
 	validated, err := search.ValidateResults(m.rootDir, []search.Result{{
 		FilePath: msg.FilePath,
@@ -3807,6 +3818,9 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 
 	// If closing the last tab, show the welcome screen with no tabs
 	if len(m.editors) <= 1 {
+		// Reset any split so reopening tabs does not inherit pane references
+		// to editors that no longer exist.
+		m.unsplit()
 		cmd := m.triggerPluginEvents(
 			m.pluginEvent(plugin.EventBufLeave, closingPath),
 			m.pluginEvent(plugin.EventBufDelete, closingPath),
@@ -3824,6 +3838,7 @@ func (m Model) closeTab(idx int) (tea.Model, tea.Cmd) {
 
 	m.editors = append(m.editors[:idx], m.editors[idx+1:]...)
 	m.tabBar.RemoveTab(idx)
+	m.reconcileSplitAfterClose(idx)
 	m.activateTab(m.tabBar.ActiveIdx)
 
 	// Re-key diff views: remove this index and shift higher indices down
@@ -3980,19 +3995,32 @@ func (m Model) newUntitledTab() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleTabBarClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
-	// Check close buttons first
-	for i, tab := range m.tabBar.Tabs {
-		if zone.Get(editor.TabCloseZoneID(tab)).InBounds(msg) {
-			return m.closeTabSafe(i)
+	switch msg.Mouse().Button {
+	case tea.MouseLeft:
+		// Check close buttons first
+		for i, tab := range m.tabBar.Tabs {
+			if zone.Get(editor.TabCloseZoneID(tab)).InBounds(msg) {
+				return m.closeTabSafe(i)
+			}
+		}
+		// Then check label zones for switching
+		for i, tab := range m.tabBar.Tabs {
+			if zone.Get(editor.TabZoneID(tab)).InBounds(msg) {
+				m.activateTab(i)
+				return m, nil
+			}
+		}
+	case tea.MouseMiddle:
+		// Middle-click on a tab label is the standard close gesture. It shares
+		// the × button's safe path, so a dirty buffer still confirms first.
+		for i, tab := range m.tabBar.Tabs {
+			if zone.Get(editor.TabZoneID(tab)).InBounds(msg) {
+				return m.closeTabSafe(i)
+			}
 		}
 	}
-	// Then check label zones for switching
-	for i, tab := range m.tabBar.Tabs {
-		if zone.Get(editor.TabZoneID(tab)).InBounds(msg) {
-			m.activateTab(i)
-			return m, nil
-		}
-	}
+	// Right-click (and any other button) intentionally does nothing on the
+	// tab bar for now; a tab context menu is a separate feature.
 	return m, nil
 }
 
@@ -4781,7 +4809,13 @@ func (m Model) requestFoldingRanges(filePath string) (Model, tea.Cmd) {
 			return nil
 		}
 		ranges, err := client.FoldingRangeContext(requestContext, lsp.FileURI(filePath))
-		if err != nil || len(ranges) == 0 {
+		if lspRequestRoutineErr(err, true) {
+			return nil
+		}
+		if err != nil {
+			return lsp.LspErrorMsg{Method: "textDocument/foldingRange", Message: err.Error()}
+		}
+		if len(ranges) == 0 {
 			return nil
 		}
 		return lsp.FoldingRangeResultMsg{DocumentRequestMetadata: metadata, FilePath: filePath, Ranges: ranges}
@@ -4817,7 +4851,13 @@ func (m Model) requestCodeActions() (Model, tea.Cmd) {
 			}
 			actions, err = client.CodeActionContext(requestContext, lsp.FileURI(filePath), line, col, line, col, diagnostics)
 		}
-		if err != nil || len(actions) == 0 {
+		if lspRequestRoutineErr(err, false) {
+			return nil
+		}
+		if err != nil {
+			return lsp.LspErrorMsg{Method: "textDocument/codeAction", Message: err.Error()}
+		}
+		if len(actions) == 0 {
 			return nil
 		}
 		return lsp.CodeActionResultMsg{DocumentRequestMetadata: metadata, Actions: actions}
@@ -4939,10 +4979,12 @@ func (m Model) handleGoToLineInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		lineNum, err := strconv.Atoi(m.goToLineInput)
-		m.goToLineInput = ""
 		if err != nil {
+			m.status = fmt.Sprintf("Not a line number: %s", m.goToLineInput)
+			m.goToLineInput = ""
 			return m, nil
 		}
+		m.goToLineInput = ""
 		// Convert 1-based to 0-based
 		lineNum--
 		ed := m.activeEditor()
@@ -6183,6 +6225,15 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.openSearch(innerMsg.mode)
 	case openSearchReplaceMsg:
 		return m.openSearchReplace()
+	case showEditorFindMsg:
+		// Same behavior as the Ctrl+F binding in handleGlobalKey: reveal the
+		// in-buffer find widget and shrink the viewport by its row.
+		if ed := m.activeEditor(); ed != nil && !ed.IsFindVisible() {
+			cmd := ed.ShowFind()
+			m.relayout()
+			return m, cmd
+		}
+		return m, nil
 	case goToLineMsg:
 		m.goToLineMode = true
 		m.goToLineInput = ""

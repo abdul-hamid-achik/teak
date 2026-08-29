@@ -2,6 +2,64 @@
 
 All notable changes to the Teak editor project.
 
+## [0.19.0] - 2026-08-29
+
+### Quality Sweep Follow-ups
+
+- `Ctrl+Shift+Home/End` now extend every cursor to the document bounds instead
+  of silently collapsing all secondary cursors, matching the other multicursor
+  navigation bindings.
+- A no-op undo or redo (empty stack) no longer runs the edit epilogue: hover
+  and signature popups stay up, the highlight cache is not re-invalidated from
+  a stale change record, and no completion popup is triggered.
+- Language-server request errors now surface in the status bar on completion,
+  hover, signature help, folding ranges, and code actions instead of failing
+  silently. Routine outcomes stay quiet by policy: supersession cancellation,
+  a server that exited mid-request, and — for automatically triggered
+  requests — the per-method timeout budget.
+- Closing a tab while a split is active reconciles the pane references:
+  remaining tabs keep their panes, and closing a pane's tab collapses the
+  split instead of leaving panes pointing at the wrong editors.
+- Go-to-line reports `Not a line number: <input>` instead of closing silently;
+  the diagnostics cache now evicts the oldest file at its cap instead of a
+  random one; accepting a completion with empty insert text no longer shifts
+  token colours from a stale change record; shift-navigation keys dismiss the
+  autocomplete popup with the same parity as clicks.
+- Overlay pickers (quick open, command palette, symbol pickers) can now be
+  dismissed by clicking outside their box, consuming the click; confirmation
+  dialogs still require an explicit choice. Undocumented live bindings were
+  added to the help overlay and README (`Ctrl+Alt+Up/Down`,
+  `Ctrl+Shift+Home/End`, `F9`, `Ctrl+.`), and the AGENTS.md cursor-clamping
+  invariant was rewritten to describe the position-mapping mechanism the code
+  actually uses.
+
+### TUI Search and Input UX
+
+- The in-buffer find widget now seeds its query from the primary selection, so
+  selecting a word and pressing `Ctrl+F` starts the search immediately.
+- Leaving find with `Escape` restores the pre-find cursor and selection when
+  no match was visited (opened by accident or bailed out); after navigating to
+  matches the cursor stays on the current match, matching VS Code and Helix.
+- `Escape` now also drops secondary cursors back to the primary caret,
+  defusing the multicursor foot-gun where the next keystroke edits N places.
+- `F3`/`Shift+F3` keep working after opening a project-search result with
+  `Enter`, continuing from the opened entry instead of reporting
+  `No search results`.
+- `F8`/`Shift+F8` report `No problems` when the problems panel is empty
+  instead of doing nothing; the command palette labels `Find in Project`
+  (`Ctrl+Shift+F`) and a new `Find in File` (`Ctrl+F`) entry now match what
+  the shortcuts actually do.
+- Project-search replace reports `Replaced N matches in <file>` so the
+  active-file scope is visible; middle-click on a tab closes it through the
+  safe close path (dirty buffers confirm) and right-click on the tab strip no
+  longer activates or closes anything.
+- Find-match rendering is now pinned by tests on the wrapped and folded
+  render paths in addition to the plain path.
+
+### Tooling
+
+- New `task install` installs the `teak` binary to `GOBIN` for global use.
+
 ## [0.18.2] - 2026-08-29
 
 ### Completion Popup Interaction

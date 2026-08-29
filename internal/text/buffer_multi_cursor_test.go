@@ -776,6 +776,44 @@ func TestBufferExtendCursors(t *testing.T) {
 	}
 }
 
+func TestBufferExtendCursorsToDocumentBounds(t *testing.T) {
+	// Every head lands on the same bound, so the nested ranges coalesce the
+	// same way the line-bound variants do: the first cursor's range survives.
+	tests := []struct {
+		name   string
+		extend func(*Buffer)
+		want   []Selection
+	}{
+		{
+			name:   "doc start",
+			extend: (*Buffer).ExtendCursorsToDocStart,
+			want: []Selection{
+				{Anchor: Position{0, 1}, Head: Position{0, 0}},
+			},
+		},
+		{
+			name:   "doc end",
+			extend: (*Buffer).ExtendCursorsToDocEnd,
+			want: []Selection{
+				{Anchor: Position{0, 1}, Head: Position{1, 3}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBufferFromBytes([]byte("ab\ncde"))
+			b.Selections = NewSelections(Position{0, 1})
+			b.Selections.Add(Selection{Anchor: Position{1, 2}, Head: Position{1, 2}})
+
+			tt.extend(b)
+
+			if got := b.Selections.All(); !selectionSlicesEqual(got, tt.want) {
+				t.Fatalf("%s = %#v, want %#v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBufferSetCursor(t *testing.T) {
 	b := NewBuffer()
 
@@ -1038,5 +1076,67 @@ func TestBufferDeleteMultiCursorAtDocumentEnd(t *testing.T) {
 	}
 	if all[1].Head != (Position{1, 2}) {
 		t.Errorf("second cursor = %v, want {1 2}", all[1].Head)
+	}
+}
+
+func TestBufferDropSecondaryCursorsCollapsesToPrimaryCaret(t *testing.T) {
+	b := NewBufferFromBytes([]byte("alpha beta\nalpha gamma\n"))
+	b.SetSelection(Position{0, 0}, Position{0, 5})
+	if !b.SelectAllOccurrences() {
+		t.Fatal("SelectAllOccurrences failed to arm multiple selections")
+	}
+	if b.Selections.Count() < 2 {
+		t.Fatalf("selection count = %d, want at least 2 before dropping", b.Selections.Count())
+	}
+	primary := b.Selections.PrimaryCursor()
+	dirtyBefore := b.Dirty()
+	versionBefore := b.Version()
+	changeBefore := b.LastChange()
+
+	b.DropSecondaryCursors()
+
+	if got := b.Selections.Count(); got != 1 {
+		t.Fatalf("selection count after drop = %d, want 1", got)
+	}
+	if got := b.Selections.Primary(); got.Anchor != primary || got.Head != primary {
+		t.Fatalf("primary selection after drop = %#v, want collapsed caret at %+v", got, primary)
+	}
+	if b.Cursor != primary {
+		t.Fatalf("cursor after drop = %+v, want primary cursor %+v", b.Cursor, primary)
+	}
+	if b.Dirty() != dirtyBefore {
+		t.Error("dropping cursors flipped the dirty flag")
+	}
+	if b.Version() != versionBefore {
+		t.Error("dropping cursors bumped the buffer version")
+	}
+	if b.LastChange() != changeBefore {
+		t.Error("dropping cursors fabricated a change record")
+	}
+}
+
+func TestBufferDropSecondaryCursorsLeavesSingleSelectionAlone(t *testing.T) {
+	b := NewBufferFromBytes([]byte("alpha beta"))
+	b.SetSelection(Position{0, 0}, Position{0, 5})
+
+	b.DropSecondaryCursors()
+
+	if got := b.Selections.Count(); got != 1 {
+		t.Fatalf("selection count = %d, want 1", got)
+	}
+	want := Selection{Anchor: Position{0, 0}, Head: Position{0, 5}}
+	if got := b.Selections.Primary(); got != want {
+		t.Fatalf("single selection after drop = %#v, want untouched %#v", got, want)
+	}
+}
+
+func TestBufferDropSecondaryCursorsNilSelections(t *testing.T) {
+	b := NewBufferFromBytes([]byte("ab"))
+	b.Selections = nil
+
+	b.DropSecondaryCursors()
+
+	if b.Selections != nil {
+		t.Fatal("drop with nil selections rebuilt a selection set")
 	}
 }

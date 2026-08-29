@@ -41,11 +41,14 @@ type Result struct {
 	EndLine    int    // from vecgrep: end line of the matched chunk
 }
 
-// OpenResultMsg is sent when a result is selected.
+// OpenResultMsg is sent when a result is selected. Index is the selected
+// result's position in the overlay's result list, so result navigation
+// (F3/Shift+F3) can continue from the entry the user opened.
 type OpenResultMsg struct {
 	FilePath string
 	Line     int
 	Col      int
+	Index    int
 }
 
 // CloseSearchMsg is sent when the search overlay should close.
@@ -222,11 +225,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			if len(m.results) > 0 && m.cursor < len(m.results) {
 				r := m.results[m.cursor]
+				index := m.cursor
 				return m, func() tea.Msg {
 					return OpenResultMsg{
 						FilePath: r.FilePath,
 						Line:     r.Line,
 						Col:      r.Col,
+						Index:    index,
 					}
 				}
 			}
@@ -319,11 +324,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			clickedIdx := m.scrollY + mouse.Y - m.headerLines()
 			if clickedIdx >= 0 && clickedIdx < len(m.results) {
 				r := m.results[clickedIdx]
+				index := clickedIdx
 				return m, func() tea.Msg {
 					return OpenResultMsg{
 						FilePath: r.FilePath,
 						Line:     r.Line,
 						Col:      r.Col,
+						Index:    index,
 					}
 				}
 			}

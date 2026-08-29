@@ -152,6 +152,38 @@ func (m *Model) unsplit() {
 	m.relayout()
 }
 
+// reconcileSplitAfterClose repairs split pane references once the editor at
+// closedIdx has been removed from editors. Pane tabs are editors[] indices,
+// so indices above the closed tab shift down with the slice. A pane that
+// showed the closed tab (or that would duplicate the other pane) collapses
+// the split exactly like unsplit instead of silently reassigning contents.
+func (m *Model) reconcileSplitAfterClose(closedIdx int) {
+	if !m.split.enabled {
+		return
+	}
+	adjust := func(tab int) int {
+		switch {
+		case tab < 0:
+			return tab
+		case tab == closedIdx:
+			return -1
+		case tab > closedIdx:
+			return tab - 1
+		default:
+			return tab
+		}
+	}
+	first := adjust(m.split.firstTab)
+	second := adjust(m.split.secondTab)
+	if first < 0 || second < 0 || first == second ||
+		first >= len(m.editors) || second >= len(m.editors) {
+		m.unsplit()
+		return
+	}
+	m.split.firstTab = first
+	m.split.secondTab = second
+}
+
 // cycleSplitFocus switches focus between pane A and pane B.
 func (m *Model) cycleSplitFocus() {
 	if !m.split.enabled {

@@ -568,6 +568,30 @@ func TestHelpUsesUnambiguousSelectionShortcutLabels(t *testing.T) {
 	}
 }
 
+// TestHelpDocumentsLiveBindings pins bindings that shipped undocumented: the
+// multicursor entry point, document-edge selection, the breakpoint toggle, the
+// hidden-files alias and the find widget's regex toggle.
+func TestHelpDocumentsLiveBindings(t *testing.T) {
+	bindings := make(map[string]string)
+	for _, group := range helpGroups {
+		for _, binding := range group.bindings {
+			bindings[binding.key] = binding.desc
+		}
+	}
+
+	for key, want := range map[string]string{
+		"Ctrl+Alt+Up/Down":            "Add cursor above / below",
+		"Ctrl+Shift+Home/End":         "Select to document start/end",
+		"F9":                          "Toggle breakpoint",
+		"Ctrl+H / Ctrl+. (file tree)": "Toggle hidden files",
+		"Ctrl+R (find widget)":        "Toggle regex search",
+	} {
+		if got := bindings[key]; got != want {
+			t.Errorf("help binding %q = %q, want %q", key, got, want)
+		}
+	}
+}
+
 // Helper functions for creating test messages
 func teaKeyPress(key string) tea.Msg {
 	return tea.KeyPressMsg{Text: key}

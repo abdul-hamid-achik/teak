@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -238,6 +240,18 @@ func (m Model) handleReplacePrepared(msg replacePreparedMsg) (tea.Model, tea.Cmd
 	}
 	ed.SetSize(ed.Viewport.Width, ed.Viewport.Height)
 	ed.EnsureCursorVisible()
+	// The panel lists project-wide results, but replace only rewrites the
+	// active editor's buffer. Say so, with the file name and match count,
+	// instead of leaving the user to guess which files changed.
+	name := filepath.Base(ed.Buffer.FilePath)
+	if name == "." || ed.Buffer.FilePath == "" {
+		name = m.tabBar.Tabs[index].Label
+	}
+	noun := "match"
+	if msg.Matches != 1 {
+		noun = "matches"
+	}
+	m.status = fmt.Sprintf("Replaced %d %s in %s", msg.Matches, noun, name)
 	editorID, version := ed.ID(), ed.Buffer.Version()
 	return m, tea.Batch(
 		func() tea.Msg { return editor.RetokenizeMsg{EditorID: editorID, Version: version} },

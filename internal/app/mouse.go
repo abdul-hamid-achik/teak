@@ -439,7 +439,12 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case mouseEditorTabs:
-		m.setFocus(FocusEditor)
+		// Only genuine tab gestures focus the editor; a right-click on the
+		// strip is inert until a tab context menu exists.
+		switch mouse.Button {
+		case tea.MouseLeft, tea.MouseMiddle:
+			m.setFocus(FocusEditor)
+		}
 		return m.handleTabBarClick(msg)
 
 	case mouseEditorBody:

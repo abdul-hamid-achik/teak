@@ -198,3 +198,50 @@ func BenchmarkFindMatchHighlightsCollapsedTenThousand(b *testing.B) {
 		benchmarkFindHighlightsSink = ed.findMatchHighlights()
 	}
 }
+
+// TestViewportRendersFindMatchRangesWithWrap pins the word-wrap render path:
+// find match ranges must paint the same styles the plain path does, on every
+// wrapped segment that shows part of a match.
+func TestViewportRendersFindMatchRangesWithWrap(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("foo bar foo"))
+	theme := ui.DefaultTheme()
+	wrap := NewWrapLayout(buf.Line, buf.LineCount(), 8)
+	viewport := Viewport{Width: 30, Height: 4}
+
+	got := viewport.RenderWithWrapHighlights(buf, theme, nil, nil, nil, wrap, []HighlightRange{
+		{Namespace: -1, Line: 0, StartCol: 0, EndCol: 3, Style: theme.FindMatch},
+		{Namespace: -1, Line: 0, StartCol: 8, EndCol: 11, Style: theme.FindMatchCurrent},
+	})
+
+	if want := theme.FindMatch.Render("foo"); !strings.Contains(got, want) {
+		t.Fatalf("wrapped render lacks the match style %q:\n%s", want, got)
+	}
+	if want := theme.FindMatchCurrent.Render("foo"); !strings.Contains(got, want) {
+		t.Fatalf("wrapped render lacks the current-match style %q:\n%s", want, got)
+	}
+}
+
+// TestViewportRendersFindMatchRangesWithFolds pins the fold render path:
+// matches on visible lines stay styled while lines inside a collapsed fold are
+// skipped (the fold's first line remains as the summary row).
+func TestViewportRendersFindMatchRangesWithFolds(t *testing.T) {
+	buf := text.NewBufferFromBytes([]byte("foo bar\nfold one\nfold two\nfoo baz"))
+	theme := ui.DefaultTheme()
+	folds := FoldState{Regions: []FoldRegion{{StartLine: 1, EndLine: 2, Collapsed: true}}}
+	viewport := Viewport{Width: 30, Height: 4}
+
+	got := viewport.RenderWithFoldsHighlights(buf, theme, nil, nil, nil, &folds, []HighlightRange{
+		{Namespace: -1, Line: 0, StartCol: 0, EndCol: 3, Style: theme.FindMatch},
+		{Namespace: -1, Line: 3, StartCol: 0, EndCol: 3, Style: theme.FindMatchCurrent},
+	})
+
+	if want := theme.FindMatch.Render("foo"); !strings.Contains(got, want) {
+		t.Fatalf("fold render lacks the match style %q:\n%s", want, got)
+	}
+	if want := theme.FindMatchCurrent.Render("foo"); !strings.Contains(got, want) {
+		t.Fatalf("fold render lacks the current-match style %q:\n%s", want, got)
+	}
+	if strings.Contains(got, "fold two") {
+		t.Fatalf("fold render exposed a line inside the collapsed region:\n%s", got)
+	}
+}

@@ -772,13 +772,19 @@ func TestEditorEditedTriggers(t *testing.T) {
 	tests := []struct {
 		name string
 		key  string
+		// history gives undo/redo something to act on; with an empty stack
+		// they change nothing and must not trigger the edit epilogue.
+		history func(e Editor)
 	}{
-		{"backspace", "backspace"},
-		{"delete", "delete"},
-		{"tab", "tab"},
-		{"shift+tab", "shift+tab"},
-		{"ctrl+z", "ctrl+z"},
-		{"ctrl+y", "ctrl+y"},
+		{name: "backspace", key: "backspace"},
+		{name: "delete", key: "delete"},
+		{name: "tab", key: "tab"},
+		{name: "shift+tab", key: "shift+tab"},
+		{name: "ctrl+z", key: "ctrl+z", history: func(e Editor) { e.Buffer.InsertAtCursor([]byte("x")) }},
+		{name: "ctrl+y", key: "ctrl+y", history: func(e Editor) {
+			e.Buffer.InsertAtCursor([]byte("x"))
+			e.Buffer.Undo()
+		}},
 	}
 
 	for _, tt := range tests {
@@ -788,6 +794,9 @@ func TestEditorEditedTriggers(t *testing.T) {
 			e = New(e.Buffer, ui.DefaultTheme(), e.Config)
 			e.SetSize(80, 24)
 			e.Buffer.Cursor = text.Position{Line: 0, Col: 5}
+			if tt.history != nil {
+				tt.history(e)
+			}
 
 			_, cmd := e.Update(tea.KeyPressMsg{Text: tt.key})
 			// Editing keys should produce a retokenize command when highlighter exists

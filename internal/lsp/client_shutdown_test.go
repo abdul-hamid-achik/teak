@@ -29,12 +29,12 @@ func TestIsExpectedShutdownError(t *testing.T) {
 		},
 		{
 			name: "client not running",
-			err:  errClientNotRunning,
+			err:  ErrClientNotRunning,
 			want: true,
 		},
 		{
 			name: "wrapped client not running",
-			err:  fmt.Errorf("wrap: %w", errClientNotRunning),
+			err:  fmt.Errorf("wrap: %w", ErrClientNotRunning),
 			want: true,
 		},
 		{
@@ -86,8 +86,8 @@ func TestCancelNotificationErrorExpectedOnlyDuringShutdown(t *testing.T) {
 		shuttingDown bool
 		want         bool
 	}{
-		{name: "closed transport during shutdown", err: errClientNotRunning, shuttingDown: true, want: true},
-		{name: "closed transport while running", err: errClientNotRunning},
+		{name: "closed transport during shutdown", err: ErrClientNotRunning, shuttingDown: true, want: true},
+		{name: "closed transport while running", err: ErrClientNotRunning},
 		{name: "unexpected shutdown error", err: errors.New("permission denied"), shuttingDown: true},
 	}
 	for _, tt := range tests {
@@ -117,7 +117,7 @@ func TestCallReturnsWhenLSPTransportReadLoopCloses(t *testing.T) {
 
 	select {
 	case err := <-result:
-		if !errors.Is(err, errClientNotRunning) {
+		if !errors.Is(err, ErrClientNotRunning) {
 			t.Fatalf("call() error = %v, want client-not-running after transport EOF", err)
 		}
 	case <-time.After(time.Second):

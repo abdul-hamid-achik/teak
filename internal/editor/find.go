@@ -3,6 +3,7 @@ package editor
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sort"
 	"time"
 
@@ -50,6 +51,16 @@ type FindResultsMsg struct {
 	Err        error
 }
 
+// findOriginState snapshots where the editor was when the find widget opened.
+// Escaping without navigating to a match rewinds to it, so opening the widget
+// by accident never strands the cursor on the first match.
+type findOriginState struct {
+	cursor     text.Position
+	selections []text.Selection
+	primary    int
+	valid      bool
+}
+
 // FindModel manages in-buffer find state.
 type FindModel struct {
 	input       textinput.Model
@@ -63,6 +74,13 @@ type FindModel struct {
 	searching   bool
 	scanContext context.Context
 	scanCancel  context.CancelFunc
+
+	// origin is the pre-find editor state restored on a bail-out.
+	origin findOriginState
+	// visited records whether the user navigated to a match (Enter/F3). Once
+	// they have, Esc leaves the cursor on the current match like VS Code and
+	// Helix instead of rewinding to the origin.
+	visited bool
 
 	// generation increments on every query change so results from a superseded
 	// scan can be discarded rather than overwriting newer ones.
@@ -89,6 +107,25 @@ func (f *FindModel) Show() {
 	f.input.Focus()
 }
 
+// CaptureOrigin snapshots the editor position so a later bail-out can rewind.
+// The editor calls it when opening the widget, before any seeded query moves
+// the cursor. Selections are copied, not aliased: the live set keeps changing
+// while the widget is open.
+func (f *FindModel) CaptureOrigin(buf *text.Buffer) {
+	if buf == nil {
+		return
+	}
+	origin := findOriginState{cursor: buf.Cursor, valid: true}
+	if buf.Selections != nil && buf.Selections.Count() > 0 {
+		origin.selections = append([]text.Selection(nil), buf.Selections.All()...)
+		origin.primary = buf.Selections.PrimaryIndex()
+	} else {
+		origin.selections = []text.Selection{{Anchor: buf.Cursor, Head: buf.Cursor}}
+	}
+	f.origin = origin
+	f.visited = false
+}
+
 // Hide closes the find widget and clears matches.
 func (f *FindModel) Hide() {
 	// Invalidate both a pending debounce tick and an in-flight scan. A result
@@ -101,6 +138,8 @@ func (f *FindModel) Hide() {
 	f.current = 0
 	f.errMsg = ""
 	f.searching = false
+	f.origin = findOriginState{}
+	f.visited = false
 	f.input.Blur()
 }
 
@@ -138,11 +177,13 @@ func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 		case "enter", "f3":
 			if len(f.matches) > 0 {
 				f.current = (f.current + 1) % len(f.matches)
+				f.visited = true
 			}
 			return f, nil
 		case "shift+f3", "shift+enter":
 			if len(f.matches) > 0 {
 				f.current = (f.current - 1 + len(f.matches)) % len(f.matches)
+				f.visited = true
 			}
 			return f, nil
 		case "ctrl+r":
@@ -327,6 +368,45 @@ func (f *FindModel) updateMatches(buf *text.Buffer) {
 	} else {
 		f.errMsg = ""
 	}
+}
+
+// SeedFromSelection preloads the query with the buffer's primary selection and
+// scans immediately, so selecting a word and opening find already shows its
+// matches. It reports whether seeding happened. Empty selections are skipped,
+// and multiline selections are deliberately not seeded: the scan is per-line,
+// so a query spanning lines could never match. In regex mode the literal
+// selection is escaped, matching how CompilePattern treats plain queries.
+func (f *FindModel) SeedFromSelection(buf *text.Buffer) bool {
+	if buf == nil || buf.Selections == nil {
+		return false
+	}
+	sel := buf.Selections.Primary()
+	if sel.IsEmpty() {
+		return false
+	}
+	start, end := sel.Ordered()
+	if start.Line != end.Line {
+		return false
+	}
+	line := buf.Line(start.Line)
+	if end.Col > len(line) {
+		return false
+	}
+	query := string(line[start.Col:end.Col])
+	if query == "" {
+		return false
+	}
+	if f.regex {
+		query = regexp.QuoteMeta(query)
+	}
+	// Invalidate any in-flight scan for the previous query so a late result
+	// cannot clobber the synchronous matches installed below.
+	f.cancelScan()
+	f.generation++
+	f.input.SetValue(query)
+	f.query = query
+	f.updateMatches(buf)
+	return true
 }
 
 // CurrentMatchPosition returns the position of the current match, or nil.

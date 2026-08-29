@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"teak/internal/editor/overlays"
+	"teak/internal/text"
 )
 
 // newEditorWithVisibleCompletion returns an editor whose cursor sits at a
@@ -78,6 +79,66 @@ func TestBufferShiftClickDismissesAutocomplete(t *testing.T) {
 	content := string(e.Buffer.Bytes())
 	if strings.Contains(content, "INSERTED_FMT") {
 		t.Fatalf("enter after a dismissing shift click inserted the stale completion: %q", content)
+	}
+}
+
+// Shift navigation moves the selection head away from the completion point
+// just like the unmodified keys and shift+click do, so the popup must hide and
+// the key must still fall through to its normal selection handling.
+func TestShiftCursorNavigationDismissesAutocomplete(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want text.Selection
+	}{
+		{
+			name: "shift+left",
+			key:  "shift+left",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 0}},
+		},
+		{
+			name: "shift+right",
+			key:  "shift+right",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 2}},
+		},
+		{
+			name: "shift+home",
+			key:  "shift+home",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 0}},
+		},
+		{
+			name: "shift+end",
+			key:  "shift+end",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 2}},
+		},
+		{
+			name: "ctrl+shift+home",
+			key:  "ctrl+shift+home",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 0, Col: 0}},
+		},
+		{
+			name: "ctrl+shift+end",
+			key:  "ctrl+shift+end",
+			want: text.Selection{Anchor: text.Position{Line: 0, Col: 1}, Head: text.Position{Line: 2, Col: len("third")}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEditor("fm\nsecond\nthird", 0, 1)
+			e.ShowAutocomplete([]overlays.AutocompleteItem{{
+				Label:      "fmt",
+				InsertText: "INSERTED_FMT",
+			}})
+
+			e, _ = e.Update(tea.KeyPressMsg{Text: tt.key})
+
+			if e.autocomplete.Visible {
+				t.Fatalf("popup still visible after %s moved the selection away", tt.key)
+			}
+			if got := e.Buffer.Selections.Primary(); got != tt.want {
+				t.Fatalf("selection after %s = %+v, want %+v (key must fall through to its normal handling)", tt.key, got, tt.want)
+			}
+		})
 	}
 }
 

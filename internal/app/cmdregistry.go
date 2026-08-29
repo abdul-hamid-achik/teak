@@ -96,11 +96,22 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			// This entry opens the project-wide search overlay, which is bound
+			// to Ctrl+Shift+F — Ctrl+F opens the in-buffer find widget instead,
+			// so the labels must not be swapped.
 			ID:       "find",
-			Label:    "Find",
-			Shortcut: "Ctrl+F",
+			Label:    "Find in Project",
+			Shortcut: "Ctrl+Shift+F",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: openSearchMsg{mode: search.ModeText}}
+			},
+		},
+		{
+			ID:       "find_in_file",
+			Label:    "Find in File",
+			Shortcut: "Ctrl+F",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: showEditorFindMsg{}}
 			},
 		},
 		{
@@ -426,6 +437,7 @@ type (
 	toggleProblemsMsg      struct{}
 	openSearchMsg          struct{ mode search.Mode }
 	openSearchReplaceMsg   struct{}
+	showEditorFindMsg      struct{}
 	goToLineMsg            struct{}
 	quickOpenMsg           struct{}
 	showHelpMsg            struct{}

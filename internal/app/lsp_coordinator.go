@@ -16,10 +16,11 @@ const (
 
 // LSPCoordinator manages LSP client lifecycle and message routing.
 type LSPCoordinator struct {
-	mu           sync.RWMutex
-	mgr          *lsp.Manager
-	diagnostics  map[string][]lsp.Diagnostic // file path → diagnostics
-	triggerChars map[string][]string         // file path → trigger characters
+	mu               sync.RWMutex
+	mgr              *lsp.Manager
+	diagnostics      map[string][]lsp.Diagnostic // file path → diagnostics
+	diagnosticsOrder []string                    // first-insertion order; head = oldest
+	triggerChars     map[string][]string         // file path → trigger characters
 }
 
 // NewLSPCoordinator creates a new LSP coordinator.
@@ -82,17 +83,34 @@ func (c *LSPCoordinator) handleDiagnostics(msg lsp.DiagnosticsMsg) []tea.Cmd {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.diagnostics[path] = slices.Clone(msg.Diagnostics)
-
-	// Clean old entries if too many files
-	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
-		// Remove first entry (oldest)
-		for oldPath := range c.diagnostics {
-			delete(c.diagnostics, oldPath)
-			break
-		}
-	}
+	c.insertDiagnosticsLocked(path, slices.Clone(msg.Diagnostics))
 	return nil
+}
+
+// insertDiagnosticsLocked stores diagnostics for a path and evicts the
+// oldest path when the cache exceeds its cap. Callers must hold c.mu.
+func (c *LSPCoordinator) insertDiagnosticsLocked(path string, diagnostics []lsp.Diagnostic) {
+	if _, exists := c.diagnostics[path]; !exists {
+		c.diagnosticsOrder = append(c.diagnosticsOrder, path)
+	}
+	c.diagnostics[path] = diagnostics
+	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
+		oldest := c.diagnosticsOrder[0]
+		c.diagnosticsOrder = c.diagnosticsOrder[1:]
+		delete(c.diagnostics, oldest)
+	}
+}
+
+// deleteDiagnosticsLocked removes a path and its order entry so a later
+// eviction cannot target a file that is already gone. Callers must hold c.mu.
+func (c *LSPCoordinator) deleteDiagnosticsLocked(path string) {
+	if _, exists := c.diagnostics[path]; !exists {
+		return
+	}
+	delete(c.diagnostics, path)
+	if i := slices.Index(c.diagnosticsOrder, path); i >= 0 {
+		c.diagnosticsOrder = slices.Delete(c.diagnosticsOrder, i, i+1)
+	}
 }
 
 // handleCompletion returns completion items.
@@ -200,13 +218,7 @@ func (c *LSPCoordinator) GetDiagnostics(path string) []lsp.Diagnostic {
 func (c *LSPCoordinator) StorePreparedDiagnostics(path string, diagnostics []lsp.Diagnostic) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.diagnostics[path] = diagnostics
-	if len(c.diagnostics) > maxLSPDiagnosticsFiles {
-		for oldPath := range c.diagnostics {
-			delete(c.diagnostics, oldPath)
-			break
-		}
-	}
+	c.insertDiagnosticsLocked(path, diagnostics)
 }
 
 // SetTriggerChars sets trigger characters for a file.
@@ -227,7 +239,7 @@ func (c *LSPCoordinator) GetTriggerChars(path string) []string {
 func (c *LSPCoordinator) ClearDiagnostics(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.diagnostics, path)
+	c.deleteDiagnosticsLocked(path)
 }
 
 // RelocateFilePath keeps coordinator caches attached to a file after a
@@ -241,8 +253,8 @@ func (c *LSPCoordinator) RelocateFilePath(oldPath, newPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if diagnostics, ok := c.diagnostics[oldPath]; ok {
-		c.diagnostics[newPath] = diagnostics
-		delete(c.diagnostics, oldPath)
+		c.deleteDiagnosticsLocked(oldPath)
+		c.insertDiagnosticsLocked(newPath, diagnostics)
 	}
 	if chars, ok := c.triggerChars[oldPath]; ok {
 		c.triggerChars[newPath] = chars

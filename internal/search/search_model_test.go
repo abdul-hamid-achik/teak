@@ -188,6 +188,43 @@ func TestModelKeyboardAndMouseContracts(t *testing.T) {
 	}
 }
 
+func TestOpenResultMsgCarriesSelectedIndex(t *testing.T) {
+	m := New(ui.DefaultTheme(), t.TempDir(), ModeText)
+	m, _ = m.Update(SearchResultsMsg{Results: []Result{
+		{FilePath: "a.go", Line: 1, Col: 0},
+		{FilePath: "b.go", Line: 2, Col: 0},
+		{FilePath: "c.go", Line: 3, Col: 0},
+	}})
+
+	// The keyboard path reports the cursor's position in the result list so
+	// F3/Shift+F3 can continue from the entry the user opened.
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on a result did not create an open command")
+	}
+	opened, ok := cmd().(OpenResultMsg)
+	if !ok {
+		t.Fatalf("open command = %#v, want OpenResultMsg", cmd())
+	}
+	if opened.Index != 1 || opened.FilePath != "b.go" {
+		t.Fatalf("opened = %#v, want index 1 of b.go", opened)
+	}
+
+	// The mouse path reports the clicked row's index.
+	_, cmd = m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 2, Y: m.headerLines() + 2}))
+	if cmd == nil {
+		t.Fatal("result click did not create an open command")
+	}
+	clicked, ok := cmd().(OpenResultMsg)
+	if !ok {
+		t.Fatalf("click command = %#v, want OpenResultMsg", cmd())
+	}
+	if clicked.Index != 2 || clicked.FilePath != "c.go" {
+		t.Fatalf("clicked = %#v, want index 2 of c.go", clicked)
+	}
+}
+
 func TestModelSearchStatusMessagesRespectGeneration(t *testing.T) {
 	m := New(ui.DefaultTheme(), t.TempDir(), ModeSemantic)
 	m.debounceGen = 4
