@@ -11,9 +11,13 @@ tasks:
       - bin/teak
 
   install:
-    desc: Install teak to GOBIN for global command-line use
+    desc: Install teak globally (defaults to ~/go/bin; override with TEAK_INSTALL_BIN)
     cmds:
-      - go install ./cmd/teak
+      - |
+        DEST="${TEAK_INSTALL_BIN:-$HOME/go/bin}"
+        mkdir -p "$DEST"
+        go build -o "$DEST/teak" ./cmd/teak
+        echo "installed $DEST/teak"
 
   test:
     desc: Run all tests

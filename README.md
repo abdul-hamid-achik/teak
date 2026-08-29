@@ -659,7 +659,7 @@ task verify
 task perf-tools
 task perf-tools-test
 task run -- main.go
-task install   # install to GOBIN for global `teak` usage
+task install   # install to ~/go/bin for global `teak` usage
 
 # Go
 go build ./...
