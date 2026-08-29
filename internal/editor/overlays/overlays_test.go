@@ -301,6 +301,75 @@ func TestAutocompleteMoveDown(t *testing.T) {
 	}
 }
 
+func TestAutocompleteScroll(t *testing.T) {
+	fourItems := func(a *Autocomplete) {
+		a.Show([]AutocompleteItem{
+			{Label: "foo", InsertText: "foo"},
+			{Label: "bar", InsertText: "bar"},
+			{Label: "baz", InsertText: "baz"},
+			{Label: "qux", InsertText: "qux"},
+		})
+	}
+	tests := []struct {
+		name  string
+		setup func(*Autocomplete)
+		delta int
+		want  int
+	}{
+		{
+			name:  "scroll down within bounds",
+			setup: fourItems,
+			delta: 2,
+			want:  2,
+		},
+		{
+			name:  "scroll down clamps to last item",
+			setup: fourItems,
+			delta: 9,
+			want:  3,
+		},
+		{
+			name: "scroll up clamps to first item",
+			setup: func(a *Autocomplete) {
+				fourItems(a)
+				a.Cursor = 1
+			},
+			delta: -5,
+			want:  0,
+		},
+		{
+			name: "empty list is a no-op",
+			setup: func(a *Autocomplete) {
+				a.Show(nil)
+			},
+			delta: 3,
+			want:  0,
+		},
+		{
+			name: "pending popup is a no-op",
+			setup: func(a *Autocomplete) {
+				fourItems(a)
+				a.BeginLoading()
+				a.Cursor = 2
+			},
+			delta: 1,
+			want:  2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := NewAutocomplete(ui.DefaultTheme())
+			tt.setup(&ac)
+
+			ac.Scroll(tt.delta)
+
+			if ac.Cursor != tt.want {
+				t.Errorf("Cursor = %d, want %d", ac.Cursor, tt.want)
+			}
+		})
+	}
+}
+
 func TestAutocompleteScrollsToKeepSelectedItemVisible(t *testing.T) {
 	ac := NewAutocomplete(ui.DefaultTheme())
 	items := make([]AutocompleteItem, 20)

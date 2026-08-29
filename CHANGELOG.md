@@ -2,6 +2,25 @@
 
 All notable changes to the Teak editor project.
 
+## [0.18.2] - 2026-08-29
+
+### Completion Popup Interaction
+
+- Clicking in the buffer (left, right, or shift+click) now dismisses the
+  autocomplete popup, matching the keyboard-navigation contract. Previously
+  the popup survived a click and re-anchored under the new cursor, so a
+  subsequent Enter inserted the stale completion's text at the clicked
+  position — or replaced a shift-clicked selection with it.
+- Accepting a completion now invalidates the syntax token cache synchronously
+  on both the keyboard and mouse accept paths, keeping viewport colours mapped
+  to the right lines until the asynchronous retokenization lands.
+- The mouse wheel now scrolls the autocomplete popup when the list is longer
+  than its visible window, moving the selection three items per notch like
+  the tab strip; other LSP popups still consume the wheel without scrolling.
+- Added a Glyphrun terminal contract (`tui_completion_mouse.yml`) backed by a
+  fixture language server proving the click-dismisses-popup workflow, plus
+  unit and app-level regression tests for all three fixes.
+
 ## [Unreleased]
 
 ### TUI Split Focus

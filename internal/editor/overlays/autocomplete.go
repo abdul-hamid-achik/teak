@@ -247,6 +247,18 @@ func (a *Autocomplete) MoveDown() {
 	}
 }
 
+// Scroll moves the selection by delta items, clamped to the list bounds.
+// The visible window derives from the selection, so this scrolls the popup.
+func (a *Autocomplete) Scroll(delta int) {
+	if a.Pending() {
+		return
+	}
+	if len(a.Items) == 0 {
+		return
+	}
+	a.Cursor = min(max(a.Cursor+delta, 0), len(a.Items)-1)
+}
+
 func (a Autocomplete) visibleStart() int {
 	if len(a.Items) <= maxVisibleItems {
 		return 0

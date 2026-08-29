@@ -1,0 +1,77 @@
+version: 1
+name: teak_tui_completion_mouse
+coversSymbol: app.Model.handleMouseWheel
+metadata:
+    feature: completion-popup
+    owner: core-ui
+    priority: high
+    tags:
+        - tui
+        - lsp
+        - mouse
+        - deterministic
+intent: |
+    a user can trigger the autocomplete popup from a fixture language server,
+    click elsewhere in the buffer to dismiss it, and have Enter insert a newline
+    instead of accepting the stale completion.
+target:
+    cmd:
+        - sh
+        - -lc
+        - >-
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); HOME_DIR="$TMP/home"; CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; mkdir -p "$HOME_DIR" "$CONFIG_HOME/teak" "$PROJECT"; PY=$(python3 -c 'print(1)' >/dev/null 2>&1 && command -v python3 || printf /usr/bin/python3); printf '%s\n' '[editor]' 'tab_size = 4' 'format_on_save = false' '[ui]' 'theme = "nord"' 'show_tree = false' '[agent]' 'enabled = false' 'command = ""' 'args = []' '[session]' 'enabled = false' '[[lsp]]' 'extensions = [".go"]' "command = \"$PY\"" "args = [\"$ROOT/testdata/glyphrun/lsp-completion-fixture.py\"]" 'language_id = "go"' > "$CONFIG_HOME/teak/config.toml"; printf '%s\n' 'package main' '' 'func main() {' '	println("one")' '	println("two")' '	println("three")' '	println("four")' '	println("five")' '	println("six")' '}' > "$PROJECT/main.go"; export HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$TMP/state" LANG=C LC_ALL=C TZ=UTC; exec "$ROOT/bin/teak" "$PROJECT/main.go"
+    cwd: "."
+    timeoutMs: 30000
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen:
+            contains: "python3 ●"
+        timeoutMs: 15000
+    - type: "f"
+    - wait:
+        screen:
+            contains: "fixturefmt"
+        timeoutMs: 5000
+    - mouse: {x: 20, y: 9, button: left, action: click}
+    - wait:
+        screen:
+            notContains: "fixturefmt"
+        timeoutMs: 3000
+    - snapshot: popup_dismissed
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "Ln 10"
+        timeoutMs: 3000
+    - snapshot: newline_inserted
+    - press: "ctrl+s"
+    - wait:
+        screen:
+            contains: "Saved"
+        timeoutMs: 3000
+    - press: "ctrl+q"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: completion_popup_dismissed
+      description: a buffer click away from the completion point closes the popup
+      verify:
+        screen:
+            notContains: "fixturefmt"
+    - id: enter_inserts_newline
+      description: Enter inserts a newline at the clicked line instead of accepting the dismissed completion
+      verify:
+        screen:
+            contains: "Ln 10"
+contractHash: sha256:7f487234b6213aabef5373a9e2e2b3c066ebc05d5b7b1a9114005f758c7ff9cf

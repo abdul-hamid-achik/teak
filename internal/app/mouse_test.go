@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/editor"
+	"teak/internal/editor/overlays"
 	"teak/internal/filetree"
 	"teak/internal/git"
 	"teak/internal/text"
@@ -226,6 +228,85 @@ func TestMouseWheelOverTabBarScrollsStrip(t *testing.T) {
 	updated = updatedModel.(Model)
 	if updated.activeTab != 1 || updated.tabBar.ActiveIdx != 1 {
 		t.Fatalf("active tab = %d / %d, want 1 with shift+wheel", updated.activeTab, updated.tabBar.ActiveIdx)
+	}
+}
+
+func TestMouseWheelOverAutocompleteScrollsPopup(t *testing.T) {
+	m := newViewTestModel(t, false)
+	// A document taller than the viewport keeps the "editor must not scroll"
+	// assertion below honest: with the one-line default buffer a leaked wheel
+	// would clamp ScrollY back to zero and the check could never fail.
+	m.setEditor(m.activeTab, editor.New(
+		text.NewBufferFromBytes([]byte(strings.Repeat("line\n", 100))),
+		m.theme,
+		editor.Config{TabSize: m.appCfg.Editor.TabSize},
+	))
+	m.relayout()
+	ed := m.activeEditor()
+	items := make([]overlays.AutocompleteItem, 15)
+	for i := range items {
+		label := fmt.Sprintf("wheel%02d", i)
+		items[i] = overlays.AutocompleteItem{Label: label, InsertText: label}
+	}
+	ed.ShowAutocomplete(items)
+	p, ok := m.lspOverlayPlacement(ed, ed.LSPOverlayView())
+	if !ok {
+		t.Fatal("lspOverlayPlacement() = not visible")
+	}
+
+	// Four wheel notches move the selection 12 items down, past the static
+	// first window, so the rendered popup itself proves the wheel reached it.
+	for range 4 {
+		updatedModel, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, X: p.x, Y: p.y}))
+		m = updatedModel.(Model)
+	}
+
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "wheel12") {
+		t.Fatal("wheel over the autocomplete popup did not scroll it")
+	}
+	if strings.Contains(view, "wheel00") {
+		t.Fatal("popup still renders the first window after wheel scrolling")
+	}
+	// The popup owns the pointer, so the editor underneath must not scroll.
+	if got := m.activeEditor().Viewport.ScrollY; got != 0 {
+		t.Fatalf("editor ScrollY = %d, want 0 while wheeling over the popup", got)
+	}
+}
+
+func TestMouseWheelUpOverAutocompleteScrollsBack(t *testing.T) {
+	m := newViewTestModel(t, false)
+	ed := m.activeEditor()
+	items := make([]overlays.AutocompleteItem, 15)
+	for i := range items {
+		label := fmt.Sprintf("back%02d", i)
+		items[i] = overlays.AutocompleteItem{Label: label, InsertText: label}
+	}
+	ed.ShowAutocomplete(items)
+	p, ok := m.lspOverlayPlacement(ed, ed.LSPOverlayView())
+	if !ok {
+		t.Fatal("lspOverlayPlacement() = not visible")
+	}
+
+	// Five notches down clamp the selection on the last item (window 5-14);
+	// one notch up must move it back three items to 11 (window 2-11). The
+	// rendered window distinguishes a real -3 step from a swallowed wheel-up.
+	for range 5 {
+		updatedModel, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, X: p.x, Y: p.y}))
+		m = updatedModel.(Model)
+	}
+	updatedModel, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp, X: p.x, Y: p.y}))
+	m = updatedModel.(Model)
+
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "back11") || !strings.Contains(view, "back02") {
+		t.Fatalf("wheel-up did not scroll the popup back; view shows neither the selection (back11) nor the window head (back02)")
+	}
+	if strings.Contains(view, "back00") {
+		t.Fatal("popup jumped to the first window; wheel-up should step back three items, not to the top")
+	}
+	if strings.Contains(view, "back14") {
+		t.Fatal("popup still renders the clamped bottom window; wheel-up did not take effect")
 	}
 }
 

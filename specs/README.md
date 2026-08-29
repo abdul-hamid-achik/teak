@@ -97,6 +97,7 @@ glyph run \
   specs/tui_agent_prompt.yml \
   specs/tui_agent_permission.yml \
   specs/tui_agent_permission_reject.yml \
+  specs/tui_completion_mouse.yml \
   specs/tui_health_dashboard.yml \
   specs/tui_project_explorer.yml \
   specs/tui_project_explorer_actions.yml
@@ -236,6 +237,9 @@ behaviors:
   without executing HTTP requests
 - `tui_edit_save.yml` — terminal editing, saving, closing, and persisted file
   content are verified as one workflow
+- `tui_completion_mouse.yml` — clicking the buffer while completions are
+  showing dismisses the popup so a stale completion cannot be inserted at the
+  new cursor position
 
 The LSP diagnostics/format/status/intelligence, DAP probe, search, tools-status, and buffer
 write contracts parse their JSON responses with fixture-side assertions. They

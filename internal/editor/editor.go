@@ -1231,6 +1231,11 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 		pos := e.screenToBuffer(m.X, m.Y)
 		// Only move cursor if no selection (preserve selection for cut/copy)
 		if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 || e.Buffer.Selections.Primary().IsEmpty() {
+			// The click moves the cursor away from the completion point, so the
+			// popup must not linger on stale suggestions.
+			if e.autocomplete.Visible {
+				e.autocomplete.Hide()
+			}
 			e.Buffer.SetCursor(pos)
 		}
 		e.contextMenu.Show(e.buildEditorMenuItems(), m.X, m.Y)
@@ -1261,6 +1266,11 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			if e.Buffer.Selections != nil && e.Buffer.Selections.Count() > 0 {
 				anchor = e.Buffer.Selections.Primary().Anchor
 			}
+			// Extending the selection moves its head away from the completion
+			// point, so the popup must not linger on stale suggestions.
+			if e.autocomplete.Visible {
+				e.autocomplete.Hide()
+			}
 			e.Buffer.SetSelection(anchor, pos)
 		} else {
 			now := time.Now()
@@ -1271,6 +1281,11 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 			}
 			e.lastClickTime = now
 			e.lastClickPos = pos
+			// The click moves the cursor away from the completion point, so the
+			// popup must not linger on stale suggestions.
+			if e.autocomplete.Visible {
+				e.autocomplete.Hide()
+			}
 			e.Buffer.SetCursor(pos)
 
 			switch e.clickCount {
@@ -2131,6 +2146,12 @@ func (e *Editor) AutocompleteSelectAt(idx int) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// AutocompleteScroll moves the visible completion selection by wheel steps,
+// mirroring the arrow-key navigation semantics for pointer input.
+func (e *Editor) AutocompleteScroll(delta int) {
+	e.autocomplete.Scroll(delta)
+}
+
 // applyCompletion inserts a completion, honouring the server's replacement
 // range when it supplied one. Servers routinely return a textEdit covering the
 // identifier already typed together with the full replacement text; inserting
@@ -2148,6 +2169,9 @@ func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
 	}
 	e.refreshWordWrapAfterBufferChange()
 	e.EnsureCursorVisible()
+	if e.Highlighter != nil {
+		e.invalidateHighlightForLastChange()
+	}
 }
 
 // completionEditIsApplicable rejects ranges that no longer describe the buffer.

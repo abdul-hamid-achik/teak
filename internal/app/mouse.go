@@ -593,6 +593,14 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 
 	mouse := msg.Mouse()
 	if popup, ok := m.currentLSPOverlayPlacement(); ok && popup.contains(mouse.X, mouse.Y) {
+		if ed := m.activeEditor(); ed != nil && ed.IsAutocompleteVisible() {
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				ed.AutocompleteScroll(-3)
+			case tea.MouseWheelDown:
+				ed.AutocompleteScroll(3)
+			}
+		}
 		return m, nil
 	}
 	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
