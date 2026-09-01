@@ -133,5 +133,8 @@ func (m *Model) activateTab(index int) bool {
 		m.tabBar.SetActive(index)
 	}
 	m.projectDebugGutterForEditor(index)
+	if path := m.editors[index].Buffer.FilePath; path != "" {
+		m.rememberRecentFile(path)
+	}
 	return true
 }

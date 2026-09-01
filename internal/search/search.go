@@ -65,14 +65,18 @@ type ReplaceOneMsg struct {
 	Replacement   string
 	Regex         bool
 	CaseSensitive bool
+	WholeWord     bool
 }
 
-// ReplaceAllMsg requests replacing all matches in the active file.
+// ReplaceAllMsg requests replacing all matches across the current project
+// result set. When the overlay has no results yet, the app falls back to the
+// active file.
 type ReplaceAllMsg struct {
 	Query         string
 	Replacement   string
 	Regex         bool
 	CaseSensitive bool
+	WholeWord     bool
 }
 
 // SearchIndexingMsg is sent when semantic search starts indexing.
@@ -108,10 +112,12 @@ type Model struct {
 	searchContext context.Context
 	searchCancel  context.CancelFunc
 
-	replaceInput textinput.Model
-	showReplace  bool
-	focusedInput int // 0=search, 1=replace
-	regex        bool
+	replaceInput  textinput.Model
+	showReplace   bool
+	focusedInput  int // 0=search, 1=replace
+	regex         bool
+	caseSensitive bool
+	wholeWord     bool
 }
 
 // New creates a new search model.
@@ -123,11 +129,11 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 
 	sp := spinner.New(
 		spinner.WithSpinner(spinner.Dot),
-		spinner.WithStyle(lipgloss.NewStyle().Foreground(ui.Nord13)),
+		spinner.WithStyle(theme.PromptMuted),
 	)
 
 	ri := textinput.New()
-	ri.Placeholder = "Replace in current file..."
+	ri.Placeholder = "Replace in project results..."
 	ri.CharLimit = 256
 	ri.SetWidth(50)
 
@@ -169,6 +175,11 @@ func (m Model) Replacement() string {
 // Regex reports whether regex mode is active in the overlay.
 func (m Model) Regex() bool {
 	return m.regex
+}
+
+// PatternOpts returns the compile options that produced the current results.
+func (m Model) PatternOpts() SearchOpts {
+	return SearchOpts{Regex: m.regex, CaseSensitive: m.caseSensitive, WholeWord: m.wholeWord}
 }
 
 // SetSize sets the overlay dimensions.
@@ -218,7 +229,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				replacement := m.replaceInput.Value()
 				if query != "" {
 					return m, func() tea.Msg {
-						return ReplaceOneMsg{Query: query, Replacement: replacement, Regex: m.regex}
+						return ReplaceOneMsg{Query: query, Replacement: replacement, Regex: m.regex, CaseSensitive: m.caseSensitive, WholeWord: m.wholeWord}
 					}
 				}
 				return m, nil
@@ -242,7 +253,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				replacement := m.replaceInput.Value()
 				if query != "" {
 					return m, func() tea.Msg {
-						return ReplaceAllMsg{Query: query, Replacement: replacement, Regex: m.regex}
+						return ReplaceAllMsg{Query: query, Replacement: replacement, Regex: m.regex, CaseSensitive: m.caseSensitive, WholeWord: m.wholeWord}
 					}
 				}
 			}
@@ -290,10 +301,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			m.cancelSearch()
 			return m, nil
-		case "ctrl+r":
+		case "ctrl+r", "alt+c", "alt+w":
 			if m.mode == ModeText {
-				m.regex = !m.regex
-				// Re-search with updated regex mode
+				switch msg.String() {
+				case "ctrl+r":
+					m.regex = !m.regex
+				case "alt+c":
+					m.caseSensitive = !m.caseSensitive
+				case "alt+w":
+					m.wholeWord = !m.wholeWord
+				}
 				if m.input.Value() != "" {
 					m.debounceGen++
 					m.replaceSearchContext()
@@ -467,7 +484,7 @@ func (m Model) doSearch() tea.Cmd {
 		if mode == ModeSemantic {
 			results, err = SemanticSearchContext(ctx, rootDir, query)
 		} else {
-			results, err = TextSearchContext(ctx, rootDir, query, SearchOpts{Regex: m.regex})
+			results, err = TextSearchContext(ctx, rootDir, query, SearchOpts{Regex: m.regex, CaseSensitive: m.caseSensitive, WholeWord: m.wholeWord})
 		}
 		return SearchResultsMsg{Results: results, Err: err, Generation: generation}
 	}
@@ -559,8 +576,8 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	// Mode toggle
-	modeStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
-	activeMode := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true)
+	modeStyle := m.theme.PromptMuted
+	activeMode := m.theme.PromptAccent
 	var textLabel, semLabel string
 	if m.mode == ModeText {
 		textLabel = activeMode.Render("Text")
@@ -571,12 +588,23 @@ func (m Model) View() string {
 	}
 	sb.WriteString(m.theme.HelpTitle.Render("Search") + "  " + textLabel + modeStyle.Render("  |  ") + semLabel + modeStyle.Render("  (Tab)"))
 	if m.mode == ModeText {
+		flagOn := m.theme.PromptAccent
+		if m.caseSensitive {
+			sb.WriteString("  " + flagOn.Render("Aa"))
+		} else {
+			sb.WriteString("  " + modeStyle.Render("Aa"))
+		}
+		if m.wholeWord {
+			sb.WriteString("  " + flagOn.Render("W"))
+		} else {
+			sb.WriteString("  " + modeStyle.Render("W"))
+		}
 		if m.regex {
-			sb.WriteString("  " + lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(".*"))
+			sb.WriteString("  " + flagOn.Render(".*"))
 		} else {
 			sb.WriteString("  " + modeStyle.Render(".*"))
 		}
-		sb.WriteString(modeStyle.Render(" (Ctrl+R)"))
+		sb.WriteString(modeStyle.Render(" (Alt+C / Alt+W / Ctrl+R)"))
 	}
 	sb.WriteByte('\n')
 	sb.WriteByte('\n')
@@ -585,7 +613,7 @@ func (m Model) View() string {
 	sb.WriteString(m.input.View())
 	sb.WriteByte('\n')
 	if m.showReplace {
-		arrowStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+		arrowStyle := m.theme.PromptMuted
 		sb.WriteString(arrowStyle.Render("  ⤷ ") + m.replaceInput.View() + " ")
 		sb.WriteString(zone.Mark("search-replace-btn", m.theme.ReplaceButton.Render("Replace")))
 		sb.WriteString(" ")
@@ -595,12 +623,12 @@ func (m Model) View() string {
 	sb.WriteByte('\n')
 
 	if m.indexing {
-		sb.WriteString(m.spinner.View() + " " + lipgloss.NewStyle().Foreground(ui.Nord13).Render("Indexing project..."))
+		sb.WriteString(m.spinner.View() + " " + m.theme.PromptMuted.Render("Indexing project..."))
 		sb.WriteByte('\n')
 	}
 
 	if m.errMsg != "" {
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord11).Render(m.errMsg))
+		sb.WriteString(m.theme.PromptDanger.Render(m.errMsg))
 		sb.WriteByte('\n')
 	}
 
@@ -616,7 +644,7 @@ func (m Model) View() string {
 		var line string
 		if r.SymbolName != "" {
 			symbol := truncStr(r.SymbolName, 20)
-			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, lipgloss.NewStyle().Foreground(ui.Nord14).Render(symbol), truncStr(r.Preview, boxWidth-45))
+			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, m.theme.PromptAccent.Render(symbol), truncStr(r.Preview, boxWidth-45))
 		} else {
 			line = fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, boxWidth-30))
 		}
@@ -631,14 +659,14 @@ func (m Model) View() string {
 	}
 
 	if len(m.results) == 0 && m.input.Value() != "" && !m.searching && !m.indexing {
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord3).Render("No results"))
+		sb.WriteString(m.theme.PromptMuted.Render("No results"))
 	}
 
 	// Scroll hint
 	if len(m.results) > visible {
 		sb.WriteByte('\n')
 		hint := fmt.Sprintf("  %d/%d results", min(m.cursor+1, len(m.results)), len(m.results))
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord3).Render(hint))
+		sb.WriteString(m.theme.PromptMuted.Render(hint))
 	}
 
 	content := sb.String()

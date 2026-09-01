@@ -107,8 +107,8 @@ func TestLargePastePreservesUndoDirtyAndMultiCursorState(t *testing.T) {
 		t.Fatalf("undo after large paste = %q", got)
 	}
 	updated.Buffer.Redo()
-	if got := updated.Buffer.Selections.Count(); got != 1 {
-		t.Fatalf("redo should use normal undo selection semantics, got %d selections", got)
+	if got := updated.Buffer.Selections.Count(); got != 2 {
+		t.Fatalf("redo lost the multi-cursor set, got %d selections", got)
 	}
 }
 

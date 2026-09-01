@@ -274,7 +274,7 @@ func TestPluginAsyncSnapshotPreservesUndoRedoAndCollapsesMulticursor(t *testing.
 		Head:   text.Position{Col: 10},
 	})
 	model.editors[0] = editor.New(buf, model.theme, editor.DefaultConfig())
-	source, sourceCursor := buf.Rope(), buf.Cursor
+	source := buf.Rope()
 
 	runtime := newPluginAsyncRuntime(model)
 	if err := runtime.InsertText("B"); err != nil {
@@ -288,8 +288,11 @@ func TestPluginAsyncSnapshotPreservesUndoRedoAndCollapsesMulticursor(t *testing.
 		t.Fatalf("selection count after full-document plugin edit = %d, want 1", got)
 	}
 	live.Undo()
-	if live.Rope() != source || live.Cursor != sourceCursor || live.Dirty() {
-		t.Fatalf("undo state = rope:%v cursor:%+v dirty:%v, want original clean snapshot", live.Rope() == source, live.Cursor, live.Dirty())
+	if live.Rope() != source || live.Dirty() {
+		t.Fatalf("undo state = rope:%v dirty:%v, want original clean snapshot", live.Rope() == source, live.Dirty())
+	}
+	if live.Selections.Count() != 2 {
+		t.Fatalf("undo collapsed the original multi-cursor set: count = %d", live.Selections.Count())
 	}
 	live.Redo()
 	if live.Rope() != prepared || live.Cursor != preparedCursor || !live.Dirty() {

@@ -292,6 +292,22 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:       "find_references",
+			Label:    "Find References",
+			Shortcut: "Shift+F12",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: findReferencesMsg{}}
+			},
+		},
+		{
+			ID:       "jump_back",
+			Label:    "Go Back",
+			Shortcut: "Ctrl+-",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: jumpBackMsg{}}
+			},
+		},
+		{
 			ID:       "rename_symbol",
 			Label:    "Rename Symbol...",
 			Shortcut: "F2",
@@ -388,6 +404,22 @@ func (m *Model) commandRegistry() []Command {
 			},
 		},
 		{
+			ID:       "toggle_word_wrap",
+			Label:    "Toggle Word Wrap",
+			Shortcut: "Alt+Z",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleWordWrapMsg{}}
+			},
+		},
+		{
+			ID:       "toggle_terminal",
+			Label:    "Toggle Terminal",
+			Shortcut: "Ctrl+`",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: toggleTerminalMsg{}}
+			},
+		},
+		{
 			ID:       "next_tab",
 			Label:    "Next Tab",
 			Shortcut: "Ctrl+Tab",
@@ -456,6 +488,8 @@ type (
 	bobCheckMsg            struct{}
 	formatFileMsg          struct{}
 	gotoDefinitionMsg      struct{}
+	findReferencesMsg      struct{}
+	jumpBackMsg            struct{}
 	renameSymbolMsg        struct{}
 	codeActionsMsg         struct{}
 	hoverSymbolMsg         struct{}
@@ -468,6 +502,7 @@ type (
 	unfoldLineMsg          struct{}
 	foldAllMsg             struct{}
 	unfoldAllMsg           struct{}
+	toggleWordWrapMsg      struct{}
 	nextTabMsg             struct{}
 	prevTabMsg             struct{}
 	nextProblemMsg         struct{}

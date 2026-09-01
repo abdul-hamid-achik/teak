@@ -3,7 +3,9 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/agent"
@@ -20,6 +22,32 @@ import (
 // isEscapeKey reports whether a key press is Escape. Bubble Tea reports it
 // under two names depending on terminal and key encoding, and both appear
 // throughout this package.
+func parseGoToLineInput(raw string) (line, col int, err error) {
+	linePart, colPart, hasCol := strings.Cut(raw, ":")
+	line, err = strconv.Atoi(linePart)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !hasCol || colPart == "" {
+		return line, 1, nil
+	}
+	col, err = strconv.Atoi(colPart)
+	if err != nil {
+		return 0, 0, err
+	}
+	return line, col, nil
+}
+
+func isBackgroundLSPError(method string) bool {
+	switch method {
+	case "textDocument/foldingRange", "textDocument/documentHighlight",
+		"textDocument/inlayHint", "textDocument/semanticTokens/full",
+		"textDocument/codeLens":
+		return true
+	}
+	return false
+}
+
 func isEscapeKey(msg tea.KeyPressMsg) bool {
 	switch msg.String() {
 	case "esc", "escape":
@@ -210,6 +238,17 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 
+	if m.showTerminal && m.focus == FocusTerminal {
+		switch msg.String() {
+		case "ctrl+`", "ctrl+~":
+			return m, m.toggleTerminalPanel(), true
+		case "ctrl+q", "ctrl+shift+p", "ctrl+p", "f1", "ctrl+,":
+			// keep palette, quit, help, and settings reachable from the PTY
+		default:
+			return m, nil, false
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+q":
 		updated, cmd := m.requestQuit()
@@ -222,7 +261,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		if buf.FilePath == "" {
 			m.cancelActiveEditorDrag()
 			m.saveAsMode = true
-			m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+			setPrompt(&m.saveAsInput, &m.saveAsCursor, filepath.Join(m.rootDir, "")+"/")
 			return m, nil, true
 		}
 		return m, m.beginSaveForTab(m.activeTab, false, false), true
@@ -233,9 +272,9 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		m.cancelActiveEditorDrag()
 		m.saveAsMode = true
 		if m.activeEditor().Buffer.FilePath != "" {
-			m.saveAsInput = m.activeEditor().Buffer.FilePath
+			setPrompt(&m.saveAsInput, &m.saveAsCursor, m.activeEditor().Buffer.FilePath)
 		} else {
-			m.saveAsInput = filepath.Join(m.rootDir, "") + "/"
+			setPrompt(&m.saveAsInput, &m.saveAsCursor, filepath.Join(m.rootDir, "")+"/")
 		}
 		return m, nil, true
 	case "f1":
@@ -287,6 +326,9 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+space":
 		model, cmd := m.requestCompletion()
 		return model, cmd, true
+	case "alt+z":
+		m.toggleWordWrap()
+		return m, nil, true
 	case "alt+k":
 		if m.focus == FocusEditor {
 			model, cmd := m.requestHover()
@@ -301,6 +343,12 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "f12":
 		model, cmd := m.requestDefinition()
+		return model, cmd, true
+	case "shift+f12":
+		model, cmd := m.requestReferences()
+		return model, cmd, true
+	case "ctrl+-":
+		model, cmd := m.jumpBack()
 		return model, cmd, true
 	case "f2":
 		m.renameMode = true
@@ -321,6 +369,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+shift+0":
 		if ed := m.activeEditor(); ed != nil {
 			ed.Folds.FoldAll()
+			ed.RevealCursorAfterFold()
 			m.setEditor(m.activeTab, *ed)
 			m.status = "All regions folded"
 		}
@@ -370,15 +419,25 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case "f3":
-		if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+		if ed := m.activeEditor(); ed != nil && (ed.IsFindVisible() || ed.CanRepeatFind()) {
+			if !ed.IsFindVisible() && ed.FindMatchCount() == 0 {
+				m.status = "No matches"
+				return m, nil, true
+			}
 			ed.UpdateFind(msg)
+			m.setEditor(m.activeTab, *ed)
 			return m, nil, true
 		}
 		model, cmd := m.findNext()
 		return model, cmd, true
 	case "shift+f3":
-		if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+		if ed := m.activeEditor(); ed != nil && (ed.IsFindVisible() || ed.CanRepeatFind()) {
+			if !ed.IsFindVisible() && ed.FindMatchCount() == 0 {
+				m.status = "No matches"
+				return m, nil, true
+			}
 			ed.UpdateFind(msg)
+			m.setEditor(m.activeTab, *ed)
 			return m, nil, true
 		}
 		model, cmd := m.findPrev()
@@ -415,6 +474,8 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.activateTab((m.activeTab - 1 + len(m.editors)) % len(m.editors))
 		}
 		return m, nil, true
+	case "ctrl+`", "ctrl+~":
+		return m, m.toggleTerminalPanel(), true
 	case "ctrl+j":
 		return m, m.toggleAgentPanel(), true
 	case "ctrl+'":
@@ -473,6 +534,12 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 // result deliberately distinguishes "there is no active recipient" from a
 // child that consumed a message without scheduling a command.
 func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
+	if m.showTerminal && m.focus == FocusTerminal {
+		if kp, ok := msg.(tea.KeyPressMsg); ok {
+			m.terminal.WriteKey(kp)
+			return m, nil, true
+		}
+	}
 	if m.showAgent && m.focus == FocusAgent {
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
 			if m.agentPanel.HasPendingWrite() {
@@ -622,4 +689,73 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 	}
 
 	return m, tea.Batch(cmd, m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)), true
+}
+
+// handlePastePrecedence keeps bracketed paste out of the document while a
+// modal prompt owns typing. The same surfaces that capture keys must consume
+// paste; otherwise Save As / Go to line / rename leak into the buffer.
+func (m Model) handlePastePrecedence(msg tea.PasteMsg) (Model, tea.Cmd, bool) {
+	content := msg.Content
+	if m.unsavedConfirm != nil {
+		return m, nil, true
+	}
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg), true
+	}
+	if m.showBranchPicker || m.showSearch {
+		return m, nil, true
+	}
+	if m.goToLineMode {
+		for _, r := range content {
+			if (r >= '0' && r <= '9') || r == ':' {
+				promptInsert(&m.goToLineInput, &m.goToLineCursor, string(r))
+			}
+		}
+		return m, nil, true
+	}
+	if m.treeRenameMode || m.treeCopyMode || m.treeMoveMode {
+		promptInsert(&m.treeEditInput, &m.treeEditCursor, sanitizePromptPaste(content))
+		return m, nil, true
+	}
+	if m.renameMode {
+		promptInsert(&m.renameInput, &m.renameCursor, sanitizePromptPaste(content))
+		return m, nil, true
+	}
+	if m.saveAsMode {
+		promptInsert(&m.saveAsInput, &m.saveAsCursor, sanitizePromptPaste(content))
+		return m, nil, true
+	}
+	if m.newFileMode || m.newFolderMode {
+		promptInsert(&m.newItemInput, &m.newItemCursor, sanitizePromptPaste(content))
+		return m, nil, true
+	}
+	if m.deleteConfirm || m.treeContextMenu.Visible || m.gitContextMenu.Visible || m.showHelp || m.showSettings {
+		return m, nil, true
+	}
+	if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+		for _, r := range content {
+			if r == '\n' || r == '\r' {
+				continue
+			}
+			ed.UpdateFind(tea.KeyPressMsg{Text: string(r)})
+		}
+		m.setEditor(m.activeTab, *ed)
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func sanitizePromptPaste(content string) string {
+	var b strings.Builder
+	b.Grow(len(content))
+	for _, r := range content {
+		if r == '\n' || r == '\r' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

@@ -111,6 +111,9 @@ func writeRopeAtomically(path string, expected os.FileInfo, rope *Rope, ending L
 	}
 
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create destination directory: %w", err)
+	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
@@ -192,4 +195,5 @@ func (b *Buffer) MarkSavedSnapshot(path string, snapshot *Rope) {
 	b.FilePath = path
 	b.savedRope = snapshot
 	b.dirty = b.rope != snapshot
+	b.diskPresence = DiskAssumedSaved
 }

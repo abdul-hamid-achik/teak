@@ -332,7 +332,7 @@ func (b *Buffer) applyLineTransform(transform LineTransform) {
 	if err != nil || !prepared.Changed {
 		return
 	}
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	b.rope = prepared.Rope
 	b.Selections = &Selections{selections: append([]Selection(nil), prepared.Selections...), primary: prepared.Primary}
 	b.Cursor = b.Selections.PrimaryCursor()

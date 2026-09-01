@@ -89,6 +89,11 @@ func managedKeyEdits(cfg Config) []*keyEdit {
 		{section: "editor", key: "format_on_save", value: strconv.FormatBool(cfg.Editor.FormatOnSave)},
 		{section: "editor", key: "word_wrap", value: strconv.FormatBool(cfg.Editor.WordWrap)},
 		{section: "editor", key: "scroll_margin", value: strconv.Itoa(cfg.Editor.ScrollMargin)},
+		{section: "editor", key: "insert_final_newline", value: strconv.FormatBool(cfg.Editor.InsertFinalNewline)},
+		{section: "editor", key: "git_gutter", value: strconv.FormatBool(cfg.Editor.GitGutter)},
+		{section: "editor", key: "indent_guides", value: strconv.FormatBool(cfg.Editor.IndentGuides)},
+		{section: "editor", key: "highlight_trailing_whitespace", value: strconv.FormatBool(cfg.Editor.HighlightTrailingWS)},
+		{section: "editor", key: "ruler_column", value: strconv.Itoa(cfg.Editor.RulerColumn)},
 		{section: "ui", key: "theme", value: strconv.Quote(cfg.UI.Theme)},
 		{section: "ui", key: "show_tree", value: strconv.FormatBool(cfg.UI.ShowTree)},
 		{section: "ui", key: "tree_width", value: strconv.Itoa(cfg.UI.TreeWidth)},
@@ -260,6 +265,11 @@ func patchRoundTrips(patched string, cfg Config) bool {
 		check.Editor.FormatOnSave == cfg.Editor.FormatOnSave &&
 		check.Editor.WordWrap == cfg.Editor.WordWrap &&
 		check.Editor.ScrollMargin == cfg.Editor.ScrollMargin &&
+		check.Editor.InsertFinalNewline == cfg.Editor.InsertFinalNewline &&
+		check.Editor.GitGutter == cfg.Editor.GitGutter &&
+		check.Editor.IndentGuides == cfg.Editor.IndentGuides &&
+		check.Editor.HighlightTrailingWS == cfg.Editor.HighlightTrailingWS &&
+		check.Editor.RulerColumn == cfg.Editor.RulerColumn &&
 		check.UI.Theme == cfg.UI.Theme &&
 		check.UI.ShowTree == cfg.UI.ShowTree &&
 		check.UI.TreeWidth == cfg.UI.TreeWidth

@@ -99,12 +99,18 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: config: %v\n", err)
+		fallback := config.DefaultConfig()
+		fallback.LoadWarnings = append(append([]string{}, cfg.LoadWarnings...), err.Error())
+		cfg = fallback
 	}
 
-	// Validate configuration
+	// An invalid file must not prevent the editor from opening. Doctor still
+	// reports the problem; here we keep defaults and surface the warning.
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Warning: invalid configuration, using defaults: %v\n", err)
+		fallback := config.DefaultConfig()
+		fallback.LoadWarnings = append(append([]string{}, cfg.LoadWarnings...), "invalid config, using defaults: "+err.Error())
+		cfg = fallback
 	}
 
 	model, err := app.NewModelWithFiles(files, rootDir, cfg)

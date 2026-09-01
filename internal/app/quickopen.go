@@ -196,15 +196,56 @@ func quickOpenCmd(ctx context.Context, rootDir string, generation int) tea.Cmd {
 
 // filesToPickerItems converts file paths to picker items.
 func filesToPickerItems(files []string) []overlay.PickerItem {
+	return filesToPickerItemsWithRecent(files, nil)
+}
+
+func filesToPickerItemsWithRecent(files []string, recent []string) []overlay.PickerItem {
+	rank := make(map[string]int, len(recent))
+	for i, path := range recent {
+		rank[filepath.ToSlash(path)] = len(recent) - i
+		rank[path] = len(recent) - i
+	}
 	items := make([]overlay.PickerItem, len(files))
 	for i, f := range files {
+		slash := filepath.ToSlash(f)
 		items[i] = overlay.PickerItem{
 			Label:       filepath.Base(f),
 			Description: filepath.Dir(f),
 			Value:       f,
+			Search:      slash,
+			Recency:     rank[slash] + rank[f],
 		}
 	}
 	return items
+}
+
+func mergeRecentIntoQuickOpen(files, recent []string, limit int) []string {
+	if len(recent) == 0 {
+		return files
+	}
+	seen := make(map[string]struct{}, len(files)+len(recent))
+	out := make([]string, 0, len(files)+len(recent))
+	for _, path := range recent {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	for _, path := range files {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
 }
 
 // preparePickerItemsCmd moves the O(N) conversion from a FileListMsg handler
@@ -212,12 +253,16 @@ func filesToPickerItems(files []string) []overlay.PickerItem {
 // a second cancellable command, so a large quick-open result never makes the
 // root Update loop build or sort thousands of items.
 func preparePickerItemsCmd(instanceID uint64, zoneID string, files []string, agent bool) tea.Cmd {
+	return preparePickerItemsCmdRecent(instanceID, zoneID, files, nil, agent)
+}
+
+func preparePickerItemsCmdRecent(instanceID uint64, zoneID string, files, recent []string, agent bool) tea.Cmd {
 	return func() tea.Msg {
 		var items []overlay.PickerItem
 		if agent {
 			items = filesToAgentPickerItems(files)
 		} else {
-			items = filesToPickerItems(files)
+			items = filesToPickerItemsWithRecent(mergeRecentIntoQuickOpen(files, recent, maxQuickOpenFiles), recent)
 		}
 		return overlay.PickerItemsReadyMsg{InstanceID: instanceID, ZoneID: zoneID, Items: items}
 	}

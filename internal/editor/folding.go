@@ -160,6 +160,21 @@ func (fs *FoldState) FoldAll() {
 	fs.ensureIndex()
 }
 
+// ClampLineToVisible returns the fold header when line is hidden inside a
+// collapsed region, otherwise line itself. FoldAll can leave the caret on a
+// hidden line; callers should move it here so typing is not silent.
+func (fs *FoldState) ClampLineToVisible(line int) int {
+	if fs == nil || !fs.IsLineHidden(line) {
+		return line
+	}
+	for _, region := range fs.Regions {
+		if region.Collapsed && line > region.StartLine && line <= region.EndLine {
+			return region.StartLine
+		}
+	}
+	return line
+}
+
 // UnfoldAll expands all regions.
 func (fs *FoldState) UnfoldAll() {
 	for i := range fs.Regions {

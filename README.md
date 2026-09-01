@@ -363,6 +363,7 @@ list.
 | Panels | `Ctrl+B` | Toggle sidebar |
 | Panels | `Ctrl+Shift+G` | Open Git panel |
 | Panels | `Ctrl+J` | Toggle agent panel |
+| Panels | `` Ctrl+` `` | Toggle integrated terminal |
 | Splits | `Ctrl+\\` | Toggle editor split |
 | Splits | `F6` | Switch split focus |
 | Problems | `F8` / `Shift+F8` | Next / previous problem |

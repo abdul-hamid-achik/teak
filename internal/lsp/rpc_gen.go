@@ -67,6 +67,10 @@ type rawCompletionItem struct {
 		Replace *Range `json:"replace"`
 		NewText string `json:"newText"`
 	} `json:"textEdit"`
+	AdditionalTextEdits []struct {
+		Range   *Range `json:"range"`
+		NewText string `json:"newText"`
+	} `json:"additionalTextEdits"`
 }
 
 func (c *Client) completionItems(uri string, raw []rawCompletionItem) []CompletionItem {
@@ -109,6 +113,23 @@ func (c *Client) completionItems(uri string, raw []rawCompletionItem) []Completi
 					converted.InsertText = edit.NewText
 				}
 			}
+		}
+
+		for _, extra := range item.AdditionalTextEdits {
+			if extra.Range == nil {
+				continue
+			}
+			internal, err := c.protocolRangeToInternal(uri, *extra.Range)
+			if err != nil {
+				continue
+			}
+			converted.AdditionalEdits = append(converted.AdditionalEdits, CompletionEdit{
+				StartLine: internal.Start.Line,
+				StartCol:  internal.Start.Character,
+				EndLine:   internal.End.Line,
+				EndCol:    internal.End.Character,
+				NewText:   extra.NewText,
+			})
 		}
 
 		items = append(items, converted)
@@ -371,7 +392,7 @@ func (c *Client) FormattingContext(ctx context.Context, uri string, options Form
 		return nil, nil
 	}
 
-	ctx, cancel := rpcRequestContext(ctx, 5*time.Second)
+	ctx, cancel := rpcRequestContext(ctx, 15*time.Second)
 	defer cancel()
 
 	result, err := c.call(ctx, "textDocument/formatting", formattingRequestParams(uri, options))

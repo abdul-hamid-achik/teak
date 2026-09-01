@@ -137,6 +137,7 @@ type Editor struct {
 	HasLSP                  bool
 	TriggerCharacters       []string    // from LSP server capabilities
 	DebugGutter             *GutterOpts // set by app when debugging
+	GitLines                map[int]GitLineKind
 	pluginHighlights        map[int][]HighlightRange
 	pluginHighlightVersion  int
 	Folds                   FoldState   // code folding state
@@ -312,6 +313,7 @@ func (e *Editor) SetSize(width, height int) {
 	}
 	e.Viewport.Width = width
 	e.Viewport.Height = height
+	e.find.SetInputWidth(max(12, width-28))
 	if !e.Config.WordWrap || e.Buffer == nil {
 		e.Wrap = nil
 		e.wrapDegraded = false
@@ -325,7 +327,7 @@ func (e *Editor) SetSize(width, height int) {
 	}
 
 	if e.Config.WordWrap {
-		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, false)
+		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.gutterOpts(), false)
 		baseTextWidth := metrics.textWidth(width)
 		reserveScrollbar := e.wrapLikelyNeedsScrollbar(baseTextWidth, height)
 		wrapWidth := baseTextWidth
@@ -407,7 +409,7 @@ func (e *Editor) refreshWordWrapAfterBufferChange() {
 	change := e.Buffer.LastChange()
 	if e.wrapLayoutVersion >= 0 && e.Buffer.Version() == e.wrapLayoutVersion+1 && change != nil &&
 		e.Wrap.ApplyEdit(e.Buffer.Line, e.Buffer.LineCount(), change.StartLine, change.EndLine, change.Text) {
-		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, false)
+		metrics := computeGutterMetrics(e.Buffer.LineCount(), e.gutterOpts(), false)
 		expectedWidth := metrics.textWidth(e.Viewport.Width)
 		if e.wrapLikelyNeedsScrollbar(expectedWidth, e.Viewport.Height) || e.Wrap.HasMoreRowsThan(max(1, e.Viewport.Height)) {
 			expectedWidth = max(1, expectedWidth-1)
@@ -467,17 +469,13 @@ func (e Editor) Update(msg tea.Msg) (Editor, tea.Cmd) {
 				e.escapeFind()
 				return e, nil
 			case "enter", "f3":
-				e.UpdateFind(msg)
-				return e, nil
+				return e, e.UpdateFind(msg)
 			case "shift+f3", "shift+enter":
-				e.UpdateFind(msg)
-				return e, nil
+				return e, e.UpdateFind(msg)
 			case "ctrl+r":
-				e.UpdateFind(msg)
-				return e, nil
+				return e, e.UpdateFind(msg)
 			default:
-				e.UpdateFind(msg)
-				return e, nil
+				return e, e.UpdateFind(msg)
 			}
 		}
 
@@ -681,7 +679,8 @@ func (e Editor) handlePastePayload(content string, sourceErr error) (Editor, tea
 	if err := clipboard.Validate(content); err != nil {
 		return e, nil
 	}
-	e.Buffer.InsertAtCursor([]byte(content))
+	normalized, _ := text.NormalizeLineEndings([]byte(content))
+	e.Buffer.InsertAtCursor(normalized)
 	e.refreshWordWrapAfterBufferChange()
 	e.EnsureCursorVisible()
 	if e.Highlighter != nil {
@@ -704,6 +703,9 @@ func (e *Editor) queueAsyncPaste(content string, sourceErr error) tea.Cmd {
 func (e Editor) selectionClipboardCopy(cut bool) (Editor, tea.Cmd, bool) {
 	if e.Buffer.Selections == nil || e.Buffer.Selections.Count() == 0 {
 		return e, nil, false
+	}
+	if !e.hasNonEmptySelection() {
+		e.expandEmptySelectionsToLines()
 	}
 	e.Buffer.Selections.Normalize()
 	selections := append([]text.Selection(nil), e.Buffer.Selections.All()...)
@@ -838,11 +840,19 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			e.Buffer.ClearSelection()
 		}
 	case "ctrl+home":
-		e.Buffer.CursorToDocStart()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsToDocStart()
+		} else {
+			e.Buffer.CursorToDocStart()
+			e.Buffer.ClearSelection()
+		}
 	case "ctrl+end":
-		e.Buffer.CursorToDocEnd()
-		e.Buffer.ClearSelection()
+		if e.hasMultipleCursors() {
+			e.Buffer.MoveCursorsToDocEnd()
+		} else {
+			e.Buffer.CursorToDocEnd()
+			e.Buffer.ClearSelection()
+		}
 	case "pgup":
 		if e.hasMultipleCursors() {
 			e.Buffer.MoveCursorsByLines(-e.Viewport.Height)
@@ -967,13 +977,20 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		edited = true
 	case "enter":
 		if e.Config.AutoIndent {
-			e.Buffer.InsertNewlineWithIndent()
+			e.Buffer.InsertNewlineWithIndentExtra(text.IndentToken(e.Config.TabSize, e.Config.InsertTabs))
 		} else {
 			e.Buffer.InsertNewline()
 		}
 		edited = true
 	case "tab":
-		e.Buffer.InsertAtCursor(text.IndentString(e.Config.TabSize))
+		if e.hasNonEmptySelection() {
+			if cmd, allowed := e.multilineEditWithinBudget("Indent"); !allowed {
+				return e, cmd
+			}
+			edited = e.Buffer.IndentLinesMode(e.Config.TabSize, e.Config.InsertTabs) == text.StructuralEditApplied
+			break
+		}
+		e.Buffer.InsertAtCursor(text.IndentToken(e.Config.TabSize, e.Config.InsertTabs))
 		edited = true
 	case "shift+tab":
 		if cmd, allowed := e.multilineEditWithinBudget("Dedent"); !allowed {
@@ -988,7 +1005,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		edited = e.Buffer.Version() != versionBefore
 
 	// --- New shortcuts ---
-	case "ctrl+/":
+	case "ctrl+/", "ctrl+_":
 		if cmd, allowed := e.multilineEditWithinBudget("Toggle comment"); !allowed {
 			return e, cmd
 		}
@@ -1054,7 +1071,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		if cmd, allowed := e.multilineEditWithinBudget("Indent"); !allowed {
 			return e, cmd
 		}
-		edited = e.Buffer.IndentLines(e.Config.TabSize) == text.StructuralEditApplied
+		edited = e.Buffer.IndentLinesMode(e.Config.TabSize, e.Config.InsertTabs) == text.StructuralEditApplied
 
 	case "esc", "escape":
 		e.hover.Hide()
@@ -1069,6 +1086,11 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			ch := msg.Text[0]
 			if len(msg.Text) == 1 {
 				if close := AutoClosePair(ch); close != 0 {
+					if shouldInsertBareQuote(e.Buffer, ch) {
+						e.Buffer.InsertAtCursor([]byte{ch})
+						edited = true
+						break
+					}
 					if edits, ok := autoCloseSelectionEdits(e.Buffer, ch, close); ok {
 						edited = e.Buffer.ApplySelectionEdits(edits)
 						break
@@ -1260,7 +1282,7 @@ func (e Editor) handleMouseClick(msg tea.MouseClickMsg) (Editor, tea.Cmd) {
 
 	if m.Button == tea.MouseLeft {
 		metrics := e.currentGutterMetrics()
-		foldCol := metrics.markerWidth + metrics.lineNumberWidth
+		foldCol := metrics.contentWidth() - metrics.foldWidth
 		gutterEnd := metrics.contentWidth()
 
 		// Click on fold indicator column → toggle fold
@@ -1433,6 +1455,10 @@ func (e Editor) handleMouseWheel(msg tea.MouseWheelMsg) (Editor, tea.Cmd) {
 		} else {
 			e.Viewport.ScrollDown(3, e.Buffer.LineCount()-1)
 		}
+	case tea.MouseWheelLeft:
+		e.Viewport.ScrollLeft(6)
+	case tea.MouseWheelRight:
+		e.Viewport.ScrollRight(6)
 	}
 	if e.needsRetokenize() {
 		return e, e.scheduleRetokenizeImmediate()
@@ -1509,6 +1535,40 @@ func (e *Editor) moveCursorVertical(delta int, extend bool) {
 	}
 	e.verticalGoalCursor = e.Buffer.Cursor
 	e.verticalGoalVersion = e.Buffer.Version()
+}
+
+func (e *Editor) expandEmptySelectionsToLines() {
+	if e.Buffer == nil || e.Buffer.Selections == nil {
+		return
+	}
+	current := e.Buffer.Selections.All()
+	expanded := make([]text.Selection, len(current))
+	lineCount := e.Buffer.LineCount()
+	for i, sel := range current {
+		if !sel.IsEmpty() {
+			expanded[i] = sel
+			continue
+		}
+		line := sel.Head.Line
+		end := text.Position{Line: line, Col: e.Buffer.Rope().LineLen(line)}
+		if line+1 < lineCount {
+			end = text.Position{Line: line + 1, Col: 0}
+		}
+		expanded[i] = text.Selection{Anchor: text.Position{Line: line, Col: 0}, Head: end}
+	}
+	e.Buffer.RestoreSelections(expanded, e.Buffer.Selections.PrimaryIndex())
+}
+
+func (e Editor) hasNonEmptySelection() bool {
+	if e.Buffer == nil || e.Buffer.Selections == nil {
+		return false
+	}
+	for _, sel := range e.Buffer.Selections.All() {
+		if !sel.IsEmpty() {
+			return true
+		}
+	}
+	return false
 }
 
 func (e Editor) hasMultipleCursors() bool {
@@ -1630,6 +1690,7 @@ func (e *Editor) View() string {
 		diagnosticHighlights = e.diagnosticHighlightsForLines(visibleDiagnostics, visibleLines)
 	}
 	extra := append(diagnosticHighlights, e.findMatchHighlightsForProjection(visibleLines, startLine, endLine)...)
+	extra = append(extra, e.decorationHighlights(visibleLines, startLine, endLine)...)
 	if len(extra) > 0 {
 		pluginHighlights = append(pluginHighlights, extra...)
 		sort.SliceStable(pluginHighlights, func(i, j int) bool {
@@ -1643,12 +1704,14 @@ func (e *Editor) View() string {
 		})
 	}
 	var view string
-	if e.Wrap != nil && e.Config.WordWrap {
-		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, e.Wrap, pluginHighlights)
+	if e.Folds.HasCollapsedRegions() {
+		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.gutterOpts(), &e.Folds, pluginHighlights)
+	} else if e.Wrap != nil && e.Config.WordWrap {
+		view = e.Viewport.RenderWithWrapHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.gutterOpts(), e.Wrap, pluginHighlights)
 	} else if len(e.Folds.Regions) > 0 {
-		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, &e.Folds, pluginHighlights)
+		view = e.Viewport.RenderWithFoldsHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.gutterOpts(), &e.Folds, pluginHighlights)
 	} else {
-		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.DebugGutter, pluginHighlights)
+		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.gutterOpts(), pluginHighlights)
 	}
 	if fv := e.find.View(); fv != "" {
 		view = fv + "\n" + view
@@ -1947,7 +2010,23 @@ func (e Editor) shouldRenderFoldGutter() bool {
 }
 
 func (e Editor) currentGutterMetrics() gutterMetrics {
-	return computeGutterMetrics(e.Buffer.LineCount(), e.DebugGutter, e.shouldRenderFoldGutter())
+	return computeGutterMetrics(e.Buffer.LineCount(), e.gutterOpts(), e.shouldRenderFoldGutter())
+}
+
+func (e Editor) gutterOpts() *GutterOpts {
+	showGit := e.Config.GitGutter && len(e.GitLines) > 0
+	if e.DebugGutter == nil && !showGit {
+		return nil
+	}
+	opts := GutterOpts{}
+	if e.DebugGutter != nil {
+		opts = *e.DebugGutter
+	}
+	if showGit {
+		opts.ShowGit = true
+		opts.GitLines = e.GitLines
+	}
+	return &opts
 }
 
 // visibleLinesForClick returns the visible lines slice when folds are active, nil otherwise.
@@ -1960,8 +2039,55 @@ func (e Editor) visibleLinesForClick() []int {
 }
 
 // screenToBuffer maps screen coordinates to buffer position, handling wrap/fold modes.
+func (e Editor) reservedScrollbarColumns() int {
+	if e.Viewport.Height < 1 || e.Buffer == nil {
+		return 0
+	}
+	total := e.Buffer.LineCount()
+	if e.Wrap != nil && e.Config.WordWrap {
+		total = e.Wrap.TotalRows()
+	} else if e.Folds.HasCollapsedRegions() {
+		total = e.Folds.TotalVisibleLines(e.Buffer.LineCount())
+	}
+	if total > e.Viewport.Height {
+		return 1
+	}
+	return 0
+}
+
+func (e Editor) contentTextWidth() int {
+	width := e.currentGutterMetrics().textWidth(e.Viewport.Width) - e.reservedScrollbarColumns()
+	if width < 1 {
+		return 1
+	}
+	return width
+}
+
+func (e Editor) CanRepeatFind() bool {
+	return e.find.Query() != ""
+}
+
+func (e *Editor) RevealCursorAfterFold() {
+	if e.Buffer == nil {
+		return
+	}
+	line := e.Folds.ClampLineToVisible(e.Buffer.Cursor.Line)
+	if line == e.Buffer.Cursor.Line {
+		return
+	}
+	e.Buffer.SetCursor(text.Position{Line: line, Col: 0})
+	e.EnsureCursorVisible()
+}
+
+func (e Editor) FindMatchCount() int {
+	return e.find.MatchCount()
+}
+
 func (e Editor) screenToBuffer(screenX, screenY int) text.Position {
 	gw := e.effectiveGutterWidth()
+	if maxX := e.Viewport.Width - e.reservedScrollbarColumns(); screenX >= maxX && maxX > gw {
+		screenX = maxX - 1
+	}
 	if e.Wrap != nil && e.Config.WordWrap {
 		return e.Viewport.ScreenToBufferPositionWrap(screenX, screenY, e.Buffer, gw, e.Wrap)
 	}
@@ -2004,11 +2130,17 @@ func (e Editor) cursorPositionInText() (int, int) {
 	if e.Wrap != nil && e.Config.WordWrap {
 		wrapRow, wrapCol := e.Wrap.PositionForByte(e.Buffer.Cursor.Line, col, lineContent)
 		x := wrapCol + gw
+		if maxX := e.Viewport.Width - e.reservedScrollbarColumns(); x >= maxX {
+			x = maxX - 1
+		}
 		visualRow := e.Wrap.VisualRow(e.Buffer.Cursor.Line) + wrapRow - e.Viewport.wrapScrollY(e.Wrap)
 		return x, visualRow
 	}
 
 	x := displayCol - e.Viewport.ScrollX + gw
+	if maxX := e.Viewport.Width - e.reservedScrollbarColumns(); x >= maxX {
+		x = maxX - 1
+	}
 
 	// When folds are active, map buffer line to screen row via visible lines
 	if len(e.Folds.Regions) > 0 {
@@ -2030,7 +2162,7 @@ func (e *Editor) EnsureCursorVisible() {
 	}
 
 	margin := clampScrollMargin(e.Config.ScrollMargin, e.Viewport.Height)
-	textWidth := e.currentGutterMetrics().textWidth(e.Viewport.Width)
+	textWidth := e.contentTextWidth()
 	if e.Wrap != nil && e.Config.WordWrap {
 		e.Viewport.ScrollX = 0
 		line := e.Buffer.Line(e.Buffer.Cursor.Line)
@@ -2191,15 +2323,24 @@ func (e *Editor) AutocompleteScroll(delta int) {
 // (typing "fm" and accepting "fmt" produced "fmfmt").
 func (e *Editor) applyCompletion(item overlays.AutocompleteItem) {
 	versionBefore := e.Buffer.Version()
+	insertText, caret := expandSnippet(item.InsertText)
 	if item.HasEdit && e.completionEditIsApplicable(item.Edit) {
 		start := text.Position{Line: item.Edit.StartLine, Col: item.Edit.StartCol}
 		end := text.Position{Line: item.Edit.EndLine, Col: item.Edit.EndCol}
 		startOffset := e.Buffer.Rope().PositionToOffset(start)
-		e.Buffer.ReplaceRange(start, end, []byte(item.InsertText))
-		e.Buffer.SetCursor(e.Buffer.Rope().OffsetToPosition(startOffset + len(item.InsertText)))
+		e.Buffer.ReplaceRange(start, end, []byte(insertText))
+		if caret < 0 || caret > len(insertText) {
+			caret = len(insertText)
+		}
+		e.Buffer.SetCursor(e.Buffer.Rope().OffsetToPosition(startOffset + caret))
 	} else {
-		e.Buffer.InsertAtCursor([]byte(item.InsertText))
+		startOffset := e.Buffer.Rope().PositionToOffset(e.Buffer.Cursor)
+		e.Buffer.InsertAtCursor([]byte(insertText))
+		if caret >= 0 && caret <= len(insertText) {
+			e.Buffer.SetCursor(e.Buffer.Rope().OffsetToPosition(startOffset + caret))
+		}
 	}
+	e.applyAdditionalCompletionEdits(item.AdditionalEdits)
 	e.refreshWordWrapAfterBufferChange()
 	e.EnsureCursorVisible()
 	// An empty InsertText mutates nothing; invalidating anyway would shift
@@ -2252,15 +2393,8 @@ func (e *Editor) ShowFind() tea.Cmd {
 	// Snapshot where the editor is now, before a seeded scan can move the
 	// cursor, so Escape without navigation can rewind here.
 	e.find.CaptureOrigin(e.Buffer)
-	if e.Buffer != nil && e.find.SeedFromSelection(e.Buffer) {
-		e.find.Show()
-		// Matches are already computed; move to the current one the way the
-		// debounced path does when its results arrive.
-		if m := e.find.CurrentMatchPosition(); m != nil {
-			e.Buffer.SetCursor(m.Start)
-			e.EnsureCursorVisible()
-		}
-		return nil
+	if e.Buffer != nil {
+		e.find.SeedFromSelection(e.Buffer)
 	}
 	e.find.Show()
 	return e.find.scheduleScan()

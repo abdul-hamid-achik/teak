@@ -172,6 +172,7 @@ func TestFindModelSeedFromSelection(t *testing.T) {
 	if got := f.input.Value(); got != "foo" {
 		t.Fatalf("seeded input = %q, want %q", got, "foo")
 	}
+	f.updateMatches(buf)
 	if got := f.MatchCount(); got != 3 {
 		t.Fatalf("seeded matches = %d, want 3 from the initial scan", got)
 	}
@@ -213,6 +214,7 @@ func TestFindModelSeedFromSelectionEscapesRegexMetacharacters(t *testing.T) {
 	if !f.SeedFromSelection(buf) {
 		t.Fatal("SeedFromSelection rejected a non-empty single-line selection")
 	}
+	f.updateMatches(buf)
 	if got := f.MatchCount(); got != 1 {
 		t.Fatalf("seeded regex-mode matches = %d, want 1 (the selection must match literally)", got)
 	}

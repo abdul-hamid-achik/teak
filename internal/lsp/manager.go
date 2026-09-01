@@ -56,7 +56,7 @@ const (
 	// protocol-side retention at roughly 550 MiB. Language-server process heap
 	// is deliberately not counted here because it is owned by the executable,
 	// but the same cap bounds its process multiplication as well.
-	maxLiveLSPClients              = 2
+	maxLiveLSPClients              = 8
 	maxLSPClientProtocolBytes      = (128 + 72 + 65 + 10) << 20
 	maxLSPProtocolReservationBytes = maxLiveLSPClients * maxLSPClientProtocolBytes
 )

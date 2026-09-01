@@ -127,6 +127,9 @@ type acpMsg struct {
 // toggleAgentMsg toggles the agent panel visibility.
 type toggleAgentMsg struct{}
 
+// toggleTerminalMsg toggles the integrated terminal panel.
+type toggleTerminalMsg struct{}
+
 // focusAgentMsg focuses the agent panel.
 type focusAgentMsg struct{}
 

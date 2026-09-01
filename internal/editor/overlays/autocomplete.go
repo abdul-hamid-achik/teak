@@ -20,6 +20,10 @@ type AutocompleteItem struct {
 	// place and the completion is appended to it.
 	Edit    AutocompleteEdit
 	HasEdit bool
+
+	// AdditionalEdits are extra replacements (typically auto-imports) applied
+	// after the primary insert, from the end of the document backwards.
+	AdditionalEdits []AutocompleteTextEdit
 }
 
 // AutocompleteEdit is a completion's replacement range in buffer coordinates.
@@ -28,6 +32,15 @@ type AutocompleteEdit struct {
 	StartCol  int
 	EndLine   int
 	EndCol    int
+}
+
+// AutocompleteTextEdit is a ranged replacement used for additionalTextEdits.
+type AutocompleteTextEdit struct {
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	NewText   string
 }
 
 // AutocompleteFilterReadyMsg returns a client-side completion projection to

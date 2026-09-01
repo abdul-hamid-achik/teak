@@ -31,6 +31,7 @@ const (
 	mouseEditorTabs
 	mouseEditorBody
 	mouseAgentBody
+	mouseTerminalBody
 )
 
 type mousePoint struct {
@@ -108,6 +109,7 @@ type mouseLayout struct {
 	editorPaneB    mouseRect
 	agentDivider   mouseRect
 	agentBody      mouseRect
+	terminalBody   mouseRect
 }
 
 func (m Model) mouseLayout() mouseLayout {
@@ -120,7 +122,15 @@ func (m Model) mouseLayout() mouseLayout {
 	if compact {
 		statusHeight = 1
 	}
-	contentHeight := max(0, m.height-statusHeight)
+	termHeight := 0
+	if !compact {
+		termHeight = m.terminalPanelHeight()
+	}
+	termExtra := 0
+	if termHeight > 0 {
+		termExtra = termHeight + 1
+	}
+	contentHeight := max(0, m.height-statusHeight-termExtra)
 	editorStart := 0
 	editorEnd := m.width
 
@@ -150,6 +160,9 @@ func (m Model) mouseLayout() mouseLayout {
 	editorWidth := max(0, editorEnd-editorStart)
 	layout.editorTabs = newMouseRect(editorStart, 0, editorWidth, min(1, contentHeight))
 	layout.editorBody = newMouseRect(editorStart, 1, editorWidth, contentHeight-1)
+	if termHeight > 0 {
+		layout.terminalBody = newMouseRect(0, contentHeight+1, m.width, termHeight)
+	}
 
 	// While split side-by-side, a click must reach the pane it landed on with
 	// coordinates local to that pane. Without this the whole editor region was
@@ -198,6 +211,8 @@ func (l mouseLayout) hit(x, y int) (mouseSurface, mousePoint) {
 		return mouseStatus, l.statusBar.local(x, y)
 	case l.statusDivider.contains(x, y):
 		return mouseChrome, point
+	case l.terminalBody.contains(x, y):
+		return mouseTerminalBody, l.terminalBody.local(x, y)
 	case l.agentBody.contains(x, y):
 		return mouseAgentBody, l.agentBody.local(x, y)
 	case l.agentDivider.contains(x, y):
@@ -264,7 +279,8 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			replacement := m.searchM.Replacement()
 			if query != "" {
 				return m, func() tea.Msg {
-					return search.ReplaceOneMsg{Query: query, Replacement: replacement, Regex: m.searchM.Regex()}
+					opts := m.searchM.PatternOpts()
+					return search.ReplaceOneMsg{Query: query, Replacement: replacement, Regex: opts.Regex, CaseSensitive: opts.CaseSensitive, WholeWord: opts.WholeWord}
 				}
 			}
 			return m, nil
@@ -274,7 +290,8 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			replacement := m.searchM.Replacement()
 			if query != "" {
 				return m, func() tea.Msg {
-					return search.ReplaceAllMsg{Query: query, Replacement: replacement, Regex: m.searchM.Regex()}
+					opts := m.searchM.PatternOpts()
+					return search.ReplaceAllMsg{Query: query, Replacement: replacement, Regex: opts.Regex, CaseSensitive: opts.CaseSensitive, WholeWord: opts.WholeWord}
 				}
 			}
 			return m, nil
@@ -382,6 +399,9 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch surface {
+	case mouseTerminalBody:
+		m.setFocus(FocusTerminal)
+		return m, nil
 	case mouseAgentBody:
 		m.setFocus(FocusAgent)
 		adjusted := tea.MouseClickMsg(mouseAt(mouse, local))

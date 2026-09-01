@@ -162,6 +162,13 @@ func TestRipgrepArgsCaseSensitive(t *testing.T) {
 	}
 }
 
+func TestRipgrepArgsWholeWord(t *testing.T) {
+	args := ripgrepArgs("cat", SearchOpts{WholeWord: true})
+	if !containsArg(args, "--word-regexp") {
+		t.Errorf("expected --word-regexp, got %v", args)
+	}
+}
+
 func TestRipgrepArgsSeparatesQueryFromFlags(t *testing.T) {
 	// A query starting with '-' must never be interpreted as a flag; it must
 	// appear after a literal "--" argument.

@@ -158,12 +158,24 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 	}
 
 	ed := m.editors[tabIndex]
+	if !saveAs && ed.Buffer.DiskPresence() == text.DiskUnread {
+		m.status = fmt.Sprintf("Cannot save %s: original file could not be read; use Save As", filepath.Base(path))
+		return nil
+	}
+	prevVersion, prevCursor := ed.Buffer.Version(), ed.Buffer.Cursor
+	var syncCmd tea.Cmd
+	if m.appCfg.Editor.InsertFinalNewline && ed.Buffer.EnsureFinalNewline() {
+		syncCmd = m.syncEditorStateAfterUpdate(tabIndex, prevVersion, prevCursor)
+	}
 	snapshot := ed.Buffer.Rope()
 	version := ed.Buffer.Version()
 	ending := ed.Buffer.LineEnding()
 	diskExpectation := saveDiskExact
 	expectedDiskSnapshot := ed.Buffer.SavedRope()
 	if saveAs {
+		diskExpectation = saveDiskMissing
+		expectedDiskSnapshot = nil
+	} else if ed.Buffer.DiskPresence() == text.DiskAbsent {
 		diskExpectation = saveDiskMissing
 		expectedDiskSnapshot = nil
 	}
@@ -205,7 +217,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 		if req.Snapshot == snapshot && req.SnapshotVersion == version &&
 			req.Path == queuedPath && req.SaveAs == queuedSaveAs {
 			m.pendingSaves[requestID] = req
-			return nil
+			return syncCmd
 		}
 		req.QueuedSnapshot = snapshot
 		req.QueuedVersion = version
@@ -214,7 +226,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 		req.QueuedPreviousPath = queuedPreviousPath
 		req.LineEnding = ending
 		m.pendingSaves[requestID] = req
-		return nil
+		return syncCmd
 	}
 
 	requestID := m.nextSaveID()
@@ -233,7 +245,7 @@ func (m *Model) beginSaveSnapshotForTabAuthorized(
 		DiskExpectation:              diskExpectation,
 		ExpectedDiskSnapshot:         expectedDiskSnapshot,
 	}
-	return m.startSaveRequest(requestID)
+	return tea.Batch(syncCmd, m.startSaveRequest(requestID))
 }
 
 func (m *Model) startSaveRequest(requestID int) tea.Cmd {
@@ -595,21 +607,21 @@ func (m Model) requestFormattingSnapshot(filePath string, cfg editor.Config, req
 	options := formattingOptions(cfg)
 	return func() tea.Msg {
 		client, err := mgr.EnsureClient(filePath)
-		if err != nil {
-			return lsp.FormatResultMsg{
-				RequestID:      requestID,
-				FilePath:       filePath,
-				BaseVersion:    baseVersion,
-				HasBaseVersion: true,
-				Status:         lsp.FormatError,
-				Err:            err,
+		if err != nil || client == nil || !client.SupportsFormatting() {
+			edits, used, fallbackErr := fallbackFormatDocument(context.Background(), filePath, snapshot)
+			switch {
+			case fallbackErr != nil:
+				return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatError, Err: fallbackErr}
+			case !used:
+				if err != nil {
+					return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatError, Err: err}
+				}
+				return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatUnsupported}
+			case len(edits) == 0:
+				return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatNoOp}
+			default:
+				return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatApplied, Edits: edits}
 			}
-		}
-		if client == nil {
-			return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatUnsupported}
-		}
-		if !client.SupportsFormatting() {
-			return lsp.FormatResultMsg{RequestID: requestID, FilePath: filePath, BaseVersion: baseVersion, HasBaseVersion: true, Status: lsp.FormatUnsupported}
 		}
 
 		synced, syncErr := ensureFormattingDocumentSnapshot(mgr, filePath, baseVersion, snapshot, client, budget)

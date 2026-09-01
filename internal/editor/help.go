@@ -38,10 +38,11 @@ var helpGroups = []bindingGroup{
 		bindings: []keybinding{
 			{"Arrows", "Move cursor"},
 			{"Ctrl+Left/Right", "Word jump"},
-			{"Home/End", "Line start/end"},
+			{"Home/End", "Smart line start/end"},
 			{"Ctrl+Home/End", "Doc start/end"},
 			{"PgUp/PgDn", "Page up/down"},
-			{"Ctrl+G", "Go to line"},
+			{"Alt+Z", "Toggle word wrap"},
+			{"Ctrl+G", "Go to line (or line:col)"},
 		},
 	},
 	{
@@ -65,8 +66,8 @@ var helpGroups = []bindingGroup{
 	{
 		title: "Clipboard",
 		bindings: []keybinding{
-			{"Ctrl+C", "Copy"},
-			{"Ctrl+X", "Cut"},
+			{"Ctrl+C", "Copy (line if no selection)"},
+			{"Ctrl+X", "Cut (line if no selection)"},
 			{"Ctrl+V", "Paste"},
 		},
 	},
@@ -95,6 +96,8 @@ var helpGroups = []bindingGroup{
 			{"Tab in search", "Toggle text / semantic search"},
 			{"F3 / Shift+F3", "Next / previous result"},
 			{"Ctrl+R (find widget)", "Toggle regex search"},
+			{"Alt+C (find widget)", "Toggle case-sensitive find"},
+			{"Alt+W (find widget)", "Toggle whole-word find"},
 		},
 	},
 	{
@@ -104,6 +107,8 @@ var helpGroups = []bindingGroup{
 			{"Alt+K", "Show hover"},
 			{"Ctrl+K", "Code actions"},
 			{"F12", "Go to definition"},
+			{"Shift+F12", "Find references"},
+			{"Ctrl+-", "Go back"},
 			{"F2", "Rename symbol"},
 			{"Ctrl+Shift+O", "Document symbols"},
 			{"Ctrl+Alt+F", "Format document"},
@@ -134,6 +139,7 @@ var helpGroups = []bindingGroup{
 			{"Tab (file tree focus)", "Switch sidebar panels"},
 			{"Ctrl+J", "Toggle agent panel"},
 			{"Ctrl+'", "Focus agent panel"},
+			{"Ctrl+`", "Toggle terminal"},
 		},
 	},
 	{

@@ -14,6 +14,18 @@ func LeadingWhitespace(line []byte) []byte {
 
 // IndentString returns an indent string of tabSize spaces.
 func IndentString(tabSize int) []byte {
+	return IndentToken(tabSize, false)
+}
+
+// IndentToken returns one indentation unit: a tab character when insertTabs is
+// set, otherwise tabSize spaces.
+func IndentToken(tabSize int, insertTabs bool) []byte {
+	if insertTabs {
+		return []byte{'\t'}
+	}
+	if tabSize <= 0 {
+		return nil
+	}
 	return bytes.Repeat([]byte{' '}, tabSize)
 }
 

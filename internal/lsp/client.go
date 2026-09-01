@@ -579,24 +579,84 @@ func capabilityEnabled(v any) bool {
 func extractHoverContent(contents any) string {
 	switch v := contents.(type) {
 	case string:
-		return v
+		return stripHoverMarkup(v)
 	case map[string]any:
 		if val, ok := v["value"]; ok {
-			return fmt.Sprintf("%v", val)
+			return stripHoverMarkup(fmt.Sprintf("%v", val))
 		}
 	case []any:
 		for _, item := range v {
 			if s, ok := item.(string); ok {
-				return s
+				return stripHoverMarkup(s)
 			}
 			if m, ok := item.(map[string]any); ok {
 				if val, mok := m["value"]; mok {
-					return fmt.Sprintf("%v", val)
+					return stripHoverMarkup(fmt.Sprintf("%v", val))
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// stripHoverMarkup turns common LSP markdown into readable terminal text.
+// It is intentionally conservative: fences, emphasis, inline code, and links
+// become their visible labels rather than a full markdown renderer.
+func stripHoverMarkup(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inFence := false
+	for line := range strings.SplitSeq(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(stripHoverInline(line))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func stripHoverInline(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], "**"):
+			if end := strings.Index(s[i+2:], "**"); end >= 0 {
+				b.WriteString(s[i+2 : i+2+end])
+				i += end + 4
+				continue
+			}
+		case s[i] == '*' || s[i] == '`':
+			mark := s[i]
+			if end := strings.IndexByte(s[i+1:], mark); end >= 0 {
+				b.WriteString(s[i+1 : i+1+end])
+				i += end + 2
+				continue
+			}
+		case s[i] == '[':
+			if close := strings.IndexByte(s[i+1:], ']'); close >= 0 {
+				labelEnd := i + 1 + close
+				if labelEnd+1 < len(s) && s[labelEnd+1] == '(' {
+					if closeParen := strings.IndexByte(s[labelEnd+2:], ')'); closeParen >= 0 {
+						b.WriteString(s[i+1 : labelEnd])
+						i = labelEnd + 2 + closeParen + 1
+						continue
+					}
+				}
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }
 
 func parseWorkspaceEditResult(result []byte) (WorkspaceEdit, error) {
@@ -784,11 +844,11 @@ func initializeParams(processID int, rootURI string) map[string]any {
 			"textDocument": map[string]any{
 				"completion": map[string]any{
 					"completionItem": map[string]any{
-						"snippetSupport": false,
+						"snippetSupport": true,
 					},
 				},
 				"hover": map[string]any{
-					"contentFormat": []string{"plaintext"},
+					"contentFormat": []string{"markdown", "plaintext"},
 				},
 				"synchronization": map[string]any{
 					"didSave":             true,

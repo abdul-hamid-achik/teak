@@ -28,6 +28,15 @@ func TestLeadingWhitespace(t *testing.T) {
 	}
 }
 
+func TestIndentTokenInsertTabs(t *testing.T) {
+	if got := IndentToken(4, true); !bytes.Equal(got, []byte{'\t'}) {
+		t.Fatalf("IndentToken(4, true) = %q, want tab", got)
+	}
+	if got := IndentToken(4, false); !bytes.Equal(got, []byte("    ")) {
+		t.Fatalf("IndentToken(4, false) = %q, want 4 spaces", got)
+	}
+}
+
 func TestIndentString(t *testing.T) {
 	tests := []struct {
 		tabSize int

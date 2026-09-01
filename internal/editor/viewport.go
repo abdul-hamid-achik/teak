@@ -717,9 +717,16 @@ func (v *Viewport) renderWrapGutterLine(theme ui.Theme, buf *text.Buffer, gutter
 	gutterErrorStyle := theme.GutterError.UnsetPadding()
 	gutterWarnStyle := theme.GutterWarn.UnsetPadding()
 
+	if gutterOpts != nil && gutterOpts.ShowGit {
+		kind := GitLineNone
+		if gutterOpts.GitLines != nil {
+			kind = gutterOpts.GitLines[line]
+		}
+		sb.WriteString(gitGlyph(kind, theme))
+	}
 	// Breakpoint marker (1 leading space + icon + 1 trailing space)
 	// Use pre-cached theme styles to avoid allocations
-	if gutterOpts != nil {
+	if gutterOpts != nil && gutterOpts.Breakpoints != nil {
 		switch gutterOpts.Breakpoints[line] {
 		case BPActive:
 			sb.WriteByte(' ')

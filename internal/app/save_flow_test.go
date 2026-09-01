@@ -113,6 +113,20 @@ func requireFileSavedMsg(t *testing.T, cmd tea.Cmd) FileSavedMsg {
 	return FileSavedMsg{}
 }
 
+func containsQuitWithoutSaving(msg tea.Msg) bool {
+	switch msg := msg.(type) {
+	case QuitWithoutSavingMsg:
+		return true
+	case tea.BatchMsg:
+		for _, cmd := range msg {
+			if cmd != nil && containsQuitWithoutSaving(cmd()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func fileSavedMsgFromBatch(msg tea.Msg) (FileSavedMsg, bool) {
 	switch msg := msg.(type) {
 	case FileSavedMsg:
@@ -914,7 +928,7 @@ func TestSaveAllAndQuitTargetsSavedPathsAndQuitsAfterLastSave(t *testing.T) {
 		t.Fatal("expected quit command after final save")
 	}
 	msg := secondCmd()
-	if _, ok := msg.(QuitWithoutSavingMsg); !ok {
+	if !containsQuitWithoutSaving(msg) {
 		t.Fatalf("final save follow-up = %T, want QuitWithoutSavingMsg", msg)
 	}
 }

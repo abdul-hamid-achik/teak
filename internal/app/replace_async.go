@@ -41,6 +41,11 @@ type replacePreparedMsg struct {
 }
 
 func (m *Model) startSearchReplace(query, replacement string, all bool, opts search.SearchOpts) tea.Cmd {
+	if all && m.showSearch {
+		if paths := uniqueSearchResultPaths(m.searchM.Results()); len(paths) > 0 {
+			return m.startProjectReplace(query, replacement, opts, paths)
+		}
+	}
 	ed := m.activeEditor()
 	if ed == nil || ed.Buffer == nil || query == "" {
 		return nil

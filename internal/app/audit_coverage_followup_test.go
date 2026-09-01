@@ -169,6 +169,7 @@ func TestAuditInputOverlaysKeepInputIsolated(t *testing.T) {
 		m := newInputRoutingTestModel(t)
 		m.renameMode = true
 		m.renameInput = "réname"
+		m.renameCursor = len(m.renameInput)
 		updatedAny, _ := m.handleRenameInput(tea.KeyPressMsg{Code: tea.KeyBackspace})
 		updated := updatedAny.(Model)
 		if updated.renameInput != "rénam" {

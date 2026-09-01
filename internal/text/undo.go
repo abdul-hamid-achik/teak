@@ -5,10 +5,12 @@ import "time"
 const groupTimeout = 300 * time.Millisecond
 const maxUndoEntries = 1000
 
-// undoEntry stores a snapshot of the rope and cursor at a point in time.
+// undoEntry stores a snapshot of the rope, cursor, and selections.
 type undoEntry struct {
-	rope   *Rope
-	cursor Position
+	rope       *Rope
+	cursor     Position
+	selections []Selection
+	primary    int
 }
 
 // UndoStack manages undo/redo using rope snapshots.
@@ -30,20 +32,22 @@ func NewUndoStack() *UndoStack {
 // Save records a snapshot before an edit. Call this before mutating the rope.
 // isCharInsert should be true for single-character inserts (for auto-grouping).
 func (u *UndoStack) Save(rope *Rope, cursor Position, isCharInsert bool) {
+	u.saveEntry(undoEntry{rope: rope, cursor: cursor}, isCharInsert)
+}
+
+func (u *UndoStack) saveEntry(entry undoEntry, isCharInsert bool) {
 	now := time.Now()
 
 	// auto-grouping: skip saving if this is a consecutive char insert within timeout
 	if isCharInsert && u.lastWasCharInsert && u.hasCharInsertEnd &&
-		u.lastCharInsertEnd == cursor && now.Sub(u.lastTime) < groupTimeout && len(u.undo) > 0 {
+		u.lastCharInsertEnd == entry.cursor && now.Sub(u.lastTime) < groupTimeout && len(u.undo) > 0 {
 		u.lastTime = now
-		// clear redo on new edit
 		u.redo = nil
 		return
 	}
 
-	u.undo = append(u.undo, undoEntry{rope: rope, cursor: cursor})
+	u.undo = append(u.undo, entry)
 	if len(u.undo) > maxUndoEntries {
-		// Keep only the most recent entries
 		u.undo = u.undo[len(u.undo)-maxUndoEntries:]
 	}
 	u.redo = nil
@@ -64,32 +68,35 @@ func (u *UndoStack) MarkCharInsertEnd(cursor Position) {
 
 // Undo returns the previous rope and cursor, pushing current state to redo.
 func (u *UndoStack) Undo(currentRope *Rope, currentCursor Position) (*Rope, Position, bool) {
-	if len(u.undo) == 0 {
-		return nil, Position{}, false
+	rope, cursor, _, _, ok := u.undoState(currentRope, currentCursor, nil, 0, true)
+	return rope, cursor, ok
+}
+
+func (u *UndoStack) undoState(currentRope *Rope, currentCursor Position, currentSels []Selection, currentPrimary int, undo bool) (*Rope, Position, []Selection, int, bool) {
+	src, dst := &u.undo, &u.redo
+	if !undo {
+		src, dst = &u.redo, &u.undo
 	}
-	// push current state to redo
-	u.redo = append(u.redo, undoEntry{rope: currentRope, cursor: currentCursor})
-	// pop from undo
-	entry := u.undo[len(u.undo)-1]
-	u.undo = u.undo[:len(u.undo)-1]
+	if len(*src) == 0 {
+		return nil, Position{}, nil, 0, false
+	}
+	*dst = append(*dst, undoEntry{
+		rope:       currentRope,
+		cursor:     currentCursor,
+		selections: cloneSelections(currentSels),
+		primary:    currentPrimary,
+	})
+	entry := (*src)[len(*src)-1]
+	*src = (*src)[:len(*src)-1]
 	u.lastWasCharInsert = false
 	u.hasCharInsertEnd = false
-	return entry.rope, entry.cursor, true
+	return entry.rope, entry.cursor, cloneSelections(entry.selections), entry.primary, true
 }
 
 // Redo returns the next rope and cursor, pushing current state to undo.
 func (u *UndoStack) Redo(currentRope *Rope, currentCursor Position) (*Rope, Position, bool) {
-	if len(u.redo) == 0 {
-		return nil, Position{}, false
-	}
-	// push current state to undo
-	u.undo = append(u.undo, undoEntry{rope: currentRope, cursor: currentCursor})
-	// pop from redo
-	entry := u.redo[len(u.redo)-1]
-	u.redo = u.redo[:len(u.redo)-1]
-	u.lastWasCharInsert = false
-	u.hasCharInsertEnd = false
-	return entry.rope, entry.cursor, true
+	rope, cursor, _, _, ok := u.undoState(currentRope, currentCursor, nil, 0, false)
+	return rope, cursor, ok
 }
 
 // CanUndo returns true if there are snapshots to undo to.
@@ -100,4 +107,11 @@ func (u *UndoStack) CanUndo() bool {
 // CanRedo returns true if there are snapshots to redo to.
 func (u *UndoStack) CanRedo() bool {
 	return len(u.redo) > 0
+}
+
+func cloneSelections(selections []Selection) []Selection {
+	if len(selections) == 0 {
+		return nil
+	}
+	return append([]Selection(nil), selections...)
 }

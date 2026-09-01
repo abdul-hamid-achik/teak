@@ -163,7 +163,10 @@ func loadFileCmd(ctx context.Context, path string, editorID, requestID uint64, f
 		// readEditorFile returned a fresh allocation owned by this command.
 		// Normalize CRLF off the UI goroutine; the buffer keeps LF content and
 		// remembers the original convention for save.
-		normalized, ending := text.NormalizeLineEndings(data)
+		normalized, ending, prepErr := text.PrepareLoadedBytes(data)
+		if prepErr != nil {
+			return FileLoadErrorMsg{Path: path, EditorID: editorID, RequestID: requestID, Err: prepErr}
+		}
 		return FileLoadedMsg{Path: path, Snapshot: text.NewOwned(normalized), LineEnding: ending, EditorID: editorID, RequestID: requestID, ForceNew: forceNew}
 	}
 }

@@ -367,7 +367,7 @@ func TestWorkspaceEditAsyncRejectsClosedFileChangedBeforeCommit(t *testing.T) {
 	}
 }
 
-func TestWorkspaceEditAsyncRejectsMixedLiveAndClosedFilesBeforeMutation(t *testing.T) {
+func TestWorkspaceEditAsyncAppliesMixedLiveAndClosedFiles(t *testing.T) {
 	root := t.TempDir()
 	closedPath := filepath.Join(root, "closed.go")
 	if err := os.WriteFile(closedPath, []byte("closed\n"), 0o600); err != nil {
@@ -376,28 +376,24 @@ func TestWorkspaceEditAsyncRejectsMixedLiveAndClosedFilesBeforeMutation(t *testi
 	model := newSaveFlowModel(t, config.DefaultConfig(), root)
 	idx := addDirtyEditor(t, &model, "open.go", "open\n", "open\n")
 	openPath := model.editors[idx].Buffer.FilePath
-	before := model.editors[idx].Buffer.Content()
 	updatedAny, cmd := model.Update(lsp.ApplyEditRequestMsg{Edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
 		lsp.FileURI(openPath):   {{StartLine: 0, EndLine: 0, EndCol: 4, NewText: "live"}},
 		lsp.FileURI(closedPath): {{StartLine: 0, EndLine: 0, EndCol: 6, NewText: "disk"}},
 	}}})
 	updated := runWorkspaceEditCommands(t, updatedAny.(Model), cmd)
-	if got := updated.editors[idx].Buffer.Content(); got != before {
-		t.Fatalf("mixed request changed live buffer to %q", got)
+	if got := updated.editors[idx].Buffer.Content(); got != "live\n" {
+		t.Fatalf("live buffer = %q, want %q", got, "live\n")
 	}
 	data, err := os.ReadFile(closedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "closed\n" {
-		t.Fatalf("mixed request changed closed file to %q", data)
-	}
-	if !strings.Contains(updated.status, "cannot be applied atomically") {
-		t.Fatalf("status = %q, want atomicity rejection", updated.status)
+	if string(data) != "disk\n" {
+		t.Fatalf("closed file = %q, want %q", data, "disk\n")
 	}
 }
 
-func TestWorkspaceEditAsyncRejectsMultipleClosedFilesBeforeMutation(t *testing.T) {
+func TestWorkspaceEditAsyncAppliesMultipleClosedFiles(t *testing.T) {
 	root := t.TempDir()
 	firstPath, secondPath := filepath.Join(root, "first.go"), filepath.Join(root, "second.go")
 	for _, path := range []string{firstPath, secondPath} {
@@ -411,17 +407,15 @@ func TestWorkspaceEditAsyncRejectsMultipleClosedFilesBeforeMutation(t *testing.T
 		lsp.FileURI(secondPath): {{StartLine: 0, EndLine: 0, EndCol: 3, NewText: "two"}},
 	}}})
 	updated := runWorkspaceEditCommands(t, updatedAny.(Model), cmd)
-	for _, path := range []string{firstPath, secondPath} {
+	want := map[string]string{firstPath: "one\n", secondPath: "two\n"}
+	for path, expected := range want {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(data) != "old\n" {
-			t.Fatalf("multi-closed request changed %s to %q", filepath.Base(path), data)
+		if string(data) != expected {
+			t.Fatalf("%s = %q, want %q (status %q)", filepath.Base(path), data, expected, updated.status)
 		}
-	}
-	if !strings.Contains(updated.status, "cannot be applied atomically") {
-		t.Fatalf("status = %q, want atomicity rejection", updated.status)
 	}
 }
 

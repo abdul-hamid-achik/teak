@@ -144,6 +144,16 @@ type themeStyles struct {
 	FoldCollapsed      lipgloss.Style
 	FoldExpanded       lipgloss.Style
 
+	IndentGuide lipgloss.Style
+	TrailingWS  lipgloss.Style
+	Ruler       lipgloss.Style
+	GitGutterAdd    lipgloss.Style
+	GitGutterMod    lipgloss.Style
+	GitGutterDel    lipgloss.Style
+	PromptAccent    lipgloss.Style
+	PromptMuted     lipgloss.Style
+	PromptDanger    lipgloss.Style
+
 	// Syntax highlighting colors
 	SyntaxKeyword   color.Color
 	SyntaxFunction  color.Color
@@ -437,6 +447,27 @@ func defaultNordTheme() Theme {
 			Foreground(Nord13), // yellow
 		FoldExpanded: lipgloss.NewStyle().
 			Foreground(Nord3), // dim
+		IndentGuide: lipgloss.NewStyle().
+			Foreground(Nord3),
+		TrailingWS: lipgloss.NewStyle().
+			Background(Nord11).
+			Foreground(Nord6),
+		Ruler: lipgloss.NewStyle().
+			Background(Nord2).
+			Foreground(Nord3),
+		GitGutterAdd: lipgloss.NewStyle().
+			Foreground(Nord14),
+		GitGutterMod: lipgloss.NewStyle().
+			Foreground(Nord13),
+		GitGutterDel: lipgloss.NewStyle().
+			Foreground(Nord11),
+		PromptAccent: lipgloss.NewStyle().
+			Foreground(Nord8).
+			Bold(true),
+		PromptMuted: lipgloss.NewStyle().
+			Foreground(Nord4),
+		PromptDanger: lipgloss.NewStyle().
+			Foreground(Nord11),
 
 		// Syntax highlighting
 		SyntaxKeyword:   Nord9,
@@ -542,6 +573,15 @@ func buildTheme(p palette) Theme {
 		ExecLineMarker:      lipgloss.NewStyle().Background(p.bg3).Foreground(p.yellow),
 		FoldCollapsed:       lipgloss.NewStyle().Foreground(p.yellow),
 		FoldExpanded:        lipgloss.NewStyle().Foreground(p.bg3),
+		IndentGuide:         lipgloss.NewStyle().Foreground(p.bg3),
+		TrailingWS:          lipgloss.NewStyle().Background(p.red).Foreground(p.fg2),
+		Ruler:               lipgloss.NewStyle().Background(p.bg2).Foreground(p.bg3),
+		GitGutterAdd:        lipgloss.NewStyle().Foreground(p.green),
+		GitGutterMod:        lipgloss.NewStyle().Foreground(p.yellow),
+		GitGutterDel:        lipgloss.NewStyle().Foreground(p.red),
+		PromptAccent:        lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
+		PromptMuted:         lipgloss.NewStyle().Foreground(p.fg1),
+		PromptDanger:        lipgloss.NewStyle().Foreground(p.red),
 		SyntaxKeyword:       p.keyword,
 		SyntaxFunction:      p.function,
 		SyntaxString:        p.str,

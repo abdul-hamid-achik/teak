@@ -46,7 +46,7 @@ func lspCompletionItemsContext(ctx context.Context, source []lsp.CompletionItem)
 				return nil, err
 			}
 		}
-		items[i] = overlays.AutocompleteItem{
+		mapped := overlays.AutocompleteItem{
 			Label:      item.Label,
 			Detail:     item.Detail,
 			InsertText: item.InsertText,
@@ -58,6 +58,19 @@ func lspCompletionItemsContext(ctx context.Context, source []lsp.CompletionItem)
 				EndCol:    item.Edit.EndCol,
 			},
 		}
+		if len(item.AdditionalEdits) > 0 {
+			mapped.AdditionalEdits = make([]overlays.AutocompleteTextEdit, len(item.AdditionalEdits))
+			for j, extra := range item.AdditionalEdits {
+				mapped.AdditionalEdits[j] = overlays.AutocompleteTextEdit{
+					StartLine: extra.StartLine,
+					StartCol:  extra.StartCol,
+					EndLine:   extra.EndLine,
+					EndCol:    extra.EndCol,
+					NewText:   extra.NewText,
+				}
+			}
+		}
+		items[i] = mapped
 	}
 	return items, ctx.Err()
 }

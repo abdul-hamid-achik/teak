@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"teak/internal/search"
 	"teak/internal/text"
 	"teak/internal/ui"
 )
@@ -126,7 +127,7 @@ func TestFindMatchesContextHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := findMatchesContext(ctx, text.NewFromString(strings.Repeat("needle\n", 10_000)), "needle", false, text.Position{})
+	_, _, err := findMatchesContext(ctx, text.NewFromString(strings.Repeat("needle\n", 10_000)), "needle", search.SearchOpts{}, text.Position{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("findMatchesContext() error = %v, want context.Canceled", err)
 	}

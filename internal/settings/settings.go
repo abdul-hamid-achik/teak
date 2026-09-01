@@ -114,6 +114,51 @@ func GetCategories(cfg config.Config) []Category {
 					DefaultValue: 2,
 					Category:     "editor",
 				},
+				{
+					ID:           "editor.insert_final_newline",
+					Label:        "Insert Final Newline",
+					Description:  "Append a newline when saving a file that does not end with one",
+					Type:         TypeBool,
+					Value:        cfg.Editor.InsertFinalNewline,
+					DefaultValue: false,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.git_gutter",
+					Label:        "Git Gutter",
+					Description:  "Show added, modified, and deleted lines in the gutter",
+					Type:         TypeBool,
+					Value:        cfg.Editor.GitGutter,
+					DefaultValue: true,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.indent_guides",
+					Label:        "Indent Guides",
+					Description:  "Draw faint guides at indent columns",
+					Type:         TypeBool,
+					Value:        cfg.Editor.IndentGuides,
+					DefaultValue: true,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.highlight_trailing_whitespace",
+					Label:        "Highlight Trailing Whitespace",
+					Description:  "Mark spaces and tabs at the end of lines",
+					Type:         TypeBool,
+					Value:        cfg.Editor.HighlightTrailingWS,
+					DefaultValue: true,
+					Category:     "editor",
+				},
+				{
+					ID:           "editor.ruler_column",
+					Label:        "Ruler Column",
+					Description:  "Draw a column guide (0 disables)",
+					Type:         TypeInt,
+					Value:        cfg.Editor.RulerColumn,
+					DefaultValue: 0,
+					Category:     "editor",
+				},
 			},
 		},
 		{
@@ -453,6 +498,36 @@ func (m *Model) Config() (config.Config, error) {
 					return config.Config{}, fmt.Errorf("invalid scroll margin setting")
 				}
 				cfg.Editor.ScrollMargin = value
+			case "editor.insert_final_newline":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid insert final newline setting")
+				}
+				cfg.Editor.InsertFinalNewline = value
+			case "editor.git_gutter":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid git gutter setting")
+				}
+				cfg.Editor.GitGutter = value
+			case "editor.indent_guides":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid indent guides setting")
+				}
+				cfg.Editor.IndentGuides = value
+			case "editor.highlight_trailing_whitespace":
+				value, ok := setting.Value.(bool)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid trailing whitespace setting")
+				}
+				cfg.Editor.HighlightTrailingWS = value
+			case "editor.ruler_column":
+				value, ok := setting.Value.(int)
+				if !ok {
+					return config.Config{}, fmt.Errorf("invalid ruler column setting")
+				}
+				cfg.Editor.RulerColumn = value
 			case "ui.theme":
 				value, ok := setting.Value.(string)
 				if !ok {

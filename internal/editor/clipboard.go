@@ -186,7 +186,8 @@ func preparePasteCmd(editorID, generation uint64, version int, snapshot *text.Ro
 		} else {
 			candidate.SetCursor(cursor)
 		}
-		candidate.InsertAtCursor([]byte(content))
+		normalized, _ := text.NormalizeLineEndings([]byte(content))
+		candidate.InsertAtCursor(normalized)
 		result.Rope = candidate.Rope()
 		result.Cursor = candidate.Cursor
 		result.Selections = append([]text.Selection(nil), candidate.Selections.All()...)

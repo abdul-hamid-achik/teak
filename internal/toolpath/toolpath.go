@@ -100,6 +100,8 @@ var installHints = map[string]string{
 	"monitor":                     "brew install monitor",
 	"fcheap":                      "go install github.com/abdulachik/fcheap@latest",
 	"dlv":                         "go install github.com/go-delve/delve/cmd/dlv@latest",
+	"gofmt":                       "install Go (https://go.dev/dl)",
+	"prettier":                    "npm install -g prettier",
 	"gopls":                       "go install golang.org/x/tools/gopls@latest",
 	"pylsp":                       "python -m pip install python-lsp-server",
 	"rust-analyzer":               "rustup component add rust-analyzer",

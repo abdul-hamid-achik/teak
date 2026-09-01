@@ -93,12 +93,16 @@ func (m Model) finalizeQuit() (Model, tea.Cmd) {
 	// errors are handled by handleSessionSaveResult, which still continues
 	// shutdown.
 	if state, ok := m.sessionSnapshot(); ok {
+		recovery, dropped := m.recoveryPrepsCounted()
+		if dropped > 0 {
+			m.status = fmt.Sprintf("%d unsaved buffer(s) skipped (over 4 MiB recovery limit)", dropped)
+		}
 		if m.sessionSaves.inFlight {
 			m.sessionSaves.queued = &state
-			m.sessionSaves.queuedRecovery = m.recoveryPreps()
+			m.sessionSaves.queuedRecovery = recovery
 			return m, nil
 		}
-		return m.startSessionSave(state, m.recoveryPreps())
+		return m.startSessionSave(state, recovery)
 	}
 	return m, m.shutdownCmd()
 }

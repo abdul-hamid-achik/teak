@@ -55,24 +55,31 @@ func TestEditorCutWithSelection(t *testing.T) {
 	}
 }
 
-func TestEditorCutWithoutSelection(t *testing.T) {
-	e := newEditor("hello world", 0, 5)
+func TestEditorCutWithoutSelectionCutsLine(t *testing.T) {
+	e := newEditor("hello world\nnext", 0, 5)
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+x"})
+	var cmd tea.Cmd
+	e, cmd = e.Update(tea.KeyPressMsg{Text: "ctrl+x"})
+	if cmd == nil {
+		t.Fatal("ctrl+x without selection should cut the current line")
+	}
+	e, _ = e.Update(cmd())
 
-	// Without selection, nothing should be cut
-	if got := editorContent(e); got != "hello world" {
-		t.Errorf("ctrl+x without selection should not modify buffer, got %q", got)
+	if got := editorContent(e); got != "next" {
+		t.Errorf("ctrl+x without selection should cut the line, got %q", got)
 	}
 }
 
-func TestEditorCopyWithoutSelection(t *testing.T) {
-	e := newEditor("hello world", 0, 5)
+func TestEditorCopyWithoutSelectionSelectsLine(t *testing.T) {
+	e := newEditor("hello world\nnext", 0, 5)
 
-	e, _ = e.Update(tea.KeyPressMsg{Text: "ctrl+c"})
-
-	if got := editorContent(e); got != "hello world" {
-		t.Errorf("ctrl+c without selection should not modify buffer, got %q", got)
+	var cmd tea.Cmd
+	e, cmd = e.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd == nil {
+		t.Fatal("ctrl+c without selection should copy the current line")
+	}
+	if got := editorContent(e); got != "hello world\nnext" {
+		t.Errorf("ctrl+c should not modify buffer, got %q", got)
 	}
 }
 

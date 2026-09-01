@@ -9,6 +9,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"teak/internal/editor"
+	"teak/internal/text"
 	"teak/internal/ui"
 )
 
@@ -17,6 +19,33 @@ const narrowViewportClipWidth = 40
 // compactTerminalHeight is the smallest height that can show the normal
 // tab/editor/divider/status layout without drawing more rows than the PTY.
 const compactTerminalHeight = 4
+
+func (m Model) chromeContentHeight() int {
+	h := m.height - 2
+	if th := m.terminalPanelHeight(); th > 0 {
+		h -= th + 1
+	}
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+func (m Model) promptBoxStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.TreeBorder.GetForeground()).
+		Background(m.theme.StatusBar.GetBackground())
+}
+
+func (m Model) withTerminal(main string) string {
+	th := m.terminalPanelHeight()
+	if th == 0 {
+		return main
+	}
+	divider := m.theme.TreeBorder.Render(strings.Repeat("─", max(0, m.width)))
+	return main + "\n" + divider + "\n" + m.terminal.View()
+}
 
 // editorInputCaptured reports whether a surface above the editor owns user
 // input. The native terminal cursor must never remain behind such a surface:
@@ -31,7 +60,7 @@ func (m Model) editorInputCaptured() bool {
 		m.passiveModalVisible() ||
 		m.treeContextMenu.Visible ||
 		m.gitContextMenu.Visible ||
-		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible())
+		(m.activeEditor() != nil && (m.activeEditor().IsContextMenuVisible() || m.activeEditor().IsFindVisible()))
 }
 
 // View implements tea.Model.
@@ -76,7 +105,7 @@ func (m Model) View() tea.View {
 		}
 		content += "\n" + m.renderCompactStatusBar()
 	} else if m.treeVisible() {
-		content = m.viewWithTree() + "\n" + statusBar
+		content = m.withTerminal(m.viewWithTree()) + "\n" + statusBar
 	} else {
 		tabBarView := m.tabBar.View()
 		var editorView string
@@ -97,7 +126,7 @@ func (m Model) View() tea.View {
 			agentView := m.agentPanel.View()
 			editorCol = lipgloss.JoinHorizontal(lipgloss.Top, editorCol, rightBorder, agentView)
 		}
-		content = editorCol + "\n" + statusBar
+		content = m.withTerminal(editorCol) + "\n" + statusBar
 	}
 
 	// LSP popups are editor-local surfaces rather than global modals. Compose
@@ -149,10 +178,7 @@ func (m Model) View() tea.View {
 		centerX, centerY, modalWidth, _ := m.settingsModalGeometry()
 
 		// Wrap in a box with border
-		settingsBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		settingsBox := m.promptBoxStyle().
 			Padding(1, 2).
 			Width(modalWidth).
 			Render(settingsView)
@@ -162,20 +188,14 @@ func (m Model) View() tea.View {
 		searchView := m.searchM.View()
 		content = ui.RenderOverlay(content, searchView, m.width, m.height)
 	} else if m.goToLineMode {
-		goToBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		goToBox := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("Go to Line: %s_", m.goToLineInput))
+			Render(fmt.Sprintf("Go to Line: %s", promptWithCaret(m.goToLineInput, m.goToLineCursor)))
 		content = ui.RenderOverlay(content, goToBox, m.width, m.height)
 	} else if m.renameMode {
-		renameBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		renameBox := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("Rename Symbol: %s_", m.renameInput))
+			Render(fmt.Sprintf("Rename Symbol: %s", promptWithCaret(m.renameInput, m.renameCursor)))
 		content = ui.RenderOverlay(content, renameBox, m.width, m.height)
 	} else if m.treeRenameMode || m.treeCopyMode || m.treeMoveMode {
 		prompt := "Move to workspace directory"
@@ -184,44 +204,30 @@ func (m Model) View() tea.View {
 		} else if m.treeCopyMode {
 			prompt = "Duplicate as"
 		}
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		box := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("%s: %s_", prompt, m.treeEditInput))
+			Render(fmt.Sprintf("%s: %s", prompt, promptWithCaret(m.treeEditInput, m.treeEditCursor)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.newFileMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		box := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("New File: %s_", m.newItemInput))
+			Render(fmt.Sprintf("New File: %s", promptWithCaret(m.newItemInput, m.newItemCursor)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.newFolderMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		box := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("New Folder: %s_", m.newItemInput))
+			Render(fmt.Sprintf("New Folder: %s", promptWithCaret(m.newItemInput, m.newItemCursor)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.deleteConfirm {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord11).
-			Background(ui.Nord1).
+		box := m.promptBoxStyle().
+			BorderForeground(m.theme.PromptDanger.GetForeground()).
 			Padding(0, 1).
 			Render(fmt.Sprintf("Delete %s? (y/N)", filepath.Base(m.deleteTarget)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.saveAsMode {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Nord3).
-			Background(ui.Nord1).
+		box := m.promptBoxStyle().
 			Padding(0, 1).
-			Render(fmt.Sprintf("Save As: %s_", m.saveAsInput))
+			Render(fmt.Sprintf("Save As: %s", promptWithCaret(m.saveAsInput, m.saveAsCursor)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	}
 
@@ -296,7 +302,7 @@ func (m Model) renderSplitPanes() string {
 	paneBView = clipViewRows(paneBView, paneH)
 	paneBView = clipViewLines(paneBView, paneBW)
 
-	dividerStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+	dividerStyle := m.theme.TreeBorder
 	dividerLines := make([]string, paneH)
 	for i := range dividerLines {
 		dividerLines[i] = dividerStyle.Render("│")
@@ -374,7 +380,7 @@ func (m Model) viewWithTree() string {
 	}
 
 	// Build sidebar: tab bar (1 line) + active panel
-	sidebarHeight := m.height - 2 // minus divider + status bar
+	sidebarHeight := m.chromeContentHeight()
 
 	tw := m.treeWidth()
 	tabBar := m.sidebarTabBar()
@@ -467,7 +473,7 @@ func (m Model) sidebarTabBar() string {
 	// Pad to full sidebar width
 	padWidth := tw - lipgloss.Width(bar)
 	if padWidth > 0 {
-		bar += lipgloss.NewStyle().Background(ui.Nord0).Render(strings.Repeat(" ", padWidth))
+		bar += m.theme.StatusBar.Render(strings.Repeat(" ", padWidth))
 	}
 	return bar
 }
@@ -487,15 +493,23 @@ func (m Model) renderStatusBar() string {
 	var right string
 	if ed := m.activeEditor(); ed != nil {
 		buf := ed.Buffer
-		tabInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
+		indentInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
+		if ed.Config.InsertTabs {
+			indentInfo = "Tabs"
+		}
+		ending := "LF"
+		if buf.LineEnding() == text.CRLF {
+			ending = "CRLF"
+		}
+		language := editor.LanguageLabelForFile(buf.FilePath)
 		scrollPos := m.scrollIndicator()
 		lspStatus := m.lspIndicator()
 		procStatus := m.procMonIndicator()
 		problemsStatus := m.problemsStatus()
 		agentStatus := m.agentIndicator()
 		right = m.theme.StatusText.Render(
-			fmt.Sprintf(" Ln %d, Col %d  %s  LF  UTF-8  %s%s%s ",
-				buf.Cursor.Line+1, ed.StatusColumn(), tabInfo, scrollPos, lspStatus+procStatus, problemsStatus),
+			fmt.Sprintf(" Ln %d, Col %d  %s  %s  UTF-8  %s  %s%s%s ",
+				buf.Cursor.Line+1, ed.StatusColumn(), indentInfo, ending, language, scrollPos, lspStatus+procStatus, problemsStatus),
 		) + agentStatus
 	}
 

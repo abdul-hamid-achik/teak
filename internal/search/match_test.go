@@ -53,6 +53,19 @@ func TestCompilePatternCaseSensitive(t *testing.T) {
 	}
 }
 
+func TestCompilePatternWholeWord(t *testing.T) {
+	re, err := CompilePattern("cat", SearchOpts{WholeWord: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !re.MatchString("a cat sat") {
+		t.Error("whole-word should match a standalone word")
+	}
+	if re.MatchString("category") {
+		t.Error("whole-word should not match a longer token")
+	}
+}
+
 func TestCompilePatternInvalidRegex(t *testing.T) {
 	_, err := CompilePattern("[invalid", SearchOpts{Regex: true})
 	if err == nil {

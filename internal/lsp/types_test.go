@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +186,19 @@ func TestCompletionItem(t *testing.T) {
 	}
 	if item.Kind != 3 {
 		t.Errorf("Kind = %d, want 3", item.Kind)
+	}
+}
+
+func TestStripHoverMarkup(t *testing.T) {
+	got := stripHoverMarkup("```go\nfunc Foo()\n```\nSee **bold** and [docs](https://example.com)")
+	if !strings.Contains(got, "func Foo()") {
+		t.Fatalf("fence body missing: %q", got)
+	}
+	if strings.Contains(got, "```") || strings.Contains(got, "**") || strings.Contains(got, "https://") {
+		t.Fatalf("markup survived: %q", got)
+	}
+	if !strings.Contains(got, "bold") || !strings.Contains(got, "docs") {
+		t.Fatalf("labels missing: %q", got)
 	}
 }
 

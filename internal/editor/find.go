@@ -9,7 +9,6 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"teak/internal/search"
 	"teak/internal/text"
 	"teak/internal/ui"
@@ -63,17 +62,19 @@ type findOriginState struct {
 
 // FindModel manages in-buffer find state.
 type FindModel struct {
-	input       textinput.Model
-	visible     bool
-	matches     []FindMatch
-	current     int
-	regex       bool
-	theme       ui.Theme
-	query       string
-	errMsg      string
-	searching   bool
-	scanContext context.Context
-	scanCancel  context.CancelFunc
+	input         textinput.Model
+	visible       bool
+	matches       []FindMatch
+	current       int
+	regex         bool
+	caseSensitive bool
+	wholeWord     bool
+	theme         ui.Theme
+	query         string
+	errMsg        string
+	searching     bool
+	scanContext   context.Context
+	scanCancel    context.CancelFunc
 
 	// origin is the pre-find editor state restored on a bail-out.
 	origin findOriginState
@@ -99,6 +100,15 @@ func NewFindModel(theme ui.Theme) FindModel {
 		input: ti,
 		theme: theme,
 	}
+}
+
+// SetInputWidth sizes the query field to the editor width so long searches
+// are not clipped at the historical 40-column default.
+func (f *FindModel) SetInputWidth(width int) {
+	if width < 12 {
+		width = 12
+	}
+	f.input.SetWidth(width)
 }
 
 // Show opens the find widget.
@@ -134,13 +144,13 @@ func (f *FindModel) Hide() {
 	f.generation++
 	f.cancelScan()
 	f.visible = false
-	f.matches = nil
-	f.current = 0
 	f.errMsg = ""
 	f.searching = false
 	f.origin = findOriginState{}
 	f.visited = false
 	f.input.Blur()
+	// Keep query and matches so F3/Shift+F3 after Esc continue the last find
+	// instead of jumping to unrelated project-search results.
 }
 
 // Visible returns whether the find widget is open.
@@ -166,6 +176,11 @@ func (f FindModel) MatchCount() int {
 	return len(f.matches)
 }
 
+// Query returns the last find query, including after the widget is hidden.
+func (f FindModel) Query() string {
+	return f.query
+}
+
 // Update handles keyboard input for the find widget.
 func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -188,6 +203,12 @@ func (f FindModel) Update(msg tea.Msg, buf *text.Buffer) (FindModel, tea.Cmd) {
 			return f, nil
 		case "ctrl+r":
 			f.regex = !f.regex
+			return f, f.scheduleScan()
+		case "alt+c":
+			f.caseSensitive = !f.caseSensitive
+			return f, f.scheduleScan()
+		case "alt+w":
+			f.wholeWord = !f.wholeWord
 			return f, f.scheduleScan()
 		}
 	}
@@ -238,7 +259,7 @@ func (f *FindModel) scheduleScan() tea.Cmd {
 // immutable, so the command can safely outlive the edit that produced it.
 func (f FindModel) ScanCmd(rope *text.Rope, cursor text.Position) tea.Cmd {
 	query := f.input.Value()
-	regex := f.regex
+	opts := search.SearchOpts{Regex: f.regex, CaseSensitive: f.caseSensitive, WholeWord: f.wholeWord}
 	generation := f.generation
 	editorID := f.editorID
 	ctx := f.scanContext
@@ -249,7 +270,7 @@ func (f FindModel) ScanCmd(rope *text.Rope, cursor text.Position) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		matches, current, err := findMatchesContext(ctx, rope, query, regex, cursor)
+		matches, current, err := findMatchesContext(ctx, rope, query, opts, cursor)
 		return FindResultsMsg{
 			EditorID:   editorID,
 			Generation: generation,
@@ -289,10 +310,10 @@ func (f *FindModel) SetEditorID(id uint64) { f.editorID = id }
 // findMatches scans rope for query. It is a pure function so it can run on a
 // background goroutine.
 func findMatches(rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int, error) {
-	return findMatchesContext(context.Background(), rope, query, regex, cursor)
+	return findMatchesContext(context.Background(), rope, query, search.SearchOpts{Regex: regex}, cursor)
 }
 
-func findMatchesContext(ctx context.Context, rope *text.Rope, query string, regex bool, cursor text.Position) ([]FindMatch, int, error) {
+func findMatchesContext(ctx context.Context, rope *text.Rope, query string, opts search.SearchOpts, cursor text.Position) ([]FindMatch, int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -305,7 +326,7 @@ func findMatchesContext(ctx context.Context, rope *text.Rope, query string, rege
 	if rope.Len() > maxFindScanBytes {
 		return nil, 0, errFindScanLimit
 	}
-	re, err := search.CompilePattern(query, search.SearchOpts{Regex: regex})
+	re, err := search.CompilePattern(query, opts)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -359,7 +380,11 @@ func (f *FindModel) updateMatches(buf *text.Buffer) {
 		f.current = 0
 		return
 	}
-	matches, current, err := findMatches(buf.Rope(), f.input.Value(), f.regex, buf.Cursor)
+	matches, current, err := findMatchesContext(context.Background(), buf.Rope(), f.input.Value(), search.SearchOpts{
+		Regex:         f.regex,
+		CaseSensitive: f.caseSensitive,
+		WholeWord:     f.wholeWord,
+	}, buf.Cursor)
 	f.matches = matches
 	f.current = current
 	f.searching = false
@@ -399,13 +424,13 @@ func (f *FindModel) SeedFromSelection(buf *text.Buffer) bool {
 	if f.regex {
 		query = regexp.QuoteMeta(query)
 	}
-	// Invalidate any in-flight scan for the previous query so a late result
-	// cannot clobber the synchronous matches installed below.
+	// Seed the query only. Scanning a large selection-backed find on the UI
+	// goroutine blocked typing; ShowFind schedules the same async path as
+	// ordinary typing.
 	f.cancelScan()
 	f.generation++
 	f.input.SetValue(query)
 	f.query = query
-	f.updateMatches(buf)
 	return true
 }
 
@@ -424,29 +449,32 @@ func (f FindModel) View() string {
 	}
 
 	var s string
-	s += lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true).Render("Find")
+	s += f.theme.PromptAccent.Render("Find")
 	s += "  "
 	s += f.input.View()
 
+	flagStyle := f.theme.PromptAccent
+	if f.caseSensitive {
+		s += "  " + flagStyle.Render("Aa")
+	}
+	if f.wholeWord {
+		s += "  " + flagStyle.Render("W")
+	}
 	if f.regex {
-		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(".*")
+		s += "  " + flagStyle.Render(".*")
 	}
 
 	if f.searching {
-		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord13).Render("Searching…")
+		s += "  " + f.theme.PromptMuted.Render("Searching…")
 	} else if f.errMsg != "" {
-		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord11).Render(truncateToWidth(f.errMsg, 40))
+		s += "  " + f.theme.PromptDanger.Render(truncateToWidth(f.errMsg, 40))
 	} else if len(f.matches) > 0 {
-		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord4).Render(
-			formatMatchCount(f.current+1, len(f.matches)))
+		s += "  " + f.theme.PromptMuted.Render(formatMatchCount(f.current+1, len(f.matches)))
 	} else if f.query != "" {
-		s += "  " + lipgloss.NewStyle().Foreground(ui.Nord11).Render("No matches")
+		s += "  " + f.theme.PromptDanger.Render("No matches")
 	}
 
-	return lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Padding(0, 1).
-		Render(s)
+	return f.theme.StatusBar.Padding(0, 1).Render(s)
 }
 
 func formatMatchCount(current, total int) string {

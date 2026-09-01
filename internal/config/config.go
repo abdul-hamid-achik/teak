@@ -57,12 +57,17 @@ type AgentConfig struct {
 
 // EditorConfig holds editor-specific settings.
 type EditorConfig struct {
-	TabSize      int  `toml:"tab_size"`
-	InsertTabs   bool `toml:"insert_tabs"`
-	AutoIndent   bool `toml:"auto_indent"`
-	FormatOnSave bool `toml:"format_on_save"`
-	WordWrap     bool `toml:"word_wrap"`
-	ScrollMargin int  `toml:"scroll_margin"`
+	TabSize             int  `toml:"tab_size"`
+	InsertTabs          bool `toml:"insert_tabs"`
+	AutoIndent          bool `toml:"auto_indent"`
+	FormatOnSave        bool `toml:"format_on_save"`
+	WordWrap            bool `toml:"word_wrap"`
+	ScrollMargin        int  `toml:"scroll_margin"`
+	InsertFinalNewline  bool `toml:"insert_final_newline"`
+	GitGutter           bool `toml:"git_gutter"`
+	IndentGuides        bool `toml:"indent_guides"`
+	HighlightTrailingWS bool `toml:"highlight_trailing_whitespace"`
+	RulerColumn         int  `toml:"ruler_column"` // 0 disables
 }
 
 // UIConfig holds UI-related settings.
@@ -92,10 +97,15 @@ func KnownThemes() []string {
 func DefaultConfig() Config {
 	return Config{
 		Editor: EditorConfig{
-			TabSize:      4,
-			InsertTabs:   false,
-			AutoIndent:   true,
-			ScrollMargin: 2,
+			TabSize:             4,
+			InsertTabs:          false,
+			AutoIndent:          true,
+			ScrollMargin:        2,
+			InsertFinalNewline:  false,
+			GitGutter:           true,
+			IndentGuides:        true,
+			HighlightTrailingWS: true,
+			RulerColumn:         0,
 		},
 		UI: UIConfig{
 			Theme:    "nord",
@@ -221,12 +231,17 @@ type userAgentConfig struct {
 }
 
 type userEditorConfig struct {
-	TabSize      *int  `toml:"tab_size"`
-	InsertTabs   *bool `toml:"insert_tabs"`
-	AutoIndent   *bool `toml:"auto_indent"`
-	FormatOnSave *bool `toml:"format_on_save"`
-	WordWrap     *bool `toml:"word_wrap"`
-	ScrollMargin *int  `toml:"scroll_margin"`
+	TabSize             *int  `toml:"tab_size"`
+	InsertTabs          *bool `toml:"insert_tabs"`
+	AutoIndent          *bool `toml:"auto_indent"`
+	FormatOnSave        *bool `toml:"format_on_save"`
+	WordWrap            *bool `toml:"word_wrap"`
+	ScrollMargin        *int  `toml:"scroll_margin"`
+	InsertFinalNewline  *bool `toml:"insert_final_newline"`
+	GitGutter           *bool `toml:"git_gutter"`
+	IndentGuides        *bool `toml:"indent_guides"`
+	HighlightTrailingWS *bool `toml:"highlight_trailing_whitespace"`
+	RulerColumn         *int  `toml:"ruler_column"`
 }
 
 type userUIConfig struct {
@@ -255,6 +270,21 @@ func merge(cfg *Config, user *userConfig) {
 		}
 		if user.Editor.ScrollMargin != nil {
 			cfg.Editor.ScrollMargin = *user.Editor.ScrollMargin
+		}
+		if user.Editor.InsertFinalNewline != nil {
+			cfg.Editor.InsertFinalNewline = *user.Editor.InsertFinalNewline
+		}
+		if user.Editor.GitGutter != nil {
+			cfg.Editor.GitGutter = *user.Editor.GitGutter
+		}
+		if user.Editor.IndentGuides != nil {
+			cfg.Editor.IndentGuides = *user.Editor.IndentGuides
+		}
+		if user.Editor.HighlightTrailingWS != nil {
+			cfg.Editor.HighlightTrailingWS = *user.Editor.HighlightTrailingWS
+		}
+		if user.Editor.RulerColumn != nil {
+			cfg.Editor.RulerColumn = *user.Editor.RulerColumn
 		}
 	}
 	if user.UI != nil {
@@ -309,6 +339,9 @@ func (c Config) Validate() error {
 	}
 	if c.Editor.ScrollMargin < 0 || c.Editor.ScrollMargin > 50 {
 		return fmt.Errorf("scroll_margin must be between 0 and 50, got %d", c.Editor.ScrollMargin)
+	}
+	if c.Editor.RulerColumn < 0 || c.Editor.RulerColumn > 512 {
+		return fmt.Errorf("ruler_column must be between 0 and 512, got %d", c.Editor.RulerColumn)
 	}
 
 	// Validate theme - check against known valid themes

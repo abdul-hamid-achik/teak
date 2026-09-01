@@ -848,6 +848,9 @@ func TestBufferUndoRedoWithMultiSelection(t *testing.T) {
 	if b.Content() != "hello\nworld" {
 		t.Errorf("After undo: got %q, want %q", b.Content(), "hello\nworld")
 	}
+	if b.Selections.Count() != 2 {
+		t.Fatalf("undo collapsed multi-cursors: count = %d", b.Selections.Count())
+	}
 	// Add makes the second cursor primary. The atomic edit reconciles the
 	// compatibility Buffer.Cursor field before saving Undo, so history restores
 	// that active cursor instead of the stale first-cursor value.

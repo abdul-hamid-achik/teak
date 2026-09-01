@@ -2,6 +2,36 @@
 
 All notable changes to the Teak editor project.
 
+## [0.21.0] - 2026-09-01
+
+### Daily Editor UX
+
+- Integrated terminal (`Ctrl+``) opens a bottom PTY panel on Unix; keys go to
+  the shell while palette, quit, and the toggle stay reachable. Windows shows
+  that the PTY is not available yet.
+- Git gutter marks added, modified, and deleted lines against HEAD. Indent
+  guides, trailing-whitespace highlights, and an optional ruler column paint
+  only visible lines.
+- Config hot-reloads from `~/.config/teak/config.toml` without restarting.
+  An invalid or unreadable file no longer exits the process; Teak keeps the
+  previous settings and reports the warning. An unsaved Settings overlay is
+  not overwritten by a disk change.
+- New-file save, Save All & Quit, and read-only destinations now go through
+  Save As instead of failing silently. Destination directories are created on
+  save. UTF-8 BOM is stripped on load; NUL-prefixed files are rejected as
+  binary. Optional `insert_final_newline` (off by default) appends a newline
+  at save time.
+- Format-on-save falls back to `gofmt` or `prettier` when the language server
+  is missing or does not format. A workspace session lock warns when another
+  Teak instance already owns the folder.
+- Find owns the caret (`Alt+C` case, `Alt+W` whole word), seeds asynchronously
+  from the selection, and `Ctrl+H` can replace across project-search results.
+  Quick Open ranks MRU and matches on full paths. Undo/redo restore
+  multi-cursors. Smart Home, wrap-aware folds, and go-to-line `12:4` land
+  where daily editing expects.
+- Find, Search, and modal prompts take colors from the active theme instead
+  of hardcoded Nord tokens.
+
 ## [0.20.0] - 2026-08-29
 
 ### TUI Feedback and Affordances

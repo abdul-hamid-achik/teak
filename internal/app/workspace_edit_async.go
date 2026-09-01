@@ -384,22 +384,10 @@ func prepareWorkspaceEdit(
 	}
 
 	var outputBytes int64
-	closedDocuments := 0
-	for _, doc := range ordered {
-		if doc.Closed {
-			closedDocuments++
-		}
-	}
-	// There is no portable transaction spanning a live Rope swap and an
-	// atomic filesystem replace, nor one spanning two filesystem replaces.
-	// Reject those combinations before any mutation rather than acknowledge a
-	// partially applied workspace edit after a late write/cancellation error.
-	if closedDocuments > 1 {
-		return workspaceEditPreparation{}, errors.New("workspace edit touches multiple unopened files and cannot be applied atomically")
-	}
-	if closedDocuments > 0 && closedDocuments != len(ordered) {
-		return workspaceEditPreparation{}, errors.New("workspace edit mixes open and unopened files and cannot be applied atomically")
-	}
+	// Closed files are written after every source digest is revalidated, then
+	// live buffers are swapped on the UI goroutine. A late write error can
+	// still leave a partial apply, which is the same trade-off VS Code makes
+	// for multi-file rename; rejecting typical gopls results made F2 unusable.
 	preparation := workspaceEditPreparation{RootInfo: rootInfo, Documents: make([]workspaceEditPreparedDocument, 0, len(ordered))}
 	for _, doc := range ordered {
 		if err := ctx.Err(); err != nil {

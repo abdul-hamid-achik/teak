@@ -31,9 +31,20 @@ const (
 )
 
 // GutterOpts holds optional debug-related gutter state.
+type GitLineKind uint8
+
+const (
+	GitLineNone GitLineKind = iota
+	GitLineAdded
+	GitLineModified
+	GitLineDeleted
+)
+
 type GutterOpts struct {
 	Breakpoints map[int]BreakpointState // 0-based line → state
 	ExecLine    int                     // 0-based current execution line, -1 if none
+	ShowGit     bool
+	GitLines    map[int]GitLineKind
 }
 
 func breakpointGlyph() string {
@@ -41,6 +52,19 @@ func breakpointGlyph() string {
 		return "\U000f0765"
 	}
 	return "*"
+}
+
+func gitGlyph(kind GitLineKind, theme ui.Theme) string {
+	switch kind {
+	case GitLineAdded:
+		return theme.GitGutterAdd.Render("▎")
+	case GitLineModified:
+		return theme.GitGutterMod.Render("▎")
+	case GitLineDeleted:
+		return theme.GitGutterDel.Render("▁")
+	default:
+		return " "
+	}
 }
 
 func foldGlyph(indicator string) string {
@@ -137,8 +161,15 @@ func RenderGutter(theme ui.Theme, totalLines, scrollY, height, activeLine int, d
 		if line >= totalLines {
 			sb.WriteString(gutterStyle.Render(getSpaces(width)))
 		} else {
+			if opts != nil && opts.ShowGit {
+				kind := GitLineNone
+				if opts.GitLines != nil {
+					kind = opts.GitLines[line]
+				}
+				sb.WriteString(gitGlyph(kind, theme))
+			}
 			// Breakpoint marker column (1 leading space + icon + 1 trailing space)
-			if opts != nil {
+			if opts != nil && opts.Breakpoints != nil {
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')
@@ -223,8 +254,15 @@ func RenderGutterWithFolds(theme ui.Theme, totalLines, scrollY, height, activeLi
 		if !inRange || line >= totalLines {
 			sb.WriteString(gutterStyle.Render(getSpaces(width)))
 		} else {
+			if opts != nil && opts.ShowGit {
+				kind := GitLineNone
+				if opts.GitLines != nil {
+					kind = opts.GitLines[line]
+				}
+				sb.WriteString(gitGlyph(kind, theme))
+			}
 			// Breakpoint marker column (1 leading space + icon + 1 trailing space)
-			if opts != nil {
+			if opts != nil && opts.Breakpoints != nil {
 				switch opts.Breakpoints[line] {
 				case BPActive:
 					sb.WriteByte(' ')

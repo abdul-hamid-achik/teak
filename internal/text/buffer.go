@@ -9,6 +9,19 @@ import (
 	"unicode/utf8"
 )
 
+// DiskPresence is what the buffer knows about FilePath on disk.
+type DiskPresence int
+
+const (
+	// DiskAssumedSaved means SavedRope is the last known on-disk snapshot.
+	DiskAssumedSaved DiskPresence = iota
+	// DiskAbsent means the path did not exist when the buffer was opened.
+	DiskAbsent
+	// DiskUnread means opening the path failed; saving that path would
+	// clobber a file we never successfully read.
+	DiskUnread
+)
+
 // MaxBufferFileBytes bounds the synchronous Buffer constructor as well as the
 // application loader. A Buffer represents an in-memory editable document, not
 // an unbounded stream.
@@ -76,6 +89,10 @@ type Buffer struct {
 	version    int
 	lastChange *EditChange // incremental change from last edit, nil if unknown
 	lineEnding LineEnding  // newline convention of the loaded file; content is always LF
+	// diskPresence records what we know about FilePath on disk. Save uses it
+	// so a missing new file is created instead of treated as a conflict, and
+	// a failed open cannot overwrite the real file with an empty buffer.
+	diskPresence DiskPresence
 }
 
 // NewBuffer creates an empty buffer.
@@ -170,6 +187,16 @@ func (b *Buffer) LineEnding() LineEnding {
 	return b.lineEnding
 }
 
+// DiskPresence reports what this buffer knows about its file on disk.
+func (b *Buffer) DiskPresence() DiskPresence {
+	return b.diskPresence
+}
+
+// SetDiskPresence records whether FilePath exists or failed to load.
+func (b *Buffer) SetDiskPresence(presence DiskPresence) {
+	b.diskPresence = presence
+}
+
 // LoadRopeSnapshot installs a document prepared by a background loader without
 // flattening or copying it on the UI goroutine. A load establishes a new clean
 // save baseline and clears edit, selection, and undo state. The line ending is
@@ -182,6 +209,7 @@ func (b *Buffer) LoadRopeSnapshot(rope *Rope, ending LineEnding) {
 	b.lineEnding = ending
 	b.rope = rope
 	b.savedRope = rope
+	b.diskPresence = DiskAssumedSaved
 	if b.Selections == nil {
 		b.Selections = NewSelections(Position{})
 	} else {
@@ -208,6 +236,34 @@ func (b *Buffer) SavedRope() *Rope {
 	return b.savedRope
 }
 
+// EnsureFinalNewline appends a single LF when the document does not already
+// end with one. Ropes store LF internally; CRLF is restored on write. The
+// cursor is left where it was.
+func (b *Buffer) EnsureFinalNewline() bool {
+	if b.rope == nil {
+		return false
+	}
+	if b.rope.Len() > 0 {
+		last, ok := b.rope.ByteAtSafe(b.rope.Len() - 1)
+		if ok && last == '\n' {
+			return false
+		}
+	}
+	saved := b.Cursor
+	b.recordUndo(false)
+	b.rope = b.rope.Insert(b.rope.Len(), []byte("\n"))
+	b.SetCursor(saved)
+	b.dirty = true
+	b.version++
+	lastLine := b.rope.LineCount() - 1
+	b.lastChange = &EditChange{
+		StartLine: lastLine, StartCol: 0,
+		EndLine: lastLine, EndCol: 0,
+		Text: "\n",
+	}
+	return true
+}
+
 // ReplaceRopeSnapshot applies a previously prepared immutable document in
 // constant time. It is intentionally a full-sync edit: callers use it for
 // multi-edit/background transformations where a single incremental LSP range
@@ -219,7 +275,7 @@ func (b *Buffer) ReplaceRopeSnapshot(rope *Rope, cursor Position) {
 	if rope == nil || rope == b.rope {
 		return
 	}
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	b.rope = rope
 	b.Selections = NewSelections(cursor)
 	b.SetCursor(cursor)
@@ -302,7 +358,7 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 			start, end := sel.Ordered()
 			startOff := b.rope.PositionToOffset(start)
 			endOff := b.rope.PositionToOffset(end)
-			b.undo.Save(b.rope, b.Cursor, false)
+			b.recordUndo(false)
 			b.rope = b.rope.Delete(startOff, endOff-startOff)
 			b.rope = b.rope.Insert(startOff, text)
 			b.dirty = true
@@ -324,7 +380,7 @@ func (b *Buffer) InsertAtCursor(text []byte) {
 		// site used to pass false, making the grouping in UndoStack.Save dead
 		// code: Ctrl+Z then undid one character at a time and the undo stack
 		// filled with one snapshot per keystroke.
-		b.undo.Save(b.rope, b.Cursor, isTypedRune(text))
+		b.recordUndo(isTypedRune(text))
 		// Record where the edit actually lands, which is the cursor. Deriving
 		// this from the primary selection meant that any path moving the cursor
 		// without collapsing the selection — a bracket skip-over, a find jump,
@@ -418,7 +474,7 @@ func (b *Buffer) ApplySelectionEdits(ops []EditOp) bool {
 	if changed {
 		isTypedInsert := len(ops) == 1 && ops[0].Delete == 0 &&
 			isTypedRune(ops[0].Insert) && ops[0].Cursor == ops[0].Offset+len(ops[0].Insert)
-		b.undo.Save(b.rope, b.Cursor, isTypedInsert)
+		b.recordUndo(isTypedInsert)
 		for i := len(ops) - 1; i >= 0; i-- {
 			op := ops[i]
 			if op.Delete > 0 {
@@ -473,6 +529,12 @@ func (b *Buffer) InsertNewline() {
 // leading whitespace of each insertion line. Prefix reads share a fixed budget
 // and the resulting replacements are committed as one undoable transaction.
 func (b *Buffer) InsertNewlineWithIndent() {
+	b.InsertNewlineWithIndentExtra(nil)
+}
+
+// InsertNewlineWithIndentExtra copies leading whitespace and, when the
+// character before the caret is an opener, appends one extra indent unit.
+func (b *Buffer) InsertNewlineWithIndentExtra(extra []byte) {
 	if b.Selections == nil || b.Selections.Count() == 0 {
 		b.Selections = NewSelections(b.ClampPosition(b.Cursor))
 	}
@@ -495,6 +557,11 @@ func (b *Buffer) InsertNewlineWithIndent() {
 			insert = make([]byte, indentLen+1)
 			insert[0] = '\n'
 			copy(insert[1:], scratch[:indentLen])
+		}
+		if len(extra) > 0 && startOffset > 0 {
+			if ch, ok := b.rope.ByteAtSafe(startOffset - 1); ok && (ch == '{' || ch == '[' || ch == '(') {
+				insert = append(insert, extra...)
+			}
 		}
 		edits[i] = EditOp{
 			Offset: startOffset,
@@ -571,7 +638,7 @@ func (b *Buffer) Backspace() {
 		}
 	}
 	endPos := b.Cursor
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	b.rope = b.rope.Delete(offset-delLen, delLen)
 	b.dirty = true
 	b.version++
@@ -615,7 +682,7 @@ func (b *Buffer) Delete() {
 	}
 	startPos := b.Cursor
 	endPos := b.rope.OffsetToPosition(offset + delLen)
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	b.rope = b.rope.Delete(offset, delLen)
 	b.dirty = true
 	b.version++
@@ -689,7 +756,7 @@ func (b *Buffer) applyCursorDeletionRanges(ranges []cursorDeleteRange) bool {
 
 	primary := b.Selections.PrimaryIndex()
 	b.Cursor = b.Selections.PrimaryCursor()
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	for i := len(merged) - 1; i >= 0; i-- {
 		r := merged[i]
 		b.rope = b.rope.Delete(r.start, r.end-r.start)
@@ -787,7 +854,7 @@ func (b *Buffer) DeleteSelection() {
 			b.Selections.Clear()
 			return
 		}
-		b.undo.Save(b.rope, b.Cursor, false)
+		b.recordUndo(false)
 		b.rope = b.rope.Delete(startOff, n)
 		b.dirty = true
 		b.version++
@@ -923,7 +990,7 @@ func (b *Buffer) ReplaceRange(start, end Position, newText []byte) {
 		oldSelections = append(oldSelections, b.Selections.selections...)
 		primary = b.Selections.PrimaryIndex()
 	}
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	if n > 0 {
 		b.rope = b.rope.Delete(startOff, n)
 	}
@@ -1048,11 +1115,23 @@ func (b *Buffer) ClearSelection() {
 	b.SetSelection(b.Cursor, b.Cursor)
 }
 
-// CursorToLineStart moves the cursor to the beginning of the current line.
+// CursorToLineStart moves the cursor to the first non-whitespace column, or
+// to column 0 when it is already there (smart home).
 func (b *Buffer) CursorToLineStart() {
 	cursor := b.Cursor
-	cursor.Col = 0
+	indent := b.lineIndentColumns(cursor.Line)
+	if cursor.Col == indent {
+		cursor.Col = 0
+	} else {
+		cursor.Col = indent
+	}
 	b.SetCursor(cursor)
+}
+
+func (b *Buffer) lineIndentColumns(line int) int {
+	scratch := make([]byte, 256)
+	n := b.leadingWhitespaceLen(line, len(scratch)-1, scratch)
+	return n
 }
 
 // CursorToLineEnd moves the cursor to the end of the current line.
@@ -1253,7 +1332,12 @@ func (b *Buffer) ExtendCursorsWordRight() {
 
 func (b *Buffer) MoveCursorsToLineStart() {
 	b.transformSelections(func(pos Position) Position {
-		pos.Col = 0
+		indent := b.lineIndentColumns(pos.Line)
+		if pos.Col == indent {
+			pos.Col = 0
+		} else {
+			pos.Col = indent
+		}
 		return pos
 	}, false, collapseAfterMove)
 }
@@ -1277,6 +1361,20 @@ func (b *Buffer) ExtendCursorsToLineEnd() {
 		pos.Col = b.rope.LineLen(pos.Line)
 		return pos
 	}, true, collapseAfterMove)
+}
+
+func (b *Buffer) MoveCursorsToDocStart() {
+	b.transformSelections(func(pos Position) Position {
+		return Position{Line: 0, Col: 0}
+	}, false, collapseAfterMove)
+}
+
+func (b *Buffer) MoveCursorsToDocEnd() {
+	lastLine := b.rope.LineCount() - 1
+	lastCol := b.rope.LineLen(lastLine)
+	b.transformSelections(func(pos Position) Position {
+		return Position{Line: lastLine, Col: lastCol}
+	}, false, collapseAfterMove)
 }
 
 func (b *Buffer) ExtendCursorsToDocStart() {
@@ -1326,18 +1424,44 @@ func (b *Buffer) SaveAs(path string) error {
 	return nil
 }
 
+func (b *Buffer) recordUndo(isCharInsert bool) {
+	b.recordUndoAt(b.Cursor, isCharInsert)
+}
+
+func (b *Buffer) recordUndoAt(cursor Position, isCharInsert bool) {
+	entry := undoEntry{rope: b.rope, cursor: cursor}
+	if b.Selections != nil {
+		entry.selections = cloneSelections(b.Selections.All())
+		entry.primary = b.Selections.PrimaryIndex()
+	}
+	b.undo.saveEntry(entry, isCharInsert)
+}
+
+func (b *Buffer) currentUndoSelections() ([]Selection, int) {
+	if b.Selections == nil {
+		return nil, 0
+	}
+	return b.Selections.All(), b.Selections.PrimaryIndex()
+}
+
+func (b *Buffer) restoreUndoSelections(cursor Position, selections []Selection, primary int) {
+	b.Cursor = cursor
+	if len(selections) == 0 {
+		b.Selections = NewSelections(cursor)
+		return
+	}
+	b.RestoreSelections(selections, primary)
+}
+
 // Undo undoes the last edit.
 func (b *Buffer) Undo() {
-	rope, cursor, ok := b.undo.Undo(b.rope, b.Cursor)
+	sels, primary := b.currentUndoSelections()
+	rope, cursor, restored, restoredPrimary, ok := b.undo.undoState(b.rope, b.Cursor, sels, primary, true)
 	if !ok {
 		return
 	}
 	b.rope = rope
-	b.Cursor = cursor
-	// Undo snapshots intentionally contain text and the active cursor, not a
-	// stale set of multicursors. Collapse to the restored cursor so selection
-	// coordinates cannot refer to the document that was just undone.
-	b.Selections = NewSelections(b.Cursor)
+	b.restoreUndoSelections(cursor, restored, restoredPrimary)
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // undo: fall back to full sync
@@ -1345,14 +1469,13 @@ func (b *Buffer) Undo() {
 
 // Redo redoes the last undone edit.
 func (b *Buffer) Redo() {
-	rope, cursor, ok := b.undo.Redo(b.rope, b.Cursor)
+	sels, primary := b.currentUndoSelections()
+	rope, cursor, restored, restoredPrimary, ok := b.undo.undoState(b.rope, b.Cursor, sels, primary, false)
 	if !ok {
 		return
 	}
 	b.rope = rope
-	b.Cursor = cursor
-	// See Undo: selection snapshots are not part of UndoStack.
-	b.Selections = NewSelections(b.Cursor)
+	b.restoreUndoSelections(cursor, restored, restoredPrimary)
 	b.dirty = b.rope != b.savedRope
 	b.version++
 	b.lastChange = nil // redo: fall back to full sync
@@ -1594,7 +1717,7 @@ func (b *Buffer) BackspaceWord() {
 	startOff := b.rope.PositionToOffset(target)
 	endOff := b.rope.PositionToOffset(startPos)
 	n := endOff - startOff
-	b.undo.Save(b.rope, startPos, false)
+	b.recordUndoAt(startPos, false)
 	b.rope = b.rope.Delete(startOff, n)
 	b.dirty = true
 	b.version++
@@ -1634,7 +1757,7 @@ func (b *Buffer) DeleteWord() {
 	startOff := b.rope.PositionToOffset(saved)
 	endOff := b.rope.PositionToOffset(endPos)
 	n := endOff - startOff
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	b.rope = b.rope.Delete(startOff, n)
 	b.SetCursor(saved)
 	b.dirty = true
@@ -1728,36 +1851,25 @@ func (b *Buffer) SelectNextOccurrence() bool {
 	if len(sel) == 0 {
 		return true
 	}
-	content := b.rope.Bytes()
 	_, end := b.Selections.Primary().Ordered()
 	endOff := b.rope.PositionToOffset(end)
 
-	// Search forward from end of selection
-	idx := bytes.Index(content[endOff:], sel)
-	if idx >= 0 {
-		matchOff := endOff + idx
-		matchEnd := matchOff + len(sel)
-		newSel := Selection{
-			Anchor: b.rope.OffsetToPosition(matchOff),
-			Head:   b.rope.OffsetToPosition(matchEnd),
+	// Search forward from end of selection without flattening the rope.
+	idx := b.rope.Index(sel, endOff)
+	if idx < 0 {
+		idx = b.rope.Index(sel, 0)
+		if idx < 0 || idx >= endOff {
+			return true
 		}
-		b.Selections.Add(newSel)
-		b.Selections.Normalize()
-		b.Cursor = b.Selections.PrimaryCursor()
-		return true
 	}
-	// Wrap around
-	idx = bytes.Index(content[:endOff], sel)
-	if idx >= 0 {
-		matchEnd := idx + len(sel)
-		newSel := Selection{
-			Anchor: b.rope.OffsetToPosition(idx),
-			Head:   b.rope.OffsetToPosition(matchEnd),
-		}
-		b.Selections.Add(newSel)
-		b.Selections.Normalize()
-		b.Cursor = b.Selections.PrimaryCursor()
+	matchEnd := idx + len(sel)
+	newSel := Selection{
+		Anchor: b.rope.OffsetToPosition(idx),
+		Head:   b.rope.OffsetToPosition(matchEnd),
 	}
+	b.Selections.Add(newSel)
+	b.Selections.Normalize()
+	b.Cursor = b.Selections.PrimaryCursor()
 	return true
 }
 
@@ -1782,21 +1894,16 @@ func (b *Buffer) SelectAllOccurrences() bool {
 		return true
 	}
 
-	content := b.rope.Bytes()
-	// Clear existing selections except primary
 	b.Selections.Clear()
-
-	// Find all occurrences
 	idx := 0
 	for {
-		pos := bytes.Index(content[idx:], selectedText)
+		pos := b.rope.Index(selectedText, idx)
 		if pos < 0 {
 			break
 		}
-		matchOff := idx + pos
-		matchEnd := matchOff + len(selectedText)
+		matchEnd := pos + len(selectedText)
 		newSel := Selection{
-			Anchor: b.rope.OffsetToPosition(matchOff),
+			Anchor: b.rope.OffsetToPosition(pos),
 			Head:   b.rope.OffsetToPosition(matchEnd),
 		}
 		b.Selections.Add(newSel)
@@ -2068,7 +2175,7 @@ func (b *Buffer) applyStructuralLineEdits(edits []structuralLineEdit) Structural
 	}
 	b.Selections.Normalize()
 	b.Cursor = b.Selections.PrimaryCursor()
-	b.undo.Save(b.rope, b.Cursor, false)
+	b.recordUndo(false)
 	for i := len(edits) - 1; i >= 0; i-- {
 		edit := edits[i]
 		offset := b.rope.LineStart(edit.line) + edit.col
@@ -2286,7 +2393,12 @@ func (b *Buffer) DeleteLine() {
 
 // IndentLines indents every unique logical line targeted by the selections.
 func (b *Buffer) IndentLines(tabSize int) StructuralEditResult {
-	indent := IndentString(tabSize)
+	return b.IndentLinesMode(tabSize, false)
+}
+
+// IndentLinesMode indents selected lines using tabs or spaces.
+func (b *Buffer) IndentLinesMode(tabSize int, insertTabs bool) StructuralEditResult {
+	indent := IndentToken(tabSize, insertTabs)
 	if len(indent) == 0 {
 		return StructuralEditNoChange
 	}

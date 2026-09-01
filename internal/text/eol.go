@@ -2,6 +2,7 @@ package text
 
 import (
 	"bytes"
+	"errors"
 	"io"
 )
 
@@ -33,6 +34,27 @@ func DetectLineEnding(data []byte) LineEnding {
 // preserved: only CR immediately followed by LF is a line ending here. The
 // input slice must not be mutated by callers afterwards when the returned
 // slice aliases it.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// ErrBinaryFile is returned when a load sees NUL bytes in the prefix.
+var ErrBinaryFile = errors.New("file looks binary")
+
+// PrepareLoadedBytes strips a UTF-8 BOM, rejects obvious binaries, and
+// normalizes line endings. Call this off the UI goroutine.
+func PrepareLoadedBytes(data []byte) ([]byte, LineEnding, error) {
+	if looksBinary(data) {
+		return nil, LF, ErrBinaryFile
+	}
+	data = bytes.TrimPrefix(data, utf8BOM)
+	normalized, ending := NormalizeLineEndings(data)
+	return normalized, ending, nil
+}
+
+func looksBinary(data []byte) bool {
+	limit := min(len(data), 8<<10)
+	return bytes.IndexByte(data[:limit], 0) >= 0
+}
+
 func NormalizeLineEndings(data []byte) ([]byte, LineEnding) {
 	if !bytes.Contains(data, crlfPair) {
 		return data, LF

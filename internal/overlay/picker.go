@@ -20,6 +20,8 @@ type PickerItem struct {
 	Label       string // display text
 	Description string // secondary text (shown dimmed)
 	Value       any    // opaque payload returned on selection
+	Search      string // optional extra haystack for fuzzy match (e.g. full path)
+	Recency     int    // higher ranks more recently used files first
 }
 
 // PickerSelectMsg is emitted when the user selects an item.
@@ -593,8 +595,19 @@ func filterItemsContext(ctx context.Context, items []PickerItem, query string) (
 				return nil, err
 			}
 		}
-		score, matched := FuzzyMatch(query, item.Label)
+		haystack := item.Label
+		if item.Search != "" {
+			haystack = item.Search
+		}
+		score, matched := FuzzyMatch(query, haystack)
+		if !matched && item.Description != "" && item.Description != haystack {
+			score, matched = FuzzyMatch(query, item.Description)
+		}
+		if !matched && item.Label != haystack {
+			score, matched = FuzzyMatch(query, item.Label)
+		}
 		if matched {
+			score += item.Recency * 20
 			matches = append(matches, PickerMatch{Item: item, Score: score})
 		}
 	}
@@ -602,7 +615,10 @@ func filterItemsContext(ctx context.Context, items []PickerItem, query string) (
 		return nil, err
 	}
 	sort.Slice(matches, func(i, j int) bool {
-		return matches[i].Score > matches[j].Score
+		if matches[i].Score != matches[j].Score {
+			return matches[i].Score > matches[j].Score
+		}
+		return matches[i].Item.Recency > matches[j].Item.Recency
 	})
 	return matches, nil
 }

@@ -94,6 +94,14 @@ func (v *Viewport) ensureCursorVisibleAtDisplayColumn(cursor text.Position, line
 	}
 }
 
+func (v *Viewport) ScrollLeft(n int) {
+	v.ScrollX = max(0, v.ScrollX-max(0, n))
+}
+
+func (v *Viewport) ScrollRight(n int) {
+	v.ScrollX += max(0, n)
+}
+
 func (v *Viewport) ScrollUp(n int) {
 	v.ScrollY -= n
 	if v.ScrollY < 0 {

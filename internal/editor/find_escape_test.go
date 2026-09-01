@@ -43,6 +43,7 @@ func TestShowFindSeedsQueryFromSelection(t *testing.T) {
 	ed.Buffer.SetSelection(text.Position{Line: 0, Col: 0}, text.Position{Line: 0, Col: 3})
 
 	ed.ShowFind()
+	ed = drainFindScan(t, ed)
 
 	if got := ed.find.input.Value(); got != "foo" {
 		t.Fatalf("find input after ShowFind = %q, want seeded %q", got, "foo")
@@ -122,8 +123,10 @@ func TestEscapeFromFindRestoresSelectionWithoutNavigation(t *testing.T) {
 	ed.Buffer.SetSelection(wantSel.Anchor, wantSel.Head)
 
 	ed.ShowFind()
-	// Seeding jumps the cursor to the next match; Esc must still put the
-	// original selection back because no match was navigated to.
+	ed = drainFindScan(t, ed)
+	// Seeding jumps the cursor to the next match once the async scan lands;
+	// Esc must still put the original selection back because no match was
+	// navigated to.
 	if ed.Buffer.Cursor == wantSel.Head {
 		t.Fatal("seeding did not move the cursor; test setup is broken")
 	}

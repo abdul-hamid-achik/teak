@@ -29,7 +29,7 @@ func TestEditorAutoClosesBracketAtEveryCursor(t *testing.T) {
 	}
 }
 
-func TestEditorAutoCloseReplacesEverySelectedRange(t *testing.T) {
+func TestEditorAutoCloseWrapsEverySelectedRange(t *testing.T) {
 	ed := newEditor("one\nred", 0, 0)
 	ed.Buffer.RestoreSelections([]text.Selection{
 		{Anchor: text.Position{}, Head: text.Position{Line: 0, Col: len("one")}},
@@ -37,7 +37,7 @@ func TestEditorAutoCloseReplacesEverySelectedRange(t *testing.T) {
 	}, 1)
 
 	ed, _ = ed.Update(tea.KeyPressMsg{Text: "["})
-	if got, want := ed.Buffer.Content(), "[]\n[]"; got != want {
+	if got, want := ed.Buffer.Content(), "[one]\n[red]"; got != want {
 		t.Fatalf("content = %q, want %q", got, want)
 	}
 	requireEditorSelections(t, ed, []text.Selection{

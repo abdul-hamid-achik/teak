@@ -71,6 +71,8 @@ type CompletionItem struct {
 	// absent edit from one that legitimately replaces an empty range.
 	Edit    CompletionEdit
 	HasEdit bool
+
+	AdditionalEdits []CompletionEdit
 }
 
 // CompletionEdit is a textEdit range in buffer coordinates (0-based line and

@@ -158,6 +158,9 @@ func ripgrepArgs(query string, opts SearchOpts) []string {
 		// for the non-regex case.
 		args = append(args, "--fixed-strings")
 	}
+	if opts.WholeWord {
+		args = append(args, "--word-regexp")
+	}
 	// rg respects .gitignore by default, which is a deliberate improvement
 	// over the walker's hardcoded blocklist. But .gitignore alone does not
 	// guarantee commonSkipDirs are excluded in a repo that doesn't happen to

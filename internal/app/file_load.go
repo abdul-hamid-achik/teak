@@ -15,6 +15,11 @@ import (
 // pendingNavigation is scoped to a requested path, rather than the whole UI.
 // It is transferred to the concrete file-load request as soon as a placeholder
 // editor has been created.
+type jumpEntry struct {
+	Path string
+	Pos  text.Position
+}
+
 type pendingNavigation struct {
 	Path             string
 	Position         text.Position
@@ -38,6 +43,47 @@ type pendingDiffLoad struct {
 	Path     string
 	EditorID uint64
 	Cancel   context.CancelFunc
+}
+
+func (m *Model) rememberRecentFile(path string) {
+	if path == "" {
+		return
+	}
+	cleaned := filepath.Clean(path)
+	next := make([]string, 0, len(m.recentFiles)+1)
+	next = append(next, cleaned)
+	for _, existing := range m.recentFiles {
+		if filepath.Clean(existing) == cleaned {
+			continue
+		}
+		next = append(next, existing)
+		if len(next) >= 50 {
+			break
+		}
+	}
+	m.recentFiles = next
+}
+
+func (m *Model) pushJump() {
+	ed := m.activeEditor()
+	if ed == nil || ed.Buffer == nil || ed.Buffer.FilePath == "" {
+		return
+	}
+	m.jumpStack = append(m.jumpStack, jumpEntry{Path: ed.Buffer.FilePath, Pos: ed.Buffer.Cursor})
+	if len(m.jumpStack) > 50 {
+		m.jumpStack = m.jumpStack[len(m.jumpStack)-50:]
+	}
+}
+
+func (m Model) jumpBack() (tea.Model, tea.Cmd) {
+	if len(m.jumpStack) == 0 {
+		m.status = "No previous location"
+		return m, nil
+	}
+	entry := m.jumpStack[len(m.jumpStack)-1]
+	m.jumpStack = m.jumpStack[:len(m.jumpStack)-1]
+	m.setPendingCursor(entry.Path, entry.Pos)
+	return m.openFilePinned(entry.Path)
 }
 
 func (m *Model) setPendingCursor(path string, pos text.Position) {

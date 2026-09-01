@@ -1,6 +1,10 @@
 package editor
 
-import "teak/internal/text"
+import (
+	"unicode"
+
+	"teak/internal/text"
+)
 
 // MaxBracketScanBytes is the deterministic per-frame budget used by the
 // viewport. Unmatched brackets in generated or minified files must not make a
@@ -9,11 +13,21 @@ const MaxBracketScanBytes = 64 << 10
 
 const bracketScanChunkBytes = 4 << 10
 
-// Bracket pairs: open → close
+// Bracket pairs: open → close. Used for matching-highlight and pair-backspace.
 var bracketPairs = map[byte]byte{
 	'(': ')',
 	'[': ']',
 	'{': '}',
+}
+
+// autoClosePairs includes quotes. Quotes are not structural brackets: they
+// wrap selections and insert pairs, but are not matched by FindMatchingBracket.
+var autoClosePairs = map[byte]byte{
+	'(': ')',
+	'[': ']',
+	'{': '}',
+	'"': '"',
+	'\'': '\'',
 }
 
 // Reverse: close → open
@@ -39,7 +53,7 @@ func IsCloseBracket(b byte) bool {
 func MatchingClose(b byte) byte { return bracketPairs[b] }
 
 // AutoClosePair returns the closing bracket to auto-insert for the given character, or 0.
-func AutoClosePair(ch byte) byte { return bracketPairs[ch] }
+func AutoClosePair(ch byte) byte { return autoClosePairs[ch] }
 
 // FindMatchingBracket finds a matching bracket without a scan limit. It is
 // retained for editing callers and tests; the viewport uses the bounded form.
@@ -174,6 +188,32 @@ func selectionOffsets(rope *text.Rope, selection text.Selection) (int, int, bool
 	return startOffset, endOffset, startOK && endOK && endOffset >= startOffset
 }
 
+func isQuotePair(ch byte) bool {
+	return ch == '"' || ch == '\''
+}
+
+// shouldInsertBareQuote reports the VS Code-style case: typing a quote
+// immediately after a word character should insert one quote, not a pair.
+func shouldInsertBareQuote(buf *text.Buffer, ch byte) bool {
+	if buf == nil || !isQuotePair(ch) || buf.Selections == nil {
+		return false
+	}
+	for _, sel := range buf.Selections.All() {
+		if !sel.IsEmpty() {
+			return false
+		}
+		off, ok := buf.Rope().PositionToOffsetUncached(sel.Head)
+		if !ok || off == 0 {
+			return false
+		}
+		r, _, exists := buf.Rope().RuneBefore(off)
+		if !exists || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func autoCloseSelectionEdits(buf *text.Buffer, open, close byte) ([]text.EditOp, bool) {
 	if buf == nil || buf.Selections == nil || buf.Selections.Count() == 0 {
 		return nil, false
@@ -186,10 +226,15 @@ func autoCloseSelectionEdits(buf *text.Buffer, open, close byte) ([]text.EditOp,
 		if !ok {
 			return nil, false
 		}
+		selected := rope.Slice(start, end).Bytes()
+		insert := make([]byte, 0, 2+len(selected))
+		insert = append(insert, open)
+		insert = append(insert, selected...)
+		insert = append(insert, close)
 		edits[i] = text.EditOp{
 			Offset: start,
 			Delete: end - start,
-			Insert: []byte{open, close},
+			Insert: insert,
 			Cursor: start + 1,
 		}
 	}
@@ -247,7 +292,7 @@ func backspaceSelectionEdits(buf *text.Buffer) ([]text.EditOp, bool) {
 		}
 		before, beforeOK := rope.ByteAtSafe(start - 1)
 		after, afterOK := rope.ByteAtSafe(start)
-		if beforeOK && afterOK && IsOpenBracket(before) && bracketPairs[before] == after {
+		if beforeOK && afterOK && autoClosePairs[before] == after {
 			edits[i] = text.EditOp{Offset: start - 1, Delete: 2, Cursor: start - 1}
 			continue
 		}

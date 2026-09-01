@@ -319,6 +319,39 @@ func (r *Rope) Bytes() []byte {
 // immutable tree. It implements io.ReaderAt, including returning io.EOF when
 // fewer than len(p) bytes remain. Reads visit only intersecting leaves and do
 // not allocate.
+// Index reports the first offset of pattern at or after from without
+// materializing the whole document.
+func (r *Rope) Index(pattern []byte, from int) int {
+	if r == nil || len(pattern) == 0 || from >= r.len {
+		return -1
+	}
+	if from < 0 {
+		from = 0
+	}
+	overlap := len(pattern) - 1
+	const chunk = 64 << 10
+	buf := make([]byte, chunk+overlap)
+	off := from
+	for off < r.len {
+		want := len(buf)
+		if remain := r.len - off; remain < want {
+			want = remain
+		}
+		n, _ := r.ReadAt(buf[:want], int64(off))
+		if n <= 0 {
+			return -1
+		}
+		if idx := bytes.Index(buf[:n], pattern); idx >= 0 {
+			return off + idx
+		}
+		if n <= overlap {
+			return -1
+		}
+		off += n - overlap
+	}
+	return -1
+}
+
 func (r *Rope) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, errNegativeReadOffset
