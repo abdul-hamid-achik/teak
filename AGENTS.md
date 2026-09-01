@@ -233,6 +233,16 @@ All state changes flow through `Update(msg tea.Msg) (tea.Model, tea.Cmd)`. Compo
 - `ToggleTreeMsg` — toggle file tree visibility
 - `GoToLineMsg` — open go-to-line dialog
 
+### Input Routing Precedence
+
+Every `tea.KeyPressMsg` enters `Model.handleKeyPressPrecedence` in `internal/app/input_routing.go`. The high-level shape: unsaved-changes confirm > overlay stack > pickers/dialogs (branch, search, go-to-line, rename, save-as, new item, delete-confirm) > context menus (tree, git, editor) > help > settings > plugin keys > welcome dismissal > `handleGlobalKey` (global shortcuts, guarded by `textInputFocused`) > `routeFocusedInput` (focused panel, defaulting to the editor).
+
+**Read the function rather than trusting any list** — it is the only authority and the chain evolves. Mouse events route separately in `internal/app/mouse.go`: overlay state first, then surface hit-testing (tree vs editor vs tabs).
+
+### Async Result Freshness
+
+Search input is debounced and its results are generation-tagged, so a superseded query cannot overwrite newer ones — the same version/generation guard pattern every async result carries (find, completion, formatting, workspace edits).
+
 ### Focus Management
 
 **Change focus only through `Model.setFocus`.** It releases whatever the area being left was holding — blurring the agent input, unfocusing the git commit form. More than fifty sites used to assign `m.focus` directly and only a handful remembered to do that, which left a phantom caret in the agent panel and a commit box that silently ate navigation keys.
@@ -796,7 +806,6 @@ func TestAsyncOperation(t *testing.T) {
 ## Architecture Documentation
 
 - [`README.md`](README.md) — user-facing overview, install, keybindings
-- [`CLAUDE.md`](CLAUDE.md) — condensed guidance for Claude Code
 - [`CHANGELOG.md`](CHANGELOG.md) — release history
 
 This file is the detailed reference; the sections above on package layout,
