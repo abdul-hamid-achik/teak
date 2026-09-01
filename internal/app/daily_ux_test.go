@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -119,6 +120,96 @@ func TestJumpBackReturnsToPushedLocation(t *testing.T) {
 	updated := updatedAny.(Model)
 	if got := updated.editors[idx].Buffer.Cursor; got.Col != 8 {
 		t.Fatalf("cursor after jump back = %+v, want col 8", got)
+	}
+}
+
+func TestJumpForwardReturnsAfterJumpBack(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	idx := addDirtyEditor(t, &model, "a.go", "package a\n", "package a\n")
+	model.editors[idx].Buffer.SetCursor(text.Position{Line: 0, Col: 8})
+	model.pushJump()
+	model.editors[idx].Buffer.SetCursor(text.Position{Line: 0, Col: 0})
+	updatedAny, _ := model.jumpBack()
+	updated := updatedAny.(Model)
+	updatedAny, _ = updated.jumpForward()
+	updated = updatedAny.(Model)
+	if got := updated.editors[idx].Buffer.Cursor; got.Col != 0 {
+		t.Fatalf("cursor after jump forward = %+v, want col 0", got)
+	}
+}
+
+func TestCtrlTabActivatesLastUsedTab(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	first := addDirtyEditor(t, &model, "a.go", "a\n", "a\n")
+	second := addDirtyEditor(t, &model, "b.go", "b\n", "b\n")
+	third := addDirtyEditor(t, &model, "c.go", "c\n", "c\n")
+	model.activateTab(first)
+	model.activateTab(third)
+	model.activateTab(second)
+
+	updatedAny, _, handled := model.handleGlobalKey(tea.KeyPressMsg{Text: "ctrl+tab"})
+	if !handled {
+		t.Fatal("ctrl+tab was not handled")
+	}
+	updated := updatedAny.(Model)
+	if updated.activeTab != third {
+		t.Fatalf("ctrl+tab active tab = %d, want last used %d", updated.activeTab, third)
+	}
+}
+
+func TestCtrlDotRequestsCodeActionsFromEditor(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	called := false
+	model.codeActionRequester = func(_ context.Context, _ string, _, _ int, _ []lsp.Diagnostic) ([]lsp.CodeAction, error) {
+		called = true
+		return nil, nil
+	}
+	model.focus = FocusEditor
+	updatedAny, cmd, handled := model.handleGlobalKey(tea.KeyPressMsg{Text: "ctrl+."})
+	if !handled {
+		t.Fatal("ctrl+. was not handled in the editor")
+	}
+	_ = updatedAny
+	if cmd == nil {
+		t.Fatal("ctrl+. did not request code actions")
+	}
+	_ = cmd()
+	if !called {
+		t.Fatal("ctrl+. did not invoke the code-action requester")
+	}
+
+	_, _, handled = model.handleGlobalKey(tea.KeyPressMsg{Text: "ctrl+k"})
+	if handled {
+		t.Fatal("ctrl+k must not request code actions")
+	}
+}
+
+func TestShiftAltFFormatsDocument(t *testing.T) {
+	model := newOverlayRequestTestModel(t)
+	model.focus = FocusEditor
+	_, cmd, handled := model.handleGlobalKey(tea.KeyPressMsg{Text: "shift+alt+f"})
+	if !handled {
+		t.Fatal("shift+alt+f was not handled")
+	}
+	if cmd == nil {
+		t.Fatal("shift+alt+f did not request formatting")
+	}
+}
+
+func TestCtrlPageDownCyclesTabsInOrder(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	addDirtyEditor(t, &model, "a.go", "a\n", "a\n")
+	addDirtyEditor(t, &model, "b.go", "b\n", "b\n")
+	addDirtyEditor(t, &model, "c.go", "c\n", "c\n")
+	model.activateTab(0)
+
+	updatedAny, _, handled := model.handleGlobalKey(tea.KeyPressMsg{Text: "ctrl+pgdown"})
+	if !handled {
+		t.Fatal("ctrl+pgdown was not handled")
+	}
+	updated := updatedAny.(Model)
+	if updated.activeTab != 1 {
+		t.Fatalf("ctrl+pgdown active tab = %d, want 1", updated.activeTab)
 	}
 }
 

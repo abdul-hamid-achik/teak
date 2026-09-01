@@ -1050,12 +1050,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 			}
 		}
 	case "ctrl+u":
-		if !e.Buffer.SelectAllOccurrences() {
-			editorID := e.id
-			return e, func() tea.Msg {
-				return OccurrenceSearchLimitMsg{EditorID: editorID, MaxBytes: text.MaxOccurrenceSearchBytes}
-			}
-		}
+		e.Buffer.UndoLastCursor()
 	case "ctrl+alt+up":
 		e.Buffer.AddCursorAbove()
 		edited = true
@@ -1063,6 +1058,13 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 		e.Buffer.AddCursorBelow()
 		edited = true
 	case "ctrl+shift+l":
+		if !e.Buffer.SelectAllOccurrences() {
+			editorID := e.id
+			return e, func() tea.Msg {
+				return OccurrenceSearchLimitMsg{EditorID: editorID, MaxBytes: text.MaxOccurrenceSearchBytes}
+			}
+		}
+	case "shift+alt+i", "alt+shift+i":
 		e.Buffer.SplitSelectionIntoLines()
 		edited = true
 	case "ctrl+l":
@@ -1076,7 +1078,7 @@ func (e Editor) handleKeyPress(msg tea.KeyPressMsg) (Editor, tea.Cmd) {
 	case "esc", "escape":
 		e.hover.Hide()
 		e.signatureHelp.Hide()
-		// Esc also defuses armed secondary cursors (Ctrl+D chains, Ctrl+U,
+		// Esc also defuses armed secondary cursors (Ctrl+D chains,
 		// AddCursorAbove/Below): without this, a stray Esc leaves N cursors
 		// armed and the next keystroke edits N places. Overlays above already
 		// consumed this key, so by the time we get here no popup is open.

@@ -210,7 +210,7 @@ func (m Model) handleKeyPressPrecedence(msg tea.KeyPressMsg) (Model, tea.Cmd, bo
 func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.showTree && m.focus == FocusTree && m.sidebarTab == SidebarFiles && !m.tree.FilterActive() {
 		switch msg.String() {
-		case "ctrl+h", "ctrl+.":
+		case "ctrl+.", "alt+h":
 			shown, cmd := m.tree.ToggleShowHiddenAsync()
 			if shown {
 				m.status = "Hidden files shown"
@@ -218,7 +218,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 				m.status = "Hidden files hidden"
 			}
 			return m, cmd, true
-		case "ctrl+k":
+		case "ctrl+shift+.", "alt+i", "ctrl+shift+h":
 			shown, cmd := m.tree.ToggleShowGitIgnoredAsync()
 			if shown {
 				m.status = "Ignored files shown"
@@ -240,7 +240,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 
 	if m.showTerminal && m.focus == FocusTerminal {
 		switch msg.String() {
-		case "ctrl+`", "ctrl+~":
+		case "ctrl+`", "ctrl+~", "alt+t":
 			return m, m.toggleTerminalPanel(), true
 		case "ctrl+q", "ctrl+shift+p", "ctrl+p", "f1", "ctrl+,":
 			// keep palette, quit, help, and settings reachable from the PTY
@@ -335,20 +335,23 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			return model, cmd, true
 		}
 		return m, nil, true
-	case "ctrl+k":
+	case "ctrl+.":
 		if m.focus == FocusEditor {
 			model, cmd := m.requestCodeActions()
 			return model, cmd, true
 		}
-		return m, nil, true
+		return m, nil, false
 	case "f12":
 		model, cmd := m.requestDefinition()
 		return model, cmd, true
 	case "shift+f12":
 		model, cmd := m.requestReferences()
 		return model, cmd, true
-	case "ctrl+-":
+	case "ctrl+-", "alt+left":
 		model, cmd := m.jumpBack()
+		return model, cmd, true
+	case "alt+right":
+		model, cmd := m.jumpForward()
 		return model, cmd, true
 	case "f2":
 		m.renameMode = true
@@ -381,7 +384,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.status = "All regions unfolded"
 		}
 		return m, nil, true
-	case "ctrl+alt+f":
+	case "ctrl+alt+f", "shift+alt+f", "alt+shift+f", "ctrl+shift+i":
 		if m.focus == FocusEditor {
 			ed := m.activeEditor()
 			if ed == nil || ed.Buffer.FilePath == "" {
@@ -465,16 +468,15 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		model, cmd := m.openCommandPalette()
 		return model, cmd, true
 	case "ctrl+tab":
-		if len(m.editors) > 1 {
-			m.activateTab((m.activeTab + 1) % len(m.editors))
-		}
+		m.activateLastUsedTab()
 		return m, nil, true
-	case "ctrl+shift+tab":
-		if len(m.editors) > 1 {
-			m.activateTab((m.activeTab - 1 + len(m.editors)) % len(m.editors))
-		}
+	case "ctrl+shift+tab", "ctrl+pgup":
+		m.cycleTab(-1)
 		return m, nil, true
-	case "ctrl+`", "ctrl+~":
+	case "ctrl+pgdown":
+		m.cycleTab(1)
+		return m, nil, true
+	case "ctrl+`", "ctrl+~", "alt+t":
 		return m, m.toggleTerminalPanel(), true
 	case "ctrl+j":
 		return m, m.toggleAgentPanel(), true

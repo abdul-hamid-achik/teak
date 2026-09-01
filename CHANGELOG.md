@@ -2,6 +2,22 @@
 
 All notable changes to the Teak editor project.
 
+## [0.22.0] - 2026-09-01
+
+### Keymap
+
+- Code actions moved from `Ctrl+K` to `Ctrl+.`.
+- `Ctrl+Shift+L` selects all occurrences; `Ctrl+U` undoes the last cursor;
+  `Shift+Alt+I` splits a selection into lines.
+- File tree hidden/ignored files no longer reuse `Ctrl+H` / `Ctrl+K`
+  (`Ctrl+.` / `Alt+H` and `Ctrl+Shift+.` / `Alt+I`).
+- Jump list supports forward (`Alt+Right`) and `Alt+Left` as well as `Ctrl+-`.
+- Format accepts `Shift+Alt+F` (and `Ctrl+Shift+I`) in addition to `Ctrl+Alt+F`.
+- `Ctrl+Tab` switches to the last used tab; `Ctrl+PageDown` / `Ctrl+PageUp`
+  cycle in strip order.
+- Integrated terminal also toggles with `Alt+T` for keyboards where
+  `` Ctrl+` `` is hard to type.
+
 ## [0.21.0] - 2026-09-01
 
 ### Daily Editor UX

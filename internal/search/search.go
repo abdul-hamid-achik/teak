@@ -157,6 +157,11 @@ func (m *Model) SetShowReplace(show bool) {
 	m.showReplace = show
 }
 
+// ShowReplace reports whether the project-search overlay is in replace mode.
+func (m Model) ShowReplace() bool {
+	return m.showReplace
+}
+
 // Results returns the current search results.
 func (m Model) Results() []Result {
 	return m.results

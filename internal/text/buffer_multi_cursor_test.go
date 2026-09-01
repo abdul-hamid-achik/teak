@@ -1143,3 +1143,37 @@ func TestBufferDropSecondaryCursorsNilSelections(t *testing.T) {
 		t.Fatal("drop with nil selections rebuilt a selection set")
 	}
 }
+
+func TestBufferUndoLastCursorReversesSelectNextOccurrence(t *testing.T) {
+	b := NewBufferFromBytes([]byte("foo foo foo\n"))
+	b.SetSelection(Position{0, 0}, Position{0, 3})
+	if !b.SelectNextOccurrence() {
+		t.Fatal("SelectNextOccurrence failed")
+	}
+	if b.Selections.Count() != 2 {
+		t.Fatalf("selection count after next = %d, want 2", b.Selections.Count())
+	}
+
+	b.UndoLastCursor()
+
+	if got := b.Selections.Count(); got != 1 {
+		t.Fatalf("selection count after undo = %d, want 1", got)
+	}
+	want := Selection{Anchor: Position{0, 0}, Head: Position{0, 3}}
+	if got := b.Selections.Primary(); got != want {
+		t.Fatalf("primary after undo = %#v, want %#v", got, want)
+	}
+}
+
+func TestBufferUndoLastCursorFallsBackToDropWhenStackEmpty(t *testing.T) {
+	b := NewBufferFromBytes([]byte("alpha beta\nalpha gamma\n"))
+	b.SetSelection(Position{0, 0}, Position{0, 5})
+	if !b.SelectAllOccurrences() {
+		t.Fatal("SelectAllOccurrences failed")
+	}
+	b.cursorUndo = nil
+	b.UndoLastCursor()
+	if got := b.Selections.Count(); got != 1 {
+		t.Fatalf("empty-stack undo count = %d, want 1", got)
+	}
+}

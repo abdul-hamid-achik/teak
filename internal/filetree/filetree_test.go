@@ -276,6 +276,14 @@ func TestTreeFilterInputAndVisibilityKeys(t *testing.T) {
 	if updated.ShowHidden() || updated.ShowGitIgnored() {
 		t.Fatalf("visibility keys did not toggle: hidden=%v ignored=%v", updated.ShowHidden(), updated.ShowGitIgnored())
 	}
+
+	hidden := updated.ShowHidden()
+	ignored := updated.ShowGitIgnored()
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "ctrl+h"})
+	updated, _ = updated.Update(tea.KeyPressMsg{Text: "ctrl+k"})
+	if updated.ShowHidden() != hidden || updated.ShowGitIgnored() != ignored {
+		t.Fatal("ctrl+h and ctrl+k must not toggle tree visibility")
+	}
 }
 
 func asyncFilterFixture(t *testing.T) Model {

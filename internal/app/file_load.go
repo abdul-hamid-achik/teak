@@ -73,6 +73,18 @@ func (m *Model) pushJump() {
 	if len(m.jumpStack) > 50 {
 		m.jumpStack = m.jumpStack[len(m.jumpStack)-50:]
 	}
+	m.jumpForwardStack = nil
+}
+
+func (m *Model) rememberJump(stack *[]jumpEntry) {
+	ed := m.activeEditor()
+	if ed == nil || ed.Buffer == nil || ed.Buffer.FilePath == "" {
+		return
+	}
+	*stack = append(*stack, jumpEntry{Path: ed.Buffer.FilePath, Pos: ed.Buffer.Cursor})
+	if len(*stack) > 50 {
+		*stack = (*stack)[len(*stack)-50:]
+	}
 }
 
 func (m Model) jumpBack() (tea.Model, tea.Cmd) {
@@ -80,8 +92,21 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 		m.status = "No previous location"
 		return m, nil
 	}
+	m.rememberJump(&m.jumpForwardStack)
 	entry := m.jumpStack[len(m.jumpStack)-1]
 	m.jumpStack = m.jumpStack[:len(m.jumpStack)-1]
+	m.setPendingCursor(entry.Path, entry.Pos)
+	return m.openFilePinned(entry.Path)
+}
+
+func (m Model) jumpForward() (tea.Model, tea.Cmd) {
+	if len(m.jumpForwardStack) == 0 {
+		m.status = "No next location"
+		return m, nil
+	}
+	m.rememberJump(&m.jumpStack)
+	entry := m.jumpForwardStack[len(m.jumpForwardStack)-1]
+	m.jumpForwardStack = m.jumpForwardStack[:len(m.jumpForwardStack)-1]
 	m.setPendingCursor(entry.Path, entry.Pos)
 	return m.openFilePinned(entry.Path)
 }

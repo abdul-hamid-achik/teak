@@ -93,6 +93,15 @@ type Buffer struct {
 	// so a missing new file is created instead of treated as a conflict, and
 	// a failed open cannot overwrite the real file with an empty buffer.
 	diskPresence DiskPresence
+	// cursorUndo stores previous multi-cursor sets so Ctrl+U can drop the last
+	// added caret without treating that as a text edit.
+	cursorUndo []cursorUndoFrame
+}
+
+type cursorUndoFrame struct {
+	selections []Selection
+	primary    int
+	cursor     Position
 }
 
 // NewBuffer creates an empty buffer.
@@ -1841,6 +1850,7 @@ func (b *Buffer) SelectWordAtCursor() {
 // the bounded synchronous scan budget.
 func (b *Buffer) SelectNextOccurrence() bool {
 	if b.Selections == nil || b.Selections.Count() == 0 || b.Selections.Primary().IsEmpty() {
+		b.pushCursorUndo()
 		b.SelectWordAtCursor()
 		return true
 	}
@@ -1867,6 +1877,7 @@ func (b *Buffer) SelectNextOccurrence() bool {
 		Anchor: b.rope.OffsetToPosition(idx),
 		Head:   b.rope.OffsetToPosition(matchEnd),
 	}
+	b.pushCursorUndo()
 	b.Selections.Add(newSel)
 	b.Selections.Normalize()
 	b.Cursor = b.Selections.PrimaryCursor()
@@ -1894,6 +1905,7 @@ func (b *Buffer) SelectAllOccurrences() bool {
 		return true
 	}
 
+	b.pushCursorUndo()
 	b.Selections.Clear()
 	idx := 0
 	for {
@@ -1920,6 +1932,7 @@ func (b *Buffer) AddCursorAbove() {
 	if b.Selections == nil {
 		return
 	}
+	b.pushCursorUndo()
 	selections := b.Selections.All()
 	for _, sel := range selections {
 		if sel.Head.Line > 0 {
@@ -1939,6 +1952,7 @@ func (b *Buffer) AddCursorBelow() {
 	if b.Selections == nil {
 		return
 	}
+	b.pushCursorUndo()
 	selections := b.Selections.All()
 	for i := len(selections) - 1; i >= 0; i-- {
 		sel := selections[i]
@@ -1956,17 +1970,74 @@ func (b *Buffer) AddCursorBelow() {
 
 // DropSecondaryCursors collapses a multi-cursor selection set back to a single
 // caret at the primary cursor. It is the keyboard escape hatch for multi-cursor
-// modes: without it, a stray Ctrl+D chain or Ctrl+U leaves every subsequent
-// keystroke editing N places until a mouse click defuses it. A single selection
-// is left untouched. The change is cursor-only, so history, version, the dirty
-// flag, and the incremental change record are all preserved.
+// modes: without it, a stray Ctrl+D chain leaves every subsequent keystroke
+// editing N places until a mouse click defuses it. A single selection is left
+// untouched. The change is cursor-only, so history, version, the dirty flag,
+// and the incremental change record are all preserved.
 func (b *Buffer) DropSecondaryCursors() {
 	if b.Selections == nil || b.Selections.Count() <= 1 {
 		return
 	}
+	b.cursorUndo = nil
 	cursor := b.Selections.PrimaryCursor()
 	b.Selections = NewSelections(cursor)
 	b.Cursor = cursor
+}
+
+func (b *Buffer) pushCursorUndo() {
+	if b == nil {
+		return
+	}
+	b.cursorUndo = append(b.cursorUndo, b.snapshotCursors())
+	if len(b.cursorUndo) > 50 {
+		b.cursorUndo = b.cursorUndo[len(b.cursorUndo)-50:]
+	}
+}
+
+func (b *Buffer) snapshotCursors() cursorUndoFrame {
+	if b.Selections == nil {
+		return cursorUndoFrame{cursor: b.Cursor}
+	}
+	all := b.Selections.All()
+	copied := make([]Selection, len(all))
+	copy(copied, all)
+	return cursorUndoFrame{
+		selections: copied,
+		primary:    b.Selections.PrimaryIndex(),
+		cursor:     b.Cursor,
+	}
+}
+
+func (b *Buffer) restoreCursors(frame cursorUndoFrame) {
+	if len(frame.selections) == 0 {
+		b.Selections = NewSelections(frame.cursor)
+		b.Cursor = frame.cursor
+		return
+	}
+	copied := make([]Selection, len(frame.selections))
+	copy(copied, frame.selections)
+	primary := frame.primary
+	if primary < 0 || primary >= len(copied) {
+		primary = 0
+	}
+	b.Selections = &Selections{selections: copied, primary: primary}
+	b.Cursor = frame.cursor
+}
+
+// UndoLastCursor restores the previous multi-cursor set. When nothing was
+// recorded, it falls back to collapsing extra carets so a stuck Ctrl+D chain
+// still has a one-key escape.
+func (b *Buffer) UndoLastCursor() {
+	if b == nil {
+		return
+	}
+	if len(b.cursorUndo) > 0 {
+		frame := b.cursorUndo[len(b.cursorUndo)-1]
+		b.cursorUndo = b.cursorUndo[:len(b.cursorUndo)-1]
+		b.restoreCursors(frame)
+		return
+	}
+	b.DropSecondaryCursors()
 }
 
 // SplitSelectionIntoLines splits the current selection into multiple selections,
@@ -1981,6 +2052,7 @@ func (b *Buffer) SplitSelectionIntoLines() {
 		return
 	}
 
+	b.pushCursorUndo()
 	start, end := primary.Ordered()
 	firstLine := start.Line
 	lastLine := end.Line

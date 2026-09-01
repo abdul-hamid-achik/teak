@@ -123,6 +123,7 @@ func (m *Model) activateTab(index int) bool {
 	}
 	if index != m.activeTab {
 		if m.activeTab >= 0 && m.activeTab < len(m.editors) {
+			m.lastEditorID = m.editors[m.activeTab].ID()
 			m.editors[m.activeTab].HideAutocomplete()
 		}
 		m.overlayRequests.invalidateAll()
@@ -137,4 +138,24 @@ func (m *Model) activateTab(index int) bool {
 		m.rememberRecentFile(path)
 	}
 	return true
+}
+
+func (m *Model) activateLastUsedTab() {
+	if m.lastEditorID != 0 {
+		for i, ed := range m.editors {
+			if ed.ID() == m.lastEditorID {
+				m.activateTab(i)
+				return
+			}
+		}
+	}
+	m.cycleTab(1)
+}
+
+func (m *Model) cycleTab(delta int) {
+	n := len(m.editors)
+	if n <= 1 {
+		return
+	}
+	m.activateTab((m.activeTab + delta%n + n) % n)
 }

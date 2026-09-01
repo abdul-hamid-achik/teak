@@ -341,29 +341,35 @@ list.
 | Commands | `Ctrl+,` | Settings |
 | Search | `Ctrl+F` | Find in the active file |
 | Search | `Ctrl+R` (find widget) | Toggle regex search |
-| Search | `Ctrl+H` | Find and replace |
-| Search | `Ctrl+Shift+F` | Search the project |
+| Search | `Ctrl+H` | Replace in the project |
+| Search | `Ctrl+Shift+F` | Find in the project |
 | Search | `Tab` | Switch text/semantic project search |
 | File tree | `/` (tree focus) | Filter project files |
-| File tree | `Ctrl+H` / `Ctrl+.` (tree focus) | Toggle hidden files |
-| File tree | `Ctrl+K` (tree focus) | Toggle Git-ignored files |
+| File tree | `Ctrl+.` / `Alt+H` (tree focus) | Toggle hidden files |
+| File tree | `Ctrl+Shift+.` / `Alt+I` (tree focus) | Toggle Git-ignored files |
 | Editing | `Ctrl+/` | Toggle comment |
 | Editing | `Alt+Up/Down` | Move line |
 | Editing | `Alt+Shift+Up/Down` | Duplicate line |
 | Selection | `Ctrl+D` | Select next occurrence |
-| Selection | `Ctrl+U` | Select all occurrences |
+| Selection | `Ctrl+U` | Undo last cursor |
+| Selection | `Ctrl+Shift+L` | Select all occurrences |
+| Selection | `Shift+Alt+I` | Split selection into lines |
 | Selection | `Ctrl+Alt+Up/Down` | Add cursor above / below |
 | Selection | `Ctrl+Shift+Home/End` | Extend selection to document start/end |
 | LSP | `Ctrl+Space` | Completion |
 | LSP | `Alt+K` | Hover information |
-| LSP | `Ctrl+K` | Code actions |
+| LSP | `Ctrl+.` | Code actions |
 | LSP | `F12` | Go to definition |
+| LSP | `Alt+Left` / `Ctrl+-` | Go back |
+| LSP | `Alt+Right` | Go forward |
 | LSP | `Ctrl+Shift+O` | Document symbols |
-| LSP | `Ctrl+Alt+F` | Format document |
+| LSP | `Shift+Alt+F` / `Ctrl+Alt+F` | Format document |
+| Tabs | `Ctrl+Tab` | Last used tab |
+| Tabs | `Ctrl+PageDown` / `Ctrl+PageUp` | Next / previous tab |
 | Panels | `Ctrl+B` | Toggle sidebar |
 | Panels | `Ctrl+Shift+G` | Open Git panel |
 | Panels | `Ctrl+J` | Toggle agent panel |
-| Panels | `` Ctrl+` `` | Toggle integrated terminal |
+| Panels | `` Ctrl+` `` / `Alt+T` | Toggle integrated terminal |
 | Splits | `Ctrl+\\` | Toggle editor split |
 | Splits | `F6` | Switch split focus |
 | Problems | `F8` / `Shift+F8` | Next / previous problem |

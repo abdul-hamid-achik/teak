@@ -556,15 +556,16 @@ func TestHelpUsesUnambiguousSelectionShortcutLabels(t *testing.T) {
 
 	for key, want := range map[string]string{
 		"Ctrl+Shift+Left/Right": "Select words",
-		"Ctrl+U":                "Select all occurrences",
-		"Ctrl+Shift+L":          "Split selection into lines",
+		"Ctrl+U":                "Undo last cursor",
+		"Ctrl+Shift+L":          "Select all occurrences",
+		"Shift+Alt+I":           "Split selection into lines",
 	} {
 		if got := bindings[key]; got != want {
 			t.Errorf("help binding %q = %q, want %q", key, got, want)
 		}
 	}
 	if _, exists := bindings["Ctrl+Shift+L/R"]; exists {
-		t.Error("help must not describe Ctrl+Shift+L as a word-selection shortcut; it splits selections")
+		t.Error("help must not describe Ctrl+Shift+L as a word-selection shortcut; it selects all occurrences")
 	}
 }
 
@@ -580,11 +581,17 @@ func TestHelpDocumentsLiveBindings(t *testing.T) {
 	}
 
 	for key, want := range map[string]string{
-		"Ctrl+Alt+Up/Down":            "Add cursor above / below",
-		"Ctrl+Shift+Home/End":         "Select to document start/end",
-		"F9":                          "Toggle breakpoint",
-		"Ctrl+H / Ctrl+. (file tree)": "Toggle hidden files",
-		"Ctrl+R (find widget)":        "Toggle regex search",
+		"Ctrl+Alt+Up/Down":                 "Add cursor above / below",
+		"Ctrl+Shift+Home/End":              "Select to document start/end",
+		"F9":                               "Toggle breakpoint",
+		"Ctrl+. / Alt+H (file tree)":       "Toggle hidden files",
+		"Ctrl+Shift+. / Alt+I (file tree)": "Toggle ignored files",
+		"Ctrl+R (find widget)":             "Toggle regex search",
+		"Ctrl+.":                           "Code actions",
+		"Alt+Left / Ctrl+-":                "Go back",
+		"Alt+Right":                        "Go forward",
+		"Ctrl+Tab":                         "Last used tab",
+		"Ctrl+PageDown / Ctrl+PageUp":      "Next / previous tab",
 	} {
 		if got := bindings[key]; got != want {
 			t.Errorf("help binding %q = %q, want %q", key, got, want)

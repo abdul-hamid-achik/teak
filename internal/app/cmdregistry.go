@@ -278,7 +278,7 @@ func (m *Model) commandRegistry() []Command {
 		{
 			ID:       "format_file",
 			Label:    "Format File",
-			Shortcut: "Ctrl+Alt+F",
+			Shortcut: "Shift+Alt+F",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: formatFileMsg{}}
 			},
@@ -302,9 +302,17 @@ func (m *Model) commandRegistry() []Command {
 		{
 			ID:       "jump_back",
 			Label:    "Go Back",
-			Shortcut: "Ctrl+-",
+			Shortcut: "Alt+Left",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: jumpBackMsg{}}
+			},
+		},
+		{
+			ID:       "jump_forward",
+			Label:    "Go Forward",
+			Shortcut: "Alt+Right",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: jumpForwardMsg{}}
 			},
 		},
 		{
@@ -318,7 +326,7 @@ func (m *Model) commandRegistry() []Command {
 		{
 			ID:       "code_actions",
 			Label:    "Code Actions...",
-			Shortcut: "Ctrl+K",
+			Shortcut: "Ctrl+.",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: codeActionsMsg{}}
 			},
@@ -414,15 +422,23 @@ func (m *Model) commandRegistry() []Command {
 		{
 			ID:       "toggle_terminal",
 			Label:    "Toggle Terminal",
-			Shortcut: "Ctrl+`",
+			Shortcut: "Ctrl+` / Alt+T",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: toggleTerminalMsg{}}
 			},
 		},
 		{
+			ID:       "last_tab",
+			Label:    "Last Used Tab",
+			Shortcut: "Ctrl+Tab",
+			Execute: func() tea.Msg {
+				return commandPaletteMsg{inner: lastTabMsg{}}
+			},
+		},
+		{
 			ID:       "next_tab",
 			Label:    "Next Tab",
-			Shortcut: "Ctrl+Tab",
+			Shortcut: "Ctrl+PageDown",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: nextTabMsg{}}
 			},
@@ -430,7 +446,7 @@ func (m *Model) commandRegistry() []Command {
 		{
 			ID:       "prev_tab",
 			Label:    "Previous Tab",
-			Shortcut: "Ctrl+Shift+Tab",
+			Shortcut: "Ctrl+PageUp",
 			Execute: func() tea.Msg {
 				return commandPaletteMsg{inner: prevTabMsg{}}
 			},
@@ -490,6 +506,8 @@ type (
 	gotoDefinitionMsg      struct{}
 	findReferencesMsg      struct{}
 	jumpBackMsg            struct{}
+	jumpForwardMsg         struct{}
+	lastTabMsg             struct{}
 	renameSymbolMsg        struct{}
 	codeActionsMsg         struct{}
 	hoverSymbolMsg         struct{}

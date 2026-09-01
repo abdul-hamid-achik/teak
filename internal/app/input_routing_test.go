@@ -1,7 +1,6 @@
 package app
 
 import (
-	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -111,18 +110,42 @@ func TestFileTreeVisibilityShortcutsAreContextual(t *testing.T) {
 	model.showTree = true
 	model.focus = FocusTree
 	model.sidebarTab = SidebarFiles
+	hiddenBefore := model.tree.ShowHidden()
+	ignoredBefore := model.tree.ShowGitIgnored()
 
-	updated := updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
-	if updated.tree.ShowHidden() {
-		t.Fatal("Ctrl+H in the file tree did not hide hidden entries")
-	}
-	if !strings.Contains(updated.status, "Hidden files hidden") {
-		t.Fatalf("status = %q, want contextual hidden-file status", updated.status)
+	updatedAny, _, handled := model.handleGlobalKey(tea.KeyPressMsg{Code: '.', Mod: tea.ModCtrl})
+	updated := updatedAny.(Model)
+	if !handled || updated.tree.ShowHidden() == hiddenBefore {
+		t.Fatal("Ctrl+. in the file tree did not toggle hidden files")
 	}
 
-	updated = updateInputRoutingModel(t, updated, tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
-	if updated.tree.ShowGitIgnored() {
-		t.Fatal("Ctrl+K in the file tree did not hide ignored entries")
+	updatedAny, _, handled = updated.handleGlobalKey(tea.KeyPressMsg{Code: '.', Mod: tea.ModCtrl | tea.ModShift})
+	updated = updatedAny.(Model)
+	if !handled || updated.tree.ShowGitIgnored() == ignoredBefore {
+		t.Fatal("Ctrl+Shift+. in the file tree did not toggle ignored files")
+	}
+
+	afterIgnored := updated.tree.ShowGitIgnored()
+	updatedAny, _, handled = updated.handleGlobalKey(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+	updated = updatedAny.(Model)
+	if handled {
+		t.Fatal("Ctrl+K in the file tree must not be a visibility shortcut")
+	}
+	if updated.tree.ShowGitIgnored() != afterIgnored {
+		t.Fatal("Ctrl+K in the file tree must not toggle ignored files")
+	}
+
+	replaced := newInputRoutingTestModel(t)
+	replaced.showTree = true
+	replaced.focus = FocusTree
+	replaced.sidebarTab = SidebarFiles
+	hiddenBefore = replaced.tree.ShowHidden()
+	replaced = updateInputRoutingModel(t, replaced, tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+	if replaced.tree.ShowHidden() != hiddenBefore {
+		t.Fatal("Ctrl+H in the file tree must open project replace, not toggle hidden files")
+	}
+	if !replaced.showSearch || !replaced.searchM.ShowReplace() {
+		t.Fatal("Ctrl+H in the file tree did not open project replace")
 	}
 }
 

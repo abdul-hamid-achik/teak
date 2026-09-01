@@ -129,9 +129,10 @@ func (m *Model) sizeEditors(editorWidth, editorHeight int) {
 //
 // bubbles' textinput and textarea bind the emacs-style chords ctrl+w (delete
 // word back), ctrl+f / ctrl+b (character forward/back), ctrl+h (backspace) and
-// ctrl+k (kill to end of line). Those chords are also global shortcuts here, and
-// the global handler runs first, so pressing ctrl+w while typing a commit
-// message or a search query closed the current tab instead of deleting a word.
+// ctrl+k (kill to end of line). Several of those chords are also global
+// shortcuts here, and the global handler runs first, so pressing ctrl+w while
+// typing a commit message or a search query closed the current tab instead of
+// deleting a word.
 func (m *Model) textInputFocused() bool {
 	if m.agentPanel.IsInputFocused() {
 		return true
@@ -225,6 +226,8 @@ type modelState struct {
 	renameCursor              int
 	pendingCursor             *pendingNavigation         // navigation tied to a target path
 	jumpStack                 []jumpEntry                // locations before Go to Definition / References
+	jumpForwardStack          []jumpEntry                // locations popped by Go Back
+	lastEditorID              uint64                     // previous tab for Ctrl+Tab MRU
 	startupCursors            map[string]text.Position   // CLI/startup line:col applied after first load
 	startupFiles              []StartupFile              // CLI files merged with session restore
 	pendingFileLoads          map[uint64]pendingFileLoad // request identity -> target editor
@@ -6566,6 +6569,8 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.requestReferences()
 	case jumpBackMsg:
 		return m.jumpBack()
+	case jumpForwardMsg:
+		return m.jumpForward()
 	case renameSymbolMsg:
 		m.renameMode = true
 		m.renameInput = ""
@@ -6620,15 +6625,14 @@ func (m Model) handleCommandPaletteAction(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "All regions unfolded"
 		}
 		return m, nil
+	case lastTabMsg:
+		m.activateLastUsedTab()
+		return m, nil
 	case nextTabMsg:
-		if len(m.editors) > 1 {
-			m.activateTab((m.activeTab + 1) % len(m.editors))
-		}
+		m.cycleTab(1)
 		return m, nil
 	case prevTabMsg:
-		if len(m.editors) > 1 {
-			m.activateTab((m.activeTab - 1 + len(m.editors)) % len(m.editors))
-		}
+		m.cycleTab(-1)
 		return m, nil
 	case nextProblemMsg:
 		return m.jumpToProblem(false)

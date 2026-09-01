@@ -192,3 +192,34 @@ func TestFoldAllMovesCaretOffHiddenLine(t *testing.T) {
 		t.Fatalf("caret still on hidden line %d", ed.Buffer.Cursor.Line)
 	}
 }
+
+func TestCtrlShiftLSelectsAllOccurrences(t *testing.T) {
+	ed := newEditor("foo foo foo\n", 0, 0)
+	ed.Buffer.SetSelection(text.Position{}, text.Position{Col: 3})
+	ed, _ = ed.Update(tea.KeyPressMsg{Text: "ctrl+shift+l"})
+	if got := ed.Buffer.Selections.Count(); got != 3 {
+		t.Fatalf("ctrl+shift+l selection count = %d, want 3", got)
+	}
+}
+
+func TestCtrlUUndoesLastCursor(t *testing.T) {
+	ed := newEditor("foo foo foo\n", 0, 0)
+	ed.Buffer.SetSelection(text.Position{}, text.Position{Col: 3})
+	ed, _ = ed.Update(tea.KeyPressMsg{Text: "ctrl+d"})
+	if got := ed.Buffer.Selections.Count(); got != 2 {
+		t.Fatalf("ctrl+d selection count = %d, want 2", got)
+	}
+	ed, _ = ed.Update(tea.KeyPressMsg{Text: "ctrl+u"})
+	if got := ed.Buffer.Selections.Count(); got != 1 {
+		t.Fatalf("ctrl+u selection count = %d, want 1", got)
+	}
+}
+
+func TestShiftAltISplitsSelectionIntoLines(t *testing.T) {
+	ed := newEditor("alpha\nbeta\n", 0, 0)
+	ed.Buffer.SetSelection(text.Position{}, text.Position{Line: 1, Col: 4})
+	ed, _ = ed.Update(tea.KeyPressMsg{Text: "shift+alt+i"})
+	if got := ed.Buffer.Selections.Count(); got != 2 {
+		t.Fatalf("shift+alt+i selection count = %d, want 2", got)
+	}
+}

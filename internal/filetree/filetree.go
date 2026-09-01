@@ -738,10 +738,10 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "/", "slash":
 		m.StartFilter()
 		return m, nil
-	case "alt+h", "ctrl+h", "ctrl+.":
+	case "alt+h", "ctrl+.":
 		_, cmd := m.ToggleShowHiddenAsync()
 		return m, cmd
-	case "alt+i", "ctrl+shift+h", "ctrl+shift+.", "ctrl+k":
+	case "alt+i", "ctrl+shift+h", "ctrl+shift+.":
 		_, cmd := m.ToggleShowGitIgnoredAsync()
 		return m, cmd
 	}

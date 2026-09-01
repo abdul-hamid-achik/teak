@@ -17,10 +17,10 @@ func TestCommandRegistryCoversCoreShortcuts(t *testing.T) {
 		ids[cmd.ID] = cmd
 	}
 	wanted := []string{
-		"format_file", "goto_definition", "find_references", "jump_back", "rename_symbol", "code_actions",
+		"format_file", "goto_definition", "find_references", "jump_back", "jump_forward", "rename_symbol", "code_actions",
 		"hover", "document_symbols", "toggle_split", "close_split",
 		"cycle_split", "toggle_breakpoint", "fold", "unfold", "fold_all",
-		"unfold_all", "toggle_word_wrap", "toggle_terminal", "next_tab", "prev_tab", "next_problem", "prev_problem",
+		"unfold_all", "toggle_word_wrap", "toggle_terminal", "last_tab", "next_tab", "prev_tab", "next_problem", "prev_problem",
 	}
 	for _, id := range wanted {
 		if _, ok := ids[id]; !ok {
