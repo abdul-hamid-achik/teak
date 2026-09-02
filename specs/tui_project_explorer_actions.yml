@@ -36,8 +36,9 @@ steps:
         contains: ".env"
       timeoutMs: 5000
   - mouse: {x: 2, y: 0, button: left, action: click}
-  - press: "ctrl+."
-  - press: "ctrl+shift+."
+  # Kitty CSI-u: Glyphrun cannot emit Ctrl+. / Ctrl+Shift+. via press.
+  - send: {bytes: "\\x1b[46;5u"}
+  - send: {bytes: "\\x1b[46;6u"}
   - wait:
       screen:
         contains: "rename-me.txt"

@@ -36,12 +36,14 @@ steps:
         contains: ".env"
       timeoutMs: 5000
   - mouse: {x: 2, y: 0, button: left, action: click}
-  - press: "ctrl+."
+  # Kitty CSI-u: Glyphrun's press aliases only accept ctrl+letter, while
+  # Bubble Tea needs the full Ctrl+. / Ctrl+Shift+. events.
+  - send: {bytes: "\\x1b[46;5u"}
   - wait:
       screen:
         notContains: ".env"
       timeoutMs: 3000
-  - press: "ctrl+shift+."
+  - send: {bytes: "\\x1b[46;6u"}
   - wait:
       screen:
         notContains: "ignored.log"
