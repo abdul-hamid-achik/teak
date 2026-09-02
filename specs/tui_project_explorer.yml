@@ -36,12 +36,12 @@ steps:
         contains: ".env"
       timeoutMs: 5000
   - mouse: {x: 2, y: 0, button: left, action: click}
-  - press: "ctrl+h"
+  - press: "ctrl+."
   - wait:
       screen:
         notContains: ".env"
       timeoutMs: 3000
-  - press: "ctrl+k"
+  - press: "ctrl+shift+."
   - wait:
       screen:
         notContains: "ignored.log"
@@ -65,12 +65,12 @@ steps:
       timeoutMs: 3000
 outcomes:
   - id: hidden_files_toggle
-    description: Alt+H removes dotfiles from the visible tree
+    description: Ctrl+. removes dotfiles from the visible tree
     verify:
       screen:
         notContains: ".env"
   - id: ignored_files_toggle
-    description: Alt+I removes gitignored files from the visible tree
+    description: Ctrl+Shift+. removes gitignored files from the visible tree
     verify:
       screen:
         notContains: "ignored.log"

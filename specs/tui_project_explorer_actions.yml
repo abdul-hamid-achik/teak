@@ -36,8 +36,8 @@ steps:
         contains: ".env"
       timeoutMs: 5000
   - mouse: {x: 2, y: 0, button: left, action: click}
-  - press: "ctrl+h"
-  - press: "ctrl+k"
+  - press: "ctrl+."
+  - press: "ctrl+shift+."
   - wait:
       screen:
         contains: "rename-me.txt"
