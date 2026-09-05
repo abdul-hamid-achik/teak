@@ -79,6 +79,24 @@ func New(filePath string, lines []DiffLine, theme ui.Theme) Model {
 	return m
 }
 
+// SetTheme replaces syntax highlighters and returns asynchronous work for the
+// visible viewport. It never tokenizes in the Bubble Tea update loop.
+func (m *Model) SetTheme(theme ui.Theme) tea.Cmd {
+	if theme == m.theme {
+		return nil
+	}
+	if m.highlighting != nil && m.highlighting.viewport.cancel != nil {
+		m.highlighting.viewport.cancel()
+	}
+	m.theme = theme
+	m.leftHL = highlight.New(m.FilePath, theme)
+	m.rightHL = highlight.New(m.FilePath, theme)
+	if m.highlighting != nil {
+		m.highlighting.viewport.generation++
+	}
+	return m.scheduleViewportHighlight()
+}
+
 // buildHighlighting prepares immutable per-side indexes for syntax coloring.
 // Tokenization is deliberately deferred to PrepareViewport: a large diff must
 // not allocate styled tokens for lines that have never been visible.
@@ -128,8 +146,9 @@ func (m *Model) buildHighlighting() {
 // requested diff rows. It is intended for a background command; the source
 // slices are immutable after New returns.
 func (m *Model) PrepareViewport(ctx context.Context, viewStart, viewEnd int) bool {
-	result := prepareViewportHighlight(
+	result := prepareViewportHighlightWithTheme(
 		ctx,
+		m.theme,
 		m.leftHL,
 		m.rightHL,
 		m.leftSource,
@@ -163,6 +182,10 @@ type viewportHighlightResult struct {
 }
 
 func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Highlighter, leftSource, rightSource []string, leftKinds, rightKinds []LineKind, leftMap, rightMap []int, totalLines, viewStart, viewEnd int) viewportHighlightResult {
+	return prepareViewportHighlightWithTheme(ctx, ui.DefaultTheme(), leftHL, rightHL, leftSource, rightSource, leftKinds, rightKinds, leftMap, rightMap, totalLines, viewStart, viewEnd)
+}
+
+func prepareViewportHighlightWithTheme(ctx context.Context, theme ui.Theme, leftHL, rightHL *highlight.Highlighter, leftSource, rightSource []string, leftKinds, rightKinds []LineKind, leftMap, rightMap []int, totalLines, viewStart, viewEnd int) viewportHighlightResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -185,10 +208,10 @@ func prepareViewportHighlight(ctx context.Context, leftHL, rightHL *highlight.Hi
 	}
 	styles := make(map[diffTokenStyleKey]highlight.StyledToken)
 	if leftOK {
-		applyDiffBackgrounds(&result.leftBatch, leftKinds, styles)
+		applyDiffBackgrounds(&result.leftBatch, leftKinds, styles, theme)
 	}
 	if rightOK {
-		applyDiffBackgrounds(&result.rightBatch, rightKinds, styles)
+		applyDiffBackgrounds(&result.rightBatch, rightKinds, styles, theme)
 	}
 	result.complete = ctx.Err() == nil
 	return result
@@ -200,7 +223,7 @@ type diffTokenStyleKey struct {
 	fast           bool
 }
 
-func applyDiffBackgrounds(batch *highlight.TokenBatch, kinds []LineKind, styles map[diffTokenStyleKey]highlight.StyledToken) {
+func applyDiffBackgrounds(batch *highlight.TokenBatch, kinds []LineKind, styles map[diffTokenStyleKey]highlight.StyledToken, theme ui.Theme) {
 	for lineOffset := range batch.Lines {
 		lineIndex := batch.StartLine + lineOffset
 		if lineIndex < 0 || lineIndex >= len(kinds) {
@@ -210,7 +233,7 @@ func applyDiffBackgrounds(batch *highlight.TokenBatch, kinds []LineKind, styles 
 			key := diffTokenStyleKey{kind: kinds[lineIndex], prefix: token.Prefix, suffix: token.Suffix, fast: token.FastSGR}
 			styled, ok := styles[key]
 			if !ok || !token.FastSGR {
-				styled = token.WithBackground(backgroundForKind(kinds[lineIndex]))
+				styled = token.WithBackground(backgroundForKindWithTheme(kinds[lineIndex], theme))
 				if token.FastSGR {
 					styles[key] = styled
 				}
@@ -350,11 +373,12 @@ func (m *Model) scheduleViewportHighlight() tea.Cmd {
 	leftSource, rightSource := m.leftSource, m.rightSource
 	leftKinds, rightKinds := m.leftKinds, m.rightKinds
 	leftMap, rightMap := m.leftLineMap, m.rightLineMap
+	theme := m.theme
 	totalLines := len(m.Lines)
 	viewStart := m.ScrollY
 	viewEnd := min(totalLines, viewStart+max(1, m.Height))
 	return func() tea.Msg {
-		result := prepareViewportHighlight(ctx, leftHL, rightHL, leftSource, rightSource, leftKinds, rightKinds, leftMap, rightMap, totalLines, viewStart, viewEnd)
+		result := prepareViewportHighlightWithTheme(ctx, theme, leftHL, rightHL, leftSource, rightSource, leftKinds, rightKinds, leftMap, rightMap, totalLines, viewStart, viewEnd)
 		return HighlightReadyMsg{
 			modelID: modelID, generation: generation,
 			leftBatch: result.leftBatch, rightBatch: result.rightBatch,
@@ -505,19 +529,24 @@ func (m Model) renderGutter(num int, kind LineKind, width int) string {
 
 // bgForKind returns the background color for a diff line kind.
 func (m Model) bgForKind(kind LineKind) color.Color {
-	return backgroundForKind(kind)
+	return backgroundForKindWithTheme(kind, m.theme)
 }
 
+// backgroundForKind preserves the package helper used by older tests.
 func backgroundForKind(kind LineKind) color.Color {
+	return backgroundForKindWithTheme(kind, ui.DefaultTheme())
+}
+
+func backgroundForKindWithTheme(kind LineKind, theme ui.Theme) color.Color {
 	switch kind {
 	case KindAdded:
-		return lipgloss.Color("#2E3B2E")
+		return theme.DiffAdded.GetBackground()
 	case KindRemoved:
-		return lipgloss.Color("#3B2C2E")
+		return theme.DiffRemoved.GetBackground()
 	case KindEmpty:
-		return ui.Nord1
+		return theme.DiffEmpty.GetBackground()
 	default:
-		return ui.Nord0
+		return theme.Editor.GetBackground()
 	}
 }
 
@@ -525,9 +554,9 @@ func backgroundForKind(kind LineKind) color.Color {
 func (m Model) fgForKind(kind LineKind) color.Color {
 	switch kind {
 	case KindEmpty:
-		return ui.Nord3
+		return m.theme.DiffEmpty.GetForeground()
 	default:
-		return ui.Nord4
+		return m.theme.Editor.GetForeground()
 	}
 }
 
@@ -574,7 +603,7 @@ func (m Model) renderContentHighlighted(text string, kind LineKind, width int, t
 }
 
 func (m Model) renderEmptyPanel(width int) string {
-	return lipgloss.NewStyle().Background(ui.Nord0).Width(width).Render("")
+	return lipgloss.NewStyle().Background(m.theme.Editor.GetBackground()).Width(width).Render("")
 }
 
 func (m Model) renderSeparator(width int) string {
@@ -584,7 +613,7 @@ func (m Model) renderSeparator(width int) string {
 }
 
 func (m Model) borderStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(ui.Nord3)
+	return lipgloss.NewStyle().Foreground(m.theme.DiffBorder.GetForeground())
 }
 
 // truncateToWidth truncates s to at most width display columns.

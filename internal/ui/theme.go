@@ -2,7 +2,9 @@ package ui
 
 import (
 	"image/color"
+	"math"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 )
 
@@ -34,6 +36,43 @@ var (
 // immutable themeStyles graph; copied Theme values deliberately share it.
 type Theme struct {
 	*themeStyles
+}
+
+// ApplyTextInputTheme gives Bubbles inputs explicit foregrounds so light
+// Teak themes remain readable even when the terminal profile itself is dark.
+func ApplyTextInputTheme(input *textinput.Model, theme Theme) {
+	styles := input.Styles()
+	textStyle := lipgloss.NewStyle().Foreground(theme.Editor.GetForeground())
+	mutedStyle := lipgloss.NewStyle().Foreground(theme.Gutter.GetForeground())
+	accentStyle := lipgloss.NewStyle().Foreground(theme.PromptAccent.GetForeground())
+	styles.Focused.Text = textStyle
+	styles.Focused.Placeholder = mutedStyle
+	styles.Focused.Suggestion = mutedStyle
+	styles.Focused.Prompt = accentStyle
+	styles.Blurred.Text = textStyle
+	styles.Blurred.Placeholder = mutedStyle
+	styles.Blurred.Suggestion = mutedStyle
+	styles.Blurred.Prompt = mutedStyle
+	styles.Cursor.Color = theme.PromptAccent.GetForeground()
+	input.SetStyles(styles)
+}
+
+// ThemeVariant identifies whether a theme is intended for a dark or light
+// terminal background.
+type ThemeVariant string
+
+const (
+	ThemeDark  ThemeVariant = "dark"
+	ThemeLight ThemeVariant = "light"
+)
+
+// ThemeOption describes a theme available to the UI. The catalog is kept in
+// display order so settings and other consumers present the same choices.
+type ThemeOption struct {
+	ID          string
+	Name        string
+	Variant     ThemeVariant
+	Constructor func() Theme
 }
 
 // themeStyles is private to keep construction centralized. Theme values are
@@ -144,15 +183,15 @@ type themeStyles struct {
 	FoldCollapsed      lipgloss.Style
 	FoldExpanded       lipgloss.Style
 
-	IndentGuide lipgloss.Style
-	TrailingWS  lipgloss.Style
-	Ruler       lipgloss.Style
-	GitGutterAdd    lipgloss.Style
-	GitGutterMod    lipgloss.Style
-	GitGutterDel    lipgloss.Style
-	PromptAccent    lipgloss.Style
-	PromptMuted     lipgloss.Style
-	PromptDanger    lipgloss.Style
+	IndentGuide  lipgloss.Style
+	TrailingWS   lipgloss.Style
+	Ruler        lipgloss.Style
+	GitGutterAdd lipgloss.Style
+	GitGutterMod lipgloss.Style
+	GitGutterDel lipgloss.Style
+	PromptAccent lipgloss.Style
+	PromptMuted  lipgloss.Style
+	PromptDanger lipgloss.Style
 
 	// Syntax highlighting colors
 	SyntaxKeyword   color.Color
@@ -166,22 +205,56 @@ type themeStyles struct {
 	SyntaxAttribute color.Color
 }
 
+var themeOptions = []ThemeOption{
+	{ID: "nord", Name: "Nord", Variant: ThemeDark, Constructor: NordTheme},
+	{ID: "dracula", Name: "Dracula", Variant: ThemeDark, Constructor: DraculaTheme},
+	{ID: "catppuccin", Name: "Catppuccin Mocha", Variant: ThemeDark, Constructor: CatppuccinTheme},
+	{ID: "solarized-dark", Name: "Solarized Dark", Variant: ThemeDark, Constructor: SolarizedDarkTheme},
+	{ID: "one-dark", Name: "One Dark", Variant: ThemeDark, Constructor: OneDarkTheme},
+	{ID: "github-dark", Name: "GitHub Dark", Variant: ThemeDark, Constructor: GitHubDarkTheme},
+	{ID: "github-light", Name: "GitHub Light", Variant: ThemeLight, Constructor: GitHubLightTheme},
+	{ID: "tokyo-night", Name: "Tokyo Night", Variant: ThemeDark, Constructor: TokyoNightTheme},
+	{ID: "ayu-mirage", Name: "Ayu Mirage", Variant: ThemeDark, Constructor: AyuMirageTheme},
+	{ID: "solarized-light", Name: "Solarized Light", Variant: ThemeLight, Constructor: SolarizedLightTheme},
+	{ID: "catppuccin-latte", Name: "Catppuccin Latte", Variant: ThemeLight, Constructor: CatppuccinLatteTheme},
+	{ID: "gruvbox-dark", Name: "Gruvbox Dark", Variant: ThemeDark, Constructor: GruvboxDarkTheme},
+	{ID: "monokai", Name: "Monokai", Variant: ThemeDark, Constructor: MonokaiTheme},
+	{ID: "night-owl", Name: "Night Owl", Variant: ThemeDark, Constructor: NightOwlTheme},
+	{ID: "material-palenight", Name: "Material Palenight", Variant: ThemeDark, Constructor: MaterialPalenightTheme},
+}
+
+// ThemeOptions returns a copy of the supported themes in display order.
+func ThemeOptions() []ThemeOption {
+	return append([]ThemeOption(nil), themeOptions...)
+}
+
+// ThemeIDs returns a copy of the supported theme IDs in display order.
+func ThemeIDs() []string {
+	ids := make([]string, len(themeOptions))
+	for i, option := range themeOptions {
+		ids[i] = option.ID
+	}
+	return ids
+}
+
+// HasTheme reports whether name is a supported theme ID.
+func HasTheme(name string) bool {
+	for _, option := range themeOptions {
+		if option.ID == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ThemeByName returns a theme by name string. Falls back to Nord if unknown.
 func ThemeByName(name string) Theme {
-	switch name {
-	case "nord":
-		return NordTheme()
-	case "dracula":
-		return DraculaTheme()
-	case "catppuccin":
-		return CatppuccinTheme()
-	case "solarized-dark":
-		return SolarizedDarkTheme()
-	case "one-dark":
-		return OneDarkTheme()
-	default:
-		return NordTheme()
+	for _, option := range themeOptions {
+		if option.ID == name {
+			return option.Constructor()
+		}
 	}
+	return NordTheme()
 }
 
 // NordTheme returns the Nord-themed styles.
@@ -201,7 +274,7 @@ func defaultNordTheme() Theme {
 			Foreground(Nord4),
 		Gutter: lipgloss.NewStyle().
 			Background(Nord0).
-			Foreground(Nord3).
+			Foreground(readableTextOnColor(Nord0, Nord3, Nord4)).
 			PaddingRight(1),
 		GutterActive: lipgloss.NewStyle().
 			Background(Nord0).
@@ -213,7 +286,7 @@ func defaultNordTheme() Theme {
 			Foreground(Nord6),
 		SecondarySelection: lipgloss.NewStyle().
 			Background(Nord10).
-			Foreground(Nord6),
+			Foreground(readableTextOnColor(Nord10, Nord6)),
 		FindMatch: lipgloss.NewStyle().
 			Background(Nord3).
 			Foreground(Nord6),
@@ -227,7 +300,7 @@ func defaultNordTheme() Theme {
 			Foreground(Nord4),
 		StatusText: lipgloss.NewStyle().
 			Background(Nord10).
-			Foreground(Nord6).
+			Foreground(textOnColor(Nord10)).
 			Padding(0, 1),
 		HelpBorder: lipgloss.NewStyle().
 			Background(Nord1).
@@ -254,14 +327,14 @@ func defaultNordTheme() Theme {
 			Bold(true),
 		TabInactive: lipgloss.NewStyle().
 			Background(Nord0).
-			Foreground(Nord3).
+			Foreground(readableTextOnColor(Nord0, Nord3, Nord4)).
 			Padding(0, 1),
 		TabCloseActive: lipgloss.NewStyle().
 			Background(Nord1).
 			Foreground(Nord4),
 		TabCloseInactive: lipgloss.NewStyle().
 			Background(Nord0).
-			Foreground(Nord3),
+			Foreground(readableTextOnColor(Nord0, Nord3, Nord4)),
 		TabBar: lipgloss.NewStyle().
 			Background(Nord0),
 
@@ -362,7 +435,7 @@ func defaultNordTheme() Theme {
 			Foreground(Nord3),
 		DiffGutter: lipgloss.NewStyle().
 			Background(Nord0).
-			Foreground(Nord3),
+			Foreground(readableTextOnColor(Nord0, Nord3, Nord4)),
 		DiffBorder: lipgloss.NewStyle().
 			Foreground(Nord3),
 		DiffHunkHeader: lipgloss.NewStyle().
@@ -377,7 +450,7 @@ func defaultNordTheme() Theme {
 			Padding(0, 1),
 		SidebarTabInactive: lipgloss.NewStyle().
 			Background(Nord0).
-			Foreground(Nord3).
+			Foreground(readableTextOnColor(Nord0, Nord3, Nord4)).
 			Padding(0, 1),
 
 		// Git action buttons & sections
@@ -392,7 +465,7 @@ func defaultNordTheme() Theme {
 			Bold(true),
 		GitPushPullButton: lipgloss.NewStyle().
 			Background(Nord10).
-			Foreground(Nord6).
+			Foreground(textOnColor(Nord10)).
 			Padding(0, 1),
 		GitSectionHeader: lipgloss.NewStyle().
 			Foreground(Nord8).
@@ -474,7 +547,7 @@ func defaultNordTheme() Theme {
 		SyntaxFunction:  Nord8,
 		SyntaxString:    Nord14,
 		SyntaxNumber:    Nord15,
-		SyntaxComment:   Nord3,
+		SyntaxComment:   readableTextOnColor(Nord0, Nord3, Nord4),
 		SyntaxType:      Nord7,
 		SyntaxOperator:  Nord9,
 		SyntaxTag:       Nord9,
@@ -498,18 +571,54 @@ type palette struct {
 	accent               color.Color
 }
 
+// textOnColor chooses the higher-contrast black or white text for a filled
+// control, using relative sRGB luminance. A theme's normal foreground can be
+// unreadable on its accent color even when it works on the editor background.
+func textOnColor(background color.Color) color.Color {
+	luminance := relativeLuminance(background)
+	if (luminance+0.05)/0.05 >= 1.05/(luminance+0.05) {
+		return color.Black
+	}
+	return color.White
+}
+
+// Preserve the palette's text unless its fill makes that text hard to read.
+func readableTextOnColor(background color.Color, candidates ...color.Color) color.Color {
+	bg := relativeLuminance(background)
+	for _, candidate := range candidates {
+		fg := relativeLuminance(candidate)
+		if (max(fg, bg)+0.05)/(min(fg, bg)+0.05) >= 4.5 {
+			return candidate
+		}
+	}
+	return textOnColor(background)
+}
+
+func relativeLuminance(c color.Color) float64 {
+	linear := func(v uint32) float64 {
+		x := float64(v) / 65535
+		if x <= 0.04045 {
+			return x / 12.92
+		}
+		return math.Pow((x+0.055)/1.055, 2.4)
+	}
+	r, g, b, _ := c.RGBA()
+	return 0.2126*linear(r) + 0.7152*linear(g) + 0.0722*linear(b)
+}
+
 func buildTheme(p palette) Theme {
+	onBlue := textOnColor(p.blue)
 	return Theme{themeStyles: &themeStyles{
 		Editor:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0),
-		Gutter:              lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).PaddingRight(1),
+		Gutter:              lipgloss.NewStyle().Background(p.bg0).Foreground(readableTextOnColor(p.bg0, p.bg3, p.fg1)).PaddingRight(1),
 		GutterActive:        lipgloss.NewStyle().Background(p.bg0).Foreground(p.fg0).PaddingRight(1).Bold(true),
 		Selection:           lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
-		SecondarySelection:  lipgloss.NewStyle().Background(p.bg3).Foreground(p.fg1),
-		FindMatch:           lipgloss.NewStyle().Background(p.bg3).Foreground(p.fg0),
-		FindMatchCurrent:    lipgloss.NewStyle().Background(p.yellow).Foreground(p.bg0),
+		SecondarySelection:  lipgloss.NewStyle().Background(p.bg3).Foreground(readableTextOnColor(p.bg3, p.fg1)),
+		FindMatch:           lipgloss.NewStyle().Background(p.bg3).Foreground(readableTextOnColor(p.bg3, p.fg0)),
+		FindMatchCurrent:    lipgloss.NewStyle().Background(p.yellow).Foreground(readableTextOnColor(p.yellow, p.bg0)),
 		CursorLine:          lipgloss.NewStyle().Background(p.bg1),
 		StatusBar:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		StatusText:          lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
+		StatusText:          lipgloss.NewStyle().Background(p.blue).Foreground(onBlue).Padding(0, 1),
 		HelpBorder:          lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
 		HelpTitle:           lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
 		HelpKey:             lipgloss.NewStyle().Foreground(p.yellow),
@@ -517,9 +626,9 @@ func buildTheme(p palette) Theme {
 		TreeCursor:          lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2),
 		TreeBorder:          lipgloss.NewStyle().Foreground(p.bg3),
 		TabActive:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg2).Padding(0, 1).Bold(true),
-		TabInactive:         lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
+		TabInactive:         lipgloss.NewStyle().Background(p.bg0).Foreground(readableTextOnColor(p.bg0, p.bg3, p.fg1)).Padding(0, 1),
 		TabCloseActive:      lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
-		TabCloseInactive:    lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
+		TabCloseInactive:    lipgloss.NewStyle().Background(p.bg0).Foreground(readableTextOnColor(p.bg0, p.bg3, p.fg1)),
 		TabBar:              lipgloss.NewStyle().Background(p.bg0),
 		SearchBox:           lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(p.bg3).Background(p.bg1).Padding(1, 2),
 		SearchInput:         lipgloss.NewStyle().Foreground(p.fg0),
@@ -544,17 +653,17 @@ func buildTheme(p palette) Theme {
 		GitModified:         lipgloss.NewStyle().Foreground(p.yellow),
 		GitDeleted:          lipgloss.NewStyle().Foreground(p.red),
 		GitUntracked:        lipgloss.NewStyle().Foreground(p.bg3),
-		DiffRemoved:         lipgloss.NewStyle().Background(p.diffRemovedBg).Foreground(p.fg0),
-		DiffAdded:           lipgloss.NewStyle().Background(p.diffAddedBg).Foreground(p.fg0),
+		DiffRemoved:         lipgloss.NewStyle().Background(p.diffRemovedBg).Foreground(readableTextOnColor(p.diffRemovedBg, p.fg0)),
+		DiffAdded:           lipgloss.NewStyle().Background(p.diffAddedBg).Foreground(readableTextOnColor(p.diffAddedBg, p.fg0)),
 		DiffEmpty:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
-		DiffGutter:          lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3),
+		DiffGutter:          lipgloss.NewStyle().Background(p.bg0).Foreground(readableTextOnColor(p.bg0, p.bg3, p.fg1)),
 		DiffBorder:          lipgloss.NewStyle().Foreground(p.bg3),
 		DiffHunkHeader:      lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
 		SidebarTabActive:    lipgloss.NewStyle().Background(p.bg1).Foreground(p.cyan).Bold(true).Padding(0, 1),
-		SidebarTabInactive:  lipgloss.NewStyle().Background(p.bg0).Foreground(p.bg3).Padding(0, 1),
+		SidebarTabInactive:  lipgloss.NewStyle().Background(p.bg0).Foreground(readableTextOnColor(p.bg0, p.bg3, p.fg1)).Padding(0, 1),
 		GitActionButton:     lipgloss.NewStyle().Background(p.bg2).Foreground(p.fg2).Padding(0, 1),
-		GitCommitButton:     lipgloss.NewStyle().Background(p.green).Foreground(p.bg0).Padding(0, 1).Bold(true),
-		GitPushPullButton:   lipgloss.NewStyle().Background(p.blue).Foreground(p.fg2).Padding(0, 1),
+		GitCommitButton:     lipgloss.NewStyle().Background(p.green).Foreground(readableTextOnColor(p.green, p.bg0)).Padding(0, 1).Bold(true),
+		GitPushPullButton:   lipgloss.NewStyle().Background(p.blue).Foreground(onBlue).Padding(0, 1),
 		GitSectionHeader:    lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
 		GitBranch:           lipgloss.NewStyle().Foreground(p.purple).Bold(true),
 		GitCommitInput:      lipgloss.NewStyle().Background(p.bg1).Foreground(p.fg0),
@@ -586,7 +695,7 @@ func buildTheme(p palette) Theme {
 		SyntaxFunction:      p.function,
 		SyntaxString:        p.str,
 		SyntaxNumber:        p.number,
-		SyntaxComment:       p.comment,
+		SyntaxComment:       readableTextOnColor(p.bg0, p.comment, p.fg1),
 		SyntaxType:          p.typ,
 		SyntaxOperator:      p.operator,
 		SyntaxTag:           p.tag,
@@ -675,5 +784,218 @@ func OneDarkTheme() Theme {
 		attribute:     lipgloss.Color("#D19A66"),
 		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
 		accent: lipgloss.Color("#61AFEF"),
+	})
+}
+
+// GitHubDarkTheme returns the GitHub Dark Default palette.
+func GitHubDarkTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#0D1117"), bg1: lipgloss.Color("#161B22"),
+		bg2: lipgloss.Color("#21262D"), bg3: lipgloss.Color("#484F58"),
+		fg0: lipgloss.Color("#C9D1D9"), fg1: lipgloss.Color("#8B949E"),
+		fg2: lipgloss.Color("#F0F6FC"),
+		red: lipgloss.Color("#F85149"), orange: lipgloss.Color("#DB6D28"),
+		yellow: lipgloss.Color("#D29922"), green: lipgloss.Color("#3FB950"),
+		cyan: lipgloss.Color("#39C5CF"), blue: lipgloss.Color("#58A6FF"),
+		purple:  lipgloss.Color("#BC8CFF"),
+		keyword: lipgloss.Color("#FF7B72"), function: lipgloss.Color("#D2A8FF"),
+		str: lipgloss.Color("#A5D6FF"), number: lipgloss.Color("#79C0FF"),
+		comment: lipgloss.Color("#8B949E"), typ: lipgloss.Color("#FFA657"),
+		operator: lipgloss.Color("#FF7B72"), tag: lipgloss.Color("#7EE787"),
+		attribute:     lipgloss.Color("#79C0FF"),
+		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
+		accent: lipgloss.Color("#58A6FF"),
+	})
+}
+
+// GitHubLightTheme returns the GitHub Light Default palette.
+func GitHubLightTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#FFFFFF"), bg1: lipgloss.Color("#F6F8FA"),
+		bg2: lipgloss.Color("#EAECEF"), bg3: lipgloss.Color("#8C959F"),
+		fg0: lipgloss.Color("#24292F"), fg1: lipgloss.Color("#57606A"),
+		fg2: lipgloss.Color("#1F2328"),
+		red: lipgloss.Color("#CF222E"), orange: lipgloss.Color("#BC4C00"),
+		yellow: lipgloss.Color("#9A6700"), green: lipgloss.Color("#1A7F37"),
+		cyan: lipgloss.Color("#0A7B83"), blue: lipgloss.Color("#0969DA"),
+		purple:  lipgloss.Color("#8250DF"),
+		keyword: lipgloss.Color("#CF222E"), function: lipgloss.Color("#8250DF"),
+		str: lipgloss.Color("#0A3069"), number: lipgloss.Color("#0550AE"),
+		comment: lipgloss.Color("#57606A"), typ: lipgloss.Color("#953800"),
+		operator: lipgloss.Color("#CF222E"), tag: lipgloss.Color("#116329"),
+		attribute:     lipgloss.Color("#0550AE"),
+		diffRemovedBg: lipgloss.Color("#FFEBE9"), diffAddedBg: lipgloss.Color("#DAFBE1"),
+		accent: lipgloss.Color("#0969DA"),
+	})
+}
+
+// TokyoNightTheme returns the Tokyo Night Storm-inspired palette.
+func TokyoNightTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#1A1B26"), bg1: lipgloss.Color("#16161E"),
+		bg2: lipgloss.Color("#292E42"), bg3: lipgloss.Color("#565F89"),
+		fg0: lipgloss.Color("#A9B1D6"), fg1: lipgloss.Color("#787C99"),
+		fg2: lipgloss.Color("#C0CAF5"),
+		red: lipgloss.Color("#F7768E"), orange: lipgloss.Color("#FF9E64"),
+		yellow: lipgloss.Color("#E0AF68"), green: lipgloss.Color("#73DACA"),
+		cyan: lipgloss.Color("#7DCFFF"), blue: lipgloss.Color("#7AA2F7"),
+		purple:  lipgloss.Color("#BB9AF7"),
+		keyword: lipgloss.Color("#BB9AF7"), function: lipgloss.Color("#7AA2F7"),
+		str: lipgloss.Color("#9ECE6A"), number: lipgloss.Color("#FF9E64"),
+		comment: lipgloss.Color("#565F89"), typ: lipgloss.Color("#2AC3DE"),
+		operator: lipgloss.Color("#89DDFF"), tag: lipgloss.Color("#F7768E"),
+		attribute:     lipgloss.Color("#E0AF68"),
+		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
+		accent: lipgloss.Color("#7AA2F7"),
+	})
+}
+
+// AyuMirageTheme returns the Ayu Mirage palette.
+func AyuMirageTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#1F2430"), bg1: lipgloss.Color("#242936"),
+		bg2: lipgloss.Color("#343E4F"), bg3: lipgloss.Color("#5C6773"),
+		fg0: lipgloss.Color("#CBCCC6"), fg1: lipgloss.Color("#A3A6A4"),
+		fg2: lipgloss.Color("#E6E1CF"),
+		red: lipgloss.Color("#F28779"), orange: lipgloss.Color("#FFAD66"),
+		yellow: lipgloss.Color("#FFCC66"), green: lipgloss.Color("#D5FF80"),
+		cyan: lipgloss.Color("#95E6CB"), blue: lipgloss.Color("#80D4FF"),
+		purple:  lipgloss.Color("#D4BFFF"),
+		keyword: lipgloss.Color("#FFAD66"), function: lipgloss.Color("#FFD580"),
+		str: lipgloss.Color("#D5FF80"), number: lipgloss.Color("#DFBFFF"),
+		comment: lipgloss.Color("#5C6773"), typ: lipgloss.Color("#73D0FF"),
+		operator: lipgloss.Color("#F29E74"), tag: lipgloss.Color("#5CCFE6"),
+		attribute:     lipgloss.Color("#FFCC66"),
+		diffRemovedBg: lipgloss.Color("#3B2C2E"), diffAddedBg: lipgloss.Color("#2E3B2E"),
+		accent: lipgloss.Color("#FFCC66"),
+	})
+}
+
+// SolarizedLightTheme returns the canonical Solarized Light palette.
+func SolarizedLightTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#FDF6E3"), bg1: lipgloss.Color("#EEE8D5"),
+		bg2: lipgloss.Color("#E0DBC8"), bg3: lipgloss.Color("#93A1A1"),
+		fg0: lipgloss.Color("#657B83"), fg1: lipgloss.Color("#586E75"),
+		fg2: lipgloss.Color("#002B36"),
+		red: lipgloss.Color("#DC322F"), orange: lipgloss.Color("#CB4B16"),
+		yellow: lipgloss.Color("#B58900"), green: lipgloss.Color("#859900"),
+		cyan: lipgloss.Color("#2AA198"), blue: lipgloss.Color("#268BD2"),
+		purple:  lipgloss.Color("#6C71C4"),
+		keyword: lipgloss.Color("#859900"), function: lipgloss.Color("#268BD2"),
+		str: lipgloss.Color("#2AA198"), number: lipgloss.Color("#D33682"),
+		comment: lipgloss.Color("#93A1A1"), typ: lipgloss.Color("#B58900"),
+		operator: lipgloss.Color("#859900"), tag: lipgloss.Color("#268BD2"),
+		attribute:     lipgloss.Color("#B58900"),
+		diffRemovedBg: lipgloss.Color("#FDECEC"), diffAddedBg: lipgloss.Color("#EAF6EA"),
+		accent: lipgloss.Color("#268BD2"),
+	})
+}
+
+// CatppuccinLatteTheme returns the Catppuccin Latte palette.
+func CatppuccinLatteTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#EFF1F5"), bg1: lipgloss.Color("#E6E9EF"),
+		bg2: lipgloss.Color("#DCE0E8"), bg3: lipgloss.Color("#9CA0B0"),
+		fg0: lipgloss.Color("#4C4F69"), fg1: lipgloss.Color("#6C6F85"),
+		fg2: lipgloss.Color("#1E1E2E"),
+		red: lipgloss.Color("#D20F39"), orange: lipgloss.Color("#FE640B"),
+		yellow: lipgloss.Color("#DF8E1D"), green: lipgloss.Color("#40A02B"),
+		cyan: lipgloss.Color("#179299"), blue: lipgloss.Color("#1E66F5"),
+		purple:  lipgloss.Color("#8839EF"),
+		keyword: lipgloss.Color("#8839EF"), function: lipgloss.Color("#1E66F5"),
+		str: lipgloss.Color("#40A02B"), number: lipgloss.Color("#FE640B"),
+		comment: lipgloss.Color("#9CA0B0"), typ: lipgloss.Color("#179299"),
+		operator: lipgloss.Color("#04A5E5"), tag: lipgloss.Color("#D20F39"),
+		attribute:     lipgloss.Color("#1E66F5"),
+		diffRemovedBg: lipgloss.Color("#FDEBEC"), diffAddedBg: lipgloss.Color("#E8F5E4"),
+		accent: lipgloss.Color("#1E66F5"),
+	})
+}
+
+// GruvboxDarkTheme returns the classic Gruvbox Dark palette with readable UI
+// neutrals for terminal chrome.
+func GruvboxDarkTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#282828"), bg1: lipgloss.Color("#32302F"),
+		bg2: lipgloss.Color("#504945"), bg3: lipgloss.Color("#A89984"),
+		fg0: lipgloss.Color("#EBDBB2"), fg1: lipgloss.Color("#D5C4A1"),
+		fg2: lipgloss.Color("#FBF1C7"),
+		red: lipgloss.Color("#FB4934"), orange: lipgloss.Color("#FE8019"),
+		yellow: lipgloss.Color("#FABD2F"), green: lipgloss.Color("#B8BB26"),
+		cyan: lipgloss.Color("#8EC07C"), blue: lipgloss.Color("#83A598"),
+		purple:  lipgloss.Color("#D3869B"),
+		keyword: lipgloss.Color("#FB4934"), function: lipgloss.Color("#B8BB26"),
+		str: lipgloss.Color("#B8BB26"), number: lipgloss.Color("#D3869B"),
+		comment: lipgloss.Color("#A89984"), typ: lipgloss.Color("#FABD2F"),
+		operator: lipgloss.Color("#FE8019"), tag: lipgloss.Color("#83A598"),
+		attribute:     lipgloss.Color("#8EC07C"),
+		diffRemovedBg: lipgloss.Color("#442E2D"), diffAddedBg: lipgloss.Color("#334032"),
+		accent: lipgloss.Color("#83A598"),
+	})
+}
+
+// MonokaiTheme returns the classic open-source Monokai palette bundled by
+// Code OSS, not the separate commercial Monokai Pro product.
+func MonokaiTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#272822"), bg1: lipgloss.Color("#2D2E27"),
+		bg2: lipgloss.Color("#49483E"), bg3: lipgloss.Color("#A09F8D"),
+		fg0: lipgloss.Color("#F8F8F2"), fg1: lipgloss.Color("#DADACF"),
+		fg2: lipgloss.Color("#FFFFFF"),
+		red: lipgloss.Color("#F92672"), orange: lipgloss.Color("#FD971F"),
+		yellow: lipgloss.Color("#E6DB74"), green: lipgloss.Color("#A6E22E"),
+		cyan: lipgloss.Color("#66D9EF"), blue: lipgloss.Color("#66D9EF"),
+		purple:  lipgloss.Color("#AE81FF"),
+		keyword: lipgloss.Color("#F92672"), function: lipgloss.Color("#A6E22E"),
+		str: lipgloss.Color("#E6DB74"), number: lipgloss.Color("#AE81FF"),
+		comment: lipgloss.Color("#A09F8D"), typ: lipgloss.Color("#66D9EF"),
+		operator: lipgloss.Color("#F92672"), tag: lipgloss.Color("#F92672"),
+		attribute:     lipgloss.Color("#A6E22E"),
+		diffRemovedBg: lipgloss.Color("#3F2830"), diffAddedBg: lipgloss.Color("#303A27"),
+		accent: lipgloss.Color("#F92672"),
+	})
+}
+
+// NightOwlTheme returns the accessible dark Night Owl palette.
+func NightOwlTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#011627"), bg1: lipgloss.Color("#0B253A"),
+		bg2: lipgloss.Color("#12344D"), bg3: lipgloss.Color("#8BADC1"),
+		fg0: lipgloss.Color("#D6DEEB"), fg1: lipgloss.Color("#B3C5D3"),
+		fg2: lipgloss.Color("#FFFFFF"),
+		red: lipgloss.Color("#EF5350"), orange: lipgloss.Color("#F78C6C"),
+		yellow: lipgloss.Color("#ECC48D"), green: lipgloss.Color("#ADDB67"),
+		cyan: lipgloss.Color("#7FDBCA"), blue: lipgloss.Color("#82AAFF"),
+		purple:  lipgloss.Color("#C792EA"),
+		keyword: lipgloss.Color("#C792EA"), function: lipgloss.Color("#82AAFF"),
+		str: lipgloss.Color("#ECC48D"), number: lipgloss.Color("#F78C6C"),
+		comment: lipgloss.Color("#8BADC1"), typ: lipgloss.Color("#7FDBCA"),
+		operator: lipgloss.Color("#C792EA"), tag: lipgloss.Color("#7FDBCA"),
+		attribute:     lipgloss.Color("#ADDB67"),
+		diffRemovedBg: lipgloss.Color("#321C2B"), diffAddedBg: lipgloss.Color("#15352F"),
+		accent: lipgloss.Color("#82AAFF"),
+	})
+}
+
+// MaterialPalenightTheme returns the MIT-licensed Palenight palette, an open
+// Material-inspired theme distinct from commercial Material Theme products.
+func MaterialPalenightTheme() Theme {
+	return buildTheme(palette{
+		bg0: lipgloss.Color("#292D3E"), bg1: lipgloss.Color("#252938"),
+		bg2: lipgloss.Color("#3A3F58"), bg3: lipgloss.Color("#959DCB"),
+		fg0: lipgloss.Color("#A6ACCD"), fg1: lipgloss.Color("#C3CAE3"),
+		fg2: lipgloss.Color("#FFFFFF"),
+		red: lipgloss.Color("#F07178"), orange: lipgloss.Color("#F78C6C"),
+		yellow: lipgloss.Color("#FFCB6B"), green: lipgloss.Color("#C3E88D"),
+		cyan: lipgloss.Color("#89DDFF"), blue: lipgloss.Color("#82AAFF"),
+		purple:  lipgloss.Color("#C792EA"),
+		keyword: lipgloss.Color("#C792EA"), function: lipgloss.Color("#82AAFF"),
+		str: lipgloss.Color("#C3E88D"), number: lipgloss.Color("#F78C6C"),
+		comment: lipgloss.Color("#959DCB"), typ: lipgloss.Color("#FFCB6B"),
+		operator: lipgloss.Color("#89DDFF"), tag: lipgloss.Color("#F07178"),
+		attribute:     lipgloss.Color("#82AAFF"),
+		diffRemovedBg: lipgloss.Color("#442B38"), diffAddedBg: lipgloss.Color("#304033"),
+		accent: lipgloss.Color("#82AAFF"),
 	})
 }

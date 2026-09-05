@@ -273,6 +273,30 @@ func (e Editor) ID() uint64 {
 	return e.id
 }
 
+// SetTheme updates the editor chrome immediately and replaces syntax
+// highlighting asynchronously. Replacing the highlighter is necessary because
+// its tokens carry pre-rendered styles from the previous theme.
+func (e *Editor) SetTheme(theme ui.Theme) tea.Cmd {
+	e.theme = theme
+	e.autocomplete.SetTheme(theme)
+	e.hover.SetTheme(theme)
+	e.signatureHelp.SetTheme(theme)
+	e.contextMenu.SetTheme(theme)
+	e.find.SetTheme(theme)
+
+	if e.Highlighter == nil || e.Buffer == nil {
+		return nil
+	}
+	// A result from the old highlighter must never be installed into its
+	// replacement, including when the new pass is viewport-only.
+	if e.tokenizer != nil {
+		e.invalidateTokenizeLane(&e.tokenizer.full)
+		e.invalidateTokenizeLane(&e.tokenizer.viewport)
+	}
+	e.Highlighter = highlight.New(e.Buffer.FilePath, theme)
+	return e.ScheduleInitialTokenize()
+}
+
 func (e *Editor) beginFullTokenize() (context.Context, uint64) {
 	if e.tokenizer == nil {
 		e.tokenizer = &tokenizeScheduler{}
@@ -1685,6 +1709,12 @@ func (e *Editor) wrappedVerticalTarget(delta, goal int) (text.Position, bool) {
 
 // View renders the editor content.
 func (e *Editor) View() string {
+	return e.ViewWithFocus(true)
+}
+
+// ViewWithFocus suppresses the Find input caret when another surface owns
+// typing, without changing the query, blink state, or keyboard bindings.
+func (e *Editor) ViewWithFocus(focused bool) string {
 	visibleDiagnostics, visibleLines, startLine, endLine := e.visibleDiagnosticProjection()
 	pluginHighlights := e.pluginHighlightRangesForProjection(visibleLines, startLine, endLine)
 	diagnosticHighlights := e.diagnosticHighlightsForRange(visibleDiagnostics, startLine, endLine)
@@ -1715,7 +1745,11 @@ func (e *Editor) View() string {
 	} else {
 		view = e.Viewport.RenderHighlights(e.Buffer, e.theme, e.Highlighter, visibleDiagnostics, e.gutterOpts(), pluginHighlights)
 	}
-	if fv := e.find.View(); fv != "" {
+	find := e.find
+	if !focused {
+		find.input.Blur()
+	}
+	if fv := find.View(); fv != "" {
 		view = fv + "\n" + view
 	}
 	return view

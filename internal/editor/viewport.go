@@ -334,7 +334,20 @@ func (v *Viewport) RenderWithFoldsHighlights(buf *text.Buffer, theme ui.Theme, h
 				tokens = hl.Line(line)
 			}
 
-			if hasSelection {
+			if hasSelection && len(tokens) > 0 {
+				_, lineContent := v.renderLineContent(buf, line)
+				isPrimaryLine := line == buf.Selections.PrimaryCursor().Line
+				// Reuse the wrapped selection renderer so unselected text keeps
+				// its syntax colors and tab stops, then clip in display columns.
+				rendered := v.renderWrapSegmentWithSelections(theme, tokens, tokenByteStarts(tokens), isPrimaryLine, lineContent, selectionRanges, 0, len(lineContent), 0)
+				rendered = ansi.Cut(rendered, v.ScrollX, v.ScrollX+textWidth)
+				sb.WriteString(rendered)
+				base := theme.Editor
+				if isPrimaryLine {
+					base = theme.CursorLine
+				}
+				sb.WriteString(base.Render(getSpaces(max(0, textWidth-ansi.StringWidth(rendered)))))
+			} else if hasSelection {
 				sb.WriteString(v.renderLineWithMultipleSelectionsTabs(lineBytes, selectionRanges, line == buf.Selections.PrimaryCursor().Line, textWidth, theme))
 			} else if len(lineHighlights) > 0 {
 				_, lineContent := v.renderLineContent(buf, line)
@@ -1285,7 +1298,7 @@ func (v *Viewport) renderLineWithTokensInto(sb *strings.Builder, tokens []highli
 			// The cursor line overrides the background, producing a style the
 			// token's precomputed sequences do not describe. It is one row per
 			// frame, so the slower path here costs little.
-			sb.WriteString(tok.Style.Background(ui.Nord1).Render(text))
+			sb.WriteString(tok.Style.Background(theme.CursorLine.GetBackground()).Render(text))
 		} else {
 			tok.WriteTo(sb, text)
 		}

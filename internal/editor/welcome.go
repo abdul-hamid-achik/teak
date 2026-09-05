@@ -1,7 +1,6 @@
 package editor
 
 import (
-	"image/color"
 	"strings"
 	"time"
 
@@ -12,19 +11,6 @@ import (
 
 // WelcomeTickMsg drives the welcome screen animation.
 type WelcomeTickMsg struct{}
-
-// Nord aurora colors for the color cycle animation
-var auroraColors = []color.Color{
-	ui.Nord7,  // teal
-	ui.Nord8,  // cyan
-	ui.Nord9,  // blue
-	ui.Nord10, // deep blue
-	ui.Nord15, // purple
-	ui.Nord11, // red
-	ui.Nord12, // orange
-	ui.Nord13, // yellow
-	ui.Nord14, // green
-}
 
 // Welcome renders a welcome screen with a smooth color-cycling logo.
 type Welcome struct {
@@ -42,6 +28,11 @@ func NewWelcome(theme ui.Theme) Welcome {
 		Active: true,
 		theme:  theme,
 	}
+}
+
+// SetTheme updates rendering without restarting the welcome animation.
+func (w *Welcome) SetTheme(theme ui.Theme) {
+	w.theme = theme
 }
 
 // Init returns the first animation tick command.
@@ -87,18 +78,16 @@ func (w *Welcome) View() string {
 		"   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝",
 	}
 
-	subtitleStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
-	keyStyle := lipgloss.NewStyle().Foreground(ui.Nord13).Bold(true)
-	descStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
-	hintStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+	subtitleStyle := w.theme.Editor
+	keyStyle := w.theme.HelpKey.Bold(true)
+	descStyle := w.theme.Editor
+	hintStyle := lipgloss.NewStyle().Foreground(w.theme.HelpBorder.GetForeground())
 
 	var lines []string
 
 	// Logo with color cycling — each line gets a different aurora color offset
 	for i, l := range logo {
-		color := w.logoColor(i)
-		style := lipgloss.NewStyle().Foreground(color).Bold(true)
-		lines = append(lines, style.Render(l))
+		lines = append(lines, w.logoStyle(i).Render(l))
 	}
 
 	lines = append(lines, "")
@@ -122,23 +111,30 @@ func (w *Welcome) View() string {
 
 	content := strings.Join(lines, "\n")
 
-	return lipgloss.NewStyle().
+	return w.theme.Editor.
 		Align(lipgloss.Center).
 		AlignVertical(lipgloss.Center).
 		Width(w.width).
 		Height(w.height).
-		Background(ui.Nord0).
 		Render(content)
 }
 
-// logoColor returns the color for a logo line based on the current animation frame.
-func (w *Welcome) logoColor(lineIdx int) color.Color {
-	if w.settled {
-		return ui.Nord8 // settled: static cyan
+// logoStyle returns a themed accent style for a logo line.
+func (w *Welcome) logoStyle(lineIdx int) lipgloss.Style {
+	styles := [...]lipgloss.Style{
+		w.theme.HelpTitle,
+		w.theme.PromptAccent,
+		w.theme.DiagInfo,
+		w.theme.HelpKey,
+		w.theme.PromptDanger,
+		w.theme.DiagWarning,
+		w.theme.GitAdded,
+		w.theme.GitModified,
 	}
-	// Cycle through aurora colors; each line offset by 1 in the palette
-	idx := (w.frame/4 + lineIdx) % len(auroraColors)
-	return auroraColors[idx]
+	if w.settled {
+		return styles[0].Bold(true)
+	}
+	return styles[(w.frame/4+lineIdx)%len(styles)].Bold(true)
 }
 
 // Dismiss deactivates the welcome screen.

@@ -1,0 +1,66 @@
+version: 1
+name: teak_theme_preview_discard
+coversSymbol: app.Model.discardSettingsChanges
+metadata:
+    feature: themes
+    owner: core-ui
+    priority: high
+    tags: [regression, story, keyboard, theme]
+intent: |
+    Discarding a light theme preview restores Nord without restarting or
+    changing the editor cursor.
+target:
+    cmd: [sh, testdata/glyphrun/run-teak.sh, theme-discard, testdata/glyphrun/config/default.toml, testdata/glyphrun/workspace/alpha.txt]
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "alpha one"}
+        timeoutMs: 5000
+    - send: {bytes: "\\x1b[44;5u"}
+    - wait:
+        screen: {contains: "Settings"}
+    - press: tab
+    - press: enter
+    - wait:
+        screen: {contains: "Choose theme"}
+    - type: "github-light"
+    - wait:
+        screen: {contains: "GitHub Light"}
+    - press: enter
+    - wait:
+        screen: {contains: "Theme preview active"}
+    - press: esc
+    - wait:
+        screen: {contains: "Keep Editing"}
+    - snapshot: discard_confirmation
+    - press: left
+    - press: enter
+    - wait:
+        screen: {contains: "Settings changes discarded"}
+    - snapshot: restored_nord
+outcomes:
+    - id: nord_editor_colors
+      description: discarding restores the original Nord cursor-line palette
+      verify:
+        cell:
+            x: 30
+            y: 1
+            char: a
+            style: {fg: "#d8dee9", bg: "#3b4252"}
+    - id: cursor_preserved
+      description: the modal workflow leaves the editor cursor unchanged
+      verify:
+        screen: {contains: "Ln 1, Col 1"}
+artifacts:
+    finalScreen: never
+contractHash: sha256:7d41abc8e759a1781f81647fc8f4814815dc76b9058ae84e01ccee8594e0770e

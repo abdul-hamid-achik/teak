@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,6 +70,64 @@ func TestHeadlessCodemapContextIsReadOnlyAndStructured(t *testing.T) {
 	}
 	if len(response.Context.Definitions) != 1 || response.Context.Definitions[0].Symbol != "Greeter" || len(response.Context.Callees) != 1 {
 		t.Fatalf("codemap context = %#v", response.Context)
+	}
+}
+
+func TestHeadlessCodemapContextPreservesEvidenceLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		payload   string
+		truncated bool
+		text      []string
+	}{
+		{"legacy", `{"definitions":[],"callers":[],"callees":[],"references":[],"tests":[]}`, false, nil},
+		{"not found", `{"found":false}`, false, []string{"Found: false"}},
+		{"capped and partial", `{"found":true,"callers":[],"callers_total":251,"references_total":2,"references_truncated":2,"references_coverage":"partial","references_stale":true,"references_confidence":"candidate","references_resolution":"An empty list does not prove no wiring","call_graph":"resolved","partial_errors":[{"component":"references","error":"query timeout"}]}`, true,
+			[]string{"truncated", "partial", "stale", "query timeout", "An empty list does not prove no wiring"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := filepath.Join(t.TempDir(), "codemap")
+			if err := os.WriteFile(fixture, []byte("#!/bin/sh\nprintf '%s\\n' \"$TEAK_CODEMAP_CONTEXT\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEAK_CODEMAP_CONTEXT", tc.payload)
+			toolpath.Configure(map[string]string{"codemap": fixture})
+			t.Cleanup(func() { toolpath.Configure(nil) })
+			root := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			args := []string{"codemap", "context", "--root", root, "target"}
+			if code := runHeadlessCLI(append(args, "--json"), strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("context failed: %s", stderr.String())
+			}
+			var response struct {
+				Context   map[string]any `json:"context"`
+				Truncated bool           `json:"truncated"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			var expected map[string]any
+			if err := json.Unmarshal([]byte(tc.payload), &expected); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range expected {
+				if !reflect.DeepEqual(response.Context[key], want) {
+					t.Errorf("context[%s] = %#v, want %#v", key, response.Context[key], want)
+				}
+			}
+			if response.Truncated != tc.truncated {
+				t.Errorf("truncated = %t, want %t", response.Truncated, tc.truncated)
+			}
+			stdout.Reset()
+			if code := runHeadlessCLI(args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("text context failed: %s", stderr.String())
+			}
+			for _, want := range tc.text {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("text context omitted %q: %s", want, stdout.String())
+				}
+			}
+		})
 	}
 }
 

@@ -57,10 +57,10 @@ func buildStyleMap(theme ui.Theme) map[chroma.TokenType]lipgloss.Style {
 	m[chroma.Punctuation] = theme.Editor
 
 	// Error
-	m[chroma.Error] = lipgloss.NewStyle().Foreground(ui.Nord11)
+	m[chroma.Error] = lipgloss.NewStyle().Foreground(theme.DiagError.GetForeground())
 
 	// Generic
-	m[chroma.GenericDeleted] = lipgloss.NewStyle().Foreground(ui.Nord11)
+	m[chroma.GenericDeleted] = lipgloss.NewStyle().Foreground(theme.DiagError.GetForeground())
 	m[chroma.GenericInserted] = lipgloss.NewStyle().Foreground(theme.SyntaxString)
 	m[chroma.GenericHeading] = lipgloss.NewStyle().Foreground(theme.SyntaxFunction).Bold(true)
 	m[chroma.GenericSubheading] = lipgloss.NewStyle().Foreground(theme.SyntaxFunction)

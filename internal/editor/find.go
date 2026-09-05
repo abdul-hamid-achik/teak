@@ -96,10 +96,17 @@ func NewFindModel(theme ui.Theme) FindModel {
 	ti.Placeholder = "Find..."
 	ti.CharLimit = 256
 	ti.SetWidth(40)
+	ui.ApplyTextInputTheme(&ti, theme)
 	return FindModel{
 		input: ti,
 		theme: theme,
 	}
+}
+
+// SetTheme updates rendering without changing an active query or search.
+func (f *FindModel) SetTheme(theme ui.Theme) {
+	f.theme = theme
+	ui.ApplyTextInputTheme(&f.input, theme)
 }
 
 // SetInputWidth sizes the query field to the editor width so long searches

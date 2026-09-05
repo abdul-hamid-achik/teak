@@ -57,6 +57,7 @@ func NewBranchPicker(theme ui.Theme) BranchPickerModel {
 	ti := textinput.New()
 	ti.Placeholder = "Switch branch..."
 	ti.CharLimit = 128
+	ui.ApplyTextInputTheme(&ti, theme)
 	return BranchPickerModel{
 		input: ti,
 		theme: theme,
@@ -84,6 +85,12 @@ func (m *BranchPickerModel) Focus() tea.Cmd {
 func (m *BranchPickerModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+}
+
+// SetTheme updates rendering without clearing the current filter or focus.
+func (m *BranchPickerModel) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	ui.ApplyTextInputTheme(&m.input, theme)
 }
 
 // Update handles input for the branch picker.
@@ -424,8 +431,8 @@ func (m BranchPickerModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(m.theme.HelpBorder.GetForeground()).
+		Background(m.theme.HelpBorder.GetBackground()).
 		Padding(1, 1).
 		Width(boxWidth).
 		Render(sb.String())

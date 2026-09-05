@@ -105,14 +105,18 @@ func BenchmarkModelUpdateCursorInput(b *testing.B) {
 	}
 	ed := m.activeEditor()
 	ed.Buffer = text.NewBufferFromBytes([]byte(content.String()))
-	ed.Buffer.Cursor = text.Position{Line: 50, Col: 10}
+	ed.Buffer.SetCursor(text.Position{Line: 50, Col: 10})
 
-	msg := tea.KeyPressMsg{Code: tea.KeyRight}
+	keys := [2]tea.KeyPressMsg{{Code: tea.KeyRight}, {Code: tea.KeyLeft}}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for range b.N {
-		updated, _ := m.Update(msg)
+	for i := range b.N {
+		before := m.activeEditor().Buffer.Cursor
+		updated, _ := m.Update(keys[i%len(keys)])
 		m = updated.(Model)
+		if m.activeEditor().Buffer.Cursor == before {
+			b.Fatal("cursor input became a no-op")
+		}
 	}
 }
 

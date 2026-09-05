@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,100 @@ import (
 )
 
 var workspaceEditPreparationSink workspaceEditPreparation
+
+func TestEmptyWorkspaceEditPreservesNewerCursor(t *testing.T) {
+	model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+	index := addDirtyEditor(t, &model, "main.go", "abc", "abc")
+	buffer := model.editors[index].Buffer
+	model, cmd := model.startWorkspaceEditAsync(lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		lsp.FileURI(buffer.FilePath): {},
+	}}, workspaceEditContinuation{})
+	buffer.SetCursor(text.Position{Col: 2})
+	model = runWorkspaceEditCommands(t, model, cmd)
+	if got := model.editors[index].Buffer.Cursor; got != (text.Position{Col: 2}) {
+		t.Fatalf("empty workspace edit restored an obsolete cursor: %+v", got)
+	}
+}
+
+func TestWorkspaceEditRebuildsViewportBeforeNextFrame(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrap=%t", wrap), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Editor.WordWrap = wrap
+			model := newSaveFlowModel(t, cfg, t.TempDir())
+			index := addDirtyEditor(t, &model, "main.go", "target", "target")
+			ed := &model.editors[index]
+			ed.SetSize(40, 8)
+			ed.Buffer.SetCursor(text.Position{Col: 6})
+			if wrap {
+				_ = ed.Wrap.LineRows(0) // Populate the old layout before the rewrite.
+			}
+			model, cmd := model.startWorkspaceEditAsync(lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+				lsp.FileURI(ed.Buffer.FilePath): {{NewText: strings.Repeat("inserted\n", 20)}},
+			}}, workspaceEditContinuation{})
+			updated, _ := model.Update(cmd())
+			ed = &updated.(Model).editors[index]
+			if wrap && ed.Wrap.VisualRow(20) != 20 {
+				t.Fatalf("new line is missing from wrap layout: visual row = %d", ed.Wrap.VisualRow(20))
+			}
+			_, y := ed.CursorPosition()
+			if y < 0 || y >= ed.Viewport.Height {
+				t.Fatalf("mapped cursor is outside the viewport: y=%d height=%d", y, ed.Viewport.Height)
+			}
+		})
+	}
+}
+
+func TestWorkspaceEditPreservesSelectionsAndUndo(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sequential=%t", sequential), func(t *testing.T) {
+			const original = "éabc\n😀xyz\n"
+			model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+			index := addDirtyEditor(t, &model, "main.go", original, original)
+			buffer := model.editors[index].Buffer
+			before := []text.Selection{
+				{Anchor: text.Position{Col: 2}, Head: text.Position{Col: 5}},
+				{Anchor: text.Position{Line: 1, Col: 7}, Head: text.Position{Line: 1, Col: 4}},
+			}
+			buffer.RestoreSelections(before, 1)
+			uri := lsp.FileURI(buffer.FilePath)
+			edits := []lsp.TextEdit{{NewText: "界"}, {StartLine: 1, EndLine: 1, NewText: "\n"}}
+			edit := lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{uri: edits}}
+			wantContent := "界éabc\n\n😀xyz\n"
+			want := []text.Selection{
+				{Anchor: text.Position{Col: 5}, Head: text.Position{Col: 8}},
+				{Anchor: text.Position{Line: 2, Col: 7}, Head: text.Position{Line: 2, Col: 4}},
+			}
+			if sequential {
+				edit = lsp.WorkspaceEdit{DocumentChanges: []lsp.WorkspaceDocumentChange{
+					{URI: uri, Edits: edits},
+					{URI: uri, Edits: []lsp.TextEdit{{StartCol: 3, EndCol: 5, NewText: "àà"}}},
+				}}
+				wantContent = "界ààabc\n\n😀xyz\n"
+				want[0].Anchor.Col += 2
+				want[0].Head.Col += 2
+			}
+			model = applyWorkspaceEditAsyncForTest(t, model, edit)
+			buffer = model.editors[index].Buffer
+			check := func(content string, selections []text.Selection, dirty bool) {
+				t.Helper()
+				if buffer.Content() != content || !reflect.DeepEqual(buffer.Selections.All(), selections) ||
+					buffer.Selections.PrimaryIndex() != 1 || buffer.Cursor != selections[1].Head || buffer.Dirty() != dirty {
+					t.Fatalf("got content=%q selections=%+v primary=%d cursor=%+v dirty=%t; want content=%q selections=%+v dirty=%t",
+						buffer.Content(), buffer.Selections.All(), buffer.Selections.PrimaryIndex(), buffer.Cursor, buffer.Dirty(), content, selections, dirty)
+				}
+			}
+			check(wantContent, want, true)
+			if !model.tabBar.Tabs[index].Dirty {
+				t.Fatal("workspace edit did not synchronize the tab dirty indicator")
+			}
+			buffer.Undo()
+			check(original, before, false)
+			buffer.Redo()
+			check(wantContent, want, true)
+		})
+	}
+}
 
 func runWorkspaceEditCommands(t *testing.T, model Model, cmd tea.Cmd) Model {
 	t.Helper()

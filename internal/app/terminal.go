@@ -45,17 +45,21 @@ func (m *Model) ensureTerminalStarted() tea.Cmd {
 	if m.terminal.Running() {
 		return m.terminal.Listen()
 	}
-	if err := m.terminal.Start(); err != nil {
-		m.status = err.Error()
-		return nil
-	}
-	return m.terminal.Listen()
+	return m.terminal.Start()
 }
 
 func (m Model) handleTerminalOutput(msg termpanel.OutputMsg) (tea.Model, tea.Cmd) {
 	m.terminal.ApplyOutput(msg)
-	if !m.showTerminal {
-		return m, nil
+	if err := m.terminal.Error(); err != nil {
+		m.status = err.Error()
 	}
 	return m, m.terminal.Listen()
+}
+
+func (m Model) handleTerminalStarted(msg termpanel.StartedMsg) (tea.Model, tea.Cmd) {
+	cmd := m.terminal.ApplyStarted(msg)
+	if err := m.terminal.Error(); err != nil {
+		m.status = err.Error()
+	}
+	return m, cmd
 }

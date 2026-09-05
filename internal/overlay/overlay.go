@@ -1,6 +1,7 @@
 package overlay
 
 import tea "charm.land/bubbletea/v2"
+import "teak/internal/ui"
 
 // Overlay is the interface for modal overlays that capture input and render
 // on top of the editor. Implementations include Confirm, Picker, etc.
@@ -29,6 +30,17 @@ type Stack struct {
 
 type cancellableOverlay interface {
 	Cancel()
+}
+
+type themedOverlay interface{ SetTheme(ui.Theme) }
+
+// SetTheme updates every live overlay while preserving its interaction state.
+func (s *Stack) SetTheme(theme ui.Theme) {
+	for _, layer := range s.layers {
+		if themed, ok := layer.(themedOverlay); ok {
+			themed.SetTheme(theme)
+		}
+	}
 }
 
 func cancelOverlay(o Overlay) {
@@ -75,6 +87,18 @@ func (s *Stack) Len() int {
 // Update forwards a message to the topmost overlay. If that overlay is
 // dismissed after the update, it is automatically popped.
 func (s *Stack) Update(msg tea.Msg) tea.Cmd {
+	// Resize reaches covered layers too, so dismissing the top layer cannot
+	// reveal a modal with stale geometry. Input still goes only to the top.
+	if _, ok := msg.(tea.WindowSizeMsg); ok {
+		var cmds []tea.Cmd
+		for i, layer := range s.layers {
+			updated, cmd := layer.Update(msg)
+			s.layers[i] = updated
+			cmds = append(cmds, cmd)
+		}
+		return tea.Batch(cmds...)
+	}
+
 	if len(s.layers) == 0 {
 		return nil
 	}

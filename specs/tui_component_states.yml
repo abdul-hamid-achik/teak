@@ -1,0 +1,287 @@
+version: 1
+name: teak_component_states
+coversSymbol: ui.ThemeByName
+metadata:
+    feature: component-stories
+    owner: core-ui
+    priority: high
+    tags: [tui, story, themes, deterministic]
+intent: |
+    Real Teak components render their empty, loading, error and populated states
+    within the terminal bounds, using the selected theme at wide and narrow sizes.
+target:
+    cmd: [./bin/teak-component-story]
+    cwd: .
+    timeoutMs: 30000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: go build -o ./bin/teak-component-story ./testdata/glyphrun/component-story
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "Stage: editor"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Compute the total"}
+    - snapshot: editor_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: completion-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Loading..."}
+    - snapshot: completion-loading_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: completion-ready"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "func([]int) int"}
+    - snapshot: completion-ready_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Search..."}
+    - snapshot: search-empty_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Searching..."}
+    - snapshot: search-loading_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-error"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Search tool unavailable"}
+    - snapshot: search-error_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-results"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "/fixture/sample.go:2"}
+    - snapshot: search-results_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: git-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "STAGED (0)"}
+    - snapshot: git-empty_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: git-changes"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Readable selections"}
+    - snapshot: git-changes_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Try asking:"}
+    - snapshot: agent-empty_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "The function computes a total."}
+    - snapshot: agent-loading_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-error"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Agent request failed:"}
+    - snapshot: agent-error_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: debugger-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "No active debug session"}
+    - snapshot: debugger-empty_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: debugger-stopped"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "main.total"}
+    - snapshot: debugger-stopped_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: problems"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Unused parameter"}
+    - snapshot: problems_80
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: diff"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "return items[0]"}
+    - snapshot: diff_80
+    - resize: {cols: 40, rows: 18}
+    - press: home
+    - wait:
+        screen: {contains: "Stage: editor"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Compute the total"}
+    - snapshot: editor_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: completion-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Loading..."}
+    - snapshot: completion-loading_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: completion-ready"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "func([]int) int"}
+    - snapshot: completion-ready_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Search..."}
+    - snapshot: search-empty_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Searching..."}
+    - snapshot: search-loading_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-error"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Search tool unavailable"}
+    - snapshot: search-error_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: search-results"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "/fixture/sample.go:2"}
+    - snapshot: search-results_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: git-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "STAGED (0)"}
+    - snapshot: git-empty_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: git-changes"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Readable selections"}
+    - snapshot: git-changes_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Try asking:"}
+    - snapshot: agent-empty_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-loading"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "The function computes a total."}
+    - snapshot: agent-loading_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: agent-error"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Agent request failed:"}
+    - snapshot: agent-error_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: debugger-empty"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "No active debug session"}
+    - snapshot: debugger-empty_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: debugger-stopped"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "main.total"}
+    - snapshot: debugger-stopped_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: problems"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "Unused parameter"}
+    - snapshot: problems_40
+    - press: enter
+    - wait:
+        screen: {contains: "Stage: diff"}
+    - wait:
+        screen: {notContains: "OVERFLOW"}
+    - wait:
+        screen: {contains: "return items[0]"}
+    - snapshot: diff_40
+outcomes:
+    - id: final_component_fits
+      description: the narrow diff retains its bounds after every component stage
+      verify:
+        screen: {notContains: "OVERFLOW"}
+contractHash: sha256:5f003e62cb17a09e0490b2854b97f8ae11574cbc2ac0c7b726811094a607df76

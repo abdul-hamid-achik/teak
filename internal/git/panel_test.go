@@ -9,9 +9,30 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
+
+func TestGitButtonsFitPanelWidthInEveryTheme(t *testing.T) {
+	previous := zone.DefaultManager
+	zone.NewGlobal()
+	t.Cleanup(func() { zone.Close(); zone.DefaultManager = previous })
+	for _, option := range ui.ThemeOptions() {
+		for _, width := range []int{20, 40, 80} {
+			t.Run(fmt.Sprintf("%s/%d", option.ID, width), func(t *testing.T) {
+				m := New("/fixture", option.Constructor())
+				m.SetIsGitRepo(true)
+				m.SetSize(width, 22)
+				for _, line := range strings.Split(zone.Scan(m.View()), "\n") {
+					if got := lipgloss.Width(line); got > width {
+						t.Errorf("rendered row width = %d, want <= %d: %q", got, width, line)
+					}
+				}
+			})
+		}
+	}
+}
 
 // helper to create a minimal Model without running git commands.
 func testModel(entries []StatusEntry) Model {
@@ -19,7 +40,7 @@ func testModel(entries []StatusEntry) Model {
 	ti.Prompt = ""
 	ti.CharLimit = 72
 	ta := textarea.New()
-	configureCommitBody(&ta)
+	configureCommitBody(&ta, ui.DefaultTheme())
 	m := Model{
 		theme:       ui.DefaultTheme(),
 		rootDir:     "/tmp/fake",

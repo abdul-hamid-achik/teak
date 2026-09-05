@@ -1,0 +1,78 @@
+version: 1
+name: teak_split_terminal_layout
+coversSymbol: app.Model.View
+metadata:
+    feature: panel-layout
+    owner: core-ui
+    priority: high
+    tags: [tui, regression, story, split, terminal, resize]
+intent: |
+    Two editor panes, sidebar, agent and a real shell share the terminal without
+    moving the shell or status below the screen; shrinking and restoring preserves both files.
+target:
+    cmd: [sh, testdata/glyphrun/run-terminal.sh]
+    cwd: .
+    timeoutMs: 20000
+terminal:
+    cols: 120
+    rows: 40
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: go build -o ./bin/teak ./cmd/teak
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "alpha one"}
+    - press: ctrl+p
+    - type: beta.txt
+    - wait:
+        screen: {contains: "beta.txt"}
+    - press: enter
+    - wait:
+        screen: {contains: "beta one"}
+    - send: {bytes: "\\x1b[92;5u"}
+    - wait:
+        screen: {contains: "alpha one"}
+    - press: ctrl+j
+    - wait:
+        screen: {contains: "Agent not connected"}
+    - press: esc
+    - wait:
+        idle: {quietForMs: 150}
+    - send: {bytes: "\\x1bt"}
+    - wait:
+        screen: {contains: "TEAK$"}
+    - wait:
+        screen: {matches: '\A(?:[^\n]*\n){26}[^\n]*Terminal'}
+    - wait:
+        screen: {matches: '\A(?:[^\n]*\n){39}[^\n]*F1'}
+    - snapshot: all_panels
+    - resize: {cols: 80, rows: 24}
+    - wait:
+        screen: {matches: '\A(?:[^\n]*\n){15}[^\n]*Terminal'}
+    - snapshot: narrower_split_terminal
+    - resize: {cols: 40, rows: 3}
+    - wait:
+        screen: {matches: '\A(?:[^\n]*\n){2}[^\n]*Split view'}
+    - resize: {cols: 120, rows: 40}
+    - wait:
+        screen: {contains: "beta one"}
+    - wait:
+        screen: {contains: "alpha one"}
+    - wait:
+        screen: {matches: '\A(?:[^\n]*\n){26}[^\n]*Terminal'}
+    - snapshot: restored_panels
+    - press: ctrl+q
+    - wait:
+        process: {exitCode: 0}
+        timeoutMs: 5000
+outcomes:
+    - id: all_panels_exit_cleanly
+      description: resizing preserves documents and the shell exits with the editor
+      verify:
+        process: {exitCode: 0}
+artifacts:
+    finalScreen: never
+contractHash: sha256:bc96b00cfb8d8f20fd533064ba7a9fe2733933c53a02fc534a5e706693e9d959

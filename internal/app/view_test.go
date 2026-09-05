@@ -11,6 +11,7 @@ import (
 	"teak/internal/config"
 	"teak/internal/editor"
 	"teak/internal/text"
+	"teak/internal/ui"
 )
 
 func useViewTestZone(t *testing.T) {
@@ -77,6 +78,61 @@ func TestFindWidgetDoesNotClipStatusBar(t *testing.T) {
 	v = m.View()
 	if lines = strings.Split(v.Content, "\n"); len(lines) != m.height {
 		t.Fatalf("view = %d lines after closing find, want %d", len(lines), m.height)
+	}
+}
+
+func TestFindCaretFollowsEditorFocus(t *testing.T) {
+	m := newViewTestModel(t, false)
+	m.showAgent = true
+	_ = m.activeEditor().ShowFind()
+	m.relayout()
+	findRow := func() string {
+		return ansi.Cut(strings.Split(m.View().Content, "\n")[1], 0, ansi.StringWidth(m.activeEditor().FindView()))
+	}
+	focused := findRow()
+	if !strings.Contains(focused, "\x1b[7;") {
+		t.Fatal("setup: Find caret must be visible")
+	}
+	m.setFocus(FocusAgent)
+	unfocused := findRow()
+	if strings.Contains(unfocused, "\x1b[7;") {
+		t.Fatal("Find kept its reverse-video caret after focus moved to the agent")
+	}
+	if ansi.Strip(focused) != ansi.Strip(unfocused) {
+		t.Fatal("moving focus changed the Find query or layout")
+	}
+	m.setFocus(FocusEditor)
+	if got := findRow(); got != focused {
+		t.Fatal("returning to the editor did not restore Find's caret")
+	}
+}
+
+func TestSplitFindCaretsRespectActivePaneAndOverlay(t *testing.T) {
+	m := newViewTestModel(t, false)
+	addDirtyEditor(t, &m, "other.go", "package other\n", "package other\n")
+	m.toggleSplit()
+	for i := range m.editors {
+		_ = m.editors[i].ShowFind()
+	}
+	m.relayout()
+	for _, tc := range []struct {
+		name  string
+		focus FocusArea
+		help  bool
+		want  int
+	}{
+		{"editor", FocusEditor, false, 1},
+		{"sidebar", FocusTree, false, 0},
+		{"terminal", FocusTerminal, false, 0},
+		{"help", FocusEditor, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.setFocus(tc.focus)
+			m.showHelp = tc.help
+			if got := strings.Count(m.renderSplitPanes(), "\x1b[7;"); got != tc.want {
+				t.Fatalf("visible Find carets = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -366,5 +422,28 @@ func TestModelViewDoesNotMutateDebugGutter(t *testing.T) {
 	gutter := m.activeEditor().DebugGutter
 	if gutter != original {
 		t.Fatalf("View replaced DebugGutter = %p, want unchanged %p", gutter, original)
+	}
+}
+
+func TestViewSetsThemeDefaultsForANSIResets(t *testing.T) {
+	m := newViewTestModel(t, false)
+	t.Setenv("NO_COLOR", "")
+	for _, id := range ui.ThemeIDs() {
+		t.Run(id, func(t *testing.T) {
+			_ = m.applyTheme(id)
+			view := m.View()
+			if view.ForegroundColor != m.theme.Editor.GetForeground() || view.BackgroundColor != m.theme.Editor.GetBackground() {
+				t.Fatal("ANSI resets would use the terminal's colors instead of the selected editor theme")
+			}
+		})
+	}
+}
+
+func TestViewRespectsNoColorForTerminalDefaults(t *testing.T) {
+	m := newViewTestModel(t, false)
+	t.Setenv("NO_COLOR", "1")
+	view := m.View()
+	if view.ForegroundColor != nil || view.BackgroundColor != nil {
+		t.Fatal("NO_COLOR must preserve the terminal defaults")
 	}
 }

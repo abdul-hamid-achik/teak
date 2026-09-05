@@ -165,6 +165,14 @@ func (m *Model) SetGitStatus(status map[string]string) {
 	m.gitStatus = status
 }
 
+// SetTheme refreshes cached rendering colors without changing tree state.
+func (m *Model) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	m.cachedStyles.cursorBg = theme.TreeCursor.GetBackground()
+	m.cachedStyles.entryBg = theme.TreeEntry.GetBackground()
+	m.cachedStyles.gitIgnoredColor = theme.Gutter.GetForeground()
+}
+
 // ShowHidden reports whether dotfiles and dot-directories are visible. The
 // default is true for compatibility with the existing tree, where .gitignore
 // and project metadata were always discoverable.
@@ -331,7 +339,7 @@ func NewEmpty(root string, theme ui.Theme) Model {
 	m.cachedStyles.base = lipgloss.NewStyle()
 	m.cachedStyles.cursorBg = theme.TreeCursor.GetBackground()
 	m.cachedStyles.entryBg = theme.TreeEntry.GetBackground()
-	m.cachedStyles.gitIgnoredColor = ui.Nord3
+	m.cachedStyles.gitIgnoredColor = theme.Gutter.GetForeground()
 
 	return m
 }
@@ -1608,7 +1616,7 @@ func (m Model) View() string {
 				label = "  Filtering..."
 			}
 			status := m.cachedStyles.base.Background(m.cachedStyles.entryBg).
-				Foreground(ui.Nord3).
+				Foreground(m.theme.Gutter.GetForeground()).
 				Render(label)
 			sb.WriteString(ansi.Truncate(status, m.Width, ""))
 			continue
@@ -1652,13 +1660,13 @@ func (m Model) View() string {
 					gitIndicator = st
 					switch st {
 					case "M":
-						gitNameColor = ui.Nord13 // yellow
+						gitNameColor = m.theme.DiagWarning.GetForeground()
 					case "A":
-						gitNameColor = ui.Nord14 // green
+						gitNameColor = m.theme.GitAdded.GetForeground()
 					case "D":
-						gitNameColor = ui.Nord11 // red
+						gitNameColor = m.theme.GitDeleted.GetForeground()
 					case "U":
-						gitNameColor = ui.Nord14 // green for untracked
+						gitNameColor = m.theme.GitUntracked.GetForeground()
 					}
 				}
 			}
@@ -1676,9 +1684,9 @@ func (m Model) View() string {
 			if m.diagnostics != nil {
 				if sev, ok := m.diagnostics[entry.Path]; ok && sev > 0 {
 					hasDiag = true
-					diagColor = ui.Nord13
+					diagColor = m.theme.DiagWarning.GetForeground()
 					if sev == 1 {
-						diagColor = ui.Nord11
+						diagColor = m.theme.DiagError.GetForeground()
 					}
 				}
 			}

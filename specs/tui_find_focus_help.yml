@@ -1,0 +1,65 @@
+version: 1
+name: teak_find_focus_and_help
+coversSymbol: app.Model.handleGlobalKey
+metadata:
+    feature: keyboard-focus
+    owner: core-ui
+    priority: high
+    tags: [regression, story, keyboard, focus]
+intent: |
+    Find takes keyboard focus when opened from the tree, an inactive Find does
+    not block sidebar shortcuts, and long help shortcuts remain readable.
+target:
+    cmd: [sh, testdata/glyphrun/run-teak.sh, find-focus-help, testdata/glyphrun/config/default.toml, testdata/glyphrun/workspace/alpha.txt]
+    cwd: "."
+    timeoutMs: 15000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "alpha one"}
+    - press: ctrl+b
+    - press: ctrl+b
+    - send: {bytes: "\\x06"}
+    - type: alpha
+    - wait:
+        screen: {matches: 'Find.*alpha'}
+    - snapshot: find_from_tree
+    - send: {bytes: "\\x1bOP"}
+    - type: terminal
+    - wait:
+        screen: {contains: "Scroll shell history"}
+    - snapshot: help_long_shortcuts
+    - press: esc
+    - mouse: {action: click, x: 10, y: 10, button: left}
+    - send: {bytes: "\\x1b[98;5u"}
+    - press: esc
+    - wait:
+        # Wait for Escape to close the populated widget. Its placeholder is
+        # already absent while searching; that would allow Escape and Ctrl+Q
+        # to arrive together as the legacy Alt+Ctrl+Q sequence.
+        screen: {notContains: "Find"}
+    - snapshot: editor_after_find
+    - press: ctrl+q
+    - wait:
+        process: {exitCode: 0}
+        timeoutMs: 3000
+outcomes:
+    - id: sidebar_shortcut_works_with_inactive_find
+      description: Ctrl+B hides the focused sidebar even with Find open in the editor
+      verify:
+        region: {x: 0, y: 1, width: 20, height: 1, contains: "alpha one"}
+    - id: document_is_unmodified
+      description: finding and filtering help leave the file unchanged
+      verify:
+        process: {exitCode: 0}
+artifacts:
+    finalScreen: never
+contractHash: sha256:e7113982aaf5ff6ef56efc2d5166fca474323d4f1fde67cdf8127c0eac1a13c0

@@ -3,6 +3,10 @@ version: 1
 artifactRoot: .glyphrun/runs
 snapshotRoot: .glyphrun/snapshots
 
+# Keep a complete 83-spec batch, including failures near its beginning.
+retention:
+  keepRuns: 100
+
 terminal:
   profile: xterm-256color
   cols: 100
@@ -10,6 +14,16 @@ terminal:
   normalize:
     trimRight: true
     normalizeLineEndings: true
+    # Keep fixture-relative paths, but remove mktemp's random directory nonce.
+    replace:
+      - regex: '(/tmp\.)[A-Za-z0-9]{6,}'
+        with: '${1}FIXTURE'
+      # Resource measurements vary by run; fixtures validate their real values
+      # before printing JSON. Keep their keys and types in screen snapshots.
+      - regex: '("(duration_ms|git_ms|lsp_ms|metrics_ms|tools_ms|heap_alloc_bytes|heap_sys_bytes|rss_bytes)": )[0-9]+(\.[0-9]+)?'
+        with: '${1}0'
+      - regex: '("(collected_at|recorded_at)": )"[^"]+"'
+        with: '${1}"<timestamp>"'
 
 artifacts:
   frames: true

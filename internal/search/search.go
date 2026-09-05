@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
@@ -126,6 +127,7 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 	ti.Placeholder = "Search..."
 	ti.CharLimit = 256
 	ti.SetWidth(50)
+	ui.ApplyTextInputTheme(&ti, theme)
 
 	sp := spinner.New(
 		spinner.WithSpinner(spinner.Dot),
@@ -136,6 +138,7 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 	ri.Placeholder = "Replace in project results..."
 	ri.CharLimit = 256
 	ri.SetWidth(50)
+	ui.ApplyTextInputTheme(&ri, theme)
 
 	return Model{
 		input:        ti,
@@ -145,6 +148,14 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 		rootDir:      rootDir,
 		spinner:      sp,
 	}
+}
+
+// SetTheme updates input and spinner styles without clearing a search.
+func (m *Model) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	ui.ApplyTextInputTheme(&m.input, theme)
+	ui.ApplyTextInputTheme(&m.replaceInput, theme)
+	m.spinner.Style = theme.PromptMuted
 }
 
 // Focus focuses the text input and returns the cursor blink command.
@@ -191,7 +202,9 @@ func (m Model) PatternOpts() SearchOpts {
 func (m *Model) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	m.input.SetWidth(50)
+	m.input.SetWidth(max(1, m.innerWidth()-lipgloss.Width(m.input.Prompt)-1))
+	m.replaceInput.SetWidth(max(1, m.innerWidth()-4-lipgloss.Width(m.replaceInput.Prompt)-1))
+	m.ensureCursorVisible()
 }
 
 // OverlayOrigin returns the top-left terminal cell used by View when it is
@@ -212,12 +225,7 @@ func (m Model) OverlayOrigin(canvasWidth, canvasHeight int) (int, int) {
 
 // headerLines returns the number of lines before results in the search overlay view.
 func (m Model) headerLines() int {
-	// mode toggle + blank + input + blank = 4 lines, plus border padding ~2
-	n := 6
-	if m.showReplace {
-		n++ // replace row
-	}
-	return n
+	return m.theme.SearchBox.GetBorderTopSize() + m.theme.SearchBox.GetPaddingTop() + strings.Count(m.headerView(false), "\n")
 }
 
 // Update handles input messages.
@@ -344,8 +352,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		mouse := msg.Mouse()
 		if mouse.Button == tea.MouseLeft {
-			clickedIdx := m.scrollY + mouse.Y - m.headerLines()
-			if clickedIdx >= 0 && clickedIdx < len(m.results) {
+			row := mouse.Y - m.headerLines()
+			clickedIdx := m.scrollY + row
+			if row >= 0 && row < m.maxVisibleResults() && clickedIdx < len(m.results) {
 				r := m.results[clickedIdx]
 				index := clickedIdx
 				return m, func() tea.Msg {
@@ -552,15 +561,8 @@ func (m *Model) replaceSearchContext() {
 
 // maxVisibleResults returns the number of result lines visible in the overlay.
 func (m Model) maxVisibleResults() int {
-	// header (title+mode) + blank + input + blank + possible status = ~5-6 lines, plus border padding ~4
-	v := m.height - 12
-	if v < 3 {
-		v = 3
-	}
-	if v > 20 {
-		v = 20
-	}
-	return v
+	// Reserve a row for the scroll hint and the box's bottom frame.
+	return max(1, min(20, m.height-m.headerLines()-m.theme.SearchBox.GetPaddingBottom()-m.theme.SearchBox.GetBorderBottomSize()-1))
 }
 
 // ensureCursorVisible adjusts scrollY so the cursor is in the visible window.
@@ -574,10 +576,19 @@ func (m *Model) ensureCursorVisible() {
 	}
 }
 
-// View renders the search overlay.
-func (m Model) View() string {
-	const boxWidth = 60
+func (m Model) boxWidth() int {
+	if m.width <= 0 {
+		return 60
+	}
+	return min(60, max(m.theme.SearchBox.GetHorizontalFrameSize()+1, m.width))
+}
 
+func (m Model) innerWidth() int {
+	return max(1, m.boxWidth()-m.theme.SearchBox.GetHorizontalFrameSize())
+}
+
+// headerView is also the source of the result rows used for mouse hit testing.
+func (m Model) headerView(markZones bool) string {
 	var sb strings.Builder
 
 	// Mode toggle
@@ -593,23 +604,23 @@ func (m Model) View() string {
 	}
 	sb.WriteString(m.theme.HelpTitle.Render("Search") + "  " + textLabel + modeStyle.Render("  |  ") + semLabel + modeStyle.Render("  (Tab)"))
 	if m.mode == ModeText {
+		sb.WriteByte('\n')
 		flagOn := m.theme.PromptAccent
 		if m.caseSensitive {
-			sb.WriteString("  " + flagOn.Render("Aa"))
+			sb.WriteString(flagOn.Render("Aa Alt+C"))
 		} else {
-			sb.WriteString("  " + modeStyle.Render("Aa"))
+			sb.WriteString(modeStyle.Render("Aa Alt+C"))
 		}
 		if m.wholeWord {
-			sb.WriteString("  " + flagOn.Render("W"))
+			sb.WriteString("  " + flagOn.Render("W Alt+W"))
 		} else {
-			sb.WriteString("  " + modeStyle.Render("W"))
+			sb.WriteString("  " + modeStyle.Render("W Alt+W"))
 		}
 		if m.regex {
-			sb.WriteString("  " + flagOn.Render(".*"))
+			sb.WriteString("  " + flagOn.Render(".* Ctrl+R"))
 		} else {
-			sb.WriteString("  " + modeStyle.Render(".*"))
+			sb.WriteString("  " + modeStyle.Render(".* Ctrl+R"))
 		}
-		sb.WriteString(modeStyle.Render(" (Alt+C / Alt+W / Ctrl+R)"))
 	}
 	sb.WriteByte('\n')
 	sb.WriteByte('\n')
@@ -619,10 +630,14 @@ func (m Model) View() string {
 	sb.WriteByte('\n')
 	if m.showReplace {
 		arrowStyle := m.theme.PromptMuted
-		sb.WriteString(arrowStyle.Render("  ⤷ ") + m.replaceInput.View() + " ")
-		sb.WriteString(zone.Mark("search-replace-btn", m.theme.ReplaceButton.Render("Replace")))
-		sb.WriteString(" ")
-		sb.WriteString(zone.Mark("search-replace-all-btn", m.theme.ReplaceButton.Render("All")))
+		sb.WriteString(arrowStyle.Render("  ⤷ ") + m.replaceInput.View() + "\n")
+		replace := m.theme.ReplaceButton.Render("Replace")
+		all := m.theme.ReplaceButton.Render("All")
+		if markZones {
+			replace = zone.Mark("search-replace-btn", replace)
+			all = zone.Mark("search-replace-all-btn", all)
+		}
+		sb.WriteString(replace + " " + all)
 		sb.WriteByte('\n')
 	}
 	sb.WriteByte('\n')
@@ -630,12 +645,27 @@ func (m Model) View() string {
 	if m.indexing {
 		sb.WriteString(m.spinner.View() + " " + m.theme.PromptMuted.Render("Indexing project..."))
 		sb.WriteByte('\n')
+	} else if m.searching {
+		sb.WriteString(m.theme.PromptMuted.Render("Searching..."))
+		sb.WriteByte('\n')
 	}
 
 	if m.errMsg != "" {
-		sb.WriteString(m.theme.PromptDanger.Render(m.errMsg))
+		sb.WriteString(m.theme.PromptDanger.Render(strings.ReplaceAll(m.errMsg, "\n", " ")))
 		sb.WriteByte('\n')
 	}
+
+	lines := strings.Split(sb.String(), "\n")
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, m.innerWidth(), "…")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// View renders the search overlay.
+func (m Model) View() string {
+	var sb strings.Builder
+	sb.WriteString(m.headerView(true))
 
 	// Scrollable results
 	visible := m.maxVisibleResults()
@@ -649,10 +679,11 @@ func (m Model) View() string {
 		var line string
 		if r.SymbolName != "" {
 			symbol := truncStr(r.SymbolName, 20)
-			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, m.theme.PromptAccent.Render(symbol), truncStr(r.Preview, boxWidth-45))
+			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, m.theme.PromptAccent.Render(symbol), truncStr(r.Preview, m.innerWidth()))
 		} else {
-			line = fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, boxWidth-30))
+			line = fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, m.innerWidth()))
 		}
+		line = ansi.Truncate(line, m.innerWidth(), "…")
 		if i == m.cursor {
 			sb.WriteString(m.theme.SearchActive.Render(line))
 		} else {
@@ -675,22 +706,24 @@ func (m Model) View() string {
 	}
 
 	content := sb.String()
-	return m.theme.SearchBox.Width(boxWidth).Render(content)
+	return m.theme.SearchBox.Width(m.boxWidth()).Render(content)
 }
 
 func truncPath(path string, maxLen int) string {
-	if len(path) <= maxLen {
+	width := ansi.StringWidth(path)
+	if width <= maxLen {
 		return path
 	}
-	return "..." + path[len(path)-maxLen+3:]
+	if maxLen <= 3 {
+		return ansi.Truncate(path, max(0, maxLen), "")
+	}
+	return "..." + ansi.Cut(path, width-maxLen+3, width)
 }
 
 func truncStr(s string, maxLen int) string {
-	if maxLen <= 0 {
-		return ""
+	tail := "..."
+	if maxLen < 3 {
+		tail = ""
 	}
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	return ansi.Truncate(s, max(0, maxLen), tail)
 }

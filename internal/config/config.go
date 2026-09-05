@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"teak/internal/ui"
 )
 
 const (
@@ -86,11 +88,9 @@ type LSPConfig struct {
 	Env        map[string]string `toml:"env"`
 }
 
-var knownThemes = []string{"nord", "dracula", "catppuccin", "solarized-dark", "one-dark"}
-
 // KnownThemes returns the supported UI theme names in display order.
 func KnownThemes() []string {
-	return append([]string(nil), knownThemes...)
+	return ui.ThemeIDs()
 }
 
 // DefaultConfig returns sensible default configuration.
@@ -347,12 +347,7 @@ func (c Config) Validate() error {
 	// Validate theme - check against known valid themes
 	if c.UI.Theme != "" {
 		validTheme := false
-		for _, theme := range knownThemes {
-			if c.UI.Theme == theme {
-				validTheme = true
-				break
-			}
-		}
+		validTheme = ui.HasTheme(c.UI.Theme)
 		if !validTheme {
 			return fmt.Errorf("unknown theme: %q", c.UI.Theme)
 		}

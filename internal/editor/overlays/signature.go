@@ -45,6 +45,11 @@ func NewSignatureHelp(theme ui.Theme) SignatureHelp {
 	}
 }
 
+// SetTheme updates rendering without changing signature state.
+func (s *SignatureHelp) SetTheme(theme ui.Theme) {
+	s.theme = theme
+}
+
 // Show displays signature help.
 func (s *SignatureHelp) Show(help *SignatureData) {
 	s.Help = help

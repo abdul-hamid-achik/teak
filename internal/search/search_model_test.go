@@ -6,11 +6,96 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
+
+func TestSearchBoundsAndRenderedResultMouseRow(t *testing.T) {
+	previous := zone.DefaultManager
+	zone.NewGlobal()
+	t.Cleanup(func() { zone.Close(); zone.DefaultManager = previous })
+	for _, width := range []int{40, 80} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/replace=%t", width, replace), func(t *testing.T) {
+				m := New(ui.DefaultTheme(), t.TempDir(), ModeText)
+				m.SetSize(width, 18)
+				m.showReplace = replace
+				m.input.SetValue("needle")
+				m.replaceInput.SetValue("a long café replacement with UTF-8")
+				if replace {
+					m.errMsg = "A recoverable search error"
+				}
+				for i := 0; i < 20; i++ {
+					m.results = append(m.results, Result{FilePath: fmt.Sprintf("file%d.go", i), Preview: "café 界 long preview that must fit", Line: i})
+				}
+				if lipgloss.Width(m.input.View()) > m.innerWidth() || lipgloss.Width(m.replaceInput.View())+4 > m.innerWidth() {
+					t.Error("input cursor extends beyond available width")
+				}
+				view := zone.Scan(m.View())
+				if lipgloss.Width(view) > width || lipgloss.Height(view) > 18 {
+					t.Errorf("search dimensions %dx%d exceed %dx18", lipgloss.Width(view), lipgloss.Height(view), width)
+				}
+				row := -1
+				for i, line := range strings.Split(ansi.Strip(view), "\n") {
+					if strings.Contains(line, "file0.go") {
+						row = i
+						break
+					}
+				}
+				if row < 0 {
+					t.Fatal("first result is not visible")
+				}
+				_, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 4, Y: row}))
+				if cmd == nil {
+					t.Fatal("click on rendered first result was ignored")
+				}
+				if got := cmd().(OpenResultMsg); got.FilePath != "file0.go" || got.Index != 0 {
+					t.Errorf("clicked rendered first result, opened %+v", got)
+				}
+				m.scrollY = 3
+				for _, y := range []int{row - 1, row + m.maxVisibleResults()} {
+					if _, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{Button: tea.MouseLeft, X: 4, Y: y})); cmd != nil {
+						t.Errorf("non-result row %d opened a scrolled result", y)
+					}
+				}
+
+			})
+		}
+	}
+}
+
+func TestSearchLoadingIsVisibleUntilResultsArrive(t *testing.T) {
+	m := New(ui.DefaultTheme(), t.TempDir(), ModeText)
+	m.SetSize(40, 18)
+	_ = m.Focus()
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "needle"})
+	if !strings.Contains(ansi.Strip(m.View()), "Searching...") {
+		t.Fatal("pending query has no loading feedback")
+	}
+	m, _ = m.Update(SearchResultsMsg{Generation: 1})
+	view := ansi.Strip(m.View())
+	if strings.Contains(view, "Searching...") || !strings.Contains(view, "No results") {
+		t.Fatalf("finished empty search: %q", view)
+	}
+}
+
+func TestSearchTruncationPreservesUnicode(t *testing.T) {
+	for _, width := range []int{-1, 0, 1, 2, 3, 8, 20} {
+		for _, input := range []string{"café/界界界.go", "short", "á🇲🇽/long-name.go"} {
+			for name, truncate := range map[string]func(string, int) string{"path": truncPath, "text": truncStr} {
+				got := truncate(input, width)
+				if !utf8.ValidString(got) || ansi.StringWidth(got) > max(0, width) {
+					t.Errorf("%s(%q, %d) = %q", name, input, width, got)
+				}
+			}
+		}
+	}
+}
 
 func TestModelIgnoresStaleSearchResults(t *testing.T) {
 	m := New(ui.DefaultTheme(), t.TempDir(), ModeText)
@@ -99,11 +184,11 @@ func TestModelViewEmptyQueryAndTinyHeightStayRenderable(t *testing.T) {
 	m := New(ui.DefaultTheme(), t.TempDir(), ModeSemantic)
 	m.SetSize(10, 1)
 	view := m.View()
-	if view == "" || !strings.Contains(view, "Search") {
+	if view == "" || lipgloss.Width(view) > 10 {
 		t.Fatalf("tiny empty View() = %q, want rendered search overlay", view)
 	}
-	if got := m.maxVisibleResults(); got < 3 {
-		t.Fatalf("maxVisibleResults() = %d, want lower bound 3", got)
+	if got := m.maxVisibleResults(); got < 1 {
+		t.Fatalf("maxVisibleResults() = %d, want lower bound 1", got)
 	}
 }
 
@@ -190,6 +275,7 @@ func TestModelKeyboardAndMouseContracts(t *testing.T) {
 
 func TestOpenResultMsgCarriesSelectedIndex(t *testing.T) {
 	m := New(ui.DefaultTheme(), t.TempDir(), ModeText)
+	m.SetSize(80, 24)
 	m, _ = m.Update(SearchResultsMsg{Results: []Result{
 		{FilePath: "a.go", Line: 1, Col: 0},
 		{FilePath: "b.go", Line: 2, Col: 0},

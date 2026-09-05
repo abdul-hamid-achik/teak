@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"teak/internal/ui"
 )
 
 // TestConfigValidation tests that config values are validated
@@ -108,13 +110,17 @@ func TestValidateTabSize(t *testing.T) {
 // TestValidateTheme tests theme validation
 func TestValidateTheme(t *testing.T) {
 	// Get list of valid themes
-	validThemes := []string{"nord", "dracula", "catppuccin", "solarized-dark", "one-dark"}
+	validThemes := ui.ThemeIDs()
 
 	tests := []struct {
 		theme   string
 		wantErr bool
 	}{
 		{"nord", false},
+		{"gruvbox-dark", false},
+		{"monokai", false},
+		{"night-owl", false},
+		{"material-palenight", false},
 		{"Nord", true}, // Case sensitive
 		{"", false},    // Empty is OK (will use default)
 		{"default", true},
@@ -146,6 +152,23 @@ func TestValidateTheme(t *testing.T) {
 		if !hasErr && !isValid && tt.theme != "" {
 			t.Errorf("Theme=%q: expected error for unknown theme", tt.theme)
 		}
+	}
+}
+
+func TestKnownThemesUsesUIThemeCatalog(t *testing.T) {
+	want := ui.ThemeIDs()
+	got := KnownThemes()
+	if len(got) != len(want) {
+		t.Fatalf("KnownThemes() returned %d IDs, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("KnownThemes()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	got[0] = "changed"
+	if KnownThemes()[0] != want[0] {
+		t.Error("KnownThemes leaked its returned slice")
 	}
 }
 

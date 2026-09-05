@@ -51,6 +51,11 @@ func NewTabBar(theme ui.Theme) TabBar {
 	return TabBar{theme: theme}
 }
 
+// SetTheme updates rendering without changing tabs or the active selection.
+func (tb *TabBar) SetTheme(theme ui.Theme) {
+	tb.theme = theme
+}
+
 // AddTab adds a tab and returns its index.
 func (tb *TabBar) AddTab(label, filePath string) int {
 	for _, tab := range tb.Tabs {
@@ -228,20 +233,20 @@ func truncateTabLabel(label string, width int) string {
 	return b.String() + ellipsis
 }
 
-func styleTabLabel(tab Tab, label string) string {
+func styleTabLabel(tab Tab, label string, theme ui.Theme) string {
 	var sb strings.Builder
 	rest := label
 	if tab.Dirty && strings.HasPrefix(rest, "● ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord12).Render("●"))
+		sb.WriteString(lipgloss.NewStyle().Foreground(theme.GitModified.GetForeground()).Render("●"))
 		sb.WriteString(" ")
 		rest = strings.TrimPrefix(rest, "● ")
 	}
 	if tab.DiagSeverity == 1 && strings.HasPrefix(rest, "✗ ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord11).Render("✗"))
+		sb.WriteString(lipgloss.NewStyle().Foreground(theme.DiagError.GetForeground()).Render("✗"))
 		sb.WriteString(" ")
 		rest = strings.TrimPrefix(rest, "✗ ")
 	} else if tab.DiagSeverity == 2 && strings.HasPrefix(rest, "▲ ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(ui.Nord13).Render("▲"))
+		sb.WriteString(lipgloss.NewStyle().Foreground(theme.DiagWarning.GetForeground()).Render("▲"))
 		sb.WriteString(" ")
 		rest = strings.TrimPrefix(rest, "▲ ")
 	}
@@ -295,7 +300,7 @@ func (tb TabBar) View() string {
 			labelWidth -= tabCloseWidth
 		}
 		label := truncateTabLabel(tabLabelText(tab), labelWidth)
-		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label)))
+		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label, tb.theme)))
 		if showClose {
 			styledClose := zone.Mark(TabCloseZoneID(tab), closeStyle.Render(" × "))
 			tabs = append(tabs, styledLabel+styledClose)

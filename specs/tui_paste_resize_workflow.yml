@@ -1,0 +1,69 @@
+version: 1
+name: teak_paste_resize_workflow
+coversSymbol: app.Model.handlePastePrecedence
+metadata:
+    feature: input-routing
+    owner: core-ui
+    priority: high
+    tags: [tui, regression, story, paste, resize]
+intent: |
+    Bracketed paste starts Find and workspace searches, a populated search survives
+    resize, and Save As keeps a long path's insertion point visible without editing the file.
+target:
+    cmd: [sh, testdata/glyphrun/run-teak.sh, paste-resize, testdata/glyphrun/config/default.toml, testdata/glyphrun/workspace/alpha.txt]
+    cwd: .
+    timeoutMs: 20000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: go build -o ./bin/teak ./cmd/teak
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "alpha one"}
+    - press: ctrl+f
+    - send: {bytes: "\\x1b[200~alpha\\x1b[201~"}
+    - wait:
+        screen: {matches: 'Find.*alpha.*[1-3]/3'}
+    - snapshot: pasted_find_matches
+    - press: esc
+    - wait:
+        screen: {notContains: "Find"}
+    - send: {bytes: "\\x1b[102;6u"}
+    - send: {bytes: "\\x1b[200~alpha\\x1b[201~"}
+    - wait:
+        screen: {contains: "alpha.txt:1"}
+    - resize: {cols: 40, rows: 18}
+    - wait:
+        screen: {contains: "alpha.txt:1"}
+    - snapshot: search_after_resize
+    - press: esc
+    - wait:
+        screen: {notContains: "alpha.txt:1"}
+    - send: {bytes: "\\x1b[115;6u"}
+    - send: {bytes: "\\x1b[200~/long-directory/long-directory/long-directory/final.go\\x1b[201~"}
+    - wait:
+        screen: {contains: "final.go_"}
+    - snapshot: save_as_path_tail
+    - press: esc
+    - wait:
+        screen: {notContains: "Save As:"}
+    - resize: {cols: 80, rows: 24}
+    - wait:
+        screen: {contains: "alpha one"}
+    - press: ctrl+q
+    - wait:
+        process: {exitCode: 0}
+        timeoutMs: 5000
+outcomes:
+    - id: unmodified_document_exits_without_confirmation
+      description: pasting into prompts never dirties the file
+      verify:
+        process: {exitCode: 0}
+artifacts:
+    finalScreen: never
+contractHash: sha256:6efa6495242a5c5fa55e4d31c374b01eb6d59b3f680bb296002bd11651f5bd6c

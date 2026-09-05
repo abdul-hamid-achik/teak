@@ -207,9 +207,8 @@ func TestThemeCaseSensitivity(t *testing.T) {
 
 // TestAllThemes tests all available themes
 func TestAllThemes(t *testing.T) {
-	themes := []string{"nord", "dracula", "catppuccin", "solarized-dark", "one-dark"}
-
-	for _, themeName := range themes {
+	for _, option := range ThemeOptions() {
+		themeName := option.ID
 		t.Run(themeName, func(t *testing.T) {
 			theme := ThemeByName(themeName)
 

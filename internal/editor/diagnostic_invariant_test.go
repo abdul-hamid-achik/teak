@@ -13,7 +13,7 @@ func TestEditorRenderPathsUsePreparedDiagnosticProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse editor.go: %v", err)
 	}
-	wanted := map[string]bool{"View": false, "diagnosticHighlights": false}
+	wanted := map[string]bool{"View": false, "ViewWithFocus": false, "diagnosticHighlights": false}
 	projectionFound := make(map[string]bool, len(wanted))
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
@@ -32,6 +32,10 @@ func TestEditorRenderPathsUsePreparedDiagnosticProjection(t *testing.T) {
 			switch selector.Sel.Name {
 			case "Diagnostics":
 				t.Errorf("%s: %s reads the file-wide diagnostic slice during rendering", fset.Position(selector.Pos()), fn.Name.Name)
+			case "ViewWithFocus":
+				if fn.Name.Name == "View" {
+					projectionFound[fn.Name.Name] = true
+				}
 			case "visibleDiagnosticProjection":
 				projectionFound[fn.Name.Name] = true
 			}

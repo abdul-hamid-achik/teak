@@ -216,6 +216,26 @@ type ContextResult struct {
 	Callees     []Symbol `json:"callees"`
 	References  []Symbol `json:"references"`
 	Tests       []Symbol `json:"tests"`
+	// Older Codemap versions omit Found. Absence must not become a false
+	// negative, and resolved calls must not imply complete value references.
+	Found                *bool  `json:"found,omitempty"`
+	CallersTotal         int    `json:"callers_total,omitempty"`
+	CalleesTotal         int    `json:"callees_total,omitempty"`
+	ReferencesTotal      int    `json:"references_total,omitempty"`
+	ReferencesTruncated  int    `json:"references_truncated,omitempty"`
+	TestsTotal           int    `json:"tests_total,omitempty"`
+	ReferencesCoverage   string `json:"references_coverage,omitempty"`
+	ReferencesStale      bool   `json:"references_stale,omitempty"`
+	ReferencesConfidence string `json:"references_confidence,omitempty"`
+	ReferencesResolution string `json:"references_resolution,omitempty"`
+	CallGraph            string `json:"call_graph,omitempty"`
+	Resolution           string `json:"resolution,omitempty"`
+	Note                 string `json:"note,omitempty"`
+	PartialErrors        []struct {
+		Symbol    string `json:"symbol,omitempty"`
+		Component string `json:"component"`
+		Error     string `json:"error"`
+	} `json:"partial_errors,omitempty"`
 }
 
 // ImpactResult is the output of `codemap impact <symbol>`.

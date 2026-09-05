@@ -486,9 +486,25 @@ func (h *Highlighter) streamTokenizeContext(ctx context.Context, content string,
 	if err := ctx.Err(); err != nil {
 		return nil, false
 	}
-	iterator, err := h.lexer.Tokenise(nil, content)
-	if err != nil {
-		return nil, true
+	var iterator chroma.Iterator
+	// ponytail: regex lexers can repeatedly time out on generated megabyte lines.
+	// Keep snapshots with lines over 64 KiB plain until lexers support bounded,
+	// cancellable matching; all source bytes and viewport ranges are preserved.
+	for line := range strings.SplitSeq(content, "\n") {
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		if len(line) > 64*1024 {
+			iterator = chroma.Literator(chroma.Token{Type: chroma.Text, Value: content})
+			break
+		}
+	}
+	if iterator == nil {
+		var err error
+		iterator, err = h.lexer.Tokenise(nil, content)
+		if err != nil {
+			return nil, true
+		}
 	}
 
 	const tokenizeMargin = 50

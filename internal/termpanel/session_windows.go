@@ -2,8 +2,11 @@
 
 package termpanel
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
-func (m *Model) Start() error {
-	return fmt.Errorf("integrated terminal is not available on Windows yet")
+func startSession(context.Context, string, int, int) (session, error) {
+	return nil, fmt.Errorf("integrated terminal is not available on Windows yet")
 }

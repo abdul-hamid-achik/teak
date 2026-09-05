@@ -94,6 +94,9 @@ func (m *Model) SetSize(width, height int) {
 	m.clampScroll()
 }
 
+// SetTheme updates rendering without rebuilding diagnostic state.
+func (m *Model) SetTheme(theme ui.Theme) { m.theme = theme }
+
 // SetProblems updates the problems list and rebuilds groups.
 func (m *Model) SetProblems(problems []Problem) {
 	m.ApplySnapshot(PrepareSnapshot(problems))
@@ -529,7 +532,7 @@ func (m *Model) renderProblem(index int) string {
 
 	// Apply selection background
 	if isSelected {
-		line = lipgloss.NewStyle().Background(ui.Nord2).Render(line)
+		line = lipgloss.NewStyle().Background(m.theme.TreeCursor.GetBackground()).Render(line)
 	}
 
 	return line

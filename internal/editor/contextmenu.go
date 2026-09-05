@@ -34,6 +34,11 @@ func NewContextMenu(theme ui.Theme) ContextMenu {
 	return ContextMenu{theme: theme}
 }
 
+// SetTheme updates rendering without changing the menu selection or visibility.
+func (c *ContextMenu) SetTheme(theme ui.Theme) {
+	c.theme = theme
+}
+
 // Show displays the context menu with the given items at (x, y).
 func (c *ContextMenu) Show(items []ContextMenuItem, x, y int) {
 	c.Items = items

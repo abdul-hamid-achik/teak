@@ -91,9 +91,10 @@ func New(theme ui.Theme) Model {
 	ti.Placeholder = "Ask the agent... (@file, /model)"
 	ti.Prompt = ""
 	ti.CharLimit = 4096
+	ui.ApplyTextInputTheme(&ti, theme)
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
-	sp.Style = lipgloss.NewStyle().Foreground(ui.Nord13)
+	sp.Style = theme.PromptAccent
 
 	return Model{
 		theme:       theme,
@@ -124,6 +125,15 @@ func (m *Model) SetSize(w, h int) {
 		innerW = 1
 	}
 	m.input.SetWidth(innerW)
+}
+
+// SetTheme updates input and spinner styles while preserving the conversation,
+// focus, and any in-flight request state.
+func (m *Model) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	ui.ApplyTextInputTheme(&m.input, theme)
+	m.spinner.Style = theme.PromptAccent
+	m.invalidateChatCache()
 }
 
 // SetConnected updates the connection state.
@@ -973,12 +983,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "home":
+	case "home", "ctrl+home":
+		if key == "home" && m.input.Focused() {
+			break
+		}
 		m.scrollY = 0
 		m.autoScroll = false
 		return m, nil
 
-	case "end":
+	case "end", "ctrl+end":
+		if key == "end" && m.input.Focused() {
+			break
+		}
 		m.refreshScrollBounds()
 		m.scrollY = m.maxScroll
 		m.autoScroll = true
@@ -1241,7 +1257,7 @@ func (m *Model) View() string {
 	}
 
 	// Input divider
-	divider := lipgloss.NewStyle().Foreground(ui.Nord3).Render(strings.Repeat("─", innerW))
+	divider := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render(strings.Repeat("─", innerW))
 	sb.WriteString(divider)
 	sb.WriteByte('\n')
 
@@ -1250,15 +1266,15 @@ func (m *Model) View() string {
 		inputView := m.input.View()
 		sb.WriteString(lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Render(" " + inputView))
 	} else {
-		sb.WriteString(lipgloss.NewStyle().Width(innerW).Foreground(ui.Nord3).Render(" Agent not connected"))
+		sb.WriteString(lipgloss.NewStyle().Width(innerW).Foreground(m.theme.Gutter.GetForeground()).Render(" Agent not connected"))
 	}
 
 	return sb.String()
 }
 
 func (m Model) renderTaggedFiles(width int) string {
-	tagStyle := lipgloss.NewStyle().Foreground(ui.Nord0).Background(ui.Nord8)
-	dimStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+	tagStyle := lipgloss.NewStyle().Foreground(m.theme.Editor.GetBackground()).Background(m.theme.PromptAccent.GetForeground())
+	dimStyle := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground())
 
 	var parts []string
 	for _, f := range m.taggedFiles {
@@ -1281,19 +1297,19 @@ func (m Model) renderHeader() string {
 	switch m.state {
 	case AgentDisconnected:
 		indicator = " ○"
-		indicatorStyle = indicatorStyle.Foreground(ui.Nord3)
+		indicatorStyle = indicatorStyle.Foreground(m.theme.Gutter.GetForeground())
 	case AgentIdle:
 		indicator = " ●"
-		indicatorStyle = indicatorStyle.Foreground(ui.Nord14)
+		indicatorStyle = indicatorStyle.Foreground(m.theme.GitAdded.GetForeground())
 	case AgentThinking:
 		indicator = " " + m.spinner.View()
-		indicatorStyle = indicatorStyle.Foreground(ui.Nord13)
+		indicatorStyle = indicatorStyle.Foreground(m.theme.DiagWarning.GetForeground())
 	case AgentPermission:
 		indicator = " ⏸"
-		indicatorStyle = indicatorStyle.Foreground(ui.Nord12)
+		indicatorStyle = indicatorStyle.Foreground(m.theme.AgentPermission.GetForeground())
 	}
 
-	titleStyle := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true)
+	titleStyle := m.theme.AgentHeader
 	title := titleStyle.Render(label)
 	ind := indicatorStyle.Render(indicator)
 
@@ -1304,14 +1320,14 @@ func (m Model) renderHeader() string {
 		if lipgloss.Width(modelStr) > 25 {
 			modelStr = ansi.Truncate(modelStr, 25, "...")
 		}
-		modelLabel = " " + lipgloss.NewStyle().Foreground(ui.Nord4).Render(modelStr)
+		modelLabel = " " + lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Render(modelStr)
 	}
 
 	dashW := w - lipgloss.Width(title) - lipgloss.Width(ind) - lipgloss.Width(modelLabel)
 	if dashW < 1 {
 		dashW = 1
 	}
-	dashes := lipgloss.NewStyle().Foreground(ui.Nord3).Render(" " + strings.Repeat("─", dashW-1))
+	dashes := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render(" " + strings.Repeat("─", dashW-1))
 
 	return title + modelLabel + dashes + ind
 }
@@ -1328,28 +1344,28 @@ func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int
 
 	if !m.connected {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render(" Agent not connected."))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Agent not connected."))
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render(" Configure in ~/.config/teak/config.toml:"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   [agent]"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   enabled = true"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   command = \"opencode\""))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render("   args = [\"acp\"]"))
-		return lines, nil, -1
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Configure in ~/.config/teak/config.toml:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   [agent]"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   enabled = true"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   command = \"opencode\""))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   args = [\"acp\"]"))
+		return strings.Split(strings.Join(lines, "\n"), "\n"), nil, -1
 	}
 
-	hasContent := len(m.messages) > 0 || len(m.streamBlocks) > 0 || m.loading
+	hasContent := len(m.messages) > 0 || len(m.streamBlocks) > 0 || m.loading || m.permission != nil || m.pendingWrite != nil
 	if !hasContent {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render(" Try asking:"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   \"explain this function\""))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   \"find usages of X\""))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   \"fix the bug in auth.go\""))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Try asking:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"explain this function\""))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"find usages of X\""))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"fix the bug in auth.go\""))
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord3).Width(width).Render(" Commands:"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   /model  — switch model"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Width(width).Render("   @       — attach file"))
-		return lines, nil, -1
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Commands:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   /model  — switch model"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   @       — attach file"))
+		return strings.Split(strings.Join(lines, "\n"), "\n"), nil, -1
 	}
 
 	contentW := width - 2
@@ -1357,19 +1373,19 @@ func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int
 		contentW = 1
 	}
 
-	systemStyle := lipgloss.NewStyle().Foreground(ui.Nord3).Italic(true)
+	systemStyle := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Italic(true)
 
 	for _, msg := range m.messages {
 		lines = append(lines, "")
 		switch msg.Role {
 		case RoleUser:
-			lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true).Render(" You:"))
+			lines = append(lines, m.theme.AgentHeader.Render(" You:"))
 			wrapped := wrapText(msg.Content, contentW)
 			for _, l := range wrapped {
 				lines = append(lines, "  "+l)
 			}
 		case RoleAgent:
-			lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(" Agent:"))
+			lines = append(lines, m.theme.GitAdded.Bold(true).Render(" Agent:"))
 			for _, tc := range msg.ToolCalls {
 				lines = append(lines, m.renderToolCall(tc, contentW)...)
 			}
@@ -1393,7 +1409,7 @@ func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int
 	// Streaming blocks in chronological order.
 	if len(m.streamBlocks) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord14).Bold(true).Render(" Agent:"))
+		lines = append(lines, m.theme.GitAdded.Bold(true).Render(" Agent:"))
 		for _, block := range m.streamBlocks {
 			streamBlockStarts = append(streamBlockStarts, len(lines))
 			lines = append(lines, m.renderStreamBlock(block, contentW)...)
@@ -1414,7 +1430,7 @@ func (m Model) renderStreamBlock(block StreamBlock, contentW int) []string {
 			lines = append(lines, "  "+line)
 		}
 	case BlockThought:
-		thoughtStyle := lipgloss.NewStyle().Foreground(ui.Nord3).Italic(true)
+		thoughtStyle := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Italic(true)
 		for _, line := range wrapText(block.Content, contentW) {
 			lines = append(lines, "  "+thoughtStyle.Render(line))
 		}
@@ -1448,13 +1464,13 @@ func (m Model) renderToolCall(tc *ToolCallState, width int) []string {
 	var statusIcon string
 	switch tc.Status {
 	case sdk.ToolCallStatusPending, sdk.ToolCallStatusInProgress:
-		statusIcon = lipgloss.NewStyle().Foreground(ui.Nord13).Render("◐")
+		statusIcon = lipgloss.NewStyle().Foreground(m.theme.DiagWarning.GetForeground()).Render("◐")
 	case sdk.ToolCallStatusCompleted:
-		statusIcon = lipgloss.NewStyle().Foreground(ui.Nord14).Render("✓")
+		statusIcon = lipgloss.NewStyle().Foreground(m.theme.GitAdded.GetForeground()).Render("✓")
 	case sdk.ToolCallStatusFailed:
-		statusIcon = lipgloss.NewStyle().Foreground(ui.Nord11).Render("✗")
+		statusIcon = lipgloss.NewStyle().Foreground(m.theme.DiagError.GetForeground()).Render("✗")
 	default:
-		statusIcon = lipgloss.NewStyle().Foreground(ui.Nord3).Render("⊘")
+		statusIcon = lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render("⊘")
 	}
 
 	arrow := "▸"
@@ -1496,13 +1512,13 @@ func (m Model) renderToolCall(tc *ToolCallState, width int) []string {
 	if lipgloss.Width(line) > width+2 {
 		line = ansi.Truncate(line, width+2, "")
 	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(ui.Nord4).Render(line))
+	lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Render(line))
 
 	if tc.Expanded {
 		lineCount := 0
 		for _, c := range tc.Content {
 			if lineCount >= maxToolOutputLines {
-				lines = append(lines, "    "+lipgloss.NewStyle().Foreground(ui.Nord3).Render("│ ... (truncated)"))
+				lines = append(lines, "    "+lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render("│ ... (truncated)"))
 				break
 			}
 			text := extractToolCallText(c)
@@ -1510,10 +1526,10 @@ func (m Model) renderToolCall(tc *ToolCallState, width int) []string {
 				wrapped := wrapText(text, width-4)
 				for _, l := range wrapped {
 					if lineCount >= maxToolOutputLines {
-						lines = append(lines, "    "+lipgloss.NewStyle().Foreground(ui.Nord3).Render("│ ... (truncated)"))
+						lines = append(lines, "    "+lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render("│ ... (truncated)"))
 						break
 					}
-					lines = append(lines, "    "+lipgloss.NewStyle().Foreground(ui.Nord3).Render("│ "+l))
+					lines = append(lines, "    "+lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Render("│ "+l))
 					lineCount++
 				}
 			}
@@ -1532,7 +1548,7 @@ func (m Model) renderPermission(width int) []string {
 	var lines []string
 	lines = append(lines, "")
 
-	boxStyle := lipgloss.NewStyle().Foreground(ui.Nord12)
+	boxStyle := lipgloss.NewStyle().Foreground(m.theme.AgentPermission.GetForeground())
 	lines = append(lines, boxStyle.Render("  Agent wants to:"))
 
 	title := ""
@@ -1542,15 +1558,15 @@ func (m Model) renderPermission(width int) []string {
 	if title == "" {
 		title = "perform an action"
 	}
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.Nord6).Bold(true).Render(title))
+	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground()).Bold(true).Render(title))
 
 	optLine := "  "
-	optLine += zone.Mark("agent-perm-allow", lipgloss.NewStyle().Foreground(ui.Nord14).Render("[y] Allow"))
+	optLine += zone.Mark("agent-perm-allow", lipgloss.NewStyle().Foreground(m.theme.GitAdded.GetForeground()).Render("[y] Allow"))
 	optLine += "  "
-	optLine += zone.Mark("agent-perm-deny", lipgloss.NewStyle().Foreground(ui.Nord11).Render("[n] Deny"))
+	optLine += zone.Mark("agent-perm-deny", lipgloss.NewStyle().Foreground(m.theme.DiagError.GetForeground()).Render("[n] Deny"))
 	if permissionHasOption(perm.Options, sdk.PermissionOptionKindAllowAlways) {
 		optLine += "  "
-		optLine += zone.Mark("agent-perm-always", lipgloss.NewStyle().Foreground(ui.Nord13).Render("[a] Always"))
+		optLine += zone.Mark("agent-perm-always", lipgloss.NewStyle().Foreground(m.theme.DiagWarning.GetForeground()).Render("[a] Always"))
 	}
 	lines = append(lines, optLine)
 
@@ -1574,12 +1590,12 @@ func (m Model) renderWriteProposal(width int) []string {
 
 	var lines []string
 	lines = append(lines, "")
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.Nord12).Render("Edit proposal:"))
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.Nord6).Render(pw.Path))
+	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.AgentPermission.GetForeground()).Render("Edit proposal:"))
+	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground()).Render(pw.Path))
 
 	lineCount := strings.Count(pw.Content, "\n") + 1
 	lines = append(lines, fmt.Sprintf("  %d lines", lineCount))
-	lines = append(lines, "  "+zone.Mark("agent-write-accept", lipgloss.NewStyle().Foreground(ui.Nord14).Render("[Enter] Accept"))+"  "+zone.Mark("agent-write-reject", lipgloss.NewStyle().Foreground(ui.Nord11).Render("[Esc] Reject")))
+	lines = append(lines, "  "+zone.Mark("agent-write-accept", lipgloss.NewStyle().Foreground(m.theme.GitAdded.GetForeground()).Render("[Enter] Accept"))+"  "+zone.Mark("agent-write-reject", lipgloss.NewStyle().Foreground(m.theme.DiagError.GetForeground()).Render("[Esc] Reject")))
 
 	return lines
 }

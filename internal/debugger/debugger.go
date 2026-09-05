@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/dap"
 	"teak/internal/ui"
@@ -14,7 +15,7 @@ import (
 type DebugControl string
 
 const (
-	DebugStart   DebugControl = "start"
+	DebugStart    DebugControl = "start"
 	DebugContinue DebugControl = "continue"
 	DebugNext     DebugControl = "next"
 	DebugStepIn   DebugControl = "stepin"
@@ -79,7 +80,11 @@ func New(theme ui.Theme) Model {
 func (m *Model) SetSize(width, height int) {
 	m.width = width
 	m.height = height
+	m.revealFrame()
 }
+
+// SetTheme updates rendering without rebuilding debug state.
+func (m *Model) SetTheme(theme ui.Theme) { m.theme = theme }
 
 // SetState sets the debug state.
 func (m *Model) SetState(state dap.DebugState) {
@@ -95,6 +100,7 @@ func (m *Model) SetState(state dap.DebugState) {
 func (m *Model) SetStackFrames(frames []dap.StackFrame) {
 	m.stackFrames = frames
 	m.currentFrame = 0
+	m.scrollY = 0
 }
 
 // SetVariables sets the variables.
@@ -152,6 +158,7 @@ func (m *Model) SelectFrame(idx int) tea.Cmd {
 		return nil
 	}
 	m.currentFrame = idx
+	m.revealFrame()
 	frame := m.stackFrames[idx]
 	if frame.Source.Path == "" {
 		return nil
@@ -182,10 +189,28 @@ func (m *Model) StackFrameAtY(y int) int {
 		return -1
 	}
 	idx := m.scrollY + frameY
-	if idx >= len(m.stackFrames) || idx >= m.scrollY+8 {
+	if idx >= len(m.stackFrames) || idx >= m.scrollY+m.visibleFrames() {
 		return -1
 	}
 	return idx
+}
+
+func (m *Model) visibleFrames() int {
+	if m.height > 0 {
+		return min(8, max(1, m.height-5))
+	}
+	return 8
+}
+
+func (m *Model) revealFrame() {
+	visible := m.visibleFrames()
+	if m.currentFrame < m.scrollY {
+		m.scrollY = m.currentFrame
+	}
+	if m.currentFrame >= m.scrollY+visible {
+		m.scrollY = m.currentFrame - visible + 1
+	}
+	m.scrollY = min(m.scrollY, max(0, len(m.stackFrames)-visible))
 }
 
 // ScrollUp scrolls the stack trace up by n lines.
@@ -195,12 +220,27 @@ func (m *Model) ScrollUp(n int) {
 
 // ScrollDown scrolls the stack trace down by n lines.
 func (m *Model) ScrollDown(n int) {
-	maxScroll := max(0, len(m.stackFrames)-8)
+	maxScroll := max(0, len(m.stackFrames)-m.visibleFrames())
 	m.scrollY = min(maxScroll, m.scrollY+n)
 }
 
 // View renders the debugger panel.
-func (m *Model) View() string {
+func (m *Model) View() (view string) {
+	// Keep one physical row per logical row so stack hit-testing and the parent
+	// layout agree even with long frame names and variable values.
+	defer func() {
+		lines := strings.Split(view, "\n")
+		if m.height > 0 && len(lines) > m.height {
+			lines = lines[:m.height]
+		}
+		if m.width > 0 {
+			for i, line := range lines {
+				lines[i] = ansi.Truncate(line, m.width, "…")
+			}
+		}
+		view = strings.Join(lines, "\n")
+	}()
+
 	if m.state == dap.StateInactive {
 		return m.renderInactive()
 	}
@@ -332,7 +372,7 @@ func (m *Model) renderStackTrace() string {
 	sb.WriteString(m.theme.GitSectionHeader.Render("Call Stack"))
 	sb.WriteString("\n")
 
-	maxFrames := 8
+	maxFrames := m.visibleFrames()
 	startIdx := m.scrollY
 	endIdx := min(startIdx+maxFrames, len(m.stackFrames))
 

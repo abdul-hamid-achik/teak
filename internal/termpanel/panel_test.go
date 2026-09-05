@@ -1,61 +1,61 @@
 package termpanel
 
 import (
-	"strings"
-	"testing"
-
 	tea "charm.land/bubbletea/v2"
+	"strings"
 	"teak/internal/ui"
+	"testing"
+	"time"
 )
 
-func TestAppendTextCapsHistory(t *testing.T) {
-	m := New(ui.DefaultTheme(), ".")
-	m.SetSize(20, 4)
-	for i := 0; i < maxTerminalLines+50; i++ {
-		m.appendText("line\n")
-	}
-	if len(m.lines) > maxTerminalLines {
-		t.Fatalf("lines = %d, want <= %d", len(m.lines), maxTerminalLines)
-	}
-}
-
 func TestApplyOutputDropsStaleGeneration(t *testing.T) {
-	m := New(ui.DefaultTheme(), ".")
+	m := New(ui.NordTheme(), ".")
+	m.SetSize(20, 5)
 	m.generation = 2
-	m.ApplyOutput(OutputMsg{Generation: 1, Data: []byte("stale")})
-	if strings.Contains(strings.Join(m.lines, ""), "stale") {
-		t.Fatal("stale PTY output was applied")
+	f := &terminalFrame{content: "stale", width: 20, height: 4}
+	m.ApplyOutput(OutputMsg{Generation: 1, frame: f})
+	if strings.Contains(m.View(), "stale") {
+		t.Fatal("stale session frame applied")
 	}
-	m.ApplyOutput(OutputMsg{Generation: 2, Data: []byte("fresh")})
-	if !strings.Contains(strings.Join(m.lines, ""), "fresh") {
-		t.Fatal("current generation output was dropped")
-	}
-}
-
-func TestEncodeKeyEnterAndCtrlC(t *testing.T) {
-	if got := encodeKey(tea.KeyPressMsg{Text: ""}); string(got) != "" {
-		// empty text without a named key is ignored
-	}
-	enter := encodeKey(mustKey("enter"))
-	if string(enter) != "\r" {
-		t.Fatalf("enter = %q", enter)
+	f.content = "fresh"
+	m.ApplyOutput(OutputMsg{Generation: 2, frame: f})
+	if !strings.Contains(m.View(), "fresh") {
+		t.Fatal("current session frame dropped")
 	}
 }
 
-func mustKey(name string) tea.KeyPressMsg {
-	switch name {
-	case "enter":
-		return tea.KeyPressMsg{Code: tea.KeyEnter}
-	default:
-		return tea.KeyPressMsg{}
+func TestKeysDuringStartupReachTheNewShell(t *testing.T) {
+	r, s := newFixtureTerminal(t)
+	m := New(ui.NordTheme(), ".")
+	m.starting = true
+	m.WriteKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m.ApplyStarted(StartedMsg{Generation: m.generation, terminal: r})
+	select {
+	case got := <-s.writes:
+		if got != "x" {
+			t.Fatalf("startup input=%q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("input typed while starting was lost")
 	}
 }
-
+func TestListenDoesNotDuplicatePendingRead(t *testing.T) {
+	r, _ := newFixtureTerminal(t)
+	m := New(ui.NordTheme(), ".")
+	m.terminal = r
+	first := m.Listen()
+	if first == nil || m.Listen() != nil {
+		t.Fatal("must have exactly one pending session read")
+	}
+	m.ApplyOutput(first().(OutputMsg))
+	if m.Listen() == nil {
+		t.Fatal("read not rearmed after current result")
+	}
+}
 func TestViewRendersTitle(t *testing.T) {
-	m := New(ui.DefaultTheme(), ".")
+	m := New(ui.NordTheme(), ".")
 	m.SetSize(40, 6)
-	got := m.View()
-	if !strings.Contains(got, "Terminal") {
-		t.Fatalf("view = %q", got)
+	if got := m.View(); !strings.Contains(got, "Terminal") {
+		t.Fatalf("view=%q", got)
 	}
 }

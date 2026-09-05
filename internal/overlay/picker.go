@@ -64,26 +64,27 @@ type PickerMatch struct {
 // Picker is a fuzzy-filterable list overlay with a text input, scrollable
 // results, and keyboard/mouse navigation. It implements the Overlay interface.
 type Picker struct {
-	input            textinput.Model
-	items            []PickerItem
-	filtered         []scoredItem
-	cursor           int
-	scrollY          int
-	theme            ui.Theme
-	width            int
-	maxHeight        int
-	dismissed        bool
-	title            string
-	zoneID           string // unique prefix for mouse zones
-	filterPending    bool
-	filterGeneration uint64
-	filterCancel     context.CancelFunc
-	instanceID       uint64
-	itemsPending     bool
-	itemsGeneration  uint64
-	itemsCancel      context.CancelFunc
-	pendingSelect    bool
-	dismissAction    tea.Msg
+	input                     textinput.Model
+	items                     []PickerItem
+	filtered                  []scoredItem
+	cursor                    int
+	scrollY                   int
+	theme                     ui.Theme
+	width                     int
+	maxHeight                 int
+	screenWidth, screenHeight int
+	dismissed                 bool
+	title                     string
+	zoneID                    string // unique prefix for mouse zones
+	filterPending             bool
+	filterGeneration          uint64
+	filterCancel              context.CancelFunc
+	instanceID                uint64
+	itemsPending              bool
+	itemsGeneration           uint64
+	itemsCancel               context.CancelFunc
+	pendingSelect             bool
+	dismissAction             tea.Msg
 }
 
 type scoredItem = PickerMatch
@@ -96,6 +97,7 @@ func NewPicker(title string, items []PickerItem, theme ui.Theme, zoneID string) 
 	ti := textinput.New()
 	ti.Placeholder = "Type to filter..."
 	ti.CharLimit = 128
+	ui.ApplyTextInputTheme(&ti, theme)
 
 	p := &Picker{
 		input:      ti,
@@ -129,7 +131,27 @@ func (p *Picker) Focus() tea.Cmd {
 func (p *Picker) SetSize(w, h int) {
 	p.width = max(1, w)
 	p.maxHeight = max(1, h)
-	p.input.SetWidth(max(1, min(p.width-8, 50)))
+	p.input.SetWidth(max(1, min(p.renderWidth()-8, 50)))
+	p.ensureVisible()
+}
+
+func (p *Picker) renderWidth() int {
+	if p.screenWidth > 0 {
+		return min(p.width, max(1, p.screenWidth-4))
+	}
+	return p.width
+}
+
+// SetTheme updates rendering without resetting filtering, input, or selection.
+func (p *Picker) SetTheme(theme ui.Theme) {
+	p.theme = theme
+	ui.ApplyTextInputTheme(&p.input, theme)
+}
+
+// SetCursor selects an item and keeps it in the visible viewport.
+func (p *Picker) SetCursor(index int) {
+	p.cursor = max(0, min(index, len(p.filtered)-1))
+	p.ensureVisible()
 }
 
 // SetItems replaces the item list and refilters.
@@ -208,6 +230,12 @@ func (p *Picker) DismissAction() tea.Msg { return p.dismissAction }
 
 // Update implements Overlay.
 func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		p.screenWidth, p.screenHeight = size.Width, size.Height
+		p.SetSize(p.width, p.maxHeight)
+		return p, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -342,7 +370,7 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 
 // View implements Overlay.
 func (p *Picker) View() string {
-	boxWidth := p.width
+	boxWidth := p.renderWidth()
 	if boxWidth < 30 && p.width >= 30 {
 		boxWidth = 30
 	}
@@ -357,7 +385,7 @@ func (p *Picker) View() string {
 	var sb strings.Builder
 
 	// Title
-	titleStyle := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true)
+	titleStyle := p.theme.HelpTitle
 	sb.WriteString(titleStyle.Render(p.title))
 	sb.WriteString("\n\n")
 
@@ -368,14 +396,10 @@ func (p *Picker) View() string {
 	// Results
 	startIdx, endIdx := p.visibleRange()
 
-	itemStyle := lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
-	cursorStyle := lipgloss.NewStyle().
-		Background(ui.Nord2).
-		Foreground(ui.Nord6)
+	itemStyle := p.theme.AutocompleteItem
+	cursorStyle := p.theme.AutocompleteCursor
 	descStyle := lipgloss.NewStyle().
-		Foreground(ui.Nord3)
+		Foreground(p.theme.Gutter.GetForeground())
 
 	for i := startIdx; i < endIdx; i++ {
 		si := p.filtered[i]
@@ -398,30 +422,30 @@ func (p *Picker) View() string {
 
 	if p.itemsPending {
 		sb.WriteByte('\n')
-		status := lipgloss.NewStyle().Foreground(ui.Nord3)
+		status := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
 		sb.WriteString(status.Render("  Loading..."))
 	} else if p.filterPending {
 		sb.WriteByte('\n')
-		status := lipgloss.NewStyle().Foreground(ui.Nord3)
+		status := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
 		sb.WriteString(status.Render("  Filtering..."))
 	} else if len(p.filtered) == 0 {
 		sb.WriteByte('\n')
-		noMatch := lipgloss.NewStyle().Foreground(ui.Nord3)
+		noMatch := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
 		sb.WriteString(noMatch.Render("  No matches"))
 	}
 
 	// Scroll hint
 	if len(p.filtered) > p.visibleCount() {
 		sb.WriteByte('\n')
-		hint := lipgloss.NewStyle().Foreground(ui.Nord3)
+		hint := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
 		sb.WriteString(hint.Render(strings.Repeat(" ", max(0, contentWidth-10)) + countStr(p.cursor+1, len(p.filtered))))
 	}
 
 	content := sb.String()
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(p.theme.HelpBorder.GetForeground()).
+		Background(p.theme.HelpBorder.GetBackground()).
 		Padding(1, 2).
 		Width(boxWidth)
 
@@ -625,7 +649,11 @@ func filterItemsContext(ctx context.Context, items []PickerItem, query string) (
 
 func (p *Picker) visibleCount() int {
 	// title + blank + input + blank = 4 lines; border/padding ~4
-	v := p.maxHeight - 8
+	height := p.maxHeight
+	if p.screenHeight > 0 {
+		height = min(height, max(1, p.screenHeight-4))
+	}
+	v := height - 8
 	if v < 3 {
 		v = 3
 	}

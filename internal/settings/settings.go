@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -168,7 +169,7 @@ func GetCategories(cfg config.Config) []Category {
 				{
 					ID:           "ui.theme",
 					Label:        "Theme",
-					Description:  "Color theme; saved now and applied after restarting Teak",
+					Description:  "Preview a color theme; press Ctrl+S to keep it",
 					Type:         TypeString,
 					Value:        cfg.UI.Theme,
 					DefaultValue: "nord",
@@ -228,6 +229,10 @@ func (m *Model) SetSize(width, height int) {
 	m.height = max(1, height)
 	m.ensureSelectedVisible()
 }
+
+// SetTheme updates the styles used by the Settings overlay without resetting
+// its selection or unsaved values.
+func (m *Model) SetTheme(theme ui.Theme) { m.theme = theme }
 
 // SelectedCategory returns the currently selected category.
 func (m *Model) SelectedCategory() *Category {
@@ -381,11 +386,30 @@ func (m *Model) CycleStringValue() {
 	m.markDirty()
 }
 
+// SetThemeValue selects a validated theme while preserving the rest of the
+// settings form. The caller owns applying the live preview to the app.
+func (m *Model) SetThemeValue(name string) bool {
+	if !ui.HasTheme(name) {
+		return false
+	}
+	for categoryIndex := range m.categories {
+		for settingIndex := range m.categories[categoryIndex].Settings {
+			setting := &m.categories[categoryIndex].Settings[settingIndex]
+			if setting.ID == "ui.theme" {
+				setting.Value = name
+				m.markDirty()
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // HandleMouseClick applies a click in Settings content coordinates (that is,
-// after the containing modal border and padding). It returns true whenever the
-// click lands on an interactive tab or setting row. Keeping the geometry here
-// makes the rendered rows and their hit targets evolve together.
-func (m *Model) HandleMouseClick(x, y int) bool {
+// after the containing modal border and padding). The second result asks the
+// app to open the theme picker when the theme control itself was clicked.
+// Keeping the geometry here makes rendered rows and hit targets evolve together.
+func (m *Model) HandleMouseClick(x, y int) (handled, openThemePicker bool) {
 	if y == settingsCategoryRow {
 		for i := range m.categories {
 			start, end := m.categoryTabBounds(i)
@@ -393,20 +417,20 @@ func (m *Model) HandleMouseClick(x, y int) bool {
 				m.selectedCategory = i
 				m.selectedSetting = 0
 				m.scrollY = 0
-				return true
+				return true, false
 			}
 		}
-		return false
+		return false, false
 	}
 
 	row := y - settingsFirstRow
 	if row < 0 || row >= m.visibleSettings() {
-		return false
+		return false, false
 	}
 	idx := m.scrollY + row
 	cat := m.SelectedCategory()
 	if cat == nil || idx >= len(cat.Settings) {
-		return false
+		return false, false
 	}
 	m.selectedSetting = idx
 
@@ -424,16 +448,23 @@ func (m *Model) HandleMouseClick(x, y int) bool {
 				m.IncrementIntValue()
 			}
 		case TypeString:
-			m.CycleStringValue()
+			if setting.ID == "ui.theme" {
+				return true, true
+			}
 		}
 	}
 	m.ensureSelectedVisible()
-	return true
+	return true, false
 }
 
 func (m *Model) markDirty() {
-	m.dirty = true
-	m.status = "Unsaved changes — press Ctrl+S to save"
+	cfg, err := m.Config()
+	m.dirty = err != nil || !reflect.DeepEqual(cfg, m.baseConfig)
+	if m.dirty {
+		m.status = "Unsaved changes — press Ctrl+S to save"
+	} else {
+		m.status = ""
+	}
 }
 
 // Dirty reports whether the displayed values differ from the last saved values.
@@ -632,7 +663,7 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	case TypeBool:
 		if val, ok := setting.Value.(bool); ok {
 			if val {
-				valueStr = lipgloss.NewStyle().Foreground(ui.Nord14).Render("[✓ Enabled]")
+				valueStr = m.theme.GitAdded.Render("[✓ Enabled]")
 			} else {
 				valueStr = m.theme.Gutter.Render("[✗ Disabled]")
 			}
@@ -667,7 +698,7 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	)
 
 	if isSelected {
-		line = lipgloss.NewStyle().Background(ui.Nord2).Render(line)
+		line = lipgloss.NewStyle().Background(m.theme.TreeCursor.GetBackground()).Render(line)
 	}
 
 	return line

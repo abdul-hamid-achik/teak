@@ -37,6 +37,7 @@ type Confirm struct {
 	result        tea.Msg
 	dismissAction tea.Msg
 	width         int
+	screenWidth   int
 }
 
 // NewConfirm creates a confirm dialog. The first button is focused by default.
@@ -55,6 +56,9 @@ func NewConfirm(title, message string, items []string, buttons []Button, theme u
 func (c *Confirm) SetWidth(w int) {
 	c.width = w
 }
+
+// SetTheme updates rendering without resetting the current selection or result.
+func (c *Confirm) SetTheme(theme ui.Theme) { c.theme = theme }
 
 // Result returns the message produced when a button was pressed, or nil.
 func (c *Confirm) Result() tea.Msg {
@@ -78,6 +82,9 @@ func (c *Confirm) DismissAction() tea.Msg {
 // Update implements Overlay.
 func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		c.screenWidth = msg.Width
+		return c, nil
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "escape":
@@ -137,16 +144,14 @@ func (c *Confirm) View() string {
 	var sb strings.Builder
 
 	// Title
-	titleStyle := lipgloss.NewStyle().
-		Foreground(ui.Nord8).
-		Bold(true)
+	titleStyle := c.theme.HelpTitle
 	sb.WriteString(titleStyle.Render(c.Title))
 	sb.WriteByte('\n')
 	sb.WriteByte('\n')
 
 	// Message
 	if c.Message != "" {
-		msgStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
+		msgStyle := lipgloss.NewStyle().Foreground(c.theme.TreeEntry.GetForeground())
 		sb.WriteString(msgStyle.Render(c.Message))
 		sb.WriteByte('\n')
 	}
@@ -154,7 +159,7 @@ func (c *Confirm) View() string {
 	// Items list
 	if len(c.Items) > 0 {
 		sb.WriteByte('\n')
-		itemStyle := lipgloss.NewStyle().Foreground(ui.Nord4).PaddingLeft(2)
+		itemStyle := lipgloss.NewStyle().Foreground(c.theme.TreeEntry.GetForeground()).PaddingLeft(2)
 		for _, item := range c.Items {
 			sb.WriteString(itemStyle.Render(item))
 			sb.WriteByte('\n')
@@ -163,15 +168,8 @@ func (c *Confirm) View() string {
 
 	// Buttons row
 	sb.WriteByte('\n')
-	btnNormal := lipgloss.NewStyle().
-		Background(ui.Nord2).
-		Foreground(ui.Nord4).
-		Padding(0, 2)
-	btnFocused := lipgloss.NewStyle().
-		Background(ui.Nord10).
-		Foreground(ui.Nord6).
-		Padding(0, 2).
-		Bold(true)
+	btnNormal := c.theme.GitActionButton.Padding(0, 2)
+	btnFocused := c.theme.GitPushPullButton.Padding(0, 2).Bold(true)
 
 	for i, btn := range c.Buttons {
 		style := btnNormal
@@ -188,13 +186,17 @@ func (c *Confirm) View() string {
 		}
 	}
 
+	width := c.width
+	if c.screenWidth > 0 {
+		width = min(width, max(1, c.screenWidth-4))
+	}
 	content := sb.String()
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(c.theme.HelpBorder.GetForeground()).
+		Background(c.theme.HelpBorder.GetBackground()).
 		Padding(1, 2).
-		Width(c.width)
+		Width(width)
 
 	return boxStyle.Render(content)
 }

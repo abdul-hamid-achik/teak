@@ -308,6 +308,7 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "ctrl+f":
 		if ed := m.activeEditor(); ed != nil {
+			m.setFocus(FocusEditor)
 			if !ed.IsFindVisible() {
 				cmd := ed.ShowFind()
 				// The widget takes one text row; re-run the layout so the
@@ -539,10 +540,21 @@ func (m Model) routeFocusedInput(msg tea.Msg) (Model, tea.Cmd, bool) {
 	if m.showTerminal && m.focus == FocusTerminal {
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
 			m.terminal.WriteKey(kp)
+			if err := m.terminal.Error(); err != nil {
+				m.status = err.Error()
+			}
 			return m, nil, true
 		}
 	}
 	if m.showAgent && m.focus == FocusAgent {
+		if paste, ok := msg.(tea.PasteMsg); ok {
+			if m.agentPanel.HasPendingWrite() || m.agentPanel.HasPermissionPending() {
+				return m, nil, true
+			}
+			var cmd tea.Cmd
+			m.agentPanel, cmd = m.agentPanel.Update(paste)
+			return m, cmd, true
+		}
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
 			if m.agentPanel.HasPendingWrite() {
 				var cmd tea.Cmd
@@ -704,8 +716,13 @@ func (m Model) handlePastePrecedence(msg tea.PasteMsg) (Model, tea.Cmd, bool) {
 	if !m.overlayStack.IsEmpty() {
 		return m, m.overlayStack.Update(msg), true
 	}
-	if m.showBranchPicker || m.showSearch {
-		return m, nil, true
+	if m.showBranchPicker {
+		model, cmd := m.updateBranchPicker(msg)
+		return model.(Model), cmd, true
+	}
+	if m.showSearch {
+		model, cmd := m.updateSearch(msg)
+		return model.(Model), cmd, true
 	}
 	if m.goToLineMode {
 		for _, r := range content {
@@ -734,15 +751,17 @@ func (m Model) handlePastePrecedence(msg tea.PasteMsg) (Model, tea.Cmd, bool) {
 	if m.deleteConfirm || m.treeContextMenu.Visible || m.gitContextMenu.Visible || m.showHelp || m.showSettings {
 		return m, nil, true
 	}
-	if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
-		for _, r := range content {
-			if r == '\n' || r == '\r' {
-				continue
-			}
-			ed.UpdateFind(tea.KeyPressMsg{Text: string(r)})
+	if m.showTerminal && m.focus == FocusTerminal {
+		m.terminal.Paste(msg)
+		if err := m.terminal.Error(); err != nil {
+			m.status = err.Error()
 		}
-		m.setEditor(m.activeTab, *ed)
 		return m, nil, true
+	}
+	if ed := m.activeEditor(); m.focus == FocusEditor && ed != nil && ed.IsFindVisible() {
+		cmd := ed.UpdateFind(tea.PasteMsg{Content: sanitizePromptPaste(content)})
+		m.setEditor(m.activeTab, *ed)
+		return m, cmd, true
 	}
 	return m, nil, false
 }

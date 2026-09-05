@@ -12,7 +12,6 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	log "github.com/charmbracelet/log"
 	"github.com/charmbracelet/x/ansi"
 	sdk "github.com/coder/acp-go-sdk"
@@ -115,6 +114,10 @@ func (m *Model) sizeEditors(editorWidth, editorHeight int) {
 				height = m.split.paneBHeight(editorHeight)
 			}
 		}
+		if dv, ok := m.diffViews[i]; ok {
+			dv.SetSize(width, height)
+			m.diffViews[i] = dv
+		}
 		// The in-buffer find widget renders as the editor's first row; give
 		// the text area one row less so the widget never pushes the status
 		// bar out of the frame.
@@ -134,13 +137,13 @@ func (m *Model) sizeEditors(editorWidth, editorHeight int) {
 // typing a commit message or a search query closed the current tab instead of
 // deleting a word.
 func (m *Model) textInputFocused() bool {
-	if m.agentPanel.IsInputFocused() {
+	if m.focus == FocusAgent && m.agentPanel.IsInputFocused() {
 		return true
 	}
-	if m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused() {
+	if m.focus == FocusGitPanel && (m.gitPanel.IsTitleFocused() || m.gitPanel.IsBodyFocused()) {
 		return true
 	}
-	if ed := m.activeEditor(); ed != nil && ed.IsFindVisible() {
+	if ed := m.activeEditor(); m.focus == FocusEditor && ed != nil && ed.IsFindVisible() {
 		return true
 	}
 	return false
@@ -344,6 +347,7 @@ type modelState struct {
 	pendingSaves              map[int]pendingSaveRequest // request id -> save continuation state
 	nextSaveRequestID         int                        // monotonically increasing save request id
 	appCfg                    config.Config              // app config for feature flags
+	configReloadGeneration    uint64                     // invalidate reads after newer disk or user changes
 	gitRefreshGeneration      int
 	codemapGeneration         uint64
 	codemapCancel             context.CancelFunc
@@ -465,7 +469,11 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 	// might log. See warmUpStyledLogger for why this prevents a data race.
 	warmUpStyledLogger(logger, logFile)
 
-	theme := ui.ThemeByName(appCfg.UI.Theme)
+	themeName := appCfg.UI.Theme
+	if themeName == "" {
+		themeName = "nord"
+	}
+	theme := ui.ThemeByName(themeName)
 	cfg := editor.Config{
 		TabSize:             appCfg.Editor.TabSize,
 		InsertTabs:          appCfg.Editor.InsertTabs,
@@ -506,7 +514,7 @@ func NewModelWithFiles(files []StartupFile, rootDir string, appCfg config.Config
 
 	m := Model{modelState: &modelState{
 		theme:                     theme,
-		activeThemeName:           appCfg.UI.Theme,
+		activeThemeName:           themeName,
 		rootDir:                   rootDir,
 		tabBar:                    editor.NewTabBar(theme),
 		split:                     defaultSplitLayout(),
@@ -1513,6 +1521,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case termpanel.OutputMsg:
 		return m.handleTerminalOutput(msg)
+	case termpanel.StartedMsg:
+		return m.handleTerminalStarted(msg)
 
 	case externalFileReadPreparedMsg:
 		return m.handleExternalFileReadPrepared(msg)
@@ -1750,7 +1760,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 		m.healthDashboard.SetSize(msg.Width, msg.Height)
 	}
 	m.relayout()
-	return m, nil
+	return m, m.overlayStack.Update(msg)
 }
 
 func (m Model) handleWelcomeTick(msg editor.WelcomeTickMsg) (tea.Model, tea.Cmd) {
@@ -1830,6 +1840,7 @@ func (m Model) handleTreeLoaded(msg treeLoadedMsg) (tea.Model, tea.Cmd) {
 	filter := m.tree.Filter()
 	filterActive := m.tree.FilterActive()
 	m.tree = msg.Tree
+	m.tree.SetTheme(m.theme)
 	projectionCmd := m.tree.RestoreView(showHidden, showGitIgnored, filter, filterActive)
 	m.tree.SetDiagnostics(m.treeDiagnostics)
 	gitStatusMap := make(map[string]string)
@@ -1905,9 +1916,6 @@ func (m Model) handleSettingsSaveResult(msg settingsSaveResultMsg) (tea.Model, t
 	}
 	settingsCmd := m.applySavedSettings(msg.Config)
 	status := "Settings saved and applied"
-	if msg.Config.UI.Theme != m.activeThemeName {
-		status = "Settings saved; restart Teak to apply the new theme"
-	}
 	if msg.Outcome == config.SavedWithBackup {
 		// The annotated file could not be patched in place; the rewrite kept a
 		// copy so the user's comments are not gone, just moved.
@@ -1920,8 +1928,7 @@ func (m Model) handleSettingsSaveResult(msg settingsSaveResultMsg) (tea.Model, t
 
 func (m Model) handleSettingsDiscard(_ settingsDiscardMsg) (tea.Model, tea.Cmd) {
 	m.unsavedConfirm = nil
-	m.discardSettingsChanges()
-	return m, nil
+	return m, m.discardSettingsChanges()
 }
 
 func (m Model) handleSettingsKeepEditing(_ settingsKeepEditingMsg) (tea.Model, tea.Cmd) {
@@ -2450,6 +2457,10 @@ func (m Model) handlePickerSelect(msg overlay.PickerSelectMsg) (tea.Model, tea.C
 				Accepted:   true,
 			}
 		}
+	}
+	if sel, ok := item.Value.(settingsThemePickerSelectMsg); ok {
+		m.clearOverlayStack()
+		return m, m.previewSettingsTheme(sel.ThemeID)
 	}
 	m.clearOverlayStack()
 	// Agent model picker
@@ -3412,20 +3423,25 @@ func (m *Model) setEditor(idx int, ed editor.Editor) {
 
 // forwardToEditor sends an adjusted mouse message to the active editor and handles LSP updates.
 func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Route to diff view if active tab is a diff tab
-	if m.isActiveDiffTab() {
-		if dv, ok := m.diffViews[m.activeTab]; ok {
+	return m.forwardToEditorAt(m.activeTab, msg)
+}
+
+// forwardToEditorAt routes pointer input without changing keyboard focus.
+func (m Model) forwardToEditorAt(tab int, msg tea.Msg) (tea.Model, tea.Cmd) {
+	if tab < 0 || tab >= len(m.editors) {
+		return m, nil
+	}
+	// A split can show a diff alongside an ordinary editor.
+	if tab < len(m.tabBar.Tabs) && m.tabBar.Tabs[tab].Kind == editor.TabDiff {
+		if dv, ok := m.diffViews[tab]; ok {
 			var cmd tea.Cmd
 			dv, cmd = dv.Update(msg)
-			m.diffViews[m.activeTab] = dv
+			m.diffViews[tab] = dv
 			return m, cmd
 		}
 		return m, nil
 	}
-	ed := m.activeEditor()
-	if ed == nil {
-		return m, nil
-	}
+	ed := &m.editors[tab]
 	if ed.Buffer.FilePath != "" {
 		ed.HasLSP = m.lspMgr.ClientForFile(ed.Buffer.FilePath) != nil
 	}
@@ -3433,14 +3449,14 @@ func (m Model) forwardToEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prevCursor := ed.Buffer.Cursor
 	var cmd tea.Cmd
 	updated, cmd := ed.Update(msg)
-	m.setEditor(m.activeTab, updated)
-	if updated.IsContextMenuVisible() {
+	m.setEditor(tab, updated)
+	if tab == m.activeTab && updated.IsContextMenuVisible() {
 		m.clampActiveEditorContextMenu()
 	}
 
-	postUpdateCmd := m.syncEditorStateAfterUpdate(m.activeTab, prevVersion, prevCursor)
+	postUpdateCmd := m.syncEditorStateAfterUpdate(tab, prevVersion, prevCursor)
 	var signatureHelpCmd tea.Cmd
-	if updated.Buffer.Version() != prevVersion && signatureHelpTrigger(msg) {
+	if tab == m.activeTab && updated.Buffer.Version() != prevVersion && signatureHelpTrigger(msg) {
 		m, signatureHelpCmd = m.requestSignatureHelp()
 	}
 	return m, tea.Batch(
@@ -3567,6 +3583,22 @@ func (m *Model) relayout() {
 		statusHeight = 1 // compact view has no divider row
 	}
 
+	// Resize can hide a panel while leaving its preference enabled. Hidden
+	// surfaces must release typing just as explicitly closed panels do.
+	if m.width > 0 && m.height > 0 {
+		switch m.focus {
+		case FocusTree, FocusGitPanel, FocusProblems, FocusDebugger:
+			if compact || !m.treeVisible() {
+				m.setFocus(FocusEditor)
+			}
+		case FocusTerminal:
+			if m.terminalPanelHeight() == 0 {
+				m.setFocus(FocusEditor)
+			}
+		}
+
+	}
+
 	// Agent panel width (0 if hidden)
 	aw := m.agentPanelWidth()
 	if compact {
@@ -3615,10 +3647,6 @@ func (m *Model) relayout() {
 		m.debuggerPanel.SetSize(tw, panelHeight)
 		m.tabBar.Width = editorWidth
 		m.sizeEditors(editorWidth, editorHeight)
-		for k, dv := range m.diffViews {
-			dv.SetSize(editorWidth, editorHeight)
-			m.diffViews[k] = dv
-		}
 		if m.welcome != nil {
 			m.welcome.SetSize(editorWidth, editorHeight)
 		}
@@ -3633,10 +3661,6 @@ func (m *Model) relayout() {
 		}
 		m.tabBar.Width = editorWidth
 		m.sizeEditors(editorWidth, editorHeight)
-		for k, dv := range m.diffViews {
-			dv.SetSize(editorWidth, editorHeight)
-			m.diffViews[k] = dv
-		}
 		if m.welcome != nil {
 			m.welcome.SetSize(editorWidth, editorHeight)
 		}
@@ -3654,6 +3678,12 @@ func (m *Model) relayout() {
 		m.terminal.SetSize(m.width, th)
 	}
 
+	if m.showSearch {
+		m.searchM.SetSize(m.width, m.height-2)
+	}
+	if m.showBranchPicker {
+		m.branchPickerM.SetSize(m.width, m.height)
+	}
 	if m.showHelp {
 		m.helpM.SetSize(m.width, m.height-2)
 	}
@@ -3965,12 +3995,12 @@ func (m Model) closeTabSafe(idx int) (tea.Model, tea.Cmd) {
 		}
 		m.pendingCloseTab = idx
 		buttons := []overlay.Button{
-			{Label: "Close Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: ForceCloseTabMsg{Index: idx}},
+			{Label: "Close Without Saving", Style: m.dangerButtonStyle(), Action: ForceCloseTabMsg{Index: idx}},
 			{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
 		}
 		if buf.FilePath != "" {
 			buttons = append([]overlay.Button{
-				{Label: "Save & Close", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAndCloseTabMsg{Index: idx}},
+				{Label: "Save & Close", Style: m.primaryButtonStyle(), Action: SaveAndCloseTabMsg{Index: idx}},
 			}, buttons...)
 		}
 		confirm := overlay.NewConfirm(
@@ -4483,6 +4513,9 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Toggle boolean value or edit string/int
 			setting := m.settingsM.SelectedSetting()
 			if setting != nil {
+				if setting.ID == "ui.theme" {
+					return m.openSettingsThemePicker()
+				}
 				switch setting.Type {
 				case settings.TypeBool:
 					m.settingsM.ToggleBoolValue()
@@ -4508,6 +4541,11 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			// Reset to default
+			if setting := m.settingsM.SelectedSetting(); setting != nil && setting.ID == "ui.theme" {
+				name, _ := setting.DefaultValue.(string)
+				m.settingsM.ResetCurrentValue()
+				return m, m.previewSettingsTheme(name)
+			}
 			m.settingsM.ResetCurrentValue()
 			return m, nil
 		}
@@ -4528,7 +4566,10 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The model is rendered within a rounded border and one-cell/two-cell
 		// padding, so route clicks in content rather than screen coordinates.
-		m.settingsM.HandleMouseClick(mouse.X-x-3, mouse.Y-y-2)
+		_, openThemePicker := m.settingsM.HandleMouseClick(mouse.X-x-3, mouse.Y-y-2)
+		if openThemePicker {
+			return m.openSettingsThemePicker()
+		}
 		return m, nil
 	}
 	return m, nil
@@ -4555,10 +4596,10 @@ func (m Model) saveSettings() (tea.Model, tea.Cmd) {
 	}
 }
 
-// applySavedSettings updates only values that are safe to change in a running
-// TUI. Themes are deliberately deferred: several sub-models cache styles, and
-// Settings explicitly tells the user a restart is required for a theme change.
+// applySavedSettings updates the running UI from a validated configuration.
 func (m *Model) applySavedSettings(cfg config.Config) tea.Cmd {
+	m.configReloadGeneration++
+	themeCmd := m.applyTheme(cfg.UI.Theme)
 	m.appCfg = cfg
 	m.showTree = cfg.UI.ShowTree
 	for i := range m.editors {
@@ -4581,12 +4622,13 @@ func (m *Model) applySavedSettings(cfg config.Config) tea.Cmd {
 	m.relayout()
 	if !cfg.Editor.GitGutter {
 		m.clearGitGutterMarks()
-		return nil
+		return themeCmd
 	}
-	return m.refreshGitGutterCmd()
+	return tea.Batch(themeCmd, m.refreshGitGutterCmd())
 }
 
 func (m *Model) toggleWordWrap() {
+	m.configReloadGeneration++
 	m.appCfg.Editor.WordWrap = !m.appCfg.Editor.WordWrap
 	for i := range m.editors {
 		ed := &m.editors[i]
@@ -5894,10 +5936,12 @@ func (m Model) handleDiffLoaded(msg DiffLoadedMsg) (tea.Model, tea.Cmd) {
 	if m.diffViews == nil {
 		m.diffViews = make(map[int]diff.Model)
 	}
-	m.diffViews[tabIdx] = *msg.View
+	view := *msg.View
+	themeCmd := view.SetTheme(m.theme)
+	m.diffViews[tabIdx] = view
 	m.relayout()
 	m.status = ""
-	return m, nil
+	return m, themeCmd
 }
 
 func (m Model) handleDiffHighlightReady(msg diff.HighlightReadyMsg) (tea.Model, tea.Cmd) {

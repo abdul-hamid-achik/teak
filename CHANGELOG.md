@@ -2,6 +2,121 @@
 
 All notable changes to the Teak editor project.
 
+## [0.23.0] - 2026-09-05
+
+### TUI fixes
+
+- Route pasted text to the focused agent, Find, project search or branch picker;
+  preserve Find's asynchronous scan command and protect pending permissions.
+- Scroll the split pane under the pointer without changing keyboard focus;
+  keep drag selections and context menus in the originating pane.
+- Render and size diff tabs correctly inside split views.
+- Resize open overlays and release focus when a panel becomes invisible.
+- Keep terminal and status rows visible with split views, agent panels and
+  long sidebar content; keep selected debugger frames in view.
+- Handle agent permission clicks in screen coordinates and show requests even
+  when the chat history is empty.
+- Keep the caret visible while editing long Unicode paths in prompts.
+
+### Editing and code context
+
+- Selections keep syntax highlighting on the surrounding unselected text,
+  including tabs, Unicode text and horizontally scrolled lines.
+- Rename and code actions preserve multiple selections, including reversed
+  UTF-8 ranges, across document rewrites and undo/redo. The viewport updates
+  immediately so inserted lines do not leave the cursor offscreen or the
+  word-wrap layout pointing at the old document.
+- Codemap context responses retain found status, native totals, reference
+  coverage and freshness, graph resolution, and partial errors. Native list
+  limits contribute to the headless response's truncation flag.
+
+### Search and panel layout
+
+- Project search fits narrow terminals, keeps replacement controls on separate
+  rows, and maps clicks to the actual visible result. Scroll hints and header
+  rows no longer open hidden results. Truncation preserves Unicode characters.
+- Repeated text searches use a stable file order, including when the result
+  limit is reached.
+- Pending project queries show a searching status until results arrive.
+- Git action buttons account for their padding when fitting the panel width.
+
+### Plugin discovery
+
+- Plugins honor an absolute `XDG_CONFIG_HOME` on every platform, using the
+  same configuration directory as Settings. On macOS, move plugins beside
+  the selected `config.toml` if you previously combined an XDG override with
+  plugins in the platform default directory.
+
+### Language servers
+
+- Language servers inherit Teak's known tool directories after the existing
+  PATH, so gopls can find Go when Teak starts from a restricted environment.
+  An explicitly configured server PATH remains authoritative.
+
+### Keyboard focus and help
+
+- Home and End move the prompt cursor when the agent input is focused;
+  Ctrl+Home and Ctrl+End jump to the first or latest chat message.
+- Find hides its caret in inactive panes and behind overlays, then restores
+  it when the editor receives focus again without resetting the query.
+- Find opened from the sidebar now takes editor focus. An inactive Find no
+  longer intercepts global shortcuts intended for the focused panel.
+- Help scrolls wrapped rows instead of logical entries, keeping long shortcut
+  descriptions inside the viewport at 80 and 40 columns.
+
+### Large files
+
+- Snapshots containing a line longer than 64 KiB render as plain text to avoid
+  repeated lexer timeouts. Text, selections and edits remain intact; ordinary
+  lines continue to use syntax highlighting.
+
+### Integrated terminal
+
+- The Unix terminal panel now emulates ANSI screen controls, cursor movement,
+  colors, and alternate screens. Progress updates overwrite their line and
+  full-screen programs render inside the panel.
+- Shell input supports control keys, uppercase and Unicode text, application
+  cursor keys, bracketed paste, and mouse reporting. Scroll history with the
+  mouse wheel or Shift+PageUp / Shift+PageDown.
+- Shell startup, input, and rendering run outside the UI event loop. Output
+  continues while hidden; reopening keeps the same shell and a single reader.
+  Startup keys are queued, errors are visible, and closing reaps the shell.
+- Regression tests cover screen controls, PTY exit, blocked input, and a
+  resize/close race. A Glyphrun story exercises a real shell without changing
+  the open document.
+
+### Themes and Settings
+
+- ANSI resets return to the selected theme's base colors, preventing dark
+  patches and unreadable text when using a light theme in a dark terminal.
+  `NO_COLOR` preserves terminal defaults; Bubble Tea resets colors on exit.
+
+- Settings offers a searchable catalog of 15 dark and light themes. Selecting
+  a theme previews it immediately; Save keeps it and Discard restores the
+  previous palette without restarting.
+- Theme changes reach editor syntax highlighting, sidebars, dialogs, search,
+  Git, agent, debugger, and diff views. Obsolete syntax results cannot restore
+  an old palette, and late initial tree loads use the active theme.
+- The config watcher ignores an identical reload after saving Settings, keeping
+  the selected category and save confirmation visible.
+- Superseded config reads and errors cannot overwrite newer settings. Saving
+  Settings, toggling word wrap, and resizing the sidebar invalidate older reads.
+- Comments, line numbers and inactive tabs use readable palette colors while
+  preserving italics, active-tab backgrounds and bold focus indicators.
+- Secondary selections, find matches, commit actions and diff fills retain
+  readable text across all 15 themes.
+- Status indicators and blue action buttons choose readable text in every
+  palette. Branch and status messages retain explicit colors after ANSI resets.
+- Glyphrun stories cover theme selection, preview, save, discard, cursor
+  preservation, and actual terminal cell colors.
+
+### Test diagnostics
+
+- Retain 100 Glyphrun runs so a complete suite keeps its failure evidence.
+- Headless workflow failures report the command, exit code, and JSON response.
+- A reported intermittent `headless_workflow` failure could not be reproduced:
+  the complete 83-spec rerun passed. Its original cause remains unconfirmed.
+
 ## [0.22.0] - 2026-09-01
 
 ### Keymap
@@ -146,7 +261,7 @@ All notable changes to the Teak editor project.
   fixture language server proving the click-dismisses-popup workflow, plus
   unit and app-level regression tests for all three fixes.
 
-## [Unreleased]
+## [0.18.1] - 2026-08-06
 
 ### TUI Split Focus
 

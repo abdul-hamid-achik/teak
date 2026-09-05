@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"teak/internal/config"
+
 	"github.com/BurntSushi/toml"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -66,14 +68,7 @@ func NewManager(pluginDir string) (*Manager, error) {
 
 // DefaultDir returns the default plugin directory.
 func DefaultDir() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "teak", "plugins")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "teak", "plugins")
-	}
-	return filepath.Join(home, ".config", "teak", "plugins")
+	return filepath.Join(filepath.Dir(config.ConfigPath()), "plugins")
 }
 
 // registerAPIs registers all built-in Lua APIs.

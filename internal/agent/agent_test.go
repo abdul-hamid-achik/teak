@@ -17,6 +17,58 @@ import (
 	"teak/internal/ui"
 )
 
+func TestAgentHomeEndRespectInputFocus(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		key     tea.KeyPressMsg
+		focused bool
+		cursor  int
+		scroll  string
+	}{
+		{"input home", tea.KeyPressMsg{Code: tea.KeyHome}, true, 0, "unchanged"},
+		{"input end", tea.KeyPressMsg{Code: tea.KeyEnd}, true, 5, "unchanged"},
+		{"history home", tea.KeyPressMsg{Code: tea.KeyHome}, false, 2, "top"},
+		{"history end", tea.KeyPressMsg{Code: tea.KeyEnd}, false, 2, "bottom"},
+		{"ctrl home", tea.KeyPressMsg{Code: tea.KeyHome, Mod: tea.ModCtrl}, true, 2, "top"},
+		{"ctrl end", tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModCtrl}, true, 2, "bottom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := New(ui.DefaultTheme())
+			model.SetSize(60, 16)
+			model.connected = true
+			model.appendChatMessage(ChatMessage{Role: RoleAgent, Content: strings.Repeat("history\n\n", 50)})
+			_ = model.cachedChatLines(58)
+			model.refreshScrollBounds()
+			if model.maxScroll <= 3 {
+				t.Fatal("setup: history must scroll beyond the starting position")
+			}
+			model.scrollY = 3
+			model.autoScroll = false
+			model.input.SetValue("hello")
+			model.input.SetCursor(2)
+			if tc.focused {
+				_ = model.Focus()
+			} else {
+				model.Blur()
+			}
+			updated, _ := model.Update(tc.key)
+			if updated.input.Position() != tc.cursor {
+				t.Errorf("input cursor = %d, want %d", updated.input.Position(), tc.cursor)
+			}
+			wantScroll := 3
+			if tc.scroll == "top" {
+				wantScroll = 0
+			}
+			if tc.scroll == "bottom" {
+				wantScroll = updated.maxScroll
+			}
+			if updated.scrollY != wantScroll || updated.autoScroll != (tc.scroll == "bottom") {
+				t.Errorf("scroll=%d auto=%t, want scroll=%d auto=%t", updated.scrollY, updated.autoScroll, wantScroll, tc.scroll == "bottom")
+			}
+		})
+	}
+}
+
 // TestAgentModelCreation tests New function
 func TestAgentModelCreation(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -2085,5 +2137,19 @@ func TestAgentAllFieldsHaveZeroValues(t *testing.T) {
 	}
 	if model.lastChatLineCount != 0 {
 		t.Errorf("Expected zero lastChatLineCount 0, got %d", model.lastChatLineCount)
+	}
+}
+
+func TestPermissionWithoutChatHistoryRemainsVisible(t *testing.T) {
+	previous := zone.DefaultManager
+	fresh := zone.New()
+	zone.DefaultManager = fresh
+	t.Cleanup(func() { fresh.Close(); zone.DefaultManager = previous })
+	model := New(ui.DefaultTheme())
+	model.SetConnected(true)
+	model.SetSize(40, 18)
+	model, _ = model.Update(acp.AgentPermissionRequestMsg{ResponseCh: make(chan sdk.RequestPermissionResponse, 1)})
+	if !strings.Contains(model.View(), "Agent wants to:") {
+		t.Fatal("empty-state suggestions hide a pending permission")
 	}
 }

@@ -23,7 +23,7 @@ work out of the UI update loop.
 - **Integrated workflows** — Git status and commits, problems panel, Go
   debugging with Delve, and an ACP-compatible AI agent panel
 - **Customizable UI** — built-in settings, Lua plugins, mouse support, system
-  clipboard integration, and five bundled color themes
+  clipboard integration, and fifteen bundled color themes
 - **Large-file foundations** — an immutable rope, viewport-oriented rendering,
   asynchronous search and tokenization, and stale-result protection
 
@@ -369,8 +369,10 @@ list.
 | Panels | `Ctrl+B` | Toggle sidebar |
 | Panels | `Ctrl+Shift+G` | Open Git panel |
 | Panels | `Ctrl+J` | Toggle agent panel |
+| Agent input | `Home` / `End` | Move to start / end of prompt |
+| Agent history | `Ctrl+Home` / `Ctrl+End` | First / latest chat message |
 | Panels | `` Ctrl+` `` / `Alt+T` | Toggle integrated terminal |
-| Splits | `Ctrl+\\` | Toggle editor split |
+| Splits | `Ctrl+\` | Toggle editor split |
 | Splits | `F6` | Switch split focus |
 | Problems | `F8` / `Shift+F8` | Next / previous problem |
 | Debugging | `F5` / `Shift+F5` | Start / stop debugging |
@@ -394,6 +396,7 @@ Teak uses the platform configuration directory:
 | Linux | `$XDG_CONFIG_HOME/teak/config.toml` or `~/.config/teak/config.toml` |
 | Windows | `%AppData%\\teak\\config.toml` |
 
+An absolute `XDG_CONFIG_HOME` overrides the platform directory on every OS.
 The file is optional; missing values use built-in defaults.
 
 ```toml
@@ -426,8 +429,13 @@ enabled = true
 auto_save_interval = 30
 ```
 
-Available themes are `nord`, `dracula`, `catppuccin`, `solarized-dark`, and
-`one-dark`. `auto_save_interval` is measured in seconds. `agent.sandbox` applies
+Available themes are `nord`, `dracula`, `catppuccin`, `solarized-dark`,
+`one-dark`, `github-dark`, `github-light`, `tokyo-night`, `ayu-mirage`,
+`solarized-light`, `catppuccin-latte`, `gruvbox-dark`, `monokai`, `night-owl`,
+and `material-palenight`. In Settings → User Interface → Theme, selecting a
+theme previews it immediately; press `Ctrl+S` to keep it or `Esc`, then Discard,
+to restore the saved theme. `auto_save_interval` is measured in seconds.
+`agent.sandbox` applies
 to terminal processes created by the ACP agent: `off` keeps the logical Teak
 authorization checks without an OS wrapper, `auto` uses macOS Seatbelt when
 available and reports fallback status, and `required` refuses to start a
@@ -477,6 +485,14 @@ headless health output.
 
 ## Terminal compatibility
 
+The integrated terminal opens with `Alt+T` or `` Ctrl+` `` on Unix. It runs
+your `$SHELL` in the workspace and supports ANSI colors, screen controls,
+alternate screens, and mouse input for applications that request it. Hiding
+the panel keeps the shell running; reopening after exit starts a new shell.
+Use the mouse wheel or `Shift+PageUp` / `Shift+PageDown` to browse up to 2,000
+lines of shell history. Each paste is limited to 1 MiB; input that cannot be
+queued reports an error. Windows does not yet provide an integrated PTY.
+
 Teak requires interactive stdin and stdout and a terminal with cursor support.
 It rejects `TERM=dumb` and redirected I/O with a diagnostic. Bubble Tea handles
 terminal color detection, and `NO_COLOR=1` disables color.
@@ -501,6 +517,9 @@ entrypoint such as `init.lua`.
 | macOS | `~/Library/Application Support/teak/plugins/` |
 | Linux | `$XDG_CONFIG_HOME/teak/plugins/` or `~/.config/teak/plugins/` |
 | Windows | `%AppData%\\teak\\plugins\\` |
+
+Plugins live beside `config.toml`, under `plugins/`. An absolute
+`XDG_CONFIG_HOME` therefore also overrides the plugin directory on every OS.
 
 Minimal layout:
 

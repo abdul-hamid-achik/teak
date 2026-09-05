@@ -5,10 +5,8 @@ import (
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"teak/internal/overlay"
 	"teak/internal/plugin"
-	"teak/internal/ui"
 
 	"github.com/charmbracelet/log"
 )
@@ -62,8 +60,8 @@ func (m Model) requestQuit() (Model, tea.Cmd) {
 	m.unsavedConfirm = overlay.NewConfirm(
 		"Unsaved Changes", message, dirtyNames,
 		[]overlay.Button{
-			{Label: "Save All & Quit", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: SaveAllAndQuitMsg{}},
-			{Label: "Quit Without Saving", Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: QuitWithoutSavingMsg{}},
+			{Label: "Save All & Quit", Style: m.primaryButtonStyle(), Action: SaveAllAndQuitMsg{}},
+			{Label: "Quit Without Saving", Style: m.dangerButtonStyle(), Action: QuitWithoutSavingMsg{}},
 			{Label: "Cancel", Action: overlay.ButtonAction{Label: "Cancel"}},
 		}, m.theme,
 	)

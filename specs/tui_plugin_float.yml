@@ -17,7 +17,7 @@ target:
         - sh
         - -lc
         - >-
-          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$TMP/config"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; case "$(uname)" in Darwin) CONF_BASE="$HOME/Library/Application Support" ;; *) CONF_BASE="$HOME/.config"; if [ -n "$XDG_CONFIG_HOME" ]; then CONF_BASE="$XDG_CONFIG_HOME"; fi ;; esac; CONFIG="$CONF_BASE/teak"; PLUGIN="$CONFIG/plugins/float"; mkdir -p "$HOME" "$PROJECT" "$PLUGIN"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.go"; printf 'name = "float"\nmain = "init.lua"\n' > "$PLUGIN/plugin.toml"; printf '%s\n' 'function setup()' '  keymap.set("a", "ctrl+f", function()' '    ui.new_float({title = "Preview", content = "generated output", width = 40, height = 4})' '  end)' 'end' > "$PLUGIN/init.lua"; "$ROOT/bin/teak" "$PROJECT/main.go"
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); export HOME="$TMP/home"; export XDG_CONFIG_HOME="$TMP/config"; export XDG_STATE_HOME="$TMP/state"; PROJECT="$TMP/project"; CONFIG="$XDG_CONFIG_HOME/teak"; PLUGIN="$CONFIG/plugins/float"; mkdir -p "$HOME" "$PROJECT" "$PLUGIN"; printf '[session]\nenabled = false\n[agent]\nenabled = false\n' > "$CONFIG/config.toml"; printf 'package main\n' > "$PROJECT/main.txt"; printf 'name = "float"\nmain = "init.lua"\n' > "$PLUGIN/plugin.toml"; printf '%s\n' 'function setup()' '  keymap.set("a", "ctrl+f", function()' '    ui.new_float({title = "Preview", content = "generated output", width = 40, height = 4})' '  end)' 'end' > "$PLUGIN/init.lua"; "$ROOT/bin/teak" "$PROJECT/main.txt"
     cwd: "."
     timeoutMs: 15000
 terminal:

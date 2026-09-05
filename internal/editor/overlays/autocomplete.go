@@ -75,6 +75,11 @@ func NewAutocomplete(theme ui.Theme) Autocomplete {
 	return Autocomplete{theme: theme}
 }
 
+// SetTheme updates rendering without changing completion state.
+func (a *Autocomplete) SetTheme(theme ui.Theme) {
+	a.theme = theme
+}
+
 // Show displays the autocomplete popup with the given items.
 func (a *Autocomplete) Show(items []AutocompleteItem) {
 	a.cancelFilter()

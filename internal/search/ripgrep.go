@@ -144,6 +144,9 @@ func ripgrepSearchContext(ctx context.Context, rootDir, query string, opts Searc
 func ripgrepArgs(query string, opts SearchOpts) []string {
 	args := []string{
 		"--json",
+		// Sort in rg before the parser caps results, so repeated queries keep
+		// the same files and order instead of depending on worker scheduling.
+		"--sort", "path",
 		"--max-filesize", ripgrepMaxFileSize,
 	}
 	if opts.CaseSensitive {

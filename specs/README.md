@@ -1,5 +1,24 @@
 # Teak terminal UI contracts
 
+`tui_find_focus_help.yml` covers Find opened from the tree, inactive Find and
+sidebar shortcuts, and long Help bindings, using both legacy and Kitty key
+events. It also verifies a clean exit without changing the document.
+
+`tui_terminal.yml` exercises the integrated panel with a real isolated shell:
+carriage-return updates, screen clearing, Ctrl+U, bracketed paste, alternate
+screens, output while hidden, shell exit, and preservation of the editor's
+content and cursor. Run it with `glyph run specs/tui_terminal.yml --parallel 1`.
+
+`tui_paste_resize_workflow.yml` pastes into Find and project search, checks
+results after shrinking to 40 columns, and keeps the end of a long Save As
+path visible. `tui_agent_prompt.yml` also pastes while an inactive Find is open.
+
+`tui_split_terminal_layout.yml` combines two editor panes, sidebar, agent and
+a real shell. It checks terminal/status rows and recovery through 120×40,
+80×24 and 40×3. Run all TUI stories with `glyph run specs/tui_*.yml --parallel 1`;
+run retained three-pass stability checks with
+`python3 scripts/glyph-stability.py specs/tui_*.yml`.
+
 These Glyphrun specs exercise Teak as a real terminal application. They use a
 fixed terminal size, an isolated home directory, an isolated copy of the test
 workspace, and the Nord theme so mouse coordinates and rendered cell styles are
@@ -27,6 +46,23 @@ done
 ```
 
 ## Regression suite
+
+Theme stories run against the real editor using the existing isolated fixture:
+
+```sh
+glyph run specs/tui_theme_save.yml specs/tui_theme_discard.yml \
+  --parallel 1 --artifact-root .glyphrun/theme-audit \
+  --junit .glyphrun/theme-audit-junit.xml
+glyph stories specs/tui_theme_save.yml specs/tui_theme_discard.yml \
+  --artifact-root .glyphrun/theme-audit \
+  --html --out .glyphrun/theme-audit/catalog.html
+```
+
+They capture the picker, light preview, discard confirmation, and final editor.
+Cell assertions check editor colors, status text contrast, and explicit save
+feedback colors; text-only snapshots would miss those regressions. These specs
+are tagged `story` and work with the installed Glyphrun 0.18.0 catalog, without
+requiring the newer `stories run` manifest API in the Glyphrun source checkout.
 
 All committed specs are expected to pass locally and in CI. Together they cover basic navigation,
 mouse routing, drag selection, scrolling, resize, modal capture, overlay
@@ -273,6 +309,11 @@ The repository `task specs` and `task specs-repeat` gates use
 individual workers. Parallel exploration is still safe when each invocation
 uses its own `--artifact-root`, as in the example above.
 
+Glyphrun 0.18 does not write JUnit in repeat mode. The CI and `specs-repeat`
+gates remove the old report, run once with JUnit, then run a separate stability
+probe. The XML describes that single run; the probe's exit status also gates
+success. Do not combine `--repeat` and `--junit` or reuse an old XML as evidence.
+
 Contracts that take an explicit snapshot before teardown may set
 `artifacts.finalScreen: never`. This keeps a shutdown status frame from
 becoming an accidental assertion; the behavior must still be asserted by a
@@ -281,8 +322,9 @@ named snapshot or process outcome.
 ## Artifacts
 
 Glyphrun writes run records, final screens, snapshots, and agent context under
-`.glyphrun/runs/`. The root config retains Glyphrun's default number of recent
-runs. For a full diagnostic sweep, give each spec its own artifact root:
+`.glyphrun/runs/`. The root config retains 100 recent runs so a complete batch
+does not prune its own failure evidence. For longer diagnostic sweeps, give
+each spec its own artifact root:
 
 ```sh
 glyph run specs/tui_status_bar_mouse.yml \
@@ -292,3 +334,21 @@ glyph run specs/tui_status_bar_mouse.yml \
 The target wrapper lives at `testdata/glyphrun/run-teak.sh`. Every invocation
 recreates its isolated home and workspace, so tests cannot modify the committed
 fixtures or inherit the developer's Teak session and configuration.
+
+### Component states across themes
+
+`tui_component_states.yml` builds a deterministic fixture from Teak's real
+component renderers. It captures 16 empty, loading, error and populated states
+at 80×24 and 40×18, checking state-specific content and terminal bounds.
+The fixture forces true color and does not start external integrations.
+
+```sh
+TEAK_STORY_THEME=github-light glyph run specs/tui_component_states.yml \
+  --artifact-root .glyphrun/theme-audit/components/github-light
+glyph stories specs/tui_component_states.yml \
+  --artifact-root .glyphrun/theme-audit/components/github-light \
+  --html --out .glyphrun/theme-audit/components/github-light/catalog.html
+```
+
+The theme defaults to Nord. After the first build,
+`bin/teak-component-story --themes` lists supported IDs.

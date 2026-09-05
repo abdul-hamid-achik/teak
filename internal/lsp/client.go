@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -719,9 +720,7 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 	cmd := exec.CommandContext(context.Background(), resolved, cfg.Args...)
 	toolpath.ConfigureCommand(cmd)
 	cmd.Dir = rootDir
-	if len(cfg.Env) > 0 {
-		cmd.Env = mergeEnvironment(os.Environ(), cfg.Env)
-	}
+	cmd.Env = languageServerEnvironment(cfg.Env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -759,6 +758,17 @@ func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, e
 	go c.readLoop(ctx)
 
 	return c, nil
+}
+
+// Servers also launch toolchains (gopls runs go; JS servers run node). Finding
+// the server by absolute path is insufficient when the parent PATH is sparse.
+// Keep inherited precedence and let an explicit configured PATH win last.
+func languageServerEnvironment(overrides map[string]string) []string {
+	paths := append(filepath.SplitList(os.Getenv("PATH")), toolpath.Default().SearchPath()...)
+	base := mergeEnvironment(os.Environ(), map[string]string{
+		"PATH": strings.Join(paths, string(os.PathListSeparator)),
+	})
+	return mergeEnvironment(base, overrides)
 }
 
 // mergeEnvironment applies configured overrides without leaving duplicate

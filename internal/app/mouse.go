@@ -400,13 +400,15 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 	switch surface {
 	case mouseTerminalBody:
+		m.cancelActiveEditorDrag()
 		m.setFocus(FocusTerminal)
+		m.terminal.Mouse(tea.MouseClickMsg(mouseAt(mouse, local)))
 		return m, nil
 	case mouseAgentBody:
 		m.setFocus(FocusAgent)
-		adjusted := tea.MouseClickMsg(mouseAt(mouse, local))
+		// Agent buttons use BubbleZone frame coordinates, like Git controls.
 		var cmd tea.Cmd
-		m.agentPanel, cmd = m.agentPanel.Update(adjusted)
+		m.agentPanel, cmd = m.agentPanel.Update(msg)
 		return m, tea.Batch(m.agentPanel.Focus(), cmd)
 
 	case mouseSidebarTabs:
@@ -507,6 +509,7 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 			width = maxTreeWidth
 		}
 		if width != m.appCfg.UI.TreeWidth {
+			m.configReloadGeneration++
 			m.appCfg.UI.TreeWidth = width
 			m.relayout()
 		}
@@ -527,18 +530,23 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	layout := m.mouseLayout()
+	// A selection belongs to the pane where the press began, even after the
+	// pointer crosses another pane, sidebar or terminal.
+	if ed := m.activeEditor(); ed != nil && ed.IsDragging() {
+		body := m.activeEditorBodyRect()
+		if body.width > 0 && body.height > 0 {
+			return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, body.local(mouse.X, mouse.Y))))
+		}
+	}
 	surface, local := layout.hit(mouse.X, mouse.Y)
+	if surface == mouseTerminalBody {
+		m.terminal.Mouse(tea.MouseMotionMsg(mouseAt(mouse, local)))
+		return m, nil
+	}
 	if surface == mouseEditorBody {
 		return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, local)))
 	}
 
-	// Continue a selection drag after the pointer leaves the editor body. The
-	// editor clamps the local coordinates and autoscrolls one row per motion,
-	// so sidebars, tab bars, and tiny terminal layouts cannot produce an
-	// out-of-range buffer position.
-	if editor := m.activeEditor(); editor != nil && editor.IsDragging() && layout.editorBody.width > 0 && layout.editorBody.height > 0 {
-		return m.forwardToEditor(tea.MouseMotionMsg(mouseAt(mouse, layout.editorBody.local(mouse.X, mouse.Y))))
-	}
 	return m, nil
 }
 
@@ -593,6 +601,11 @@ func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) 
 	// outside its body cannot leave its selection drag active.
 	mouse := msg.Mouse()
 	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
+	if surface == mouseTerminalBody {
+		m.cancelActiveEditorDrag()
+		m.terminal.Mouse(tea.MouseReleaseMsg(mouseAt(mouse, local)))
+		return m, nil
+	}
 	if surface == mouseEditorBody {
 		return m.forwardToEditor(tea.MouseReleaseMsg(mouseAt(mouse, local)))
 	}
@@ -643,6 +656,9 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	}
 	surface, local := m.mouseLayout().hit(mouse.X, mouse.Y)
 	switch surface {
+	case mouseTerminalBody:
+		m.terminal.Mouse(tea.MouseWheelMsg(mouseAt(mouse, local)))
+		return m, nil
 	case mouseEditorTabs:
 		if len(m.tabBar.Tabs) == 0 {
 			return m, nil
@@ -692,7 +708,15 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case mouseEditorBody:
-		return m.forwardToEditor(tea.MouseWheelMsg(mouseAt(mouse, local)))
+		tab := m.activeTab
+		if m.split.enabled {
+			pane := 0
+			if m.mouseLayout().inPaneB(mouse.X, mouse.Y) {
+				pane = 1
+			}
+			tab = m.split.paneTab(pane)
+		}
+		return m.forwardToEditorAt(tab, tea.MouseWheelMsg(mouseAt(mouse, local)))
 
 	default:
 		return m, nil

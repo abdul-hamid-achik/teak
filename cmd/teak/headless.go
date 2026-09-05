@@ -2060,6 +2060,27 @@ func runHeadlessCodemapContext(parentCtx context.Context, args []string, stdout,
 		fmt.Fprintf(&body, "Definitions: %d\nCallers: %d\nCallees: %d\nReferences: %d\nTests: %d\n",
 			len(response.Context.Definitions), len(response.Context.Callers), len(response.Context.Callees),
 			len(response.Context.References), len(response.Context.Tests))
+		if response.Context.Found != nil {
+			fmt.Fprintf(&body, "Found: %t\n", *response.Context.Found)
+		}
+		if response.Truncated {
+			fmt.Fprintln(&body, "Context lists are truncated")
+		}
+		if response.Context.CallGraph != "" {
+			fmt.Fprintf(&body, "Call graph: %s\n", response.Context.CallGraph)
+		}
+		if response.Context.ReferencesCoverage != "" {
+			fmt.Fprintf(&body, "Reference coverage: %s (stale=%t, confidence=%s)\n",
+				response.Context.ReferencesCoverage, response.Context.ReferencesStale, response.Context.ReferencesConfidence)
+		}
+		for _, note := range []string{response.Context.Note, response.Context.Resolution, response.Context.ReferencesResolution} {
+			if note != "" {
+				fmt.Fprintln(&body, note)
+			}
+		}
+		for _, partial := range response.Context.PartialErrors {
+			fmt.Fprintf(&body, "Partial error (%s): %s\n", partial.Component, partial.Error)
+		}
 	}
 	if response.Impact != nil {
 		fmt.Fprintf(&body, "Locations: %d\nDirect callers: %d\nBlast radius: %d\nTests: %d\n",
@@ -2101,7 +2122,9 @@ func boundHeadlessCodemapSymbols(symbols []codemap.Symbol) ([]codemap.Symbol, bo
 func boundHeadlessCodemapContext(result codemap.ContextResult) (codemap.ContextResult, bool) {
 	var truncated bool
 	result.Definitions, truncated = boundHeadlessCodemapSymbols(result.Definitions)
-	resultTruncated := truncated
+	resultTruncated := truncated || result.CallersTotal > len(result.Callers) ||
+		result.CalleesTotal > len(result.Callees) || result.ReferencesTotal > len(result.References) ||
+		result.TestsTotal > len(result.Tests) || result.ReferencesTruncated > 0
 	result.Callers, truncated = boundHeadlessCodemapSymbols(result.Callers)
 	resultTruncated = resultTruncated || truncated
 	result.Callees, truncated = boundHeadlessCodemapSymbols(result.Callees)

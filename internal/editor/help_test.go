@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"charm.land/lipgloss/v2"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -610,4 +612,20 @@ func teaKeyPressMsgWithText(text string) tea.Msg {
 
 func teaMouseWheel(button tea.MouseButton) tea.Msg {
 	return tea.MouseWheelMsg{Button: button}
+}
+
+func TestHelpLongShortcutsStayWithinViewport(t *testing.T) {
+	for _, width := range []int{80, 40} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			m := NewHelpModel(ui.DefaultTheme())
+			m.SetSize(width, 24)
+			for row := 0; row <= m.maxScroll(); row++ {
+				m.scrollY = row
+				view := m.View()
+				if lipgloss.Width(view) > width || lipgloss.Height(view) > 24 {
+					t.Fatalf("scroll %d: help is %dx%d for %dx24 viewport", row, lipgloss.Width(view), lipgloss.Height(view), width)
+				}
+			}
+		})
+	}
 }

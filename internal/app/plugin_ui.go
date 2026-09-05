@@ -200,6 +200,7 @@ func (m *Model) showPluginFloatWithID(id int, options plugin.UIFloatOptions) err
 		return fmt.Errorf("float %d is already open", id)
 	}
 	float := overlay.NewFloat(id, options.Title, options.Content, options.Width, options.Height)
+	float.SetTheme(m.theme)
 	m.pluginFloats[id] = float
 	m.overlayStack.Push(float)
 	return nil

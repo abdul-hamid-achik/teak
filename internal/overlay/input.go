@@ -24,13 +24,14 @@ type InputResultAction func(InputResult) tea.Msg
 // Input is a single-line text prompt that captures keyboard input until the
 // user submits it or presses Escape.
 type Input struct {
-	Prompt    string
-	input     textinput.Model
-	theme     ui.Theme
-	width     int
-	dismissed bool
-	result    tea.Msg
-	action    InputResultAction
+	Prompt      string
+	input       textinput.Model
+	theme       ui.Theme
+	width       int
+	screenWidth int
+	dismissed   bool
+	result      tea.Msg
+	action      InputResultAction
 }
 
 // NewInput creates a text prompt with an optional initial value.
@@ -38,6 +39,7 @@ func NewInput(prompt, initial string, theme ui.Theme) *Input {
 	ti := textinput.New()
 	ti.CharLimit = 4096
 	ti.SetValue(initial)
+	ui.ApplyTextInputTheme(&ti, theme)
 	return &Input{
 		Prompt: prompt,
 		input:  ti,
@@ -54,7 +56,20 @@ func (i *Input) Focus() tea.Cmd {
 // SetWidth limits the prompt to the available terminal width.
 func (i *Input) SetWidth(width int) {
 	i.width = max(1, width)
-	i.input.SetWidth(max(1, min(i.width-8, 80)))
+	i.input.SetWidth(max(1, min(i.renderWidth()-8, 80)))
+}
+
+func (i *Input) renderWidth() int {
+	if i.screenWidth > 0 {
+		return min(i.width, max(1, i.screenWidth-4))
+	}
+	return i.width
+}
+
+// SetTheme updates rendering without resetting the typed value or focus.
+func (i *Input) SetTheme(theme ui.Theme) {
+	i.theme = theme
+	ui.ApplyTextInputTheme(&i.input, theme)
 }
 
 // SetResultAction registers the message mapper used on submit or dismissal.
@@ -79,6 +94,12 @@ func (i *Input) Value() string {
 
 // Update implements Overlay.
 func (i *Input) Update(msg tea.Msg) (Overlay, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		i.screenWidth = size.Width
+		i.SetWidth(i.width)
+		return i, nil
+	}
+
 	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "esc", "escape":
@@ -110,9 +131,9 @@ func (i *Input) resultCommand() tea.Cmd {
 
 // View implements Overlay.
 func (i *Input) View() string {
-	titleStyle := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true)
-	promptStyle := lipgloss.NewStyle().Foreground(ui.Nord4)
-	hintStyle := lipgloss.NewStyle().Foreground(ui.Nord3)
+	titleStyle := i.theme.HelpTitle
+	promptStyle := lipgloss.NewStyle().Foreground(i.theme.TreeEntry.GetForeground())
+	hintStyle := lipgloss.NewStyle().Foreground(i.theme.Gutter.GetForeground())
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Plugin input"))
@@ -125,11 +146,11 @@ func (i *Input) View() string {
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("Enter to accept • Esc to cancel"))
 
-	width := max(1, i.width)
+	width := max(1, i.renderWidth())
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(i.theme.HelpBorder.GetForeground()).
+		Background(i.theme.HelpBorder.GetBackground()).
 		Padding(1, 2).
 		Width(width).
 		Render(sb.String())

@@ -24,11 +24,13 @@ const maxWorkspaceEditAggregateBytes int64 = 128 << 20
 const maxQueuedWorkspaceEdits = 16
 
 type workspaceEditBufferSnapshot struct {
-	EditorID uint64
-	Path     string
-	Version  int
-	Cursor   text.Position
-	Rope     *text.Rope
+	EditorID   uint64
+	Path       string
+	Version    int
+	Cursor     text.Position
+	Rope       *text.Rope
+	Selections []text.Selection
+	Primary    int
 }
 
 type workspaceEditPreparedDocument struct {
@@ -39,6 +41,8 @@ type workspaceEditPreparedDocument struct {
 	Source       *text.Rope
 	Result       *text.Rope
 	Cursor       text.Position
+	Selections   []text.Selection
+	Primary      int
 	Applied      int
 	Closed       bool
 	Data         []byte // only populated for a closed document, off the UI path
@@ -147,11 +151,13 @@ func (m Model) startNextWorkspaceEdit(request workspaceEditRequest) (Model, tea.
 		}
 		seenPaths[absolutePath] = struct{}{}
 		snapshots = append(snapshots, workspaceEditBufferSnapshot{
-			EditorID: m.editors[index].ID(),
-			Path:     absolutePath,
-			Version:  buf.Version(),
-			Cursor:   buf.Cursor,
-			Rope:     buf.Rope(),
+			EditorID:   m.editors[index].ID(),
+			Path:       absolutePath,
+			Version:    buf.Version(),
+			Cursor:     buf.Cursor,
+			Rope:       buf.Rope(),
+			Selections: append([]text.Selection(nil), buf.Selections.All()...),
+			Primary:    buf.Selections.PrimaryIndex(),
 		})
 	}
 	rootDir, pinnedRoot := m.rootDir, m.agentWriteRoot
@@ -311,6 +317,7 @@ func prepareWorkspaceEdit(
 				doc.EditorID, doc.Version, doc.Source = snapshot.EditorID, snapshot.Version, snapshot.Rope
 				doc.buffer = text.NewBufferFromRope(snapshot.Rope)
 				doc.buffer.SetCursor(snapshot.Cursor)
+				doc.buffer.RestoreSelections(snapshot.Selections, snapshot.Primary)
 			} else {
 				if expectedVersion != nil {
 					return fmt.Errorf("cannot verify document version for unopened file %s", filepath.Base(path))
@@ -354,9 +361,14 @@ func prepareWorkspaceEdit(
 		if err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(path), err)
 		}
-		cursor := mapPositionThroughTextEdits(source, result, doc.buffer.Cursor, preparedEdits)
+		cursor, selections, primary, err := mapFormattingSelections(ctx, source, result,
+			doc.buffer.Cursor, doc.buffer.Selections.All(), doc.buffer.Selections.PrimaryIndex(), preparedEdits)
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
 		doc.buffer = text.NewBufferFromRope(result)
 		doc.buffer.SetCursor(cursor)
+		doc.buffer.RestoreSelections(selections, primary)
 		doc.Applied += len(preparedEdits)
 		if int64(doc.buffer.Rope().Len()) > maxWorkspaceEditAggregateBytes {
 			return fmt.Errorf("%s would exceed the workspace edit aggregate budget", filepath.Base(path))
@@ -394,6 +406,8 @@ func prepareWorkspaceEdit(
 			return workspaceEditPreparation{}, err
 		}
 		doc.Result, doc.Cursor = doc.buffer.Rope(), doc.buffer.Cursor
+		doc.Selections = append([]text.Selection(nil), doc.buffer.Selections.All()...)
+		doc.Primary = doc.buffer.Selections.PrimaryIndex()
 		outputBytes += int64(doc.Result.Len())
 		if outputBytes > maxWorkspaceEditAggregateBytes {
 			return workspaceEditPreparation{}, fmt.Errorf("workspace edit exceeds %d MiB aggregate document budget", maxWorkspaceEditAggregateBytes>>20)
@@ -646,15 +660,21 @@ func (m Model) handleWorkspaceEditPrepared(msg workspaceEditPreparedMsg) (tea.Mo
 			needsCommit = true
 			continue
 		}
+		if doc.Result == doc.Source {
+			continue
+		}
 		index := m.editorIndexForAsyncMessage(doc.EditorID)
 		if index < 0 {
 			return m.completeWorkspaceEdit(msg.Generation, msg.Continuation, false, "target editor was closed", 0)
 		}
 		previous[doc.EditorID] = previousEditorState{version: m.editors[index].Buffer.Version(), cursor: m.editors[index].Buffer.Cursor}
 		m.editors[index].Buffer.ReplaceRopeSnapshot(doc.Result, doc.Cursor)
+		m.editors[index].Buffer.RestoreSelections(doc.Selections, doc.Primary)
 		if m.editors[index].Highlighter != nil {
 			m.editors[index].Highlighter.Invalidate()
 		}
+		m.editors[index].SetSize(m.editors[index].Viewport.Width, m.editors[index].Viewport.Height)
+		m.editors[index].EnsureCursorVisible()
 	}
 
 	var postMutation []tea.Cmd

@@ -60,11 +60,16 @@ tasks:
     deps: [build]
     cmds:
       - |
+        set -e
         SPECS="$(ls specs/*.yml)"
         if [ "$(uname)" = "Linux" ]; then
           SPECS="$(ls specs/*.yml | grep -v tui_agent_)"
         fi
-        glyph run $SPECS --parallel 1 --repeat 3 --progress auto --junit .glyphrun/glyphrun-repeat-junit.xml
+        # Repeat mode does not write JUnit in Glyphrun 0.18. Generate a fresh
+        # single-run report, then inspect stability with retained per-spec runs.
+        rm -f .glyphrun/glyphrun-repeat-junit.xml
+        glyph run $SPECS --parallel 1 --progress auto --junit .glyphrun/glyphrun-repeat-junit.xml
+        python3 scripts/glyph-stability.py $SPECS
 
   perf:
     desc: Measure representative input, render, tree, and rope hot paths
@@ -173,6 +178,7 @@ tasks:
       - go vet ./...
       - task race
       - task perf-tools-test
+      - python3 scripts/headless-workflow-fixture-test.py
       - task specs
 
   verify:

@@ -43,14 +43,17 @@ type healthDashboardOverlay struct {
 	width     int
 	height    int
 	dismissed bool
+	theme     ui.Theme
 }
 
 func newHealthDashboardOverlay(width, height int) *healthDashboardOverlay {
-	dashboard := &healthDashboardOverlay{}
+	dashboard := &healthDashboardOverlay{theme: ui.DefaultTheme()}
 	dashboard.SetSize(width, height)
 	dashboard.SetContent("Loading workspace health…")
 	return dashboard
 }
+
+func (o *healthDashboardOverlay) SetTheme(theme ui.Theme) { o.theme = theme }
 
 func (o *healthDashboardOverlay) SetSize(width, height int) {
 	o.width = max(1, width-4)
@@ -76,8 +79,8 @@ func (o *healthDashboardOverlay) Update(msg tea.Msg) (overlay.Overlay, tea.Cmd) 
 }
 
 func (o *healthDashboardOverlay) View() string {
-	title := lipgloss.NewStyle().Foreground(ui.Nord8).Bold(true).Render("Workspace health")
-	hint := lipgloss.NewStyle().Foreground(ui.Nord3).Render("Enter, Esc, or q to close")
+	title := o.theme.HelpTitle.Render("Workspace health")
+	hint := o.theme.Gutter.Render("Enter, Esc, or q to close")
 	content := o.content
 	if content == "" {
 		content = "(no health data)"
@@ -91,11 +94,11 @@ func (o *healthDashboardOverlay) View() string {
 	for i, line := range lines {
 		lines[i] = truncateHealthDashboardBytes(line, lineLimit)
 	}
-	body := lipgloss.NewStyle().Foreground(ui.Nord4).Render(strings.Join(lines, "\n"))
+	body := o.theme.PromptMuted.Render(strings.Join(lines, "\n"))
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(o.theme.TreeBorder.GetForeground()).
+		Background(o.theme.StatusBar.GetBackground()).
 		Padding(1, 2).
 		Width(max(1, o.width)).
 		Render(title + "\n\n" + body + "\n\n" + hint)
@@ -270,6 +273,7 @@ func (m Model) openHealthDashboard() (tea.Model, tea.Cmd) {
 	m.healthDashboardGeneration++
 	generation := m.healthDashboardGeneration
 	dashboard := newHealthDashboardOverlay(m.width, m.height)
+	dashboard.SetTheme(m.theme)
 	m.healthDashboard = dashboard
 	m.overlayStack.Push(dashboard)
 	m.status = "Loading workspace health…"

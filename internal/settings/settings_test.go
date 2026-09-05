@@ -185,21 +185,21 @@ func TestSettingsMouseClickSelectsCategoryAndEditsControls(t *testing.T) {
 
 	// The UI category tab row is rendered at content row 4. A click in the
 	// second tab must select it instead of leaking through to the editor.
-	if !model.HandleMouseClick(12, 4) {
+	if handled, _ := model.HandleMouseClick(12, 4); !handled {
 		t.Fatal("category click was not handled")
 	}
 	if got := model.SelectedCategory().ID; got != "ui" {
 		t.Fatalf("selected category = %q, want ui", got)
 	}
 
-	// The first UI setting is a string control. Its action region must cycle
-	// the value with a mouse click, just as Enter does for keyboard users.
+	// The first UI setting is a string control. Its action region asks the app
+	// to open the shared picker without changing the value prematurely.
 	before := model.SelectedSetting().Value
-	if !model.HandleMouseClick(24, 6) {
+	if handled, openPicker := model.HandleMouseClick(24, 6); !handled || !openPicker {
 		t.Fatal("setting control click was not handled")
 	}
-	if got := model.SelectedSetting().Value; got == before {
-		t.Fatalf("theme = %v after control click, want a different value", got)
+	if got := model.SelectedSetting().Value; got != before {
+		t.Fatalf("theme = %v after opening picker, want %v", got, before)
 	}
 }
 
@@ -207,7 +207,7 @@ func TestSettingsCategoryClickDoesNotTreatTheGapAsATab(t *testing.T) {
 	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
 	model.SetSize(72, 22)
 	_, firstEnd := model.categoryTabBounds(0)
-	if model.HandleMouseClick(firstEnd, settingsCategoryRow) {
+	if handled, _ := model.HandleMouseClick(firstEnd, settingsCategoryRow); handled {
 		t.Fatal("the visual gap between category tabs was treated as a click target")
 	}
 	if got := model.SelectedCategory().ID; got != "editor" {
@@ -409,6 +409,27 @@ func TestSettingsDecrementIntValue(t *testing.T) {
 	t.Error("Could not find int setting to test")
 }
 
+func TestSettingsDirtyClearsWhenValuesReturnToSavedState(t *testing.T) {
+	model := New(ui.DefaultTheme(), config.DefaultConfig(), "/test/config.toml")
+
+	model.IncrementIntValue()
+	if !model.Dirty() {
+		t.Fatal("incremented setting was not marked dirty")
+	}
+	model.DecrementIntValue()
+	if model.Dirty() {
+		t.Fatal("restoring the saved value left Settings dirty")
+	}
+
+	model.SelectNextCategory()
+	for range config.KnownThemes() {
+		model.CycleStringValue()
+	}
+	if model.Dirty() {
+		t.Fatal("cycling back to the saved theme left Settings dirty")
+	}
+}
+
 // TestSettingsResetCurrentValue tests ResetCurrentValue method
 func TestSettingsResetCurrentValue(t *testing.T) {
 	theme := ui.DefaultTheme()
@@ -517,9 +538,9 @@ func TestSettingsPreviewTOML(t *testing.T) {
 func TestSettingToTOMLFormatsStringListsAsArrays(t *testing.T) {
 	model := &Model{}
 	tests := []struct {
-		name string
+		name  string
 		value []string
-		want string
+		want  string
 	}{
 		{"empty", nil, "extensions = []\n"},
 		{"one", []string{"go"}, "extensions = [\"go\"]\n"},

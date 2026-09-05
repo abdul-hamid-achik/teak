@@ -10,16 +10,17 @@ metadata:
         - agent
         - acp
         - deterministic
+        - story
 intent: |
     a user can open Teak's agent panel, send a prompt through a configured ACP
-    subprocess, and see the bounded streamed response without an installed
-    agent or network dependency
+    subprocess, paste with an inactive Find open, edit with Home/End, and see the bounded
+    streamed response without an installed agent or network dependency
 target:
     cmd:
         - sh
         - -lc
         - >-
-          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); HOME_DIR="$TMP/home"; CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; mkdir -p "$HOME_DIR" "$CONFIG_HOME/teak" "$PROJECT"; printf '%s\n' '[editor]' 'tab_size = 4' '[ui]' 'show_tree = false' '[agent]' 'enabled = true' 'command = "python3"' "args = [\"$ROOT/testdata/glyphrun/acp-agent-fixture.py\"]" '[session]' 'enabled = false' > "$CONFIG_HOME/teak/config.toml"; printf '%s\n' 'package main' > "$PROJECT/main.go"; export HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$TMP/state" LANG=C LC_ALL=C TZ=UTC; exec "$ROOT/bin/teak" "$PROJECT/main.go"
+          set -eu; ROOT=$(pwd); TMP=$(mktemp -d); HOME_DIR="$TMP/home"; CONFIG_HOME="$TMP/config"; PROJECT="$TMP/project"; mkdir -p "$HOME_DIR" "$CONFIG_HOME/teak" "$PROJECT"; printf '%s\n' '[editor]' 'tab_size = 4' '[ui]' 'show_tree = false' '[agent]' 'enabled = true' 'command = "python3"' "args = [\"$ROOT/testdata/glyphrun/acp-agent-fixture.py\"]" '[session]' 'enabled = false' > "$CONFIG_HOME/teak/config.toml"; printf '%s\n' 'package main' > "$PROJECT/main.txt"; export HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$TMP/state" LANG=C LC_ALL=C TZ=UTC; exec "$ROOT/bin/teak" "$PROJECT/main.txt"
     cwd: "."
     timeoutMs: 15000
 terminal:
@@ -32,12 +33,25 @@ steps:
         screen:
             contains: "Agent"
         timeoutMs: 5000
+    - press: ctrl+f
+    - wait:
+        screen: {contains: "Find"}
     - press: "ctrl+j"
     - wait:
         screen:
             contains: "Ask the agent..."
         timeoutMs: 5000
-    - type: "hello teak"
+    - snapshot: agent_empty
+    - send: {bytes: "\\x1b[200~hello\\x1b[201~"}
+    - press: "home"
+    - type: "audit "
+    - press: "end"
+    - type: " teak"
+    - wait:
+        screen:
+            contains: "audit hello teak"
+        timeoutMs: 3000
+    - snapshot: agent_prompt_edited
     - press: "enter"
     - wait:
         screen:
@@ -59,4 +73,4 @@ outcomes:
       verify:
         process:
             exitCode: 0
-contractHash: sha256:45680e130005011a56978a13766e015cb857dcb1d0a2315ad7f81eb6b7a75ce1
+contractHash: sha256:83e60621e66ef6938a67d4a8832503a748736b9ba94e9a1323497b6ebe87885d

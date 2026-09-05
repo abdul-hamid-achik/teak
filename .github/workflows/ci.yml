@@ -57,6 +57,12 @@ jobs:
       - name: Verify bounded external-tool measurement contract
         run: sh scripts/perf-tools-test.sh
 
+      - name: Verify stability gate rejects incomplete and unstable probes
+        run: python3 scripts/glyph-stability-test.py
+
+      - name: Verify headless workflow failure diagnostics
+        run: python3 scripts/headless-workflow-fixture-test.py
+
       - name: Build binary
         run: go build -o bin/teak ./cmd/teak
 
@@ -85,7 +91,11 @@ jobs:
           # the TUI exits early under a Linux PTY (known glyphrun issue; they pass
           # on macOS). See the 2026-08-04 investigation notes.
           SPECS="$(ls specs/*.yml | grep -v tui_agent_)"
-          glyph run $SPECS --parallel 1 --repeat 3 --progress auto --junit .glyphrun/glyphrun-repeat-ci-junit.xml
+          # JUnit describes the fresh single run. Probe JSON must also report
+          # stable screens; each spec retains its three evidence directories.
+          rm -f .glyphrun/glyphrun-repeat-ci-junit.xml
+          glyph run $SPECS --parallel 1 --progress auto --junit .glyphrun/glyphrun-repeat-ci-junit.xml
+          python3 scripts/glyph-stability.py $SPECS
 
       - name: Upload Glyphrun JUnit report
         if: always()

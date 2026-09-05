@@ -7,12 +7,10 @@ import (
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"teak/internal/editor"
 	"teak/internal/overlay"
 	"teak/internal/plugin"
 	"teak/internal/text"
-	"teak/internal/ui"
 )
 
 type externalConflictResolution uint8
@@ -183,8 +181,8 @@ func (m Model) showExternalConflictConfirmation(path string) Model {
 		message,
 		details,
 		[]overlay.Button{
-			{Label: reloadLabel, Style: lipgloss.NewStyle().Background(ui.Nord11).Foreground(ui.Nord6).Padding(0, 2), Action: externalConflictResolutionMsg{Path: path, Resolution: externalConflictReload}},
-			{Label: "Overwrite", Style: lipgloss.NewStyle().Background(ui.Nord14).Foreground(ui.Nord0).Padding(0, 2), Action: externalConflictResolutionMsg{Path: path, Resolution: externalConflictOverwrite}},
+			{Label: reloadLabel, Style: m.dangerButtonStyle(), Action: externalConflictResolutionMsg{Path: path, Resolution: externalConflictReload}},
+			{Label: "Overwrite", Style: m.primaryButtonStyle(), Action: externalConflictResolutionMsg{Path: path, Resolution: externalConflictOverwrite}},
 			{Label: "Cancel", Action: externalConflictResolutionMsg{Path: path, Resolution: externalConflictCancel}},
 		},
 		m.theme,

@@ -8,13 +8,11 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	sdk "github.com/coder/acp-go-sdk"
 	"teak/internal/acp"
 	"teak/internal/agent"
 	"teak/internal/overlay"
 	"teak/internal/text"
-	"teak/internal/ui"
 )
 
 // listenACP returns a tea.Cmd that waits for the next ACP message.
@@ -306,11 +304,11 @@ func (m Model) agentIndicator() string {
 	case agent.AgentDisconnected:
 		return ""
 	case agent.AgentIdle:
-		return "  Agent " + lipgloss.NewStyle().Foreground(ui.Nord14).Render("●")
+		return "  Agent " + m.theme.GitAdded.Render("●")
 	case agent.AgentThinking:
-		return "  Agent " + lipgloss.NewStyle().Foreground(ui.Nord13).Render("◐")
+		return "  Agent " + m.theme.GitModified.Render("◐")
 	case agent.AgentPermission:
-		return "  Agent " + lipgloss.NewStyle().Foreground(ui.Nord12).Render("⏸")
+		return "  Agent " + m.theme.AgentPermission.Render("⏸")
 	}
 	return ""
 }

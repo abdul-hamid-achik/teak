@@ -161,38 +161,32 @@ func TestWelcomeViewContainsHints(t *testing.T) {
 	}
 }
 
-func TestWelcomeLogoColor(t *testing.T) {
+func TestWelcomeLogoStyle(t *testing.T) {
 	welcome := NewWelcome(ui.DefaultTheme())
 
-	// Before settled, should cycle through colors
-	color := welcome.logoColor(0)
-	if color == nil {
-		t.Error("expected non-nil color")
+	if got := welcome.logoStyle(0).Render("T"); got == "T" {
+		t.Error("expected themed logo style")
 	}
 }
 
-func TestWelcomeLogoColorSettled(t *testing.T) {
+func TestWelcomeLogoStyleSettled(t *testing.T) {
 	welcome := NewWelcome(ui.DefaultTheme())
 	welcome.settled = true
 
-	// After settled, should be static cyan (Nord8)
-	color := welcome.logoColor(0)
-	if color == nil {
-		t.Error("expected non-nil color")
+	if got := welcome.logoStyle(0).Render("T"); got == "T" {
+		t.Error("expected themed settled logo style")
 	}
 }
 
-func TestWelcomeLogoColorDifferentLines(t *testing.T) {
+func TestWelcomeLogoStyleDifferentLines(t *testing.T) {
 	welcome := NewWelcome(ui.DefaultTheme())
 
-	color0 := welcome.logoColor(0)
-	color1 := welcome.logoColor(1)
-	color2 := welcome.logoColor(2)
+	style0 := welcome.logoStyle(0)
+	style1 := welcome.logoStyle(1)
+	style2 := welcome.logoStyle(2)
 
-	// Different lines should have different colors (offset in palette)
-	// This is hard to test directly without knowing the frame, but we can check they're not nil
-	if color0 == nil || color1 == nil || color2 == nil {
-		t.Error("expected non-nil colors")
+	if style0.Render("T") == "T" || style1.Render("T") == "T" || style2.Render("T") == "T" {
+		t.Error("expected themed logo styles")
 	}
 }
 
@@ -221,16 +215,6 @@ func TestWelcomeTickMsg(t *testing.T) {
 	_, ok := msg.(WelcomeTickMsg)
 	if !ok {
 		t.Errorf("expected WelcomeTickMsg, got %T", msg)
-	}
-}
-
-func TestWelcomeAuroraColors(t *testing.T) {
-	if len(auroraColors) == 0 {
-		t.Error("expected some aurora colors")
-	}
-	// Should have 9 colors as defined
-	if len(auroraColors) != 9 {
-		t.Errorf("expected 9 aurora colors, got %d", len(auroraColors))
 	}
 }
 

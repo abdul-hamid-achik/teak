@@ -247,13 +247,14 @@ func New(rootDir string, theme ui.Theme) Model {
 	ti.Placeholder = "Commit message"
 	ti.CharLimit = 72
 	ti.Prompt = ""
+	ui.ApplyTextInputTheme(&ti, theme)
 
 	// Initialize textarea for commit body
 	ta := textarea.New()
-	configureCommitBody(&ta)
+	configureCommitBody(&ta, theme)
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
-	sp.Style = lipgloss.NewStyle().Foreground(ui.Nord8)
+	sp.Style = theme.PromptAccent
 
 	m := Model{
 		theme:       theme,
@@ -267,7 +268,7 @@ func New(rootDir string, theme ui.Theme) Model {
 	return m
 }
 
-func configureCommitBody(ta *textarea.Model) {
+func configureCommitBody(ta *textarea.Model, theme ui.Theme) {
 	ta.Placeholder = "Description (optional)"
 	ta.Prompt = ""
 	ta.ShowLineNumbers = false
@@ -278,35 +279,35 @@ func configureCommitBody(ta *textarea.Model) {
 
 	styles := ta.Styles()
 	styles.Focused.Text = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord6)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetForeground())
 	styles.Focused.Placeholder = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.TreeEntry.GetForeground())
 	styles.Focused.CursorLine = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord6)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetForeground())
 	styles.Focused.EndOfBuffer = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord1)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetBackground())
 	styles.Focused.Prompt = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord1)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetBackground())
 	styles.Blurred.Text = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.TreeEntry.GetForeground())
 	styles.Blurred.Placeholder = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.TreeEntry.GetForeground())
 	styles.Blurred.CursorLine = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord4)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.TreeEntry.GetForeground())
 	styles.Blurred.EndOfBuffer = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord1)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetBackground())
 	styles.Blurred.Prompt = lipgloss.NewStyle().
-		Background(ui.Nord1).
-		Foreground(ui.Nord1)
+		Background(theme.Editor.GetBackground()).
+		Foreground(theme.Editor.GetBackground())
 	ta.SetStyles(styles)
 }
 
@@ -318,6 +319,14 @@ func (m Model) IsGitRepo() bool {
 // SetIsGitRepo sets whether the root dir is inside a git repository.
 func (m *Model) SetIsGitRepo(isGitRepo bool) {
 	m.isGitRepo = isGitRepo
+}
+
+// SetTheme updates controls without resetting staged files, commit text, or focus.
+func (m *Model) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	ui.ApplyTextInputTheme(&m.commitTitle, theme)
+	m.spinner.Style = theme.PromptAccent
+	configureCommitBody(&m.commitBody, theme)
 }
 
 // RootDir returns the root directory of the git repo.
@@ -1373,8 +1382,9 @@ func (m Model) renderPushPullLine() string {
 	btnWidthR := availWidth - gap - btnWidth
 	pushContent := gitActionLabel("\uf0ee", "Push")
 	pullContent := gitActionLabel("\uf0ed", "Pull")
-	pushPadded := centerText(pushContent, btnWidth, ' ')
-	pullPadded := centerText(pullContent, btnWidthR, ' ')
+	frameWidth := m.theme.GitPushPullButton.GetHorizontalFrameSize()
+	pushPadded := centerText(pushContent, max(1, btnWidth-frameWidth), ' ')
+	pullPadded := centerText(pullContent, max(1, btnWidthR-frameWidth), ' ')
 	pushBtn := zone.Mark("git-push-btn", m.theme.GitPushPullButton.Render(pushPadded))
 	pullBtn := zone.Mark("git-pull-btn", m.theme.GitPushPullButton.Render(pullPadded))
 	return " " + pushBtn + " " + pullBtn
@@ -1386,41 +1396,41 @@ func (m Model) renderCommitFormLines(bodyHeight int) []string {
 		innerWidth = 1
 	}
 
-	borderColor := ui.Nord3
+	borderColor := m.theme.HelpBorder.GetForeground()
 	if m.titleFocused || m.bodyFocused {
-		borderColor = ui.Nord8
+		borderColor = m.theme.PromptAccent.GetForeground()
 	}
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 
 	m.commitTitle.SetWidth(innerWidth)
 	tiStyles := m.commitTitle.Styles()
-	titleBg := ui.Nord1
+	titleBg := m.theme.Editor.GetBackground()
 	if m.titleFocused {
-		titleBg = ui.Nord2
+		titleBg = m.theme.TreeCursor.GetBackground()
 	}
-	tiStyles.Focused.Text = lipgloss.NewStyle().Background(titleBg).Foreground(ui.Nord6)
-	tiStyles.Focused.Placeholder = lipgloss.NewStyle().Background(titleBg).Foreground(ui.Nord4)
-	tiStyles.Blurred.Text = lipgloss.NewStyle().Background(ui.Nord1).Foreground(ui.Nord4)
-	tiStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(ui.Nord1).Foreground(ui.Nord4)
+	tiStyles.Focused.Text = lipgloss.NewStyle().Background(titleBg).Foreground(m.theme.Editor.GetForeground())
+	tiStyles.Focused.Placeholder = lipgloss.NewStyle().Background(titleBg).Foreground(m.theme.TreeEntry.GetForeground())
+	tiStyles.Blurred.Text = lipgloss.NewStyle().Background(m.theme.Editor.GetBackground()).Foreground(m.theme.TreeEntry.GetForeground())
+	tiStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(m.theme.Editor.GetBackground()).Foreground(m.theme.TreeEntry.GetForeground())
 	m.commitTitle.SetStyles(tiStyles)
 	titleView := m.commitTitle.View()
 	titleClamped := lipgloss.NewStyle().MaxWidth(innerWidth).Render(titleView)
 
-	bodyBg := ui.Nord1
+	bodyBg := m.theme.Editor.GetBackground()
 	if m.bodyFocused {
-		bodyBg = ui.Nord2
+		bodyBg = m.theme.TreeCursor.GetBackground()
 	}
 	m.commitBody.SetWidth(innerWidth)
 	m.commitBody.SetHeight(bodyHeight)
 	taStyles := m.commitBody.Styles()
-	taStyles.Focused.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
-	taStyles.Focused.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-	taStyles.Focused.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord6)
+	taStyles.Focused.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.Editor.GetForeground())
+	taStyles.Focused.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.TreeEntry.GetForeground())
+	taStyles.Focused.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.Editor.GetForeground())
 	taStyles.Focused.EndOfBuffer = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
 	taStyles.Focused.Prompt = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
-	taStyles.Blurred.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-	taStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
-	taStyles.Blurred.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(ui.Nord4)
+	taStyles.Blurred.Text = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.TreeEntry.GetForeground())
+	taStyles.Blurred.Placeholder = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.TreeEntry.GetForeground())
+	taStyles.Blurred.CursorLine = lipgloss.NewStyle().Background(bodyBg).Foreground(m.theme.TreeEntry.GetForeground())
 	taStyles.Blurred.EndOfBuffer = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
 	taStyles.Blurred.Prompt = lipgloss.NewStyle().Background(bodyBg).Foreground(bodyBg)
 	m.commitBody.SetStyles(taStyles)
@@ -1450,7 +1460,7 @@ func (m Model) renderCommitFormLines(bodyHeight int) []string {
 		availWidth = 10
 	}
 	commitContent := gitActionLabel("\uf417", "Commit")
-	commitPadded := centerText(commitContent, availWidth, ' ')
+	commitPadded := centerText(commitContent, max(1, availWidth-m.theme.GitCommitButton.GetHorizontalFrameSize()), ' ')
 	commitBtn := zone.Mark("git-commit-btn", m.theme.GitCommitButton.Render(commitPadded))
 	lines = append(lines, " "+commitBtn)
 	return lines

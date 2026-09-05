@@ -10,7 +10,7 @@ func (m Model) editorContextMenuScreenPosition() (int, int) {
 		return 0, 0
 	}
 	x, y := m.activeEditor().ContextMenuPosition()
-	body := m.mouseLayout().editorBody
+	body := m.activeEditorBodyRect()
 	return body.x + x, body.y + y
 }
 
@@ -23,7 +23,7 @@ func (m Model) editorContextMenuGeometry() (string, mouseRect, bool) {
 	if ed == nil || !ed.IsContextMenuVisible() {
 		return "", mouseRect{}, false
 	}
-	body := m.mouseLayout().editorBody
+	body := m.activeEditorBodyRect()
 	if body.width < 1 || body.height < 1 {
 		return "", mouseRect{}, false
 	}
@@ -50,7 +50,7 @@ func (m Model) clampActiveEditorContextMenu() {
 	if !ok {
 		return
 	}
-	body := m.mouseLayout().editorBody
+	body := m.activeEditorBodyRect()
 	ed.SetContextMenuPosition(rect.x-body.x, rect.y-body.y)
 }
 

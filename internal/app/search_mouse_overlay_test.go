@@ -37,10 +37,20 @@ func TestSearchOverlayMouseClickUsesCenteredOverlayCoordinates(t *testing.T) {
 		overlayY = 0
 	}
 
+	resultRow := -1
+	for i, line := range strings.Split(searchView, "\n") {
+		if strings.Contains(line, "selected.go") {
+			resultRow = i
+			break
+		}
+	}
+	if resultRow < 0 {
+		t.Fatal("selected result is not rendered")
+	}
 	updatedAny, cmd := m.Update(tea.MouseClickMsg(tea.Mouse{
 		Button: tea.MouseLeft,
 		X:      overlayX + 4,
-		Y:      overlayY + 6, // first result row: border + padding + header
+		Y:      overlayY + resultRow,
 	}))
 	updated := updatedAny.(Model)
 	if !updated.showSearch {

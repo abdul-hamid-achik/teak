@@ -196,6 +196,40 @@ func containsArg(args []string, want string) bool {
 	return false
 }
 
+func TestRipgrepArgsOrderFilesBeforeApplyingResultLimit(t *testing.T) {
+	args := ripgrepArgs("needle", SearchOpts{})
+	if !strings.Contains(strings.Join(args, " "), "--sort path") {
+		t.Fatalf("file order must be deterministic before parsing a capped prefix: %v", args)
+	}
+}
+
+func TestRipgrepCappedResultsKeepPathOrder(t *testing.T) {
+	if !toolpath.Available("rg") {
+		t.Skip("ripgrep is not installed")
+	}
+	root := t.TempDir()
+	for _, name := range []string{"z.txt", "a.txt", "m.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("needle\nneedle again\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, limit := range []int{1, 3, 6} {
+		results, err := ripgrepSearchContext(context.Background(), root, "needle", SearchOpts{}, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != limit {
+			t.Fatalf("limit %d: got %d results", limit, len(results))
+		}
+		for i, result := range results {
+			wantPath := []string{"a.txt", "m.txt", "z.txt"}[i/2]
+			if result.FilePath != wantPath || result.Line != i%2 {
+				t.Fatalf("limit %d, result %d = %+v, want %s:%d", limit, i, result, wantPath, i%2)
+			}
+		}
+	}
+}
+
 // --- Dispatch / fallback behaviour ---
 //
 // These tests override the ripgrepAvailableFn/ripgrepCommandFn seams instead

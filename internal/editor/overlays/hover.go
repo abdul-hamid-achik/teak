@@ -19,6 +19,11 @@ func NewHover(theme ui.Theme) Hover {
 	return Hover{theme: theme}
 }
 
+// SetTheme updates rendering without changing hover content.
+func (h *Hover) SetTheme(theme ui.Theme) {
+	h.theme = theme
+}
+
 // Show displays hover content.
 func (h *Hover) Show(content string) {
 	h.Content = content

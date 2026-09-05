@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -38,6 +39,26 @@ func (m Model) promptBoxStyle() lipgloss.Style {
 		Background(m.theme.StatusBar.GetBackground())
 }
 
+// promptView keeps the insertion point visible in long paths and names.
+func (m Model) promptView(label, value string, cursor int) string {
+	style := m.promptBoxStyle().Padding(0, 1)
+	available := max(1, m.width-style.GetHorizontalFrameSize())
+	label = ansi.Truncate(label, max(0, available-3), "…")
+	fieldWidth := max(1, available-ansi.StringWidth(label)-2)
+	cursor = clampPromptCursor(value, cursor)
+	start := max(0, ansi.StringWidth(value[:cursor])-fieldWidth+1)
+	field := ansi.Cut(promptWithCaret(value, cursor), start, start+fieldWidth)
+	return style.Render(label + ": " + field)
+}
+
+func (m Model) primaryButtonStyle() lipgloss.Style {
+	return m.theme.GitCommitButton.Padding(0, 2)
+}
+
+func (m Model) dangerButtonStyle() lipgloss.Style {
+	return m.theme.PromptDanger.Padding(0, 2)
+}
+
 func (m Model) withTerminal(main string) string {
 	th := m.terminalPanelHeight()
 	if th == 0 {
@@ -51,6 +72,11 @@ func (m Model) withTerminal(main string) string {
 // input. The native terminal cursor must never remain behind such a surface:
 // it otherwise looks editable and can blink through small modal overlays.
 func (m Model) editorInputCaptured() bool {
+	return m.editorOverlayInputCaptured() ||
+		(m.focus == FocusEditor && m.activeEditor() != nil && m.activeEditor().IsFindVisible())
+}
+
+func (m Model) editorOverlayInputCaptured() bool {
 	return m.unsavedConfirm != nil ||
 		!m.overlayStack.IsEmpty() ||
 		m.showBranchPicker ||
@@ -60,7 +86,14 @@ func (m Model) editorInputCaptured() bool {
 		m.passiveModalVisible() ||
 		m.treeContextMenu.Visible ||
 		m.gitContextMenu.Visible ||
-		(m.activeEditor() != nil && (m.activeEditor().IsContextMenuVisible() || m.activeEditor().IsFindVisible()))
+		(m.activeEditor() != nil && m.activeEditor().IsContextMenuVisible())
+}
+
+func (m Model) renderEditor(tab int) string {
+	if dv, ok := m.diffViews[tab]; ok {
+		return dv.View()
+	}
+	return m.editors[tab].ViewWithFocus(m.focus == FocusEditor && tab == m.activeTab && !m.editorOverlayInputCaptured())
 }
 
 // View implements tea.Model.
@@ -99,7 +132,7 @@ func (m Model) View() tea.View {
 			} else if m.isActiveDiffTab() {
 				editorView = m.activeDiffView()
 			} else if m.activeEditor() != nil {
-				editorView = m.activeEditor().View()
+				editorView = m.renderEditor(m.activeTab)
 			}
 			content += "\n" + editorView
 		}
@@ -116,12 +149,12 @@ func (m Model) View() tea.View {
 		} else if m.isActiveDiffTab() {
 			editorView = m.activeDiffView()
 		} else if m.activeEditor() != nil {
-			editorView = m.activeEditor().View()
+			editorView = m.renderEditor(m.activeTab)
 		}
 		editorCol := tabBarView + "\n" + editorView
 		// Agent panel on the right (no-tree mode)
 		if m.showAgent && m.agentPanelWidth() > 0 {
-			sidebarHeight := m.height - 2
+			sidebarHeight := m.chromeContentHeight()
 			rightBorder := m.agentBorderColumn(sidebarHeight)
 			agentView := m.agentPanel.View()
 			editorCol = lipgloss.JoinHorizontal(lipgloss.Top, editorCol, rightBorder, agentView)
@@ -172,7 +205,7 @@ func (m Model) View() tea.View {
 	} else if m.showSettings {
 		// Settings overlay shares its geometry with mouse hit-testing.
 		settingsView := m.settingsM.View()
-		hint := m.theme.Gutter.Render("\n\n↑↓ select  •  click a control to change  •  Ctrl+S save  •  Esc close")
+		hint := m.theme.Gutter.Render("\n\n↑↓ select  •  Enter/click choose  •  Ctrl+S keep changes  •  Esc cancel")
 		settingsView += hint
 
 		centerX, centerY, modalWidth, _ := m.settingsModalGeometry()
@@ -188,14 +221,10 @@ func (m Model) View() tea.View {
 		searchView := m.searchM.View()
 		content = ui.RenderOverlay(content, searchView, m.width, m.height)
 	} else if m.goToLineMode {
-		goToBox := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("Go to Line: %s", promptWithCaret(m.goToLineInput, m.goToLineCursor)))
+		goToBox := m.promptView("Go to Line", m.goToLineInput, m.goToLineCursor)
 		content = ui.RenderOverlay(content, goToBox, m.width, m.height)
 	} else if m.renameMode {
-		renameBox := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("Rename Symbol: %s", promptWithCaret(m.renameInput, m.renameCursor)))
+		renameBox := m.promptView("Rename Symbol", m.renameInput, m.renameCursor)
 		content = ui.RenderOverlay(content, renameBox, m.width, m.height)
 	} else if m.treeRenameMode || m.treeCopyMode || m.treeMoveMode {
 		prompt := "Move to workspace directory"
@@ -204,19 +233,13 @@ func (m Model) View() tea.View {
 		} else if m.treeCopyMode {
 			prompt = "Duplicate as"
 		}
-		box := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("%s: %s", prompt, promptWithCaret(m.treeEditInput, m.treeEditCursor)))
+		box := m.promptView(prompt, m.treeEditInput, m.treeEditCursor)
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.newFileMode {
-		box := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("New File: %s", promptWithCaret(m.newItemInput, m.newItemCursor)))
+		box := m.promptView("New File", m.newItemInput, m.newItemCursor)
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.newFolderMode {
-		box := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("New Folder: %s", promptWithCaret(m.newItemInput, m.newItemCursor)))
+		box := m.promptView("New Folder", m.newItemInput, m.newItemCursor)
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.deleteConfirm {
 		box := m.promptBoxStyle().
@@ -225,9 +248,7 @@ func (m Model) View() tea.View {
 			Render(fmt.Sprintf("Delete %s? (y/N)", filepath.Base(m.deleteTarget)))
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	} else if m.saveAsMode {
-		box := m.promptBoxStyle().
-			Padding(0, 1).
-			Render(fmt.Sprintf("Save As: %s", promptWithCaret(m.saveAsInput, m.saveAsCursor)))
+		box := m.promptView("Save As", m.saveAsInput, m.saveAsCursor)
 		content = ui.RenderOverlay(content, box, m.width, m.height)
 	}
 
@@ -253,6 +274,12 @@ func (m Model) View() tea.View {
 	content = clipViewRows(content, m.height)
 	scanned := zone.Scan(content)
 	v := tea.NewView(scanned)
+	// ANSI resets in nested styles must return to this theme, not the shell's.
+	// Bubble Tea resets these terminal defaults again when the program exits.
+	if os.Getenv("NO_COLOR") == "" {
+		v.ForegroundColor = m.theme.Editor.GetForeground()
+		v.BackgroundColor = m.theme.Editor.GetBackground()
+	}
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
@@ -268,6 +295,14 @@ func (m Model) View() tea.View {
 			v.Cursor = cursor
 		}
 	}
+	if !m.editorInputCaptured() && m.showTerminal && m.focus == FocusTerminal && m.terminalPanelHeight() > 0 {
+		if cursor := m.terminal.Cursor(); cursor != nil {
+			cursor.Y += m.mouseLayout().terminalBody.y
+			if cursor.Y < m.height-2 && cursor.X < m.width {
+				v.Cursor = cursor
+			}
+		}
+	}
 
 	return v
 }
@@ -278,9 +313,7 @@ func (m Model) renderSplitPanes() string {
 
 	paneAW := m.split.paneAWidth(totalWidth)
 	paneBW := m.split.paneBWidth(totalWidth)
-	statusHeight := 2
-	tabBarHeight := 1
-	paneH := m.height - statusHeight - tabBarHeight
+	paneH := m.chromeContentHeight() - 1
 	if paneH < 1 {
 		paneH = 1
 	}
@@ -290,14 +323,14 @@ func (m Model) renderSplitPanes() string {
 	// the same buffer.
 	paneAView := ""
 	if tab := m.split.firstTab; tab >= 0 && tab < len(m.editors) {
-		paneAView = m.editors[tab].View()
+		paneAView = m.renderEditor(tab)
 	}
 	paneAView = clipViewRows(paneAView, paneH)
 	paneAView = clipViewLines(paneAView, paneAW)
 
 	paneBView := ""
 	if m.split.secondTab >= 0 && m.split.secondTab < len(m.editors) {
-		paneBView = m.editors[m.split.secondTab].View()
+		paneBView = m.renderEditor(m.split.secondTab)
 	}
 	paneBView = clipViewRows(paneBView, paneH)
 	paneBView = clipViewLines(paneBView, paneBW)
@@ -374,7 +407,7 @@ func (m Model) viewWithTree() string {
 		} else if m.isActiveDiffTab() {
 			editorView = m.activeDiffView()
 		} else if m.activeEditor() != nil {
-			editorView = m.activeEditor().View()
+			editorView = m.renderEditor(m.activeTab)
 		}
 		editorColumn = tabBarView + "\n" + editorView
 	}
@@ -388,14 +421,20 @@ func (m Model) viewWithTree() string {
 	var panelView string
 	switch m.sidebarTab {
 	case SidebarGit:
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.gitPanel.View())
+		panelView = m.gitPanel.View()
 	case SidebarProblems:
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.problemsPanel.View())
+		panelView = m.problemsPanel.View()
 	case SidebarDebugger:
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.debuggerPanel.View())
+		panelView = m.debuggerPanel.View()
 	default:
-		panelView = lipgloss.NewStyle().Width(tw).Render(m.tree.View())
+		panelView = m.tree.View()
 	}
+
+	// Child rows have matching mouse coordinates. Wrapping them here shifts
+	// every following click target and can displace terminal/status chrome.
+	panelHeight := max(0, sidebarHeight-1)
+	panelView = clipViewRows(clipViewLines(panelView, tw), panelHeight)
+	panelView = lipgloss.NewStyle().Width(tw).Height(panelHeight).Render(panelView)
 
 	sidebarView := tabBar + "\n" + panelView
 
@@ -488,7 +527,7 @@ func (m Model) renderStatusBar() string {
 	} else if m.rootDir != "" {
 		branchPart = "  " + filepath.Base(m.rootDir)
 	}
-	left := helpHint + branchPart
+	left := helpHint + m.theme.StatusBar.Render(branchPart)
 
 	var right string
 	if ed := m.activeEditor(); ed != nil {
@@ -526,7 +565,7 @@ func (m Model) renderStatusBar() string {
 	usedWidth := ansi.StringWidth(left) + ansi.StringWidth(right) + ansi.StringWidth(center)
 	padding := max(0, m.width-usedWidth)
 
-	bar := left + " " + center + strings.Repeat(" ", max(0, padding-1)) + right
+	bar := left + m.theme.StatusBar.Render(" "+center+strings.Repeat(" ", max(0, padding-1))) + right
 	// Lipgloss Width wraps overlong content. A status bar must remain exactly
 	// one terminal row even when its fixed hints cannot fit.
 	bar = ansi.Truncate(bar, m.width, "")

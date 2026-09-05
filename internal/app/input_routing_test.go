@@ -1,9 +1,12 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/config"
 	"teak/internal/editor"
 	"teak/internal/overlay"
@@ -36,6 +39,70 @@ func updateInputRoutingModel(t *testing.T, model Model, msg tea.Msg) Model {
 		t.Fatalf("Update() model type = %T, want app.Model", updated)
 	}
 	return result
+}
+
+func TestTextFieldShortcutRoutingMatrix(t *testing.T) {
+	useViewTestZone(t)
+	for _, field := range []string{"find", "agent", "commit title", "commit body"} {
+		for _, tc := range []struct {
+			key  rune
+			home bool
+			want string
+		}{
+			{'w', false, "abc !"},
+			{'h', false, "abc de!"},
+			{'b', false, "abc de!f"},
+			{'f', true, "a!bc def"},
+			{'k', true, "!"},
+		} {
+			t.Run(fmt.Sprintf("%s/ctrl+%c", field, tc.key), func(t *testing.T) {
+				model := newInputRoutingTestModel(t)
+				model.width, model.height = 120, 40
+				switch field {
+				case "find":
+					_ = model.activeEditor().ShowFind()
+				case "agent":
+					model.showAgent = true
+					model.setFocus(FocusAgent)
+					_ = model.agentPanel.Focus()
+				default:
+					model.showTree = true
+					model.sidebarTab = SidebarGit
+					model.gitPanel.SetIsGitRepo(true)
+					model.setFocus(FocusGitPanel)
+					if field == "commit title" {
+						_ = model.gitPanel.FocusTitle()
+					} else {
+						_ = model.gitPanel.FocusBody()
+					}
+				}
+				model.relayout()
+				for _, char := range "abc def" {
+					model = updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: char, Text: string(char)})
+				}
+				if tc.home {
+					model = updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: tea.KeyHome})
+				}
+				model = updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: tc.key, Mod: tea.ModCtrl})
+				model = updateInputRoutingModel(t, model, tea.KeyPressMsg{Code: '!', Text: "!"})
+				var rendered string
+				switch field {
+				case "find":
+					rendered = model.activeEditor().FindView()
+				case "agent":
+					rendered = model.agentPanel.InputValue()
+				default:
+					rendered = model.gitPanel.View()
+				}
+				if !strings.Contains(ansi.Strip(rendered), tc.want) || (tc.key == 'k' && strings.Contains(ansi.Strip(rendered), "abc")) {
+					t.Errorf("field did not receive text-editing shortcut; want %q in %q", tc.want, ansi.Strip(rendered))
+				}
+				if len(model.editors) != 1 || model.activeEditor().Buffer.Content() != "" || model.showSearch || !model.textInputFocused() {
+					t.Fatal("text field shortcut changed the document, tabs, focus, or global search")
+				}
+			})
+		}
+	}
 }
 
 func TestInputRoutingContextMenuCapturesEditorKey(t *testing.T) {
@@ -396,4 +463,36 @@ func TestInputRoutingFocusedAgentAndSidebar(t *testing.T) {
 			t.Fatalf("sidebar tab route = (%v, %v), want (%v, %v)", updated.focus, updated.sidebarTab, FocusGitPanel, SidebarGit)
 		}
 	})
+}
+
+func TestFindShortcutFocusesEditorFromSidebar(t *testing.T) {
+	for _, visible := range []bool{false, true} {
+		t.Run(fmt.Sprintf("find_visible_%t", visible), func(t *testing.T) {
+			m := newInputRoutingTestModel(t)
+			if visible {
+				m.activeEditor().ShowFind()
+			}
+			m.showTree = true
+			m.setFocus(FocusTree)
+			m = updateInputRoutingModel(t, m, tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+			if m.focus != FocusEditor || !m.activeEditor().IsFindVisible() {
+				t.Fatalf("find focus=%v visible=%v", m.focus, m.activeEditor().IsFindVisible())
+			}
+			m = updateInputRoutingModel(t, m, tea.KeyPressMsg{Code: 'x', Text: "x"})
+			if !strings.Contains(m.activeEditor().FindView(), "x") {
+				t.Fatal("typing did not reach the find input")
+			}
+		})
+	}
+}
+
+func TestInactiveFindDoesNotCaptureGlobalShortcuts(t *testing.T) {
+	m := newInputRoutingTestModel(t)
+	m.activeEditor().ShowFind()
+	m.showTree = true
+	m.setFocus(FocusTree)
+	m = updateInputRoutingModel(t, m, tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+	if m.showTree {
+		t.Fatal("inactive Find prevented Ctrl+B from hiding the sidebar")
+	}
 }

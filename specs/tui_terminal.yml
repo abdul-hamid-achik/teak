@@ -1,0 +1,87 @@
+version: 1
+name: teak_terminal_shell_workflow
+coversSymbol: app.Model.handleTerminalOutput
+metadata:
+    feature: terminal
+    owner: core-ui
+    priority: high
+    tags: [regression, story, terminal, keyboard]
+intent: |
+    A real shell runs in the bottom panel, interprets screen controls, accepts
+    editing and bracketed paste, survives hide/reopen, and leaves the editor intact.
+target:
+    cmd: [sh, testdata/glyphrun/run-terminal.sh]
+    cwd: "."
+    timeoutMs: 20000
+terminal:
+    cols: 80
+    rows: 24
+    profile: xterm-256color
+    alternateScreen: require
+preconditions:
+    commands:
+        - run: "go build -o ./bin/teak ./cmd/teak"
+          timeoutMs: 30000
+steps:
+    - wait:
+        screen: {contains: "alpha one"}
+        timeoutMs: 5000
+    - send: {bytes: "\\x1bt"}
+    - wait:
+        screen: {contains: "TEAK$"}
+    - type: "printf '\\033[2J\\033[Hprogress 1\\rprogress 2\\n'"
+    - press: enter
+    - wait:
+        screen: {matches: "(?m)^progress 2"}
+    - snapshot: terminal_screen
+    - type: "WRONG_COMMAND"
+    - send: {bytes: "\\x15"}
+    - type: "printf 'EDIT_'; printf 'OK\\n'"
+    - press: enter
+    - wait:
+        screen: {contains: "EDIT_OK"}
+    - send: {bytes: "\\x1b[200~printf 'PASTE_'; printf 'OK\\n'\\x1b[201~"}
+    - press: enter
+    - wait:
+        screen: {contains: "PASTE_OK"}
+    - type: "printf '\\033[?1049h\\033[2J\\033[HAPP_SCREEN'; read answer; printf '\\033[?1049l'"
+    - press: enter
+    - wait:
+        screen: {matches: "(?m)^APP_SCREEN"}
+    - snapshot: terminal_alt_screen
+    - press: enter
+    - wait:
+        screen: {contains: "TEAK$"}
+    - type: "sleep 1; i=0; while [ $i -lt 2000 ]; do printf 'background line\\n'; i=$((i+1)); done; printf 'HIDDEN_'; printf 'READY\\n'"
+    - press: enter
+    - send: {bytes: "\\x1bt"}
+    - wait:
+        screen: {notContains: " Terminal "}
+    - snapshot: editor_while_terminal_hidden
+    - wait:
+        idle: {quietForMs: 1500}
+        timeoutMs: 5000
+    - send: {bytes: "\\x1bt"}
+    - wait:
+        screen: {contains: "HIDDEN_READY"}
+        timeoutMs: 5000
+    - snapshot: terminal_reopened
+    - press: ctrl+d
+    - wait:
+        screen: {contains: "exited — reopen to restart"}
+    - send: {bytes: "\\x1bt"}
+    - wait:
+        screen: {notContains: " Terminal "}
+    - snapshot: editor_after_terminal
+outcomes:
+    - id: editor_content_preserved
+      description: terminal keys and paste never reached the document
+      verify:
+        region: {x: 30, y: 1, width: 20, height: 1, contains: "alpha one"}
+    - id: editor_cursor_preserved
+      description: terminal interaction leaves the document cursor at its original position
+      verify:
+        screen: {contains: "Ln 1, Col 1"}
+artifacts:
+    finalScreen: never
+contractHash: sha256:e5be33d5afe75551af6e351ef87a0eb4de08da1faa42e286b9f13a4584b6fc34

@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -142,7 +143,10 @@ var helpGroups = []bindingGroup{
 			{"Tab (file tree focus)", "Switch sidebar panels"},
 			{"Ctrl+J", "Toggle agent panel"},
 			{"Ctrl+'", "Focus agent panel"},
+			{"Home / End (agent input)", "Move prompt cursor"},
+			{"Ctrl+Home / Ctrl+End (agent)", "First / latest chat message"},
 			{"Ctrl+` / Ctrl+~ / Alt+T", "Toggle terminal"},
+			{"Shift+PageUp / Shift+PageDown (terminal)", "Scroll shell history"},
 		},
 	},
 	{
@@ -199,14 +203,34 @@ func NewHelpModel(theme ui.Theme) HelpModel {
 	ti.Placeholder = "Filter..."
 	ti.CharLimit = 64
 	ti.SetWidth(36)
+	ui.ApplyTextInputTheme(&ti, theme)
 
 	m := HelpModel{
 		input: ti,
 		theme: theme,
+		width: 80,
 	}
 	m.lines = m.buildLines()
 	m.filtered = m.lines
 	return m
+}
+
+// SetTheme updates pre-rendered help lines without disturbing the filter or scroll.
+func (m *HelpModel) SetTheme(theme ui.Theme) {
+	m.theme = theme
+	ui.ApplyTextInputTheme(&m.input, theme)
+	m.rebuildLines()
+}
+
+func (m *HelpModel) rebuildLines() {
+	m.lines = m.buildLines()
+	query := strings.ToLower(m.input.Value())
+	if query == "" {
+		m.filtered = m.lines
+	} else {
+		m.filtered = m.filterLines(query)
+	}
+	m.scrollY = min(m.scrollY, m.maxScroll())
 }
 
 // Focus focuses the search input.
@@ -219,6 +243,7 @@ func (m *HelpModel) SetSize(w, h int) {
 	m.width = max(1, w)
 	m.height = max(1, h)
 	m.input.SetWidth(max(1, min(m.width-12, 36)))
+	m.rebuildLines()
 }
 
 // Update handles input for the help overlay.
@@ -297,13 +322,6 @@ func (m HelpModel) Update(msg tea.Msg) (HelpModel, tea.Cmd) {
 
 // View renders the help overlay.
 func (m HelpModel) View() string {
-	boxWidth := 48
-	if boxWidth > m.width-4 {
-		boxWidth = m.width - 4
-	}
-	if boxWidth < 1 {
-		boxWidth = 1
-	}
 
 	var sb strings.Builder
 
@@ -332,31 +350,18 @@ func (m HelpModel) View() string {
 	// Scroll indicator
 	if len(m.filtered) > visible {
 		sb.WriteByte('\n')
-		pct := 0
-		if m.maxScroll() > 0 {
-			pct = m.scrollY * 100 / m.maxScroll()
-		}
-		indicator := lipgloss.NewStyle().Foreground(ui.Nord3).Render(
-			padRight(
-				"  "+strings.Repeat("^", min(1, m.scrollY))+" Scroll "+
-					strings.Repeat("v", min(1, m.maxScroll()-m.scrollY)),
-				20,
-			) + padRight("", 10) + padRight(string(rune('0'+pct/100%10))+string(rune('0'+pct/10%10))+string(rune('0'+pct%10))+"%", 5),
-		)
-		_ = indicator
-		scrollHint := lipgloss.NewStyle().Foreground(ui.Nord3).Render("  Use arrows or scroll to navigate")
+		scrollHint := lipgloss.NewStyle().Foreground(m.theme.HelpBorder.GetForeground()).Render("  Use arrows or scroll to navigate")
 		sb.WriteString(scrollHint)
 	}
 
 	content := sb.String()
 
-	helpStyle := lipgloss.NewStyle().
+	helpStyle := m.theme.HelpBorder.
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ui.Nord3).
-		Background(ui.Nord1).
+		BorderForeground(m.theme.HelpBorder.GetForeground()).
 		Padding(1, 2)
 
-	return helpStyle.Width(boxWidth).Render(content)
+	return helpStyle.Width(m.boxWidth()).Render(content)
 }
 
 func (m HelpModel) buildLines() []helpLine {
@@ -377,7 +382,7 @@ func (m HelpModel) buildLines() []helpLine {
 			lines = append(lines, helpLine{rendered: rendered, text: text})
 		}
 	}
-	return lines
+	return m.wrapLines(lines)
 }
 
 func (m HelpModel) filterLines(query string) []helpLine {
@@ -408,7 +413,38 @@ func (m HelpModel) filterLines(query string) []helpLine {
 			result = append(result, matching...)
 		}
 	}
-	return result
+	return m.wrapLines(result)
+}
+
+func (m HelpModel) boxWidth() int { return max(1, min(48, m.width-4)) }
+
+// Scroll physical rows so long shortcuts cannot push the help footer outside
+// the viewport. Cut from the original styled line to retain colors even when
+// scrolling starts on a continuation row.
+func (m HelpModel) wrapLines(lines []helpLine) []helpLine {
+	width := max(1, m.boxWidth()-6) // border and horizontal padding
+	var rows []helpLine
+	for _, line := range lines {
+		total := ansi.StringWidth(line.rendered)
+		if total == 0 {
+			rows = append(rows, line)
+			continue
+		}
+		for start := 0; start < total; {
+			span := min(width, total-start)
+			if start+span < total {
+				plain := ansi.Strip(ansi.Cut(line.rendered, start, start+span))
+				if space := strings.LastIndex(plain, " "); space > 2 {
+					span = ansi.StringWidth(plain[:space+1])
+				}
+			}
+			row := line
+			row.rendered = ansi.Cut(line.rendered, start, start+span)
+			rows = append(rows, row)
+			start += span
+		}
+	}
+	return rows
 }
 
 func (m HelpModel) visibleLines() int {
