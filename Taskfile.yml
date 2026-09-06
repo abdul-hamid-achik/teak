@@ -215,6 +215,11 @@ tasks:
     cmds:
       - vhs examples/vhs/teak-features-demo.tape
 
+  dev:
+    desc: Run the editor from source
+    cmds:
+      - go run ./cmd/teak {{.CLI_ARGS}}
+
   run:
     desc: Build and run teak
     deps: [build]
