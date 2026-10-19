@@ -13,57 +13,125 @@ import (
 // The returned caret is a byte offset into the expanded text, or -1 to leave
 // the cursor at the end.
 func expandSnippet(s string) (string, int) {
+	// Completion items do not carry their insertTextFormat this far, so plain
+	// text reaches here too. Without a "$" there is no snippet syntax to
+	// expand, and leaving the text untouched keeps literal backslashes (such as
+	// Windows paths) in plain-text items intact.
 	if !strings.Contains(s, "$") {
 		return s, -1
 	}
-	var b strings.Builder
-	b.Grow(len(s))
-	caret := -1
-	i := 0
-	for i < len(s) {
-		if s[i] != '$' {
-			b.WriteByte(s[i])
-			i++
-			continue
-		}
-		if i+1 < len(s) && s[i+1] == '{' {
-			end := strings.IndexByte(s[i+2:], '}')
-			if end < 0 {
-				b.WriteByte('$')
+	p := snippetParser{s: s, closes: snippetPlaceholderCloses(s), caret: -1}
+	p.buf = make([]byte, 0, len(s))
+	p.text(0, len(s))
+	return string(p.buf), p.caret
+}
+
+// snippetParser expands LSP snippet syntax. Placeholders are matched up front
+// so an unterminated "${" stays literal and nested defaults such as
+// "${1:${2:x}}" resolve to their innermost text.
+type snippetParser struct {
+	s      string
+	closes map[int]int // index of each "${" that has a matching "}" -> index of that "}"
+	buf    []byte
+	caret  int
+}
+
+// snippetPlaceholderCloses pairs every "${" with its "}", skipping escaped
+// characters. Opens left without a close are absent from the map.
+func snippetPlaceholderCloses(s string) map[int]int {
+	closes := make(map[int]int)
+	var open []int
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			if i+1 < len(s) && isSnippetEscapable(s[i+1]) {
 				i++
-				continue
 			}
-			inner := s[i+2 : i+2+end]
-			name, def, hasDef := strings.Cut(inner, ":")
-			if tab, err := strconv.Atoi(name); err == nil {
-				if tab == 0 {
-					caret = b.Len()
-				}
-				if hasDef {
-					b.WriteString(def)
-				}
-				i += 3 + end
-				continue
+		case '$':
+			if i+1 < len(s) && s[i+1] == '{' {
+				open = append(open, i)
+				i++
 			}
-			b.WriteByte('$')
-			i++
-			continue
-		}
-		j := i + 1
-		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-			j++
-		}
-		if j > i+1 {
-			if tab, err := strconv.Atoi(s[i+1 : j]); err == nil && tab == 0 {
-				caret = b.Len()
+		case '}':
+			if n := len(open); n > 0 {
+				closes[open[n-1]] = i
+				open = open[:n-1]
 			}
-			i = j
-			continue
 		}
-		b.WriteByte('$')
-		i++
 	}
-	return b.String(), caret
+	return closes
+}
+
+func isSnippetEscapable(c byte) bool {
+	return c == '$' || c == '}' || c == '\\'
+}
+
+// text writes s[i:end], honoring escapes and placeholders.
+func (p *snippetParser) text(i, end int) {
+	for i < end {
+		switch c := p.s[i]; {
+		case c == '\\' && i+1 < end && isSnippetEscapable(p.s[i+1]):
+			p.buf = append(p.buf, p.s[i+1])
+			i += 2
+		case c == '$':
+			i = p.dollar(i, end)
+		default:
+			p.buf = append(p.buf, c)
+			i++
+		}
+	}
+}
+
+// dollar expands the construct starting at the '$' at i and returns the index
+// after it. Forms that are not a recognised tabstop are kept as literal text.
+func (p *snippetParser) dollar(i, end int) int {
+	s := p.s
+	if i+1 < end && s[i+1] == '{' {
+		closeAt, matched := p.closes[i]
+		if matched && closeAt < end {
+			k := i + 2
+			for k < closeAt && isSnippetDigit(s[k]) {
+				k++
+			}
+			tab, err := strconv.Atoi(s[i+2 : k])
+			if k > i+2 && err == nil {
+				switch {
+				case k == closeAt:
+					p.markTabstop(tab)
+					return closeAt + 1
+				case s[k] == ':':
+					p.markTabstop(tab)
+					p.text(k+1, closeAt)
+					return closeAt + 1
+				}
+			}
+		}
+		p.buf = append(p.buf, '$')
+		return i + 1
+	}
+	j := i + 1
+	for j < end && isSnippetDigit(s[j]) {
+		j++
+	}
+	if j > i+1 {
+		if tab, err := strconv.Atoi(s[i+1 : j]); err == nil {
+			p.markTabstop(tab)
+		}
+		return j
+	}
+	p.buf = append(p.buf, '$')
+	return i + 1
+}
+
+// markTabstop records the caret when the tabstop is $0.
+func (p *snippetParser) markTabstop(tab int) {
+	if tab == 0 {
+		p.caret = len(p.buf)
+	}
+}
+
+func isSnippetDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 func (e *Editor) applyAdditionalCompletionEdits(edits []overlays.AutocompleteTextEdit) {

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"github.com/mattn/go-runewidth"
 	"teak/internal/ui"
@@ -404,8 +405,8 @@ func TestTabBarViewDiagnosticWarning(t *testing.T) {
 
 func TestTabBarLabelsDistinguishDirtyFromDiagnostics(t *testing.T) {
 	tests := []struct {
-		name    string
-		tab     Tab
+		name     string
+		tab      Tab
 		prefixes []string
 	}{
 		{"dirty only", Tab{Label: "a.go", Dirty: true}, []string{"●"}},
@@ -498,5 +499,53 @@ func TestTabBarSetDiagSeverity(t *testing.T) {
 
 	if tabBar.Tabs[idx].DiagSeverity != 1 {
 		t.Errorf("expected DiagSeverity 1, got %d", tabBar.Tabs[idx].DiagSeverity)
+	}
+}
+
+// TestTabBarDisambiguatesDuplicateBaseNames pins that two open files sharing a
+// base name show their parent directory so the tabs can be told apart.
+func TestTabBarDisambiguatesDuplicateBaseNames(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("main.go", "/work/api/main.go")
+	tabBar.AddTab("main.go", "/work/worker/main.go")
+	tabBar.Width = 120
+
+	plain := ansi.Strip(tabBar.View())
+	for _, want := range []string{"main.go (api)", "main.go (worker)"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("tab bar %q does not contain %q", plain, want)
+		}
+	}
+}
+
+// TestTabBarDisambiguationDeepensUntilUnique pins that equal parent directory
+// names are told apart by the next path component.
+func TestTabBarDisambiguationDeepensUntilUnique(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("main.go", "/a/internal/main.go")
+	tabBar.AddTab("main.go", "/b/internal/main.go")
+	tabBar.Width = 120
+
+	plain := ansi.Strip(tabBar.View())
+	for _, want := range []string{"main.go (a/internal)", "main.go (b/internal)"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("tab bar %q does not contain %q", plain, want)
+		}
+	}
+}
+
+// TestTabBarUniqueNamesStayPlain pins that disambiguation only applies when
+// base names collide, and never to diff tabs.
+func TestTabBarUniqueNamesStayPlain(t *testing.T) {
+	tabBar := NewTabBar(ui.DefaultTheme())
+	tabBar.AddTab("main.go", "/work/api/main.go")
+	tabBar.AddTab("util.go", "/work/api/util.go")
+	tabBar.AddTab("main.go", "diff://api/main.go")
+	tabBar.Tabs[2].Kind = TabDiff
+	tabBar.Width = 120
+
+	plain := ansi.Strip(tabBar.View())
+	if strings.Contains(plain, "(") {
+		t.Fatalf("tab bar %q added disambiguation without a duplicate file name", plain)
 	}
 }

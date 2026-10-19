@@ -75,9 +75,15 @@ func bufferGetCursor(L *lua.LState) int {
 // buffer.set_cursor(line: number, col: number)
 func bufferSetCursor(L *lua.LState) int {
 	runtime := requireRuntime(L, "buffer.set_cursor")
-	line := L.CheckInt(1) - 1 // Convert to 0-based
-	col := L.CheckInt(2) - 1
-	if err := runtime.SetBufferCursor(text.Position{Line: line, Col: col}); err != nil {
+	line := L.CheckInt(1)
+	col := L.CheckInt(2)
+	// Zero or negative values are not 1-based positions. Reject them here
+	// instead of letting the runtime clamp them onto the first line or column.
+	if line < 1 || col < 1 {
+		L.RaiseError("buffer.set_cursor failed: line and column must be positive 1-based numbers, got %d, %d", line, col)
+		return 0
+	}
+	if err := runtime.SetBufferCursor(text.Position{Line: line - 1, Col: col - 1}); err != nil {
 		L.RaiseError("buffer.set_cursor failed: %v", err)
 		return 0
 	}
@@ -128,7 +134,12 @@ func bufferDelete(L *lua.LState) int {
 // buffer.get_line(line: number) -> string
 func bufferGetLine(L *lua.LState) int {
 	runtime := requireRuntime(L, "buffer.get_line")
-	content, err := runtime.BufferLine(L.CheckInt(1) - 1)
+	line := L.CheckInt(1)
+	if line < 1 {
+		L.RaiseError("buffer.get_line failed: line must be a positive 1-based number, got %d", line)
+		return 0
+	}
+	content, err := runtime.BufferLine(line - 1)
 	if err != nil {
 		L.RaiseError("buffer.get_line failed: %v", err)
 		return 0

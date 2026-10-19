@@ -322,7 +322,7 @@ func TestOutboundBarriersPreserveOpenChangeSaveCloseResponseAndRequestOrder(t *t
 	client.DidChange(uri, 2, "two")
 	client.DidSave(uri)
 	client.DidClose(uri)
-	client.handleWorkDoneProgressCreate(ptrTo(31))
+	client.handleWorkDoneProgressCreate(json.RawMessage("31"))
 
 	requestResult := make(chan error, 1)
 	go func() {

@@ -339,3 +339,34 @@ func TestExternalReadFailureBlocksPotentialOverwrite(t *testing.T) {
 		t.Fatal("save proceeded after external bytes could not be verified")
 	}
 }
+
+// A clean buffer reloaded after an external change keeps the user's cursor
+// where it was, clamped into the new content when the file got shorter.
+func TestCleanExternalReloadKeepsCursorInRange(t *testing.T) {
+	tests := []struct {
+		name     string
+		external string
+		cursor   text.Position
+		want     text.Position
+	}{
+		{"longer file keeps cursor", "one\ntwo\nthree\nfour\n", text.Position{Line: 2, Col: 3}, text.Position{Line: 2, Col: 3}},
+		{"shorter file clamps to last line", "one\n", text.Position{Line: 2, Col: 3}, text.Position{Line: 1, Col: 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := newSaveFlowModel(t, config.DefaultConfig(), t.TempDir())
+			addDirtyEditor(t, &model, "notes.txt", "one\ntwo\nthree\n", "one\ntwo\nthree\n")
+			buf := model.editors[0].Buffer
+			buf.LoadRopeSnapshot(text.NewFromString("one\ntwo\nthree\n"), buf.LineEnding())
+			buf.SetCursor(tt.cursor)
+			updatedAny, _ := model.Update(FileChangedMsg{
+				Path:     buf.FilePath,
+				Snapshot: text.NewFromString(tt.external),
+			})
+			updated := updatedAny.(Model)
+			if got := updated.editors[0].Buffer.Cursor; got != tt.want {
+				t.Fatalf("cursor after clean reload = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}

@@ -404,6 +404,10 @@ func (m *Manager) EnsureClient(filePath string) (*Client, error) {
 			return nil, fmt.Errorf("language server manager is shut down")
 		}
 		m.clients[cfg.Command] = client
+		// A successful start ends the failure streak; the budget counts
+		// consecutive startup failures, not failures over the session.
+		delete(m.retries, cfg.Command)
+		delete(m.disabledUntil, cfg.Command)
 		close(waitCh)
 		delete(m.starting, cfg.Command)
 		delete(m.startingClients, cfg.Command)

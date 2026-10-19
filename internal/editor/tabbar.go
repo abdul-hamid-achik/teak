@@ -3,6 +3,7 @@ package editor
 import (
 	"encoding/base64"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -164,16 +165,16 @@ func (tb TabBar) visibleStart(start int) int {
 		return 0
 	}
 	start = min(max(0, start), len(tb.Tabs)-1)
-	if tb.rangeContainsActive(start) {
+	if tb.rangeContainsActive(start, tb.tabTexts()) {
 		return start
 	}
 	return tb.ActiveIdx
 }
 
-func (tb TabBar) rangeContainsActive(start int) bool {
+func (tb TabBar) rangeContainsActive(start int, texts []string) bool {
 	remaining := tb.Width
 	for i := start; i < len(tb.Tabs) && remaining > 0; i++ {
-		width := tabNaturalWidth(tb.Tabs[i])
+		width := tabNaturalWidth(texts[i])
 		if i == start {
 			width = min(width, remaining)
 		}
@@ -185,11 +186,16 @@ func (tb TabBar) rangeContainsActive(start int) bool {
 	return false
 }
 
-func tabNaturalWidth(tab Tab) int {
-	return tabLabelPadding + min(runewidth.StringWidth(tabLabelText(tab)), maxTabLabelWidth) + tabCloseWidth
+func tabNaturalWidth(text string) int {
+	return tabLabelPadding + min(runewidth.StringWidth(text), maxTabLabelWidth) + tabCloseWidth
 }
 
 func tabLabelText(tab Tab) string {
+	return tabLabelWithName(tab, tab.Label)
+}
+
+// tabLabelWithName prefixes name with the tab's dirty and diagnostic glyphs.
+func tabLabelWithName(tab Tab, name string) string {
 	// Dirty and diagnostics use distinct glyphs: a shared marker made a dirty
 	// file with errors indistinguishable from a clean file with errors.
 	var prefix strings.Builder
@@ -202,7 +208,59 @@ func tabLabelText(tab Tab) string {
 	case 2:
 		prefix.WriteString("▲ ")
 	}
-	return prefix.String() + tab.Label
+	return prefix.String() + name
+}
+
+// tabTexts returns the full text each tab displays, before truncation.
+// Editor tabs that share a base name with another open editor tab get their
+// parent directory appended, deepened until the names differ, so that two
+// "main.go" tabs can be told apart.
+func (tb TabBar) tabTexts() []string {
+	names := make([]string, len(tb.Tabs))
+	groups := make(map[string][]int)
+	for i, tab := range tb.Tabs {
+		names[i] = tab.Label
+		if tab.Kind == TabEditor && tab.FilePath != "" && tab.Label == filepath.Base(tab.FilePath) {
+			groups[tab.Label] = append(groups[tab.Label], i)
+		}
+	}
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue
+		}
+		dirs := make([][]string, len(idxs))
+		maxDepth := 0
+		for j, i := range idxs {
+			dirs[j] = strings.FieldsFunc(filepath.ToSlash(filepath.Dir(tb.Tabs[i].FilePath)), func(r rune) bool { return r == '/' })
+			maxDepth = max(maxDepth, len(dirs[j]))
+		}
+		for depth := 1; depth <= maxDepth; depth++ {
+			suffixes := make([]string, len(idxs))
+			seen := make(map[string]bool, len(idxs))
+			unique := true
+			for j := range idxs {
+				parts := dirs[j]
+				suffixes[j] = strings.Join(parts[max(0, len(parts)-depth):], "/")
+				if seen[suffixes[j]] {
+					unique = false
+				}
+				seen[suffixes[j]] = true
+			}
+			if unique || depth == maxDepth {
+				for j, i := range idxs {
+					if suffixes[j] != "" {
+						names[i] = tb.Tabs[i].Label + " (" + suffixes[j] + ")"
+					}
+				}
+				break
+			}
+		}
+	}
+	texts := make([]string, len(tb.Tabs))
+	for i, tab := range tb.Tabs {
+		texts[i] = tabLabelWithName(tab, names[i])
+	}
+	return texts
 }
 
 // truncateTabLabel truncates on rune boundaries and measures terminal cells,
@@ -265,13 +323,14 @@ func (tb TabBar) View() string {
 	}
 	start := tb.visibleStart(tb.ScrollIdx)
 	remaining := tb.Width
+	texts := tb.tabTexts()
 
 	var tabs []string
 	for i, tab := range tb.Tabs {
 		if i < start || remaining <= 0 {
 			continue
 		}
-		width := min(tabNaturalWidth(tab), remaining)
+		width := min(tabNaturalWidth(texts[i]), remaining)
 		if width <= 0 {
 			break
 		}
@@ -299,7 +358,7 @@ func (tb TabBar) View() string {
 		if showClose {
 			labelWidth -= tabCloseWidth
 		}
-		label := truncateTabLabel(tabLabelText(tab), labelWidth)
+		label := truncateTabLabel(texts[i], labelWidth)
 		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label, tb.theme)))
 		if showClose {
 			styledClose := zone.Mark(TabCloseZoneID(tab), closeStyle.Render(" × "))

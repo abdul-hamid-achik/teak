@@ -150,6 +150,7 @@ func New(overrides map[string]string) *Resolver {
 	copied := make(map[string]string, len(overrides))
 	for name, path := range overrides {
 		if path != "" {
+			path = expandHome(path)
 			if !filepath.IsAbs(path) {
 				if absolute, err := filepath.Abs(path); err == nil {
 					path = absolute
@@ -164,6 +165,19 @@ func New(overrides map[string]string) *Resolver {
 		cache:     make(map[string]cacheEntry),
 		now:       time.Now,
 	}
+}
+
+// expandHome replaces a leading "~" or "~/" with the user's home directory, as
+// shells do for config values. Other forms (such as "~user") are left intact.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, `~\`) {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return filepath.Join(home, path[1:])
 }
 
 // wellKnownDirs lists directories that commonly hold developer tools but are

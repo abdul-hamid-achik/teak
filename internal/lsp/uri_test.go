@@ -116,3 +116,14 @@ func TestURIToPathNonFile(t *testing.T) {
 		t.Errorf("URIToPath(%q) = %q, want %q", uri, result, uri)
 	}
 }
+
+// RFC 8089 allows an empty or "localhost" authority. Servers emit the latter
+// occasionally; it must resolve to the same local path, not a relative one.
+func TestURIToPathAcceptsLocalhostAuthority(t *testing.T) {
+	local := FileURI(t.TempDir() + "/main.go")
+	want := URIToPath(local)
+	got := URIToPath("file://localhost" + local[len("file://"):])
+	if got != want {
+		t.Errorf("URIToPath(localhost form) = %q, want %q", got, want)
+	}
+}

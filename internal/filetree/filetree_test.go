@@ -2265,3 +2265,53 @@ func TestSetChildrenInSliceWithNonExistentDir(t *testing.T) {
 		t.Error("Expected setChildrenInSlice to return false")
 	}
 }
+
+// TestReadDirEntriesSortsNamesCaseInsensitively guards the documented
+// case-insensitive ordering: a byte-wise sort placed "Zeta.go" before
+// "alpha.go".
+func TestReadDirEntriesSortsNamesCaseInsensitively(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, name := range []string{"Zeta.go", "alpha.go", "Beta.go"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := readDirEntries(tmpDir, tmpDir, 0, nil)
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name)
+	}
+	want := []string{"alpha.go", "Beta.go", "Zeta.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sorted names = %v, want %v", got, want)
+	}
+}
+
+// TestApplyRefreshClampsCursorWhenSelectionVanishes covers a watcher refresh
+// that removes the selected last row: the cursor must land on a real row
+// instead of pointing past the end of the projection.
+func TestApplyRefreshClampsCursorWhenSelectionVanishes(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(root, ui.DefaultTheme())
+	model.Cursor = len(model.flatEntries()) - 1
+
+	if err := os.Remove(filepath.Join(root, "c.go")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := model.SnapshotForRefresh().Refresh(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !model.ApplyRefresh(result) {
+		t.Fatal("ApplyRefresh rejected a fresh result")
+	}
+	flat := model.flatEntries()
+	if model.Cursor < 0 || model.Cursor >= len(flat) {
+		t.Fatalf("Cursor = %d after refresh with %d rows, want a valid row index", model.Cursor, len(flat))
+	}
+}

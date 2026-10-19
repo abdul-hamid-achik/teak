@@ -23,10 +23,10 @@ var bracketPairs = map[byte]byte{
 // autoClosePairs includes quotes. Quotes are not structural brackets: they
 // wrap selections and insert pairs, but are not matched by FindMatchingBracket.
 var autoClosePairs = map[byte]byte{
-	'(': ')',
-	'[': ']',
-	'{': '}',
-	'"': '"',
+	'(':  ')',
+	'[':  ']',
+	'{':  '}',
+	'"':  '"',
 	'\'': '\'',
 }
 

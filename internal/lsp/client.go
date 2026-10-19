@@ -72,6 +72,7 @@ const (
 	lspShutdownRequestTimeout = 750 * time.Millisecond
 	lspShutdownReapTimeout    = 2 * time.Second
 	applyEditResponseTimeout  = 5 * time.Second
+	serverExitNotifyTimeout   = 5 * time.Second
 	maxPendingApplyEdits      = 16
 	maxPendingOutbound        = 128
 	maxPendingOutboundBytes   = 72 << 20
@@ -683,7 +684,7 @@ type jsonrpcNotification struct {
 
 type jsonrpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
+	ID      json.RawMessage `json:"id"` // echoes the request id verbatim: integer or string
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *jsonrpcError   `json:"error,omitempty"`
 }
@@ -704,7 +705,10 @@ type jsonrpcError struct {
 	Data    any    `json:"data,omitempty"` // Optional additional error information
 }
 
-const jsonrpcMethodNotFound = -32601
+const (
+	jsonrpcMethodNotFound = -32601
+	jsonrpcInternalError  = -32603
+)
 
 // NewClient creates a new LSP client and starts the server process.
 func NewClient(cfg ServerConfig, rootDir string, msgChan chan<- any) (*Client, error) {
@@ -1751,9 +1755,15 @@ func (c *Client) reapProcess() {
 	}
 	c.mu.RUnlock()
 	if !expected && c.msgChan != nil {
+		// This report is the only signal that a server died unexpectedly, so a
+		// busy UI reader must delay it rather than cause it to be dropped. The
+		// bound keeps this goroutine from outliving a reader that has stopped.
+		timer := time.NewTimer(serverExitNotifyTimeout)
+		defer timer.Stop()
 		select {
 		case c.msgChan <- ServerExitedMsg{Command: command, Err: err}:
-		default:
+		case <-timer.C:
+			log.Warn("lsp: server exit notification not delivered", "command", command)
 		}
 	}
 }
@@ -1927,28 +1937,36 @@ func retainPossibleHeaderPrefix(data []byte) []byte {
 
 func (c *Client) handleMessage(data json.RawMessage) {
 	// Check if it's a response (has "id" and "result" or "error")
+	// id and error are decoded raw: JSON-RPC allows string ids on server
+	// requests, and a malformed member must not make the decode fail and drop a
+	// message whose waiter or reply is still pending.
 	var peek struct {
-		ID     *int            `json:"id"`
+		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 		Result json.RawMessage `json:"result"`
-		Error  *jsonrpcError   `json:"error"`
+		Error  json.RawMessage `json:"error"`
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(data, &peek); err != nil {
 		return
 	}
+	hasID := rpcHasID(peek.ID)
 
 	// Response to our request
-	if peek.ID != nil && peek.Method == "" {
+	if hasID && peek.Method == "" {
+		numericID, ok := rpcNumericID(peek.ID)
+		if !ok {
+			return
+		}
 		c.mu.Lock()
-		ch, ok := c.pending[*peek.ID]
+		ch, ok := c.pending[numericID]
 		if ok {
-			delete(c.pending, *peek.ID)
+			delete(c.pending, numericID)
 		}
 		c.mu.Unlock()
 
 		if ok {
-			ch <- callResult{Result: peek.Result, Error: peek.Error}
+			ch <- callResult{Result: peek.Result, Error: decodeRPCError(peek.Error)}
 		}
 		return
 	}
@@ -1978,10 +1996,40 @@ func (c *Client) handleMessage(data json.RawMessage) {
 	case "workspace/applyEdit":
 		c.handleApplyEdit(peek.ID, peek.Params)
 	default:
-		if peek.ID != nil {
-			c.sendErrorResponse(*peek.ID, jsonrpcMethodNotFound, fmt.Sprintf("method not found: %s", peek.Method), nil)
+		if hasID {
+			c.sendErrorResponse(peek.ID, jsonrpcMethodNotFound, fmt.Sprintf("method not found: %s", peek.Method), nil)
 		}
 	}
+}
+
+// rpcHasID reports whether a decoded id member is present. JSON null is the
+// spec's "no id" marker for notifications and error responses.
+func rpcHasID(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+// rpcNumericID returns the integer value of an id. Only ids this client issues
+// are integers; a string id can never match a pending request.
+func rpcNumericID(raw json.RawMessage) (int, bool) {
+	var id int
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// decodeRPCError converts the raw error member of a response. A member that is
+// present but not an error object is still an error: the waiter must not be
+// released as a successful empty result.
+func decodeRPCError(raw json.RawMessage) *jsonrpcError {
+	if !rpcHasID(raw) {
+		return nil
+	}
+	var rpcErr jsonrpcError
+	if err := json.Unmarshal(raw, &rpcErr); err != nil {
+		return &jsonrpcError{Code: jsonrpcInternalError, Message: "malformed error member: " + string(raw)}
+	}
+	return &rpcErr
 }
 
 func (c *Client) handleShowMessage(params json.RawMessage) {
@@ -2021,10 +2069,10 @@ func (c *Client) handleProgress(params json.RawMessage) {
 	c.queueNotification("progress:"+fmt.Sprintf("%T:%v", p.Token, p.Token), LspProgressMsg{Token: p.Token, Value: p.Value})
 }
 
-func (c *Client) handleWorkspaceConfiguration(id *int, params json.RawMessage) {
+func (c *Client) handleWorkspaceConfiguration(id json.RawMessage, params json.RawMessage) {
 	// Respond with a nil entry per requested config item.
 	// Some servers expect the result array length to match the requested items.
-	if id == nil {
+	if !rpcHasID(id) {
 		return
 	}
 
@@ -2032,7 +2080,7 @@ func (c *Client) handleWorkspaceConfiguration(id *int, params json.RawMessage) {
 		Items []json.RawMessage `json:"items"`
 	}
 	if err := json.Unmarshal(params, &req); err != nil {
-		c.sendResponse(*id, []any{})
+		c.sendResponse(id, []any{})
 		return
 	}
 
@@ -2040,47 +2088,47 @@ func (c *Client) handleWorkspaceConfiguration(id *int, params json.RawMessage) {
 	for i := range resp {
 		resp[i] = nil
 	}
-	c.sendResponse(*id, resp)
+	c.sendResponse(id, resp)
 }
 
-func (c *Client) handleWorkspaceFolders(id *int) {
+func (c *Client) handleWorkspaceFolders(id json.RawMessage) {
 	// Respond with current workspace folder
-	if id != nil {
+	if rpcHasID(id) {
 		folders := []map[string]string{
 			{"uri": c.rootURI, "name": "workspace"},
 		}
-		c.sendResponse(*id, folders)
+		c.sendResponse(id, folders)
 	}
 }
 
-func (c *Client) handleWorkDoneProgressCreate(id *int) {
-	if id != nil {
-		c.sendResponse(*id, nil)
+func (c *Client) handleWorkDoneProgressCreate(id json.RawMessage) {
+	if rpcHasID(id) {
+		c.sendResponse(id, nil)
 	}
 }
 
-func (c *Client) handleClientRegisterCapability(id *int) {
-	if id != nil {
-		c.sendResponse(*id, nil)
+func (c *Client) handleClientRegisterCapability(id json.RawMessage) {
+	if rpcHasID(id) {
+		c.sendResponse(id, nil)
 	}
 }
 
-func (c *Client) handleClientUnregisterCapability(id *int) {
-	if id != nil {
-		c.sendResponse(*id, nil)
+func (c *Client) handleClientUnregisterCapability(id json.RawMessage) {
+	if rpcHasID(id) {
+		c.sendResponse(id, nil)
 	}
 }
 
-func (c *Client) handleShowMessageRequest(id *int, params json.RawMessage) {
-	if id == nil {
+func (c *Client) handleShowMessageRequest(id json.RawMessage, params json.RawMessage) {
+	if !rpcHasID(id) {
 		return
 	}
 	c.handleShowMessage(params)
-	c.sendResponse(*id, nil)
+	c.sendResponse(id, nil)
 }
 
-func (c *Client) handleApplyEdit(id *int, params json.RawMessage) {
-	if id == nil {
+func (c *Client) handleApplyEdit(id json.RawMessage, params json.RawMessage) {
+	if !rpcHasID(id) {
 		return
 	}
 
@@ -2089,33 +2137,33 @@ func (c *Client) handleApplyEdit(id *int, params json.RawMessage) {
 		Edit  json.RawMessage `json:"edit"`
 	}
 	if err := json.Unmarshal(params, &request); err != nil {
-		c.sendApplyEditResponse(*id, false, "invalid workspace/applyEdit parameters")
+		c.sendApplyEditResponse(id, false, "invalid workspace/applyEdit parameters")
 		return
 	}
 	if len(request.Edit) == 0 || string(request.Edit) == "null" {
-		c.sendApplyEditResponse(*id, false, "workspace/applyEdit did not include an edit")
+		c.sendApplyEditResponse(id, false, "workspace/applyEdit did not include an edit")
 		return
 	}
 
 	var edit WorkspaceEdit
 	if err := json.Unmarshal(request.Edit, &edit); err != nil {
-		c.sendApplyEditResponse(*id, false, "invalid workspace edit")
+		c.sendApplyEditResponse(id, false, "invalid workspace edit")
 		return
 	}
 	convertedEdit, err := c.workspaceEditFromProtocol(edit)
 	if err != nil {
-		c.sendApplyEditResponse(*id, false, "workspace edit has invalid or unavailable document positions")
+		c.sendApplyEditResponse(id, false, "workspace edit has invalid or unavailable document positions")
 		return
 	}
 	if c.msgChan == nil {
-		c.sendApplyEditResponse(*id, false, "editor UI is unavailable")
+		c.sendApplyEditResponse(id, false, "editor UI is unavailable")
 		return
 	}
 
 	c.applyEditMu.Lock()
 	if c.pendingApplyEdits >= maxPendingApplyEdits {
 		c.applyEditMu.Unlock()
-		c.sendApplyEditResponse(*id, false, "too many pending workspace edits")
+		c.sendApplyEditResponse(id, false, "too many pending workspace edits")
 		return
 	}
 	c.pendingApplyEdits++
@@ -2148,7 +2196,7 @@ func (c *Client) handleApplyEdit(id *int, params json.RawMessage) {
 		close(responseDone)
 		// This callback is invoked by Bubble Tea Update. Enqueueing a response
 		// is bounded and non-blocking; the sole writer owns any stdin stall.
-		c.sendApplyEditResponse(*id, applied, failureReason)
+		c.sendApplyEditResponse(id, applied, failureReason)
 	}
 	claim := func() bool {
 		responseMu.Lock()
@@ -2174,11 +2222,14 @@ func (c *Client) handleApplyEdit(id *int, params json.RawMessage) {
 		}
 		c.applyEditMu.Unlock()
 		close(responseDone)
-		c.sendApplyEditResponse(*id, false, failureReason)
+		c.sendApplyEditResponse(id, false, failureReason)
 		return true
 	}
+	// The UI-facing RequestID stays numeric; it is 0 for a string id, which is
+	// echoed to the server only through the response.
+	requestID, _ := rpcNumericID(id)
 	uiRequest := ApplyEditRequestMsg{
-		RequestID: *id,
+		RequestID: requestID,
 		Label:     request.Label,
 		Edit:      convertedEdit,
 		Context:   requestCtx,
@@ -2212,7 +2263,7 @@ func (c *Client) handleApplyEdit(id *int, params json.RawMessage) {
 	}()
 }
 
-func (c *Client) sendApplyEditResponse(id int, applied bool, failureReason string) {
+func (c *Client) sendApplyEditResponse(id json.RawMessage, applied bool, failureReason string) {
 	result := map[string]any{"applied": applied}
 	if !applied {
 		if failureReason == "" {
@@ -2223,7 +2274,7 @@ func (c *Client) sendApplyEditResponse(id int, applied bool, failureReason strin
 	c.sendResponse(id, result)
 }
 
-func (c *Client) sendResponse(id int, result any) {
+func (c *Client) sendResponse(id json.RawMessage, result any) {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		log.Error("lsp: failed to marshal response", "err", err)
@@ -2239,7 +2290,7 @@ func (c *Client) sendResponse(id int, result any) {
 	}
 }
 
-func (c *Client) sendErrorResponse(id int, code int, message string, data any) {
+func (c *Client) sendErrorResponse(id json.RawMessage, code int, message string, data any) {
 	resp := jsonrpcResponse{
 		JSONRPC: "2.0",
 		ID:      id,

@@ -2,6 +2,7 @@ package dap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -248,6 +249,30 @@ func (m *Manager) trackClientLocked(client *Client) {
 	}()
 }
 
+// errNoThreads reports that the adapter listed no threads to act on.
+var errNoThreads = errors.New("debug session has no threads")
+
+// activeThreadID returns the thread the adapter stopped in when it is still
+// listed, otherwise the first listed thread. It returns errNoThreads when the
+// adapter lists none, so a step can never report success without acting.
+func activeThreadID(client *Client) (int, error) {
+	threads, err := client.Threads()
+	if err != nil {
+		return 0, err
+	}
+	if len(threads) == 0 {
+		return 0, errNoThreads
+	}
+	if stopped := client.StoppedThreadID(); stopped > 0 {
+		for _, thread := range threads {
+			if thread.Id == stopped {
+				return stopped, nil
+			}
+		}
+	}
+	return threads[0].Id, nil
+}
+
 // Continue resumes execution.
 func (m *Manager) Continue() error {
 	m.mu.Lock()
@@ -257,22 +282,18 @@ func (m *Manager) Continue() error {
 		return fmt.Errorf("no debug session")
 	}
 
-	// Get threads first
-	threads, err := client.Threads()
+	threadID, err := activeThreadID(client)
 	if err != nil {
 		return err
 	}
-
-	if len(threads) > 0 {
-		if err := client.Continue(threads[0].Id); err != nil {
-			return err
-		}
-		m.mu.Lock()
-		if m.client == client {
-			m.state = StateRunning
-		}
-		m.mu.Unlock()
+	if err := client.Continue(threadID); err != nil {
+		return err
 	}
+	m.mu.Lock()
+	if m.client == client {
+		m.state = StateRunning
+	}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -285,17 +306,11 @@ func (m *Manager) Next() error {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := client.Threads()
+	threadID, err := activeThreadID(client)
 	if err != nil {
 		return err
 	}
-
-	if len(threads) > 0 {
-		if err := client.Next(threads[0].Id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return client.Next(threadID)
 }
 
 // StepIn steps into a function call.
@@ -307,17 +322,11 @@ func (m *Manager) StepIn() error {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := client.Threads()
+	threadID, err := activeThreadID(client)
 	if err != nil {
 		return err
 	}
-
-	if len(threads) > 0 {
-		if err := client.StepIn(threads[0].Id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return client.StepIn(threadID)
 }
 
 // StepOut steps out of the current function.
@@ -329,17 +338,11 @@ func (m *Manager) StepOut() error {
 		return fmt.Errorf("no debug session")
 	}
 
-	threads, err := client.Threads()
+	threadID, err := activeThreadID(client)
 	if err != nil {
 		return err
 	}
-
-	if len(threads) > 0 {
-		if err := client.StepOut(threads[0].Id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return client.StepOut(threadID)
 }
 
 // SetBreakpoints sets breakpoints in a file.
@@ -362,16 +365,15 @@ func (m *Manager) GetStackTrace() ([]StackFrame, error) {
 		return nil, fmt.Errorf("no debug session")
 	}
 
-	threads, err := client.Threads()
+	threadID, err := activeThreadID(client)
+	if errors.Is(err, errNoThreads) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	if len(threads) == 0 {
-		return nil, nil
-	}
-
-	return client.StackTrace(threads[0].Id)
+	return client.StackTrace(threadID)
 }
 
 // GetVariables returns variables in a scope.

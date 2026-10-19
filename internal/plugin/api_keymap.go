@@ -49,6 +49,12 @@ func keymapSet(L *lua.LState) int {
 
 	// Action can be a string (command) or function
 	action := L.Get(3)
+	switch action.(type) {
+	case *lua.LFunction, lua.LString:
+	default:
+		L.RaiseError("keymap.set failed: action must be a function or command name, got %s", action.Type())
+		return 0
+	}
 
 	var opts map[string]interface{}
 	if L.GetTop() >= 4 {

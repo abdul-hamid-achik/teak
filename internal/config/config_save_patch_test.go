@@ -151,6 +151,69 @@ func TestPatchConfigFileRejectsAmbiguousInput(t *testing.T) {
 	}
 }
 
+// TestSaveToPatchesManagedKeysBesideArrayOfTablesLSPEntries checks that a
+// [[lsp]] table does not force a full rewrite: the settings keys are patched in
+// place and the LSP entry's comments survive.
+func TestSaveToPatchesManagedKeysBesideArrayOfTablesLSPEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := `# top comment
+[editor]
+tab_size = 2 # two
+
+# Go language server, pinned on purpose.
+[[lsp]]
+extensions = [".go"]
+command = "gopls" # from PATH
+language_id = "go"
+`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Editor.TabSize = 8
+	cfg.LSP = []LSPConfig{{Extensions: []string{".go"}, Command: "gopls", LanguageID: "go"}}
+	outcome, err := SaveToWithOutcome(path, cfg)
+	if err != nil {
+		t.Fatalf("SaveToWithOutcome: %v", err)
+	}
+	if outcome != SavedPatched {
+		t.Fatalf("outcome = %v, want SavedPatched", outcome)
+	}
+	content := string(mustReadFile(t, path))
+	for _, want := range []string{"# top comment", "tab_size = 8", "# Go language server, pinned on purpose.", "# from PATH"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("saved config lost or missed %q:\n%s", want, content)
+		}
+	}
+}
+
+// TestSaveToFailsWithoutRewritingWhenBackupCannotBeWritten covers an
+// unpatchable file whose ".bak" sibling cannot be created. The annotated
+// original must not be overwritten silently, so the save has to fail.
+func TestSaveToFailsWithoutRewritingWhenBackupCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := "# keep me\n[editor]\n\"tab_size\" = 2\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// A directory where the backup file should go makes the backup write fail.
+	if err := os.Mkdir(path+".bak", 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Editor.TabSize = 6
+	if _, err := SaveToWithOutcome(path, cfg); err == nil {
+		t.Fatal("SaveToWithOutcome succeeded although the backup could not be written")
+	}
+	if got := mustReadFile(t, path); string(got) != original {
+		t.Fatalf("original config was rewritten without a backup:\n%s", got)
+	}
+}
+
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)

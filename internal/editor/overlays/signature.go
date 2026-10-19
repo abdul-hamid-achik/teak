@@ -75,8 +75,11 @@ func (s SignatureHelp) View() string {
 	// Highlight active parameter
 	if s.Help.ActiveParameter >= 0 && s.Help.ActiveParameter < len(activeSig.Parameters) {
 		param := activeSig.Parameters[s.Help.ActiveParameter]
-		// Simple highlighting: wrap parameter in brackets
-		label = strings.Replace(label, param.Label, "["+param.Label+"]", 1)
+		// Simple highlighting: wrap parameter in brackets. An empty label
+		// would match at offset 0 and bracket the function name instead.
+		if param.Label != "" {
+			label = strings.Replace(label, param.Label, "["+param.Label+"]", 1)
+		}
 	}
 
 	// Build content

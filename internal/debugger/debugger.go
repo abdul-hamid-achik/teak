@@ -3,6 +3,7 @@ package debugger
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -134,9 +135,20 @@ func (m *Model) SetBreakpoints(bps []Breakpoint) {
 	m.breakpoints = bps
 }
 
-// AppendOutput adds a line to the output log.
+// AppendOutput adds debuggee output to the log. Each physical line becomes its
+// own entry and terminal control sequences are removed, so the one-row-per-line
+// layout holds and raw escapes or carriage returns cannot reach the screen.
 func (m *Model) AppendOutput(line string) {
-	m.outputLog = append(m.outputLog, line)
+	for _, part := range strings.Split(line, "\n") {
+		part = strings.ReplaceAll(ansi.Strip(part), "\t", "    ")
+		part = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, part)
+		m.outputLog = append(m.outputLog, part)
+	}
 	if len(m.outputLog) > 200 {
 		m.outputLog = m.outputLog[len(m.outputLog)-200:]
 	}

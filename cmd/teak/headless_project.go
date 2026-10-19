@@ -214,6 +214,14 @@ func runHeadlessProjectMutation(ctx context.Context, operation string, root *os.
 		}
 		nodes, bytes = scan.Paths, scan.Bytes
 	case "copy":
+		// Verify the destination is absent before any copy work. The failure
+		// cleanup below removes the destination, so it must only ever run for a
+		// tree this copy created, never for a pre-existing file or directory.
+		if _, err := root.Lstat(destination); err == nil {
+			return writeHeadlessError(stderr, fmt.Errorf("project destination %q already exists", destination))
+		} else if !os.IsNotExist(err) {
+			return writeHeadlessError(stderr, fmt.Errorf("inspect project destination %q: %w", destination, err))
+		}
 		_, err := scanHeadlessProject(operationCtx, root, source, true)
 		if err != nil {
 			return writeHeadlessError(stderr, err)

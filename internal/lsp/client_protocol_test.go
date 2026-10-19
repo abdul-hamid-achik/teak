@@ -65,7 +65,7 @@ func TestHandleWorkspaceConfigurationMatchesRequestedItems(t *testing.T) {
 	stdin := &captureWriteCloser{written: make(chan struct{}, 1)}
 	client := &Client{stdin: stdin}
 
-	client.handleWorkspaceConfiguration(ptrTo(7), json.RawMessage(`{
+	client.handleWorkspaceConfiguration(json.RawMessage("7"), json.RawMessage(`{
 		"items": [
 			{"section":"gopls"},
 			{"section":"gopls.formatting"}

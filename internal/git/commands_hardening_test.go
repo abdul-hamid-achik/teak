@@ -179,3 +179,46 @@ func TestRunGitOutputReportsContextCancellation(t *testing.T) {
 		t.Fatalf("runCommandOutput error = %v, want context.Canceled", err)
 	}
 }
+
+func TestStageCmdSurfacesGitStderrInError(t *testing.T) {
+	// The panel shows only the error text. A bare "exit status 128" hides
+	// why staging failed, so git's own fatal message must be carried along.
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	msg := StageCmd(repo, "missing.txt")()
+	refresh, ok := msg.(RefreshMsg)
+	if !ok {
+		t.Fatalf("StageCmd message = %T, want RefreshMsg", msg)
+	}
+	if refresh.Err == nil {
+		t.Fatal("StageCmd on a missing path returned no error")
+	}
+	if !strings.Contains(refresh.Err.Error(), "fatal") || !strings.Contains(refresh.Err.Error(), "missing.txt") {
+		t.Fatalf("StageCmd error = %q, want git's fatal message naming the path", refresh.Err)
+	}
+}
+
+func TestStatusContextReportsUnbornBranchInFreshRepository(t *testing.T) {
+	// A repository with no commits yet has no resolvable HEAD, so
+	// `rev-parse --abbrev-ref HEAD` fails. The branch must still be reported
+	// from the symbolic ref, as the interactive panel refresh already does.
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	snapshot, err := StatusContext(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("StatusContext on unborn repository: %v", err)
+	}
+	if snapshot.Branch == "" || snapshot.Branch == "HEAD" {
+		t.Fatalf("StatusContext branch = %q, want the unborn branch name", snapshot.Branch)
+	}
+
+	refresh := refreshAfter(repo)
+	if refresh.Err != nil {
+		t.Fatalf("refreshAfter on unborn repository: %v", refresh.Err)
+	}
+	if refresh.Branch != snapshot.Branch {
+		t.Fatalf("refresh branch = %q, want %q", refresh.Branch, snapshot.Branch)
+	}
+}

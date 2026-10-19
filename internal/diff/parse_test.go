@@ -144,6 +144,35 @@ func TestParseUnifiedDiff_UnevenPairing(t *testing.T) {
 	}
 }
 
+// TestParseUnifiedDiff_KeepsHunkContentThatLooksLikeFileHeaders guards content
+// lines whose text starts with "-- " or "++ " (SQL/Lua comments, C++ text).
+// Inside a hunk they appear as "--- ..." and "+++ ..." and must not be dropped
+// as file headers.
+func TestParseUnifiedDiff_KeepsHunkContentThatLooksLikeFileHeaders(t *testing.T) {
+	raw := "diff --git a/q.sql b/q.sql\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/q.sql\n" +
+		"+++ b/q.sql\n" +
+		"@@ -1,2 +1,2 @@\n" +
+		"--- old comment\n" +
+		"+-- new comment\n" +
+		" SELECT 1;\n"
+
+	got := ParseUnifiedDiff(raw)
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(got), got)
+	}
+	if got[0].Left != "-- old comment" || got[0].LeftKind != KindRemoved {
+		t.Errorf("row 0 left = %q kind %d, want removed %q", got[0].Left, got[0].LeftKind, "-- old comment")
+	}
+	if got[0].Right != "-- new comment" || got[0].RightKind != KindAdded {
+		t.Errorf("row 0 right = %q kind %d, want added %q", got[0].Right, got[0].RightKind, "-- new comment")
+	}
+	if got[1].Left != "SELECT 1;" || got[1].LeftKind != KindUnchanged {
+		t.Errorf("row 1 = %+v, want unchanged SELECT 1;", got[1])
+	}
+}
+
 func TestAllAddedLines(t *testing.T) {
 	content := "line1\nline2\nline3\n"
 	lines := AllAddedLines(content)

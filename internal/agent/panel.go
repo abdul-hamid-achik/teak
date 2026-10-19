@@ -1218,7 +1218,7 @@ func (m *Model) View() string {
 	}
 
 	// Header
-	header := m.renderHeader()
+	header := ansi.Truncate(m.renderHeader(), innerW, "")
 	sb.WriteString(header)
 	sb.WriteByte('\n')
 	linesUsed := 1
@@ -1244,7 +1244,9 @@ func (m *Model) View() string {
 	for i := 0; i < chatHeight; i++ {
 		lineIdx := m.scrollY + i
 		if lineIdx < len(chatLines) {
-			sb.WriteString(chatLines[lineIdx])
+			// Clamp to the panel width: tiny panels cannot fit some fixed
+			// prefixes, and an overlong row would corrupt the surrounding layout.
+			sb.WriteString(ansi.Truncate(chatLines[lineIdx], innerW, ""))
 		}
 		sb.WriteByte('\n')
 	}
@@ -1558,7 +1560,10 @@ func (m Model) renderPermission(width int) []string {
 	if title == "" {
 		title = "perform an action"
 	}
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground()).Bold(true).Render(title))
+	titleStyle := lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground()).Bold(true)
+	for _, l := range wrapText(title, max(width-2, 1)) {
+		lines = append(lines, "  "+titleStyle.Render(l))
+	}
 
 	optLine := "  "
 	optLine += zone.Mark("agent-perm-allow", lipgloss.NewStyle().Foreground(m.theme.GitAdded.GetForeground()).Render("[y] Allow"))
@@ -1591,7 +1596,10 @@ func (m Model) renderWriteProposal(width int) []string {
 	var lines []string
 	lines = append(lines, "")
 	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.AgentPermission.GetForeground()).Render("Edit proposal:"))
-	lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground()).Render(pw.Path))
+	pathStyle := lipgloss.NewStyle().Foreground(m.theme.Editor.GetForeground())
+	for _, l := range wrapText(pw.Path, max(width-2, 1)) {
+		lines = append(lines, "  "+pathStyle.Render(l))
+	}
 
 	lineCount := strings.Count(pw.Content, "\n") + 1
 	lines = append(lines, fmt.Sprintf("  %d lines", lineCount))

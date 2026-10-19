@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/ui"
 )
 
@@ -598,6 +599,22 @@ func TestHelpDocumentsLiveBindings(t *testing.T) {
 		if got := bindings[key]; got != want {
 			t.Errorf("help binding %q = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// TestHelpModelViewReportsNoMatches pins that a filter matching nothing says so
+// instead of rendering an empty list that looks like a broken overlay.
+func TestHelpModelViewReportsNoMatches(t *testing.T) {
+	m := NewHelpModel(ui.DefaultTheme())
+	m.SetSize(80, 40)
+	m.input.SetValue("zzqqxx-no-such-shortcut")
+	m.rebuildLines()
+
+	if len(m.filtered) != 0 {
+		t.Fatalf("filtered = %d lines, want 0", len(m.filtered))
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "No matching shortcuts") {
+		t.Fatalf("view does not report that no shortcuts matched:\n%s", view)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -139,6 +140,72 @@ func TestHeadlessMCPRejectsNonScalarRequestIDs(t *testing.T) {
 	if responses[2].Error != nil || string(responses[2].ID) != `"valid"` {
 		t.Fatalf("valid ID response = %#v, want successful string ID", responses[2])
 	}
+}
+
+func TestHeadlessMCPOversizedMessageIsRejectedWithoutEndingSession(t *testing.T) {
+	server := newHeadlessMCPServer("/workspace", nil)
+	input := strings.Repeat("x", headlessMCPMaxMessageBytes+1) + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n"
+	var output, stderr bytes.Buffer
+	if err := server.serve(context.Background(), strings.NewReader(input), &output, &stderr); err != nil {
+		t.Fatalf("serve() error = %v, want the oversized line rejected and the session kept open; stderr = %s", err, stderr.String())
+	}
+	responses := decodeMCPResponses(t, output.Bytes())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want an error for the oversized line and a tools/list result", len(responses))
+	}
+	if responses[0].Error == nil || string(responses[0].ID) != "null" {
+		t.Fatalf("oversized line response = %#v, want an error with null id", responses[0])
+	}
+	if responses[1].Error != nil || string(responses[1].ID) != "2" {
+		t.Fatalf("tools/list response after oversized line = %#v, want success", responses[1])
+	}
+}
+
+func TestHeadlessMCPLineSplitterBoundsFrames(t *testing.T) {
+	const limit = 8
+	tooLong := string(headlessMCPOversizeMarker)
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "lines within limit", input: "abc\ndefgh\n", want: []string{"abc", "defgh"}},
+		{name: "exact limit kept", input: "12345678\n", want: []string{"12345678"}},
+		{name: "overlong line drained then next line", input: "123456789\nok\n", want: []string{tooLong, "ok"}},
+		{name: "overlong line spanning many chunks", input: strings.Repeat("x", 100) + "\nnext\n", want: []string{tooLong, "next"}},
+		{name: "overlong unterminated final line", input: strings.Repeat("y", 50), want: []string{tooLong}},
+		{name: "short unterminated final line", input: "tail", want: []string{"tail"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// OneByteReader forces the splitter to see data in tiny chunks.
+			scanner := bufio.NewScanner(oneByteHeadlessMCPReader{r: strings.NewReader(tt.input)})
+			scanner.Split(splitHeadlessMCPLines(limit))
+			scanner.Buffer(make([]byte, 4), limit+1)
+			var got []string
+			for scanner.Scan() {
+				got = append(got, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("scanner error = %v", err)
+			}
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Fatalf("frames = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+type oneByteHeadlessMCPReader struct {
+	r io.Reader
+}
+
+func (o oneByteHeadlessMCPReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return o.r.Read(p[:1])
 }
 
 func TestHeadlessMCPServeUnblocksWhenContextIsCancelled(t *testing.T) {

@@ -1272,14 +1272,16 @@ func (v *Viewport) renderLineWithTokensInto(sb *strings.Builder, tokens []highli
 			}
 			// Skip runes until we've consumed scrollRemaining display width
 			w := 0
-			for j, r := range text {
+			for j := 0; j < len(text); {
+				r, size := utf8.DecodeRuneInString(text[j:])
 				rw := runewidth.RuneWidth(r)
 				if w+rw > scrollRemaining {
-					text = text[j:]
+					text = scrollEdgeRemainder(text, j, size, w, rw, scrollRemaining)
 					scrollRemaining = 0
 					break
 				}
 				w += rw
+				j += size
 			}
 			if scrollRemaining > 0 {
 				text = ""
@@ -1508,14 +1510,27 @@ func applyScrollXCount(s string, scrollX int) (string, int) {
 		return s, 0
 	}
 	w := 0
-	for i, r := range s {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
 		rw := runewidth.RuneWidth(r)
 		if w+rw > scrollX {
-			return s[i:], 0
+			return scrollEdgeRemainder(s, i, size, w, rw, scrollX), 0
 		}
 		w += rw
+		i += size
 	}
 	return "", scrollX - w
+}
+
+// scrollEdgeRemainder returns the visible tail of s when the scroll edge falls
+// inside (or exactly at) the rune at byte offset i, which occupies rw cells
+// starting at display column w. A wide rune cut by the edge leaves its right
+// half, which is shown as a blank cell so later columns keep their position.
+func scrollEdgeRemainder(s string, i, size, w, rw, scrollX int) string {
+	if w < scrollX {
+		return strings.Repeat(" ", w+rw-scrollX) + s[i+size:]
+	}
+	return s[i:]
 }
 
 // ScreenToBufferPosition maps screen coordinates to buffer position.
@@ -1580,12 +1595,14 @@ func applyScrollX(s string, scrollX int) string {
 		return s
 	}
 	w := 0
-	for i, r := range s {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
 		rw := runewidth.RuneWidth(r)
 		if w+rw > scrollX {
-			return s[i:]
+			return scrollEdgeRemainder(s, i, size, w, rw, scrollX)
 		}
 		w += rw
+		i += size
 	}
 	return ""
 }

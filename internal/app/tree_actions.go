@@ -673,8 +673,15 @@ func executeTreeMove(ctx context.Context, root *os.Root, request treeActionReque
 	if !parentInfo.IsDir() {
 		return treeActionOutcome{Err: errors.New("destination is not a directory")}
 	}
-	if _, err := root.Lstat(request.DestinationRelativePath); err == nil {
-		return treeActionOutcome{Err: errors.New("destination already exists")}
+	if destInfo, err := root.Lstat(request.DestinationRelativePath); err == nil {
+		// On case-insensitive filesystems (macOS default) a case-only rename
+		// resolves the destination to the source itself. That is not a
+		// collision; allow it so the rename can change the letter case.
+		sameEntry := os.SameFile(info, destInfo) &&
+			strings.EqualFold(filepath.Base(request.RelativePath), filepath.Base(request.DestinationRelativePath))
+		if !sameEntry {
+			return treeActionOutcome{Err: errors.New("destination already exists")}
+		}
 	} else if !os.IsNotExist(err) {
 		return treeActionOutcome{Err: fmt.Errorf("inspect destination: %w", err)}
 	}

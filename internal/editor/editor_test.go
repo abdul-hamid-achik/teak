@@ -1257,3 +1257,16 @@ func TestEditorScheduleRetokenizeNoHighlighter(t *testing.T) {
 		t.Error("expected nil cmd when no highlighter")
 	}
 }
+
+// A live tab_size change is applied by writing Config.TabSize and calling
+// SetSize. Tab display and cursor columns must follow the new width too, not
+// stay on the viewport's construction-time value.
+func TestEditorSetSizeAppliesLiveTabSizeChange(t *testing.T) {
+	e := newEditor("\tx", 0, 1)
+	e.Config.TabSize = 2
+	e.SetSize(e.Viewport.Width, e.Viewport.Height)
+
+	if got := e.StatusColumn(); got != 3 {
+		t.Errorf("StatusColumn after tab_size 4->2 = %d, want 3 (tab rendered at width 2)", got)
+	}
+}

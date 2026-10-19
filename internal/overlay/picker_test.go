@@ -458,3 +458,22 @@ func containsStr(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestPickerViewNeverWiderThanTerminal checks that the rendered box fits the
+// terminal on narrow screens. The box used to be forced to a 30-column minimum,
+// which overflowed every terminal narrower than 34 columns. Below about 15
+// columns the border and padding alone exceed the screen, so the range starts
+// at 11 to cover the narrow cases the box can actually fit.
+func TestPickerViewNeverWiderThanTerminal(t *testing.T) {
+	items := []PickerItem{{Label: "main.go", Description: "cmd/main.go"}}
+	for screen := 11; screen <= 40; screen++ {
+		p := NewPicker("Open File", items, ui.DefaultTheme(), "tiny-width-picker")
+		p.Update(tea.WindowSizeMsg{Width: screen, Height: 24})
+		for _, line := range strings.Split(p.View(), "\n") {
+			if got := lipgloss.Width(line); got > screen {
+				t.Fatalf("screen width %d: picker line is %d columns wide: %q", screen, got, line)
+				break
+			}
+		}
+	}
+}

@@ -40,21 +40,28 @@ func ParseUnifiedDiff(raw string) []DiffLine {
 	var result []DiffLine
 	var leftNum, rightNum int
 	lastHunkEnd := -1 // track end of previous hunk for separator insertion
+	// Inside a hunk, "--- " and "+++ " are removed/added content (for example
+	// a removed SQL comment), not file headers.
+	inHunk := false
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 
+		if strings.HasPrefix(line, "diff ") {
+			inHunk = false
+			continue
+		}
+
 		// Skip diff headers
-		if strings.HasPrefix(line, "diff ") ||
-			strings.HasPrefix(line, "index ") ||
-			strings.HasPrefix(line, "--- ") ||
-			strings.HasPrefix(line, "+++ ") ||
+		if strings.HasPrefix(line, "index ") ||
+			(!inHunk && (strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ "))) ||
 			strings.HasPrefix(line, "Binary ") {
 			continue
 		}
 
 		// Hunk header
 		if strings.HasPrefix(line, "@@") {
+			inHunk = true
 			oldStart, newStart := parseHunkHeader(line)
 			// Insert separator between non-contiguous hunks
 			if lastHunkEnd >= 0 {

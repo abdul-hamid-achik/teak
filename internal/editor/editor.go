@@ -335,6 +335,9 @@ func (e *Editor) SetSize(width, height int) {
 	if !unchangedSize {
 		e.verticalGoalValid = false
 	}
+	// Config.TabSize can change after New (live settings apply writes it and
+	// then calls SetSize); keep the viewport's tab width in step with it.
+	e.Viewport.TabSize = e.Config.TabSize
 	e.Viewport.Width = width
 	e.Viewport.Height = height
 	e.find.SetInputWidth(max(12, width-28))

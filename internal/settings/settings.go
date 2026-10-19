@@ -322,6 +322,8 @@ func intSettingBounds(id string) (int, int) {
 		return 0, 50
 	case "ui.tree_width":
 		return 0, 120
+	case "editor.ruler_column":
+		return 0, 512
 	default:
 		return 1, 100
 	}

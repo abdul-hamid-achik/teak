@@ -340,6 +340,9 @@ func (m HelpModel) View() string {
 		endIdx = len(m.filtered)
 	}
 
+	if len(m.filtered) == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.HelpBorder.GetForeground()).Render("No matching shortcuts"))
+	}
 	for i := m.scrollY; i < endIdx; i++ {
 		sb.WriteString(m.filtered[i].rendered)
 		if i < endIdx-1 {

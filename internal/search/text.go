@@ -93,7 +93,14 @@ func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchO
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		isRoot := filepath.Clean(path) == filepath.Clean(rootDir)
 		if err != nil {
+			// An unreadable or missing root means nothing was searched. Report
+			// it instead of returning an empty result set that looks like "no
+			// matches". Errors below the root only skip that entry.
+			if isRoot {
+				return fmt.Errorf("search root %q: %w", rootDir, err)
+			}
 			return nil
 		}
 		if len(results) >= maxResults {
@@ -101,7 +108,6 @@ func textSearchGoWalker(ctx context.Context, rootDir, query string, opts SearchO
 		}
 
 		name := info.Name()
-		isRoot := filepath.Clean(path) == filepath.Clean(rootDir)
 
 		// Skip dotfiles and directories
 		if strings.HasPrefix(name, ".") && !isRoot {
@@ -206,7 +212,7 @@ func searchFileContext(ctx context.Context, path, rootDir string, re *regexp.Reg
 		}
 		loc := re.FindStringIndex(line)
 		if loc != nil {
-			preview := strings.TrimSpace(line)
+			preview := previewAround(line, loc[0])
 			results = append(results, Result{
 				FilePath: relPath,
 				Line:     lineNum,

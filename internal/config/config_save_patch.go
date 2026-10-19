@@ -58,9 +58,10 @@ func SaveToWithOutcome(path string, cfg Config) (SaveOutcome, error) {
 		}
 		// The file cannot be patched safely. Keep the annotated original
 		// before rewriting it so nothing the user wrote is unrecoverable.
-		if err := os.WriteFile(path+".bak", existing, 0o600); err == nil {
-			outcome = SavedWithBackup
+		if err := os.WriteFile(path+".bak", existing, 0o600); err != nil {
+			return SavedRewritten, fmt.Errorf("back up config before rewrite: %w", err)
 		}
+		outcome = SavedWithBackup
 	}
 
 	if err := atomicfile.Write(path, func(file *os.File) error {
@@ -117,6 +118,18 @@ func patchConfigFile(existing string, cfg Config) (string, bool) {
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[[") {
+			// An array-of-tables entry such as [[lsp]] never holds the managed
+			// keys, so it only ends the current section and opens a scope the
+			// patcher must leave alone.
+			name, ok := parseArrayTableHeader(trimmed)
+			if !ok {
+				return "", false
+			}
+			sectionEnd[section] = i
+			section = "[[" + name + "]]"
+			continue
+		}
 		if strings.HasPrefix(trimmed, "[") {
 			name, ok := parseSectionHeader(trimmed)
 			if !ok {
@@ -182,6 +195,23 @@ func patchConfigFile(existing string, cfg Config) (string, bool) {
 		return "", false
 	}
 	return patched, true
+}
+
+// parseArrayTableHeader extracts the name from a [[name]] header. Anything
+// unexpected reports ok=false so the patch aborts.
+func parseArrayTableHeader(trimmed string) (string, bool) {
+	end := strings.Index(trimmed, "]]")
+	if !strings.HasPrefix(trimmed, "[[") || end <= 2 {
+		return "", false
+	}
+	name := strings.TrimSpace(trimmed[2:end])
+	if name == "" || strings.ContainsAny(name, "[]#") {
+		return "", false
+	}
+	if rest := strings.TrimSpace(trimmed[end+2:]); rest != "" && !strings.HasPrefix(rest, "#") {
+		return "", false
+	}
+	return name, true
 }
 
 // parseSectionHeader extracts a plain [section] name. Array-of-tables headers

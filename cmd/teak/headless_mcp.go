@@ -113,10 +113,19 @@ func (s *headlessMCPServer) serve(ctx context.Context, stdin io.Reader, stdout, 
 	stopInputWatch := watchHeadlessMCPInput(ctx, stdin)
 	defer stopInputWatch()
 	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 4096), headlessMCPMaxMessageBytes)
+	scanner.Split(splitHeadlessMCPLines(headlessMCPMaxMessageBytes))
+	scanner.Buffer(make([]byte, 4096), headlessMCPMaxMessageBytes+1)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
+			continue
+		}
+		if bytes.Equal(line, headlessMCPOversizeMarker) {
+			// The line was drained by the splitter; reject only this message and
+			// keep serving the messages that follow it.
+			if err := s.writeError(stdout, nil, headlessMCPInvalidRequestCode, fmt.Sprintf("MCP message exceeds %d bytes", headlessMCPMaxMessageBytes)); err != nil {
+				return err
+			}
 			continue
 		}
 		var request headlessMCPRequest
@@ -224,6 +233,48 @@ func (s *headlessMCPServer) serve(ctx context.Context, stdin io.Reader, stdout, 
 	s.cancelAll()
 	s.wg.Wait()
 	return nil
+}
+
+// headlessMCPOversizeMarker stands in for a line longer than
+// headlessMCPMaxMessageBytes. It contains a NUL byte, which can never start a
+// valid JSON-RPC message, so it cannot collide with a real request.
+var headlessMCPOversizeMarker = []byte("\x00teak-oversized-message")
+
+// splitHeadlessMCPLines frames stdio messages by newline. A line longer than
+// limit is drained without being retained and emitted as
+// headlessMCPOversizeMarker. bufio.Scanner cannot resume after ErrTooLong, so
+// handling the overflow in the split function keeps the session alive.
+// The scanner buffer must allow limit+1 bytes so an overlong line is visible.
+func splitHeadlessMCPLines(limit int) bufio.SplitFunc {
+	discarding := false
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		newline := bytes.IndexByte(data, '\n')
+		if discarding {
+			if newline < 0 {
+				if atEOF {
+					discarding = false
+					return len(data), headlessMCPOversizeMarker, nil
+				}
+				return len(data), nil, nil
+			}
+			discarding = false
+			return newline + 1, headlessMCPOversizeMarker, nil
+		}
+		if newline >= 0 {
+			if newline > limit {
+				return newline + 1, headlessMCPOversizeMarker, nil
+			}
+			return newline + 1, data[:newline], nil
+		}
+		if len(data) > limit {
+			discarding = true
+			return len(data), nil, nil
+		}
+		if atEOF && len(data) > 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	}
 }
 
 // watchHeadlessMCPInput closes a closable stdio reader when its session context

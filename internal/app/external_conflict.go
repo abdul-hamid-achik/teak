@@ -351,7 +351,14 @@ func (m Model) applyExternalSnapshot(path string, snapshot *text.Rope, clean boo
 		prevCursor := m.editors[i].Buffer.Cursor
 		m.editors[i].InvalidateClipboardPaste()
 		if clean {
+			// A clean buffer silently reloaded from disk keeps the user's
+			// position, confined to the new content. Discarding local edits
+			// (Reload) still starts from the top of the file.
+			keepCursor := !m.editors[i].Buffer.Dirty()
 			m.editors[i].Buffer.LoadRopeSnapshot(snapshot, m.editors[i].Buffer.LineEnding())
+			if keepCursor {
+				m.editors[i].Buffer.SetCursor(m.editors[i].Buffer.ClampPosition(prevCursor))
+			}
 		} else {
 			m.editors[i].Buffer.ReplaceRopeSnapshot(snapshot, text.Position{})
 		}

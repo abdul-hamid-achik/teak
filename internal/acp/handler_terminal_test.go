@@ -786,6 +786,42 @@ func TestCreateTerminalCapsOutputAtUTF8Boundary(t *testing.T) {
 	}
 }
 
+func TestValidUTF8PrefixKeepsOutputAfterInvalidByte(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want string
+	}{
+		{"valid text unchanged", []byte("héllo"), "héllo"},
+		{"incomplete tail dropped", []byte("ok\xe2\x82"), "ok"},
+		{"invalid byte replaced, newer output kept", []byte("\xffnew"), "�new"},
+		{"stray continuation replaced", []byte("a\x80b"), "a�b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validUTF8Prefix(tt.in); got != tt.want {
+				t.Fatalf("validUTF8Prefix(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidUTF8PrefixIsLinearOnLargeTail(t *testing.T) {
+	// An invalid byte in the middle of a 1 MiB output window used to make the
+	// trim loop re-validate up to the bad byte once per trimmed byte.
+	data := []byte(strings.Repeat("a", 512<<10) + "\xff" + strings.Repeat("a", 512<<10))
+	done := make(chan string, 1)
+	go func() { done <- validUTF8Prefix(data) }()
+	select {
+	case got := <-done:
+		if !strings.HasSuffix(got, "aaaa") || len(got) < 1<<20 {
+			t.Fatalf("validUTF8Prefix dropped the newest output: len %d", len(got))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("validUTF8Prefix did not finish within 2s on a 1 MiB tail")
+	}
+}
+
 func TestWaitForTerminalExitHonorsCancellation(t *testing.T) {
 	handler := newClientHandler(make(chan tea.Msg), t.TempDir())
 	resp, err := handler.CreateTerminal(context.Background(), sdk.CreateTerminalRequest{

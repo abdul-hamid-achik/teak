@@ -259,15 +259,17 @@ func (b *Buffer) EnsureFinalNewline() bool {
 		}
 	}
 	saved := b.Cursor
+	// The change record uses pre-edit coordinates, so capture the old end of
+	// the document before the newline is appended.
+	end := b.rope.OffsetToPosition(b.rope.Len())
 	b.recordUndo(false)
 	b.rope = b.rope.Insert(b.rope.Len(), []byte("\n"))
 	b.SetCursor(saved)
 	b.dirty = true
 	b.version++
-	lastLine := b.rope.LineCount() - 1
 	b.lastChange = &EditChange{
-		StartLine: lastLine, StartCol: 0,
-		EndLine: lastLine, EndCol: 0,
+		StartLine: end.Line, StartCol: end.Col,
+		EndLine: end.Line, EndCol: end.Col,
 		Text: "\n",
 	}
 	return true
@@ -1719,14 +1721,17 @@ func (b *Buffer) BackspaceWord() {
 	}
 	startPos := b.Cursor
 	target := b.wordPositionLeft(startPos, maxInteractiveWordNavigationBytes)
-	b.SetCursor(target)
 	if startPos == target {
+		b.SetCursor(target)
 		return
 	}
 	startOff := b.rope.PositionToOffset(target)
 	endOff := b.rope.PositionToOffset(startPos)
 	n := endOff - startOff
+	// Record the undo snapshot before the cursor moves so that Undo restores
+	// the caret to where the user was, not to the start of the deleted word.
 	b.recordUndoAt(startPos, false)
+	b.SetCursor(target)
 	b.rope = b.rope.Delete(startOff, n)
 	b.dirty = true
 	b.version++

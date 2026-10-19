@@ -1894,6 +1894,27 @@ func TestResolveCLIWorkspaceMissingDirectoryErrors(t *testing.T) {
 	}
 }
 
+func TestResolveCLIWorkspaceUnreadablePathErrors(t *testing.T) {
+	base := t.TempDir()
+	locked := filepath.Join(base, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(locked, "main.go")
+	if err := os.WriteFile(file, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	_, _, err := resolveCLIWorkspace([]cliTarget{{path: file, line: -1}})
+	if err == nil {
+		t.Fatal("resolveCLIWorkspace for a file inside an unsearchable directory returned nil error; want an access error instead of an empty new buffer")
+	}
+}
+
 func TestResolveCLIWorkspaceMultipleFiles(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example\n"), 0o644); err != nil {

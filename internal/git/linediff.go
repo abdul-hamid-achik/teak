@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -46,9 +45,10 @@ func DiffLinesAgainstHEAD(ctx context.Context, rootDir, path string) (map[int]Li
 
 func parseUnifiedZeroDiff(data []byte) map[int]LineKind {
 	marks := make(map[int]LineKind)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		line := scanner.Text()
+	// bufio.Scanner stops silently on a line over its 64 KiB token limit,
+	// which would drop every later hunk. Split instead so only hunk headers
+	// are inspected regardless of how long the changed content lines are.
+	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.HasPrefix(line, "@@") {
 			continue
 		}

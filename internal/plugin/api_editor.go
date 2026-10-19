@@ -126,9 +126,16 @@ func editorOpenFile(L *lua.LState) int {
 // editor.close_tab(tab: number?)
 func editorCloseTab(L *lua.LState) int {
 	runtime := requireRuntime(L, "editor.close_tab")
+	// -1 is the runtime's active-tab sentinel, so an explicit Lua index must
+	// be validated here; otherwise close_tab(0) would close the active tab.
 	tab := -1
 	if L.GetTop() >= 1 {
-		tab = L.CheckInt(1) - 1
+		number := L.CheckInt(1)
+		if number < 1 {
+			L.RaiseError("editor.close_tab failed: invalid tab index %d", number)
+			return 0
+		}
+		tab = number - 1
 	}
 	if err := runtime.CloseTab(tab); err != nil {
 		L.RaiseError("editor.close_tab failed: %v", err)

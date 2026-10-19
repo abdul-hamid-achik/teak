@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/config"
 	"teak/internal/settings"
+	"teak/internal/toolpath"
 )
 
 type configReloadedMsg struct {
@@ -66,6 +67,9 @@ func (m Model) handleConfigReloaded(msg configReloadedMsg) (tea.Model, tea.Cmd) 
 	if reflect.DeepEqual(msg.Config, m.appCfg) {
 		return m, nil
 	}
+	// Tool overrides are otherwise resolved once at startup; re-apply them so an
+	// edited [tools] path takes effect without restarting Teak.
+	toolpath.Configure(msg.Config.Tools)
 	cmd := m.applySavedSettings(msg.Config)
 	if m.showSettings {
 		path := m.settingsM.ConfigPath()

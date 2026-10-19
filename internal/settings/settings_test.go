@@ -616,3 +616,49 @@ func TestSettingsExposesFormatAndWrap(t *testing.T) {
 		t.Fatalf("visible editor settings omit format_on_save=%v word_wrap=%v", foundFormat, foundWrap)
 	}
 }
+
+// selectSettingForRulerTest focuses the editor.ruler_column row so the stepper
+// methods act on it.
+func selectSettingForRulerTest(t *testing.T, model *Model) {
+	t.Helper()
+	for i, cat := range model.categories {
+		for j, setting := range cat.Settings {
+			if setting.ID == "editor.ruler_column" {
+				model.selectedCategory = i
+				model.selectedSetting = j
+				return
+			}
+		}
+	}
+	t.Fatal("editor.ruler_column setting not found")
+}
+
+// TestSettingsRulerColumnStepperMatchesConfigRange checks that the stepper can
+// reach the config range (0 disables the ruler, 512 is the validated maximum).
+func TestSettingsRulerColumnStepperMatchesConfigRange(t *testing.T) {
+	tests := []struct {
+		name  string
+		start int
+		step  func(*Model)
+		want  int
+	}{
+		{"decrement from 1 reaches 0 which disables the ruler", 1, (*Model).DecrementIntValue, 0},
+		{"increment past 100 is allowed up to 512", 100, (*Model).IncrementIntValue, 101},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Editor.RulerColumn = tt.start
+			model := New(ui.DefaultTheme(), cfg, "/test/config.toml")
+			selectSettingForRulerTest(t, &model)
+			tt.step(&model)
+			got, err := model.Config()
+			if err != nil {
+				t.Fatalf("Config() error = %v", err)
+			}
+			if got.Editor.RulerColumn != tt.want {
+				t.Fatalf("RulerColumn = %d, want %d", got.Editor.RulerColumn, tt.want)
+			}
+		})
+	}
+}

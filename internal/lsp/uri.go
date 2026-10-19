@@ -41,6 +41,11 @@ func URIToPath(uri string) string {
 	}
 
 	uri = strings.TrimPrefix(uri, "file://")
+	// "file://localhost/path" names the same local file as "file:///path".
+	// Keep the leading slash of the path, not the authority.
+	if rest, ok := strings.CutPrefix(uri, "localhost/"); ok {
+		uri = "/" + rest
+	}
 
 	// Decode percent-encoded characters
 	decoded, err := url.PathUnescape(uri)

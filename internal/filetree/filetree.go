@@ -437,6 +437,9 @@ func (m *Model) ApplyRefresh(result RefreshResult) bool {
 	if index, ok := result.indexByPath[selectedPath]; ok {
 		m.Cursor = index
 	}
+	// The selected row may have been removed by the refresh; keep the cursor on
+	// a real row rather than past the end of the new projection.
+	m.clampCursorForLength(len(result.projection))
 	m.ensureCursorVisibleForLength(len(result.projection))
 	return true
 }
@@ -1471,9 +1474,18 @@ func readDirEntriesContext(ctx context.Context, rootDir, path string, depth int,
 		}
 	}
 
-	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name < dirs[j].Name })
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	sort.Slice(dirs, func(i, j int) bool { return compareEntryNames(dirs[i].Name, dirs[j].Name) < 0 })
+	sort.Slice(files, func(i, j int) bool { return compareEntryNames(files[i].Name, files[j].Name) < 0 })
 	return append(dirs, files...), nil
+}
+
+// compareEntryNames orders tree rows case-insensitively, falling back to the
+// byte order so names differing only by case still sort deterministically.
+func compareEntryNames(a, b string) int {
+	if c := strings.Compare(strings.ToLower(a), strings.ToLower(b)); c != 0 {
+		return c
+	}
+	return strings.Compare(a, b)
 }
 
 // loadGitignore reads a top-level .gitignore and returns simple patterns.

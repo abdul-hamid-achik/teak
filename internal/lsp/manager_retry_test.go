@@ -147,3 +147,59 @@ func TestOpenDocumentIgnoresRetiredGeneration(t *testing.T) {
 		t.Errorf("start attempts = %d, want 0 for a retired generation", *attempts)
 	}
 }
+
+// A successful start must clear the consecutive-failure budget. Otherwise two
+// earlier transient failures leave the counter at maxRetries-1 for the rest of
+// the session, and one later crash-restart failure disables a healthy server.
+func TestSuccessfulStartResetsStartupFailureBudget(t *testing.T) {
+	m := NewManager(t.TempDir(), []ServerConfig{{
+		Command:    "budget-language-server",
+		Extensions: []string{".bgt"},
+		LanguageID: "bgt",
+	}})
+	m.now = func() time.Time { return time.Unix(1_000_000, 0) }
+	m.initClient = func(*Client) error { return nil }
+
+	succeed := false
+	attempts := 0
+	var live *Client
+	m.newClient = func(ServerConfig, string, chan<- any) (*Client, error) {
+		attempts++
+		if !succeed {
+			return nil, errors.New("boom")
+		}
+		live = newBudgetTestClient()
+		return live, nil
+	}
+	defer func() {
+		if live != nil {
+			close(live.processDone)
+		}
+	}()
+
+	for range maxRetries - 1 {
+		if _, err := m.EnsureClient("main.bgt"); err == nil {
+			t.Fatal("EnsureClient: expected startup failure")
+		}
+	}
+	succeed = true
+	if _, err := m.EnsureClient("main.bgt"); err != nil {
+		t.Fatalf("EnsureClient after transient failures: %v", err)
+	}
+
+	// Simulate the server crashing: the registered client is no longer ready.
+	live.mu.Lock()
+	live.running = false
+	live.mu.Unlock()
+
+	succeed = false
+	_, _ = m.EnsureClient("main.bgt") // one fresh failure after recovery
+	before := attempts
+	_, err := m.EnsureClient("main.bgt")
+	if err != nil && strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("server disabled after a single failure following a successful start: %v", err)
+	}
+	if attempts == before {
+		t.Errorf("no restart attempt after a single failure following a successful start")
+	}
+}

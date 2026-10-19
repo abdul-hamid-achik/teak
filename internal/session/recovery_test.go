@@ -2,6 +2,7 @@ package session
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -126,6 +127,46 @@ func TestRecoveryLoadCorruptFile(t *testing.T) {
 	}
 	if len(loaded) != 0 {
 		t.Fatalf("loaded %d records from corrupt file, want 0", len(loaded))
+	}
+}
+
+func TestRecoveryLoadQuarantinesCorruptFileInsteadOfLosingIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	corrupt := []byte("{not json, but it holds unsaved edits")
+	path := RecoveryPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("writing corrupt recovery file: %v", err)
+	}
+
+	loaded, err := LoadRecovery(root)
+	if err != nil {
+		t.Fatalf("LoadRecovery: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("loaded %d records from corrupt file, want 0", len(loaded))
+	}
+	// The next autosave overwrites recovery.json, so the unreadable bytes must
+	// be moved aside first or the only copy of the unsaved work is destroyed.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("corrupt recovery.json still at its live path (stat err = %v)", err)
+	}
+	matches, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("found %d quarantined recovery files, want 1", len(matches))
+	}
+	preserved, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("reading quarantined file: %v", err)
+	}
+	if string(preserved) != string(corrupt) {
+		t.Fatalf("quarantined content = %q, want original bytes %q", preserved, corrupt)
 	}
 }
 

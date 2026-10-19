@@ -95,7 +95,7 @@ func (m *Model) enrichPluginEventContext(ctx plugin.EventContext) plugin.EventCo
 		return ctx
 	}
 	rel, err := filepath.Rel(m.rootDir, ctx.FilePath)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return ctx
 	}
 	ctx.RelativePath = filepath.ToSlash(rel)

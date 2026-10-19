@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -84,7 +85,8 @@ func boundedRecoveryRecords(records []RecoveryRecord) []RecoveryRecord {
 // A missing, corrupt, or oversized file reads as no records: recovery is best
 // effort and must never block or exhaust memory during startup.
 func LoadRecovery(rootDir string) ([]RecoveryRecord, error) {
-	file, err := os.Open(RecoveryPath(rootDir))
+	path := RecoveryPath(rootDir)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -95,20 +97,39 @@ func LoadRecovery(rootDir string) ([]RecoveryRecord, error) {
 	if info, statErr := file.Stat(); statErr != nil {
 		return nil, statErr
 	} else if info.Size() > maxRecoveryFileBytes {
-		return nil, nil
+		return quarantineUnreadable(file, path)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxRecoveryFileBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > maxRecoveryFileBytes {
-		return nil, nil
+		return quarantineUnreadable(file, path)
 	}
 	var records []RecoveryRecord
 	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, nil
+		return quarantineUnreadable(file, path)
 	}
 	return boundedRecoveryRecords(records), nil
+}
+
+// quarantineUnreadable closes the open recovery file before moving it aside;
+// renaming an open file fails on Windows. It always reports no records.
+func quarantineUnreadable(file *os.File, path string) ([]RecoveryRecord, error) {
+	_ = file.Close()
+	return nil, quarantineRecoveryFile(path)
+}
+
+// quarantineRecoveryFile renames an unreadable recovery file aside instead of
+// discarding it. Loading reads as no records so startup is never blocked, but
+// the next autosave rewrites recovery.json; without this move the bytes of a
+// crashed session's unsaved edits would be destroyed silently.
+func quarantineRecoveryFile(path string) error {
+	target := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("quarantine unreadable recovery file: %w", err)
+	}
+	return nil
 }
 
 // ClearRecovery removes the recovery file for a workspace.

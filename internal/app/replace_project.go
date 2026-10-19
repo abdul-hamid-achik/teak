@@ -203,15 +203,19 @@ func (m Model) handleProjectReplacePrepared(msg projectReplacePreparedMsg) (tea.
 	var cmds []tea.Cmd
 	total := 0
 	files := 0
+	skippedOpen := 0
 	for _, item := range msg.Open {
 		index := m.editorIndexForAsyncMessage(item.Target.EditorID)
 		if index < 0 {
+			skippedOpen++
 			continue
 		}
 		ed := &m.editors[index]
+		// Skip only the stale target. Buffers already replaced earlier in this
+		// loop keep their sync commands, so the language server stays in step.
 		if ed.Buffer.Version() != item.Target.Version || ed.Buffer.Rope() != item.Target.Source {
-			m.status = "Replace discarded: buffer changed while it was prepared"
-			return m, nil
+			skippedOpen++
+			continue
 		}
 		if item.Result == nil || item.Matches == 0 {
 			continue
@@ -231,10 +235,13 @@ func (m Model) handleProjectReplacePrepared(msg projectReplacePreparedMsg) (tea.
 			m.syncEditorStateAfterUpdate(index, prevVersion, prevCursor),
 		)
 	}
+	// Closed files are already written by the prepare step, so every outcome
+	// must be reported: one failure must not hide the files that changed.
+	var failures []string
 	for _, item := range msg.Closed {
 		if item.Err != nil {
-			m.status = fmt.Sprintf("Replace failed in %s: %v", filepath.Base(item.Path), item.Err)
-			return m, tea.Batch(cmds...)
+			failures = append(failures, fmt.Sprintf("%s: %v", filepath.Base(item.Path), item.Err))
+			continue
 		}
 		if item.Matches == 0 {
 			continue
@@ -242,18 +249,26 @@ func (m Model) handleProjectReplacePrepared(msg projectReplacePreparedMsg) (tea.
 		total += item.Matches
 		files++
 	}
-	if total == 0 {
-		m.status = "No matches to replace"
-		return m, tea.Batch(cmds...)
+	var parts []string
+	if total > 0 {
+		noun := "match"
+		if total != 1 {
+			noun = "matches"
+		}
+		fileNoun := "file"
+		if files != 1 {
+			fileNoun = "files"
+		}
+		parts = append(parts, fmt.Sprintf("Replaced %d %s in %d %s", total, noun, files, fileNoun))
+	} else if len(failures) == 0 && skippedOpen == 0 {
+		parts = append(parts, "No matches to replace")
 	}
-	noun := "match"
-	if total != 1 {
-		noun = "matches"
+	if skippedOpen > 0 {
+		parts = append(parts, fmt.Sprintf("skipped %d open buffer(s) changed while preparing", skippedOpen))
 	}
-	fileNoun := "file"
-	if files != 1 {
-		fileNoun = "files"
+	if len(failures) > 0 {
+		parts = append(parts, fmt.Sprintf("%d file(s) failed, first: %s", len(failures), failures[0]))
 	}
-	m.status = fmt.Sprintf("Replaced %d %s in %d %s", total, noun, files, fileNoun)
+	m.status = strings.Join(parts, "; ")
 	return m, tea.Batch(cmds...)
 }

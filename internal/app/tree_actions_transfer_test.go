@@ -318,3 +318,37 @@ func TestTreeMoveRestartsPendingLoadAtDestination(t *testing.T) {
 		t.Fatalf("pending navigation after move = %#v, want preserved position", relocatedCursor)
 	}
 }
+
+// A rename that only changes letter case must succeed on case-insensitive
+// filesystems (the macOS default), where the destination name resolves to the
+// source file itself.
+func TestTreeRenameCaseOnlyChangeSucceeds(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(source, []byte("draft\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	m := newTreeUXModel(t, root)
+	cmd := m.startTreeRename(source, "Notes.txt")
+	if cmd == nil {
+		t.Fatalf("rename returned no command; status = %q", m.status)
+	}
+	result := cmd().(treeActionResultMsg)
+	if result.Err != nil || !result.Committed {
+		t.Fatalf("case-only rename result = %#v", result)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "Notes.txt" {
+		t.Fatalf("directory entries after case-only rename = %d, want single Notes.txt", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(root, "Notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "draft\n" {
+		t.Fatalf("content = %q", data)
+	}
+}

@@ -2,6 +2,92 @@
 
 All notable changes to the Teak editor project.
 
+## [0.24.0] - 2026-10-18
+
+### Changed
+
+- The file tree sorts names case-insensitively, so `alpha.go` and `Beta.go`
+  appear in alphabetical order instead of uppercase first.
+- Tabs for different files that share a name show their parent directory,
+  for example `main.go (api)` and `main.go (web)`.
+- The plugin API rejects invalid arguments instead of guessing:
+  `buffer.get_line`, `buffer.set_cursor` and `editor.close_tab` raise an
+  error for indices below 1 (`close_tab(0)` used to close the active tab), and
+  `keymap.set` requires a function or a command name.
+- Debugger stepping, continue and the call stack target the thread that
+  stopped rather than the first listed thread. With no threads, a step
+  reports an error instead of doing nothing.
+
+### Editing
+
+- Horizontal scrolling no longer shifts a row by one column when the edge
+  cuts through a wide character.
+- Changing `tab_size` in Settings updates tab rendering and cursor columns
+  immediately.
+- Snippet completions honor `\$`, `\}` and `\\` escapes and nested
+  placeholders such as `${1:${2:x}}`.
+- Undoing a word deletion with Ctrl+Backspace restores the cursor to where it
+  was.
+- Indentation folding treats tab-only and CRLF blank lines as blank.
+- A clean buffer reloaded after an external change keeps its cursor position.
+
+### Language servers and protocols
+
+- Language server requests that use string ids are answered. A response with
+  a malformed `error` member releases its waiting request with an error.
+- A language server that exits unexpectedly is reported even when the UI is
+  busy, and a successful start resets the restart budget.
+- `file://localhost/...` URIs resolve to local paths.
+- Inserting the final newline on save sends the language server the correct
+  pre-edit position.
+- Agent terminal output keeps text after an invalid UTF-8 byte; previously
+  everything after it was dropped.
+- Failed debug adapter requests name the command. Debuggee output is split
+  into lines with terminal escape sequences removed.
+
+### Search, Git and panels
+
+- Project search reports a missing or unreadable root instead of showing no
+  results. Long-line previews are bounded, and control characters in file
+  content cannot reach the terminal.
+- Git gutter marks after a very long changed line are no longer lost. A
+  repository with no commits shows its branch name. Git command errors include
+  Git's own message.
+- Project Replace All reports every replaced file even when one fails, and an
+  open buffer edited during preparation no longer drops updates for the other
+  buffers.
+- Pickers never draw wider than a narrow terminal. The help overlay says when
+  a filter matches no shortcuts. Signature help no longer brackets the
+  function name for an unnamed parameter.
+- Agent permission titles and edit-proposal paths wrap to the panel width.
+- Diff views keep hunk lines that start with `-- ` or `++ ` and re-clamp
+  scrolling when the panel grows. Multi-line diagnostics occupy one row in
+  the Problems panel.
+- The file tree keeps a valid selection when a refresh removes the selected
+  row.
+
+### Files, configuration and sessions
+
+- Renaming a file to change only its letter case works on case-insensitive
+  file systems.
+- Settings saves keep comments in configs that contain `[[lsp]]` tables. If
+  the `.bak` backup cannot be written, the save stops instead of rewriting
+  the file without one.
+- The `ruler_column` stepper covers the full 0–512 range accepted by the
+  configuration.
+- Reloading `config.toml` applies `[tools]` overrides, and override paths may
+  start with `~`.
+- An unreadable `recovery.json` is moved aside as `recovery.json.corrupt-*`
+  instead of being overwritten by the next autosave.
+
+### Command line and headless mode
+
+- A path that exists but cannot be accessed is reported instead of opening
+  as an empty new file.
+- A failed headless project copy no longer deletes an existing destination.
+- An oversized MCP message is rejected on its own; the session keeps
+  serving later requests.
+
 ## [0.23.0] - 2026-09-05
 
 ### TUI fixes

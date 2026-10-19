@@ -387,6 +387,26 @@ func TestModel_View_WithProblems(t *testing.T) {
 	}
 }
 
+// TestModelViewKeepsMultilineMessagesOnOneRow guards multi-line LSP messages
+// (for example TypeScript elaborations). A newline inside a message would split
+// one problem across several rows and push later problems out of the panel.
+func TestModelViewKeepsMultilineMessagesOnOneRow(t *testing.T) {
+	m := New(ui.NordTheme(), "/test/root")
+	m.SetSize(80, 5)
+	m.SetProblems([]Problem{
+		{FilePath: "/test/root/a.ts", Line: 1, Col: 0, Severity: 1, Message: "Type 'A' is not assignable.\n  Property 'x' is missing."},
+		{FilePath: "/test/root/b.ts", Line: 2, Col: 0, Severity: 1, Message: "second"},
+	})
+
+	rows := strings.Split(m.View(), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("View() rendered %d rows, want 2 (one per problem): %q", len(rows), rows)
+	}
+	if !strings.Contains(rows[1], "second") {
+		t.Errorf("second problem missing from row 1: %q", rows[1])
+	}
+}
+
 func TestModelViewNarrowWidthsTruncatesUnicodeMessagesSafely(t *testing.T) {
 	for _, width := range []int{0, 15, 19, 22, 25} {
 		t.Run("width="+strconv.Itoa(width), func(t *testing.T) {

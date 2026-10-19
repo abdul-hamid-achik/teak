@@ -391,6 +391,23 @@ func TestDiffModelClampsScrollToLastVisiblePage(t *testing.T) {
 	}
 }
 
+// TestDiffModelSetSizeReclampsScrollAfterGrowing guards against a scroll offset
+// that was valid for a short viewport remaining past the end after the window
+// grows, which rendered blank rows until the user pressed up repeatedly.
+func TestDiffModelSetSizeReclampsScrollAfterGrowing(t *testing.T) {
+	model := New("test.go", make([]DiffLine, 10), ui.DefaultTheme())
+	model.SetSize(80, 3)
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if got, want := model.ScrollY, 7; got != want {
+		t.Fatalf("scroll after end = %d, want %d", got, want)
+	}
+
+	model.SetSize(80, 20)
+	if got, want := model.ScrollY, 0; got != want {
+		t.Errorf("scroll after growing viewport = %d, want %d", got, want)
+	}
+}
+
 // TestDiffModelView tests View method
 func TestDiffModelView(t *testing.T) {
 	theme := ui.DefaultTheme()

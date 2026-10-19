@@ -48,6 +48,10 @@ type Client struct {
 	processDone  chan struct{}
 	readDone     chan struct{}
 
+	// stoppedThreadID is the thread named by the most recent stopped event, or
+	// 0 when none is known. Guarded by mu.
+	stoppedThreadID int
+
 	// The adapter's protocol reader must never wait for Bubble Tea to process a
 	// message. Keep bounded, priority-separated queues so noisy output cannot
 	// evict lifecycle transitions while the UI is busy.
@@ -505,7 +509,14 @@ func (c *Client) sendRequestContext(ctx context.Context, command string, args an
 	c.mu.Unlock()
 
 	if res.Error != nil {
-		return fmt.Errorf("DAP error %d: %s", res.Error.Id, res.Error.Message)
+		detail := res.Error.Message
+		if detail == "" {
+			detail = res.Error.Format
+		}
+		if detail == "" {
+			detail = "adapter gave no reason"
+		}
+		return fmt.Errorf("DAP request %q failed (error %d): %s", command, res.Error.Id, detail)
 	}
 
 	if result != nil {
@@ -745,6 +756,7 @@ func (c *Client) handleEvent(event *Event) {
 	if event == nil {
 		return
 	}
+	c.trackStoppedThread(event)
 	if event.Event == "exited" || event.Event == "terminated" {
 		c.markSessionInactive()
 	}
@@ -810,6 +822,30 @@ func (c *Client) handleEvent(event *Event) {
 			})
 		}
 	}
+}
+
+// trackStoppedThread remembers which thread the adapter stopped in, so stepping
+// and stack requests target that thread rather than whichever is listed first.
+func (c *Client) trackStoppedThread(event *Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch event.Event {
+	case "stopped":
+		c.stoppedThreadID = 0
+		if body, ok := event.Body.(map[string]any); ok {
+			c.stoppedThreadID = max(0, getInt(body, "threadId"))
+		}
+	case "continued", "exited", "terminated":
+		c.stoppedThreadID = 0
+	}
+}
+
+// StoppedThreadID returns the thread named by the latest stopped event, or 0
+// when the adapter has not reported one since the last resume.
+func (c *Client) StoppedThreadID() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stoppedThreadID
 }
 
 func boundedDAPText(value string) string {

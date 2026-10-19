@@ -1,6 +1,8 @@
 package debugger
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"teak/internal/dap"
@@ -528,7 +530,9 @@ func TestDebuggerAppendOutputWithLongString(t *testing.T) {
 	theme := ui.DefaultTheme()
 	model := New(theme)
 
-	longLine := string(make([]byte, 10000))
+	// Printable filler: NUL bytes are control characters that AppendOutput now
+	// strips, and this test only checks that long lines are kept whole.
+	longLine := strings.Repeat("x", 10000)
 	model.AppendOutput(longLine)
 
 	if len(model.outputLog) != 1 {
@@ -801,8 +805,52 @@ func TestDebuggerAppendOutputWithNewlines(t *testing.T) {
 
 	model.AppendOutput("line1\nline2\nline3")
 
-	if len(model.outputLog) != 1 {
-		t.Errorf("Expected 1 output line, got %d", len(model.outputLog))
+	// Each physical line is its own entry so the output block keeps one row per
+	// logical row, which the View layout depends on.
+	if len(model.outputLog) != 3 {
+		t.Errorf("Expected 3 output lines, got %d", len(model.outputLog))
+	}
+}
+
+// TestDebuggerOutputKeepsNewestLinesVisible reproduces a multi-line output
+// event: the newest line must stay inside the panel rather than being cut off
+// by the height cap, because the output block shows the last few entries.
+func TestDebuggerOutputKeepsNewestLinesVisible(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetSize(80, 16)
+	model.SetState(dap.StateRunning)
+
+	var lines []string
+	for i := range 20 {
+		lines = append(lines, fmt.Sprintf("line-%02d", i))
+	}
+	model.AppendOutput(strings.Join(lines, "\n"))
+
+	if view := model.View(); !strings.Contains(view, "line-19") {
+		t.Errorf("newest output line was cut off by the panel height: %q", view)
+	}
+}
+
+// TestDebuggerAppendOutputSanitizesDebuggeeText reproduces raw debuggee output
+// (CR line endings, embedded newlines, clear-screen escapes) reaching the
+// panel. Each output entry must occupy one row and carry no control codes.
+func TestDebuggerAppendOutputSanitizesDebuggeeText(t *testing.T) {
+	model := New(ui.DefaultTheme())
+	model.SetSize(80, 40)
+	model.SetState(dap.StateRunning)
+	model.AppendOutput("first\r\nsecond\x1b[2J\x1b[31mred\x1b[0m\tcol")
+
+	view := model.View()
+	if strings.Contains(view, "\r") {
+		t.Errorf("view contains a carriage return: %q", view)
+	}
+	if strings.Contains(view, "\x1b[2J") {
+		t.Errorf("view contains a clear-screen escape from debuggee output: %q", view)
+	}
+	for _, want := range []string{"first", "second", "red", "col"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q: %q", want, view)
+		}
 	}
 }
 

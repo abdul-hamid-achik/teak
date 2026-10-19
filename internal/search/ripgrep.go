@@ -239,7 +239,7 @@ func parseRipgrepJSON(data []byte, maxResults int) ([]Result, error) {
 		}
 
 		filePath := filepath.FromSlash(strings.TrimPrefix(msg.Data.Path.Text, "./"))
-		preview := strings.TrimSpace(strings.TrimRight(msg.Data.Lines.Text, "\r\n"))
+		preview := previewAround(msg.Data.Lines.Text, msg.Data.Submatches[0].Start)
 
 		results = append(results, Result{
 			FilePath: filePath,

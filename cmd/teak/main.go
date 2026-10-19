@@ -205,6 +205,12 @@ func resolveCLIWorkspace(targets []cliTarget) ([]app.StartupFile, string, error)
 			if os.IsNotExist(err) && wantsDir {
 				return nil, "", fmt.Errorf("directory does not exist: %s", t.path)
 			}
+			if !os.IsNotExist(err) {
+				// Only a missing path may become a new buffer. A permission or
+				// other stat failure means the file exists but cannot be reached,
+				// and opening it as an empty buffer would hide that.
+				return nil, "", fmt.Errorf("cannot access %s: %w", t.path, err)
+			}
 			// Not-yet-created file path — still open as a new buffer.
 			items = append(items, resolved{abs: abs, line: t.line, col: t.col, dir: false})
 			continue

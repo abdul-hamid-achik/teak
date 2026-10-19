@@ -289,6 +289,20 @@ func TestRelativeOverrideIsNormalizedBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestHomeRelativeOverrideExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fixture := writeExecutable(t, home, "configured-tool")
+
+	resolved, err := New(map[string]string{"configured": "~/configured-tool"}).Resolve("configured")
+	if err != nil {
+		t.Fatalf("Resolve(configured) error = %v; a ~ override must expand to the home directory", err)
+	}
+	if filepath.Clean(resolved) != filepath.Clean(fixture) {
+		t.Fatalf("Resolve(configured) = %q, want %q", resolved, fixture)
+	}
+}
+
 func TestCommandUsesAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
 	want := writeExecutable(t, dir, "codemap")

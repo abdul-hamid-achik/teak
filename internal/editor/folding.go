@@ -1,6 +1,9 @@
 package editor
 
-import "sort"
+import (
+	"bytes"
+	"sort"
+)
 
 // FoldRegion represents a foldable range in the document.
 type FoldRegion struct {
@@ -341,7 +344,7 @@ func DetectIndentRegions(lines func(int) []byte, lineCount int) []FoldRegion {
 				break indentLoop
 			}
 		}
-		if indent == len(line) {
+		if len(bytes.Trim(line, " \t\r")) == 0 {
 			infos[i] = lineInfo{blank: true}
 		} else {
 			infos[i] = lineInfo{indent: indent}

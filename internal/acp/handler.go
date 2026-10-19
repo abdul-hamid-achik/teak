@@ -1084,11 +1084,21 @@ func trimLeadingUTF8Continuation(data []byte) []byte {
 	return data
 }
 
+// validUTF8Prefix makes captured terminal output valid UTF-8 in one pass. Only
+// a multi-byte sequence cut off at the end of the window is dropped (the
+// capture boundary can split a rune); any other invalid byte is replaced so
+// newer output after it is still reported.
 func validUTF8Prefix(data []byte) string {
-	for len(data) > 0 && !utf8.Valid(data) {
-		data = data[:len(data)-1]
+	end := len(data)
+	for start := len(data) - 1; start >= 0 && start >= len(data)-utf8.UTFMax+1; start-- {
+		if utf8.RuneStart(data[start]) {
+			if !utf8.FullRune(data[start:]) {
+				end = start
+			}
+			break
+		}
 	}
-	return string(data)
+	return strings.ToValidUTF8(string(data[:end]), "�")
 }
 
 func terminalOutputLimit(requested *int) (int, error) {

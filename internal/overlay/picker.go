@@ -370,10 +370,9 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 
 // View implements Overlay.
 func (p *Picker) View() string {
+	// renderWidth already caps the box to the terminal. Widening it to a fixed
+	// minimum here would overflow narrow terminals, so no minimum is applied.
 	boxWidth := p.renderWidth()
-	if boxWidth < 30 && p.width >= 30 {
-		boxWidth = 30
-	}
 	if boxWidth > 80 {
 		boxWidth = 80
 	}

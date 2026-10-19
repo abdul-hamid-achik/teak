@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -121,7 +122,28 @@ func runGitCommand(ctx context.Context, rootDir string, limit int64, args ...str
 	if err != nil {
 		return nil, err
 	}
-	return runCommandOutput(cmd, limit)
+	out, err := runCommandOutput(cmd, limit)
+	if err != nil && !errors.Is(err, ErrOutputLimit) {
+		if detail := gitErrorDetail(out); detail != "" {
+			err = fmt.Errorf("%w: %s", err, detail)
+		}
+	}
+	return out, err
+}
+
+// gitErrorDetail condenses git's combined stdout and stderr into one bounded
+// line. The exit status alone does not tell the user what failed.
+func gitErrorDetail(out []byte) string {
+	const maxDetail = 300
+	detail := strings.Join(strings.Fields(string(out)), " ")
+	if len(detail) > maxDetail {
+		cut := maxDetail
+		for cut > 0 && !utf8.RuneStart(detail[cut]) {
+			cut--
+		}
+		detail = detail[:cut] + "..."
+	}
+	return detail
 }
 
 func runGitCommandTimeout(rootDir string, timeout time.Duration, limit int64, args ...string) ([]byte, error) {
@@ -159,7 +181,7 @@ type StatusSnapshot struct {
 func StatusContext(ctx context.Context, rootDir string) (StatusSnapshot, error) {
 	ctx, cancel := withGitTimeout(ctx, gitReadTimeout)
 	defer cancel()
-	branchOut, err := runGitCommand(ctx, rootDir, 64<<10, "rev-parse", "--abbrev-ref", "HEAD")
+	branch, err := currentBranchName(ctx, rootDir)
 	if err != nil {
 		if ctx.Err() != nil {
 			return StatusSnapshot{}, ctx.Err()
@@ -170,7 +192,26 @@ func StatusContext(ctx context.Context, rootDir string) (StatusSnapshot, error) 
 	if err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read git status: %w", err)
 	}
-	return StatusSnapshot{Branch: strings.TrimSpace(string(branchOut)), Entries: entries}, nil
+	return StatusSnapshot{Branch: branch, Entries: entries}, nil
+}
+
+// currentBranchName resolves the checked-out branch. rev-parse cannot resolve
+// HEAD in a repository without commits, so when it fails the symbolic ref is
+// consulted; it names the unborn branch in that case.
+func currentBranchName(ctx context.Context, rootDir string) (string, error) {
+	out, err := runGitCommand(ctx, rootDir, 64<<10, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if symOut, symErr := runGitCommand(ctx, rootDir, 64<<10, "symbolic-ref", "--short", "-q", "HEAD"); symErr == nil {
+		if name := strings.TrimSpace(string(symOut)); name != "" {
+			return name, nil
+		}
+	}
+	return "", err
 }
 
 func withGitTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -479,10 +520,7 @@ func refreshAfter(rootDir string) RefreshMsg {
 func refreshAfterContext(ctx context.Context, rootDir string) RefreshMsg {
 	ctx, cancel := withGitTimeout(ctx, gitReadTimeout)
 	defer cancel()
-	branch := ""
-	if out, err := runGitCommand(ctx, rootDir, 64<<10, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
-		branch = strings.TrimSpace(string(out))
-	}
+	branch, _ := currentBranchName(ctx, rootDir)
 	entries, err := readStatusEntriesContext(ctx, rootDir)
 	return RefreshMsg{Branch: branch, Entries: entries, Err: err}
 }

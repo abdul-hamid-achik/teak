@@ -169,6 +169,29 @@ func TestRunHeadlessProjectRejectsSymlinkCopyAndTraversal(t *testing.T) {
 	}
 }
 
+func TestRunHeadlessProjectCopyOntoExistingDestinationKeepsDestination(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "source.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("precious\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runHeadlessCLI([]string{"project", "copy", "--confirm", "--json", "--root", root, "source.txt", "existing.txt"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("project copy onto an existing destination exit code = 0, want failure; stdout=%s", stdout.String())
+	}
+	content, err := os.ReadFile(filepath.Join(root, "existing.txt"))
+	if err != nil {
+		t.Fatalf("existing destination was removed by failed copy: %v; stderr=%s", err, stderr.String())
+	}
+	if string(content) != "precious\n" {
+		t.Fatalf("existing destination content = %q, want original content preserved", content)
+	}
+}
+
 func TestRunHeadlessProjectRejectsCopyIntoSource(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "src", "nested"), 0o755); err != nil {

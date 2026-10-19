@@ -304,6 +304,8 @@ func mappedSourceRange(lineMap []int, start, end int) (int, int, bool) {
 func (m *Model) SetSize(w, h int) {
 	m.Width = w
 	m.Height = h
+	// A taller viewport shrinks the scrollable range; keep the offset inside it.
+	m.ScrollY = max(0, min(m.ScrollY, m.maxScroll()))
 }
 
 // Update handles scroll input.

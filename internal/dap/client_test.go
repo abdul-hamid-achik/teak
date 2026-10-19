@@ -1154,3 +1154,34 @@ func TestIsReady(t *testing.T) {
 		t.Error("IsReady() should be true after initialization")
 	}
 }
+
+// TestFailedRequestWithoutDetailsNamesTheCommand reproduces an adapter that
+// fails a request without any message: the error must still name the command
+// instead of reading "DAP error 0: ".
+func TestFailedRequestWithoutDetailsNamesTheCommand(t *testing.T) {
+	client, _ := newPipedAdapterClient(t, func(req Request) (any, bool) {
+		return nil, false
+	})
+
+	err := client.sendRequest("threads", nil, nil)
+	if err == nil {
+		t.Fatal("sendRequest() error = nil, want failure for success:false response")
+	}
+	if !strings.Contains(err.Error(), "threads") {
+		t.Errorf("error %q does not name the failed command", err)
+	}
+}
+
+// TestStoppedThreadTrackingClearsOnResume checks that the remembered stop
+// thread is kept across a stop and dropped once the adapter resumes.
+func TestStoppedThreadTrackingClearsOnResume(t *testing.T) {
+	c := &Client{}
+	c.handleEvent(&Event{Event: "stopped", Body: map[string]any{"threadId": float64(7)}})
+	if got := c.StoppedThreadID(); got != 7 {
+		t.Fatalf("StoppedThreadID() = %d after stopped event, want 7", got)
+	}
+	c.handleEvent(&Event{Event: "continued", Body: map[string]any{"threadId": float64(7)}})
+	if got := c.StoppedThreadID(); got != 0 {
+		t.Errorf("StoppedThreadID() = %d after continued event, want 0", got)
+	}
+}

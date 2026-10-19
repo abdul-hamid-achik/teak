@@ -500,7 +500,8 @@ func (m *Model) renderProblem(index int) string {
 
 	// Message (truncated if needed)
 	maxMessageWidth := max(0, m.width-20) // Reserve space for icon, path, location.
-	message := ansi.Truncate(p.Message, maxMessageWidth, "...")
+	// Collapse line breaks: a multi-line LSP message must stay on one row.
+	message := ansi.Truncate(strings.Join(strings.Fields(p.Message), " "), maxMessageWidth, "...")
 
 	// Build the line
 	var parts []string
