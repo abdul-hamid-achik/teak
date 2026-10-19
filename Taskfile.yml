@@ -43,8 +43,9 @@ tasks:
     desc: Run the Glyphrun terminal behavior suite
     deps: [build]
     cmds:
-      # Glyphrun v0.16.1 prunes the shared artifact root from each worker; a
-      # serial gate avoids retention races while preserving deterministic JUnit.
+      # Glyphrun prunes the shared artifact root after every run, so parallel
+      # workers race on retention; a serial gate avoids that and keeps JUnit
+      # deterministic.
       # tui_agent_* specs are excluded on Linux: the agent panel connects but the
       # TUI exits early under a Linux PTY (known glyphrun issue; they pass on
       # macOS). See docs notes on the 2026-08-04 investigation.
@@ -65,7 +66,7 @@ tasks:
         if [ "$(uname)" = "Linux" ]; then
           SPECS="$(ls specs/*.yml | grep -v tui_agent_)"
         fi
-        # Repeat mode does not write JUnit in Glyphrun 0.18. Generate a fresh
+        # Glyphrun's repeat mode does not write JUnit. Generate a fresh
         # single-run report, then inspect stability with retained per-spec runs.
         rm -f .glyphrun/glyphrun-repeat-junit.xml
         glyph run $SPECS --parallel 1 --progress auto --junit .glyphrun/glyphrun-repeat-junit.xml

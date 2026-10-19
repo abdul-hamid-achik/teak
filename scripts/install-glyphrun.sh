@@ -5,5 +5,5 @@
 # against a newer Glyphrun release.
 set -eu
 
-glyphrun_version=v0.16.1
+glyphrun_version=v0.22.0
 exec go install "github.com/abdul-hamid-achik/glyphrun/cmd/glyph@${glyphrun_version}"
