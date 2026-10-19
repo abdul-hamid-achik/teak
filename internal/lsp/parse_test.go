@@ -199,13 +199,14 @@ func TestNotificationDispatcherCoalescesDiagnostics(t *testing.T) {
 
 	out := make(chan any)
 	client := &Client{msgChan: out}
-	go client.dispatchNotifications(ctx)
-
+	// Queue both before the dispatcher starts: once it holds the first
+	// message, whether the second replaces it depends on scheduling.
 	client.queueNotification("diagnostics:file:///test.go", DiagnosticsMsg{URI: "file:///test.go"})
 	client.queueNotification("diagnostics:file:///test.go", DiagnosticsMsg{
 		URI:         "file:///test.go",
 		Diagnostics: []Diagnostic{{Message: "newest"}},
 	})
+	go client.dispatchNotifications(ctx)
 
 	select {
 	case msg := <-out:
@@ -218,6 +219,24 @@ func TestNotificationDispatcherCoalescesDiagnostics(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("notification dispatcher did not deliver diagnostics")
+	}
+}
+
+// Replacing a queued notification must wake the dispatcher, which may already
+// hold the superseded message and be blocked delivering it.
+func TestQueueNotificationReplacementWakesDispatcher(t *testing.T) {
+	client := &Client{msgChan: make(chan any)}
+	client.queueNotification("diagnostics:file:///test.go", DiagnosticsMsg{URI: "file:///test.go"})
+	<-client.notificationWake // the dispatcher consumed the first wake
+
+	client.queueNotification("diagnostics:file:///test.go", DiagnosticsMsg{
+		URI:         "file:///test.go",
+		Diagnostics: []Diagnostic{{Message: "newest"}},
+	})
+	select {
+	case <-client.notificationWake:
+	default:
+		t.Fatal("replacing a queued notification did not wake the dispatcher")
 	}
 }
 

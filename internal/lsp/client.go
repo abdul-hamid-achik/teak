@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1670,10 +1671,34 @@ func (c *Client) sendEncoded(data []byte) error {
 		return ErrClientNotRunning
 	}
 	if _, err := io.WriteString(stdin, header); err != nil {
-		return err
+		return serverGoneWriteError(err)
 	}
 	_, err := stdin.Write(data)
-	return err
+	return serverGoneWriteError(err)
+}
+
+// serverGoneWriteError reports a write that failed because the server has
+// exited as ErrClientNotRunning. Whether an exited server surfaces as a broken
+// pipe here or as EOF on the read side is a race, and callers such as `teak
+// doctor` show the error to the user, so both must read the same.
+func serverGoneWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	gone := errors.Is(err, syscall.EPIPE) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed)
+	if !gone {
+		msg := strings.ToLower(err.Error())
+		// Windows reports a pipe whose reader exited as ERROR_NO_DATA or
+		// ERROR_BROKEN_PIPE rather than EPIPE.
+		gone = strings.Contains(msg, "broken pipe") ||
+			strings.Contains(msg, "pipe is being closed") ||
+			strings.Contains(msg, "pipe has been ended")
+	}
+	if !gone {
+		return err
+	}
+	log.Debug("lsp: write to exited server", "err", err)
+	return ErrClientNotRunning
 }
 
 func (c *Client) readLoop(ctx context.Context) {
@@ -2390,7 +2415,14 @@ func (c *Client) queueNotification(key string, msg any) {
 	if queued, ok := c.pendingNotification[key]; ok {
 		queued.msg = msg
 		queued.generation++
+		wake := c.notificationWake
 		c.notificationMu.Unlock()
+		// The dispatcher may already hold the superseded message and be
+		// waiting to deliver it; wake it so it picks up this one instead.
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
 		return
 	}
 	if len(c.notificationQueue) >= maxQueuedNotifications {
