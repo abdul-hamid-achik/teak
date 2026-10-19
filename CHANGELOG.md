@@ -2,6 +2,59 @@
 
 All notable changes to the Teak editor project.
 
+## [0.25.0] - 2026-10-19
+
+### Interface
+
+- Secondary text (descriptions, hints, placeholders, paths, ignored files) is
+  now visibly dimmer than normal text in every theme while keeping readable
+  contrast, and floating panels (pickers, dialogs, help, settings, search)
+  paint their own background on every cell instead of showing editor-colored
+  patches.
+- The status bar keeps the cursor position and diagnostics visible. When a
+  message needs room it drops lower-value segments (encoding, line endings,
+  indentation, scroll position) and truncates the message with an ellipsis.
+- The command palette right-aligns and dims keyboard shortcuts. The context
+  menu shows Shift+F12 for Find References and F2 for Rename Symbol.
+- Help sizes its key column to the longest shortcut, wraps long descriptions
+  with a hanging indent and widens on large terminals.
+- Settings align their values in a column and show the config path with `~`.
+- Project search highlights the matched text, dims the location and grows
+  with the terminal. Active option toggles stand out from inactive ones.
+- The welcome screen lists Quick Open, Command Palette, Help, New File, Find
+  in Project, Toggle file tree and Quit in aligned columns, and drops rows on
+  short terminals.
+- The problems panel leads with the diagnostic message. The location follows
+  it, dimmed, and is clipped first in a narrow sidebar.
+- In the file tree, gitignored entries are dimmed, untracked files are green,
+  and `.git` is hidden.
+- The unsaved-changes dialog keeps its buttons on one row (or stacks them)
+  instead of wrapping "Cancel" onto the next line, and says "1 unsaved file".
+- A tab's file name keeps the tab background after its dirty and diagnostic
+  markers.
+
+### Agent
+
+- A missing agent command shows a short status message. The agent panel
+  shows the reason and the install command, instead of configuration
+  instructions for an agent that is already configured.
+- Ctrl+J and Ctrl+' no longer focus an agent panel that is too narrow to be
+  shown. The status bar says how to make room.
+
+### Fixes
+
+- The first launch in a workspace no longer reports "Session restore failed"
+  for a session file that does not exist yet.
+- Quick Open no longer shows "No matches" for files in subdirectories when it
+  is opened shortly after startup. While the file list loads it shows
+  "Loading...".
+- Typing quickly no longer surfaces "completion position" errors. A completion
+  request waits for the language server to receive the edit it was computed
+  for, and superseded results are discarded.
+- Teak no longer refreshes git status and the file tree several times a
+  second while idle. Its own `git status` touched `.git/index.lock`, and the
+  file watcher treated that as a project change.
+
 ## [0.24.0] - 2026-10-18
 
 ### Changed
