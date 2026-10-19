@@ -165,14 +165,19 @@ func (c ContextMenu) View() string {
 		labelColumnWidth = max(0, totalWidth-6-shortcutColumnWidth)
 	}
 
+	separatorStyle := c.theme.AutocompleteItem.
+		Foreground(c.theme.AutocompleteBox.GetBorderTopForeground()).
+		Background(c.theme.AutocompleteBox.GetBackground())
+
 	var sb strings.Builder
 	for i := range maxItems {
 		item := c.Items[i]
 
-		// Separator
+		// Separator: drawn in the border color so it recedes behind the
+		// items, on the menu background so no gap shows through.
 		if item.Label == "" {
 			sep := strings.Repeat("─", totalWidth)
-			sb.WriteString(c.theme.AutocompleteItem.Render(sep))
+			sb.WriteString(separatorStyle.Render(sep))
 			if i < maxItems-1 {
 				sb.WriteByte('\n')
 			}

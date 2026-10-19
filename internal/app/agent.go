@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"teak/internal/agent"
 	"teak/internal/overlay"
 	"teak/internal/text"
+	"teak/internal/toolpath"
 )
 
 // listenACP returns a tea.Cmd that waits for the next ACP message.
@@ -54,8 +56,13 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 			m.showAgent = true
 			m.relayout()
 		}
-		m.setFocus(FocusAgent)
-		_ = m.agentPanel.Focus()
+		if m.agentPanelFits() {
+			m.setFocus(FocusAgent)
+			_ = m.agentPanel.Focus()
+		} else {
+			// Never hand focus to a panel nobody can see.
+			m.status = agentNoRoomStatus
+		}
 	case acp.AgentWriteCancelledMsg:
 		m.agentPanel, _ = m.agentPanel.Update(inner)
 	case acp.AgentPermissionRequestMsg:
@@ -84,9 +91,21 @@ func (m Model) handleACPMsg(msg acpMsg) (tea.Model, tea.Cmd) {
 	case acp.AgentStoppedMsg:
 		m.agentPanel.SetConnected(false)
 		if inner.Err != nil {
-			message := "Agent stopped: " + inner.Err.Error()
-			m.agentPanel.AddSystemMessage(message)
-			m.status = message
+			var missing *toolpath.MissingToolError
+			// A hint other than the tool's install command describes a broken
+			// path override, not a missing install; that keeps the full error.
+			if errors.As(inner.Err, &missing) && missing.Hint == toolpath.Hint(missing.Tool) {
+				// The panel owns the full install hint; the status bar only
+				// points at it so the same sentence is not shown twice.
+				reason := missing.Tool + " is not installed."
+				m.agentPanel.SetStartFailure(reason, missing.Hint)
+				m.status = fmt.Sprintf("Agent unavailable: %s not installed (Ctrl+J)", missing.Tool)
+			} else {
+				message := "Agent stopped: " + inner.Err.Error()
+				m.agentPanel.SetStartFailure(inner.Err.Error(), "")
+				m.agentPanel.AddSystemMessage(message)
+				m.status = message
+			}
 		}
 	case acp.FileReadRequestMsg:
 		return m.handleFileReadRequest(inner)
@@ -216,6 +235,19 @@ func filterLines(content string, line *int, limit *int) string {
 	return strings.Join(lines[startLine:endLine], "\n")
 }
 
+// agentNoRoomStatus tells the user why the agent panel did not open.
+const agentNoRoomStatus = "Agent panel needs more room — hide the sidebar (Ctrl+B) or widen the terminal"
+
+// agentPanelFits reports whether the agent panel would be visible if it were
+// shown at the current terminal size. Before the first size message arrives
+// there is nothing to measure, so the panel is assumed to fit, as relayout does.
+func (m Model) agentPanelFits() bool {
+	if m.width <= 0 || m.height <= 0 {
+		return true
+	}
+	return m.height >= compactTerminalHeight && m.agentPanelWidthIfShown() > 0
+}
+
 // toggleAgentPanel toggles the agent panel visibility.
 func (m *Model) toggleAgentPanel() tea.Cmd {
 	if m.showAgent {
@@ -224,6 +256,12 @@ func (m *Model) toggleAgentPanel() tea.Cmd {
 			m.setFocus(FocusEditor)
 		}
 	} else {
+		if !m.agentPanelFits() {
+			// Focusing a panel that auto-hides would send keystrokes into a
+			// prompt nobody can see.
+			m.status = agentNoRoomStatus
+			return nil
+		}
 		m.showAgent = true
 		m.setFocus(FocusAgent)
 		m.relayout()
@@ -238,7 +276,14 @@ func (m Model) agentPanelWidth() int {
 	if !m.showAgent {
 		return 0
 	}
+	return m.agentPanelWidthIfShown()
+}
 
+// agentPanelWidthIfShown is the width the panel would get if it were shown,
+// or 0 when the terminal is too narrow. It reads only layout state: Model
+// copies share their modelState, so probing by flipping showAgent on a copy
+// would change the live model.
+func (m Model) agentPanelWidthIfShown() int {
 	available := m.width
 	if m.treeVisible() {
 		available -= m.treeWidth() + 1

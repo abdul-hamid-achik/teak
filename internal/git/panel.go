@@ -1321,7 +1321,7 @@ func (m Model) renderTreeRow(row treeRowHit) string {
 		stagedLabel := fmt.Sprintf(" STAGED (%d) %s", len(m.Staged), stagedArrow)
 		line := m.theme.GitSectionHeader.Render(stagedLabel)
 		if len(m.Staged) > 0 {
-			line += zone.Mark("git-unstage-all", m.theme.GitUntracked.Render(" −"))
+			line += zone.Mark("git-unstage-all", m.theme.Muted.Render(" −"))
 		}
 		return line
 	case treeRowUnstagedHeader:

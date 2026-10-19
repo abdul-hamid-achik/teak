@@ -145,7 +145,7 @@ type Model struct {
 		base            lipgloss.Style // base style for applying dynamic colors
 		cursorBg        color.Color    // cached cursor background
 		entryBg         color.Color    // cached entry background
-		gitIgnoredColor color.Color    // cached git ignored color (Nord3)
+		gitIgnoredColor color.Color    // cached color of gitignored entries (theme.Muted)
 	}
 }
 
@@ -170,7 +170,7 @@ func (m *Model) SetTheme(theme ui.Theme) {
 	m.theme = theme
 	m.cachedStyles.cursorBg = theme.TreeCursor.GetBackground()
 	m.cachedStyles.entryBg = theme.TreeEntry.GetBackground()
-	m.cachedStyles.gitIgnoredColor = theme.Gutter.GetForeground()
+	m.cachedStyles.gitIgnoredColor = theme.Muted.GetForeground()
 }
 
 // ShowHidden reports whether dotfiles and dot-directories are visible. The
@@ -339,7 +339,7 @@ func NewEmpty(root string, theme ui.Theme) Model {
 	m.cachedStyles.base = lipgloss.NewStyle()
 	m.cachedStyles.cursorBg = theme.TreeCursor.GetBackground()
 	m.cachedStyles.entryBg = theme.TreeEntry.GetBackground()
-	m.cachedStyles.gitIgnoredColor = theme.Gutter.GetForeground()
+	m.cachedStyles.gitIgnoredColor = theme.Muted.GetForeground()
 
 	return m
 }
@@ -1445,9 +1445,15 @@ func readDirEntriesContext(ctx context.Context, rootDir, path string, depth int,
 			if directoryEntries >= maxDirectoryEntries {
 				return nil, fmt.Errorf("%w: %q exceeds %d entries", errDirectoryEntryLimit, path, maxDirectoryEntries)
 			}
+			name := de.Name()
+			// Repository metadata is never browsable (VS Code's default
+			// files.exclude), even with hidden files shown. Dropping it at the
+			// source keeps projections, filters and refreshes consistent.
+			if name == ".git" {
+				continue
+			}
 			budget.entries++
 			directoryEntries++
-			name := de.Name()
 			fullPath := filepath.Join(path, name)
 			relPath, err := filepath.Rel(rootDir, fullPath)
 			if err != nil {

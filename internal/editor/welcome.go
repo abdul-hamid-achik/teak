@@ -78,36 +78,33 @@ func (w *Welcome) View() string {
 		"   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝",
 	}
 
+	editorBg := w.theme.Editor.GetBackground()
 	subtitleStyle := w.theme.Editor
-	keyStyle := w.theme.HelpKey.Bold(true)
+	keyStyle := w.theme.HelpKey.Background(editorBg).Bold(true)
 	descStyle := w.theme.Editor
-	hintStyle := lipgloss.NewStyle().Foreground(w.theme.HelpBorder.GetForeground())
-
-	var lines []string
+	hintStyle := w.theme.Muted.Background(editorBg)
 
 	// Logo with color cycling — each line gets a different aurora color offset
+	var header []string
 	for i, l := range logo {
-		lines = append(lines, w.logoStyle(i).Render(l))
+		header = append(header, w.logoStyle(i).Render(l))
 	}
+	header = append(header, "", subtitleStyle.Render("A terminal code editor"), "", "")
 
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("A terminal code editor"))
-	lines = append(lines, "")
-	lines = append(lines, "")
-
-	hints := []struct{ key, desc string }{
-		{"Ctrl+B", "Toggle file tree"},
-		{"Ctrl+F", "Find in file"},
-		{"Ctrl+P", "Quick Open"},
-		{"Ctrl+Q", "Quit"},
-		{"F1", "Help"},
+	// Every row has the same width, so the centered block keeps keys and
+	// descriptions in two columns instead of centering each line alone.
+	keyWidth, descWidth := 0, 0
+	for _, h := range welcomeHints {
+		keyWidth = max(keyWidth, lipgloss.Width(h.key))
+		descWidth = max(descWidth, lipgloss.Width(h.desc))
 	}
-	for _, h := range hints {
-		lines = append(lines, keyStyle.Render(h.key)+"  "+descStyle.Render(h.desc))
+	hints := make([]string, 0, len(welcomeHints))
+	for _, h := range welcomeHints {
+		hints = append(hints, keyStyle.Render(padRight(h.key, keyWidth))+descStyle.Render("  "+padRight(h.desc, descWidth)))
 	}
+	footer := []string{"", hintStyle.Render("Open a file from the tree to get started.")}
 
-	lines = append(lines, "")
-	lines = append(lines, hintStyle.Render("Open a file from the tree to get started."))
+	lines := w.fitRows(header, hints, footer)
 
 	content := strings.Join(lines, "\n")
 
@@ -117,6 +114,47 @@ func (w *Welcome) View() string {
 		Width(w.width).
 		Height(w.height).
 		Render(content)
+}
+
+// welcomeHints are the starters that work with no file open, most useful
+// first: a short terminal drops rows from the end.
+var welcomeHints = []struct{ key, desc string }{
+	{"Ctrl+P", "Quick Open"},
+	{"Ctrl+Shift+P", "Command Palette"},
+	{"F1", "Help"},
+	{"Ctrl+N", "New File"},
+	{"Ctrl+Shift+F", "Find in Project"},
+	{"Ctrl+B", "Toggle file tree"},
+	{"Ctrl+Q", "Quit"},
+}
+
+// fitRows joins the welcome sections, dropping content that does not fit the
+// height: the footer first, then trailing hints (never below the first three),
+// then the logo, then the remaining hints.
+func (w *Welcome) fitRows(header, hints, footer []string) []string {
+	join := func(h, hs, f []string) []string {
+		rows := append(append(append([]string{}, h...), hs...), f...)
+		return rows
+	}
+	rows := join(header, hints, footer)
+	if w.height <= 0 || len(rows) <= w.height {
+		return rows
+	}
+	rows = join(header, hints, nil)
+	for len(rows) > w.height && len(hints) > 3 {
+		hints = hints[:len(hints)-1]
+		rows = join(header, hints, nil)
+	}
+	if len(rows) > w.height {
+		// Keep the tagline, drop the logo and its spacer.
+		header = header[len(header)-3 : len(header)-2]
+		rows = join(header, hints, nil)
+	}
+	for len(rows) > w.height && len(hints) > 0 {
+		hints = hints[:len(hints)-1]
+		rows = join(header, hints, nil)
+	}
+	return rows
 }
 
 // logoStyle returns a themed accent style for a logo line.

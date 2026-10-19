@@ -812,3 +812,52 @@ func TestFileWatcher_WatchFileSkipsRedundantParentWatch(t *testing.T) {
 		t.Fatalf("WatchFile() added a redundant watch: before=%d after=%d", before, after)
 	}
 }
+
+// Git lock files and attribute-only events are side effects of reading the
+// repository: `git status` itself creates and removes .git/index.lock and can
+// touch the index's attributes. Treating them as tree changes made the git
+// panel's own refresh trigger the next refresh, several times a second, for
+// the whole session. Real repository changes (HEAD, refs, the index itself)
+// still count.
+func TestFileWatcherIgnoresGitLockFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "refs", "heads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(root, ".git")
+	tests := []struct {
+		name string
+		path string
+		op   fsnotify.Op
+		want bool
+	}{
+		{"index lock created", filepath.Join(gitDir, "index.lock"), fsnotify.Create, false},
+		{"index lock removed", filepath.Join(gitDir, "index.lock"), fsnotify.Remove, false},
+		{"ref lock created", filepath.Join(gitDir, "refs", "heads", "main.lock"), fsnotify.Create, false},
+		{"index attributes touched", filepath.Join(gitDir, "index"), fsnotify.Chmod, false},
+		{"HEAD rewritten", filepath.Join(gitDir, "HEAD"), fsnotify.Write, true},
+		{"index replaced", filepath.Join(gitDir, "index"), fsnotify.Create, true},
+		{"branch ref updated", filepath.Join(gitDir, "refs", "heads", "main"), fsnotify.Write, true},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fw, err := newFileWatcher(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fw.Close()
+
+			fw.processEvent(fsnotify.Event{Name: tt.path, Op: tt.op}, time.Unix(1_700_000_000+int64(i), 0))
+			select {
+			case msg := <-fw.msgChan:
+				if _, ok := msg.(TreeChangedMsg); ok != tt.want {
+					t.Errorf("got %T, want tree change = %v", msg, tt.want)
+				}
+			case <-time.After(100 * time.Millisecond):
+				if tt.want {
+					t.Error("no TreeChangedMsg for a real repository change")
+				}
+			}
+		})
+	}
+}

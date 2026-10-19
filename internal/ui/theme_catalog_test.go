@@ -100,7 +100,7 @@ func TestApplyTextInputThemeMakesLightThemeTextExplicit(t *testing.T) {
 	ApplyTextInputTheme(&input, theme)
 	styles := input.Styles()
 	if styles.Focused.Text.GetForeground() != theme.Editor.GetForeground() ||
-		styles.Focused.Placeholder.GetForeground() != theme.Gutter.GetForeground() ||
+		styles.Focused.Placeholder.GetForeground() != theme.Muted.GetForeground() ||
 		styles.Cursor.Color != theme.PromptAccent.GetForeground() {
 		t.Fatal("text input did not receive readable theme foregrounds")
 	}

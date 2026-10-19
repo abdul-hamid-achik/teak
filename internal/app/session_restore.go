@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,13 @@ func sessionRestoreCmd(ctx context.Context, generation uint64, rootDir string) t
 			return sessionRestoreResultMsg{Generation: generation, Err: err}
 		}
 		state, err := loadSessionForRestore(ctx, rootDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			// No saved session is the normal first launch in a workspace, not
+			// a failure. Only this load is exempt: a missing workspace above,
+			// and corrupt or non-regular session files, still surface.
+			log.Debug("no saved session", "root", rootDir)
+			return sessionRestoreResultMsg{Generation: generation}
+		}
 		if err != nil {
 			return sessionRestoreResultMsg{Generation: generation, Err: err}
 		}

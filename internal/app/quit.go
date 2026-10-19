@@ -56,7 +56,7 @@ func (m Model) requestQuit() (Model, tea.Cmd) {
 		return m.finalizeQuit()
 	}
 
-	message := fmt.Sprintf("You have %d unsaved file(s):", len(dirtyNames))
+	message := unsavedFilesMessage(len(dirtyNames))
 	m.unsavedConfirm = overlay.NewConfirm(
 		"Unsaved Changes", message, dirtyNames,
 		[]overlay.Button{
@@ -66,6 +66,13 @@ func (m Model) requestQuit() (Model, tea.Cmd) {
 		}, m.theme,
 	)
 	return m, nil
+}
+
+func unsavedFilesMessage(n int) string {
+	if n == 1 {
+		return "You have 1 unsaved file:"
+	}
+	return fmt.Sprintf("You have %d unsaved files:", n)
 }
 
 // finalizeQuit performs terminal cleanup after the quit decision is settled.

@@ -174,7 +174,7 @@ func (tb TabBar) visibleStart(start int) int {
 func (tb TabBar) rangeContainsActive(start int, texts []string) bool {
 	remaining := tb.Width
 	for i := start; i < len(tb.Tabs) && remaining > 0; i++ {
-		width := tabNaturalWidth(texts[i])
+		width := tabNaturalWidth(tb.Tabs[i], texts[i])
 		if i == start {
 			width = min(width, remaining)
 		}
@@ -186,8 +186,14 @@ func (tb TabBar) rangeContainsActive(start int, texts []string) bool {
 	return false
 }
 
-func tabNaturalWidth(text string) int {
-	return tabLabelPadding + min(runewidth.StringWidth(text), maxTabLabelWidth) + tabCloseWidth
+// tabNaturalWidth is the width a tab wants before the strip runs out of room.
+// The dirty and diagnostic glyphs are measured with the label but sit outside
+// the maxTabLabelWidth cap, which bounds the file name alone: otherwise a
+// tab carrying both glyphs would truncate a name that fits.
+func tabNaturalWidth(tab Tab, text string) int {
+	indicators := runewidth.StringWidth(tabIndicatorPrefix(tab))
+	name := max(0, runewidth.StringWidth(text)-indicators)
+	return tabLabelPadding + indicators + min(name, maxTabLabelWidth) + tabCloseWidth
 }
 
 func tabLabelText(tab Tab) string {
@@ -196,6 +202,12 @@ func tabLabelText(tab Tab) string {
 
 // tabLabelWithName prefixes name with the tab's dirty and diagnostic glyphs.
 func tabLabelWithName(tab Tab, name string) string {
+	return tabIndicatorPrefix(tab) + name
+}
+
+// tabIndicatorPrefix returns the dirty and diagnostic glyphs that precede a
+// tab's name, each followed by a space.
+func tabIndicatorPrefix(tab Tab) string {
 	// Dirty and diagnostics use distinct glyphs: a shared marker made a dirty
 	// file with errors indistinguishable from a clean file with errors.
 	var prefix strings.Builder
@@ -208,7 +220,7 @@ func tabLabelWithName(tab Tab, name string) string {
 	case 2:
 		prefix.WriteString("▲ ")
 	}
-	return prefix.String() + name
+	return prefix.String()
 }
 
 // tabTexts returns the full text each tab displays, before truncation.
@@ -291,24 +303,28 @@ func truncateTabLabel(label string, width int) string {
 	return b.String() + ellipsis
 }
 
-func styleTabLabel(tab Tab, label string, theme ui.Theme) string {
+// styleTabLabel colors the indicator glyphs of a plain label. Every segment is
+// rendered on base, the tab's own colors: lipgloss closes each glyph's style
+// with a reset, and an unstyled remainder would fall back to the terminal
+// default instead of the tab background.
+func styleTabLabel(tab Tab, label string, theme ui.Theme, base lipgloss.Style) string {
 	var sb strings.Builder
 	rest := label
 	if tab.Dirty && strings.HasPrefix(rest, "● ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(theme.GitModified.GetForeground()).Render("●"))
-		sb.WriteString(" ")
+		sb.WriteString(base.Foreground(theme.GitModified.GetForeground()).Render("●"))
+		sb.WriteString(base.Render(" "))
 		rest = strings.TrimPrefix(rest, "● ")
 	}
 	if tab.DiagSeverity == 1 && strings.HasPrefix(rest, "✗ ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(theme.DiagError.GetForeground()).Render("✗"))
-		sb.WriteString(" ")
+		sb.WriteString(base.Foreground(theme.DiagError.GetForeground()).Render("✗"))
+		sb.WriteString(base.Render(" "))
 		rest = strings.TrimPrefix(rest, "✗ ")
 	} else if tab.DiagSeverity == 2 && strings.HasPrefix(rest, "▲ ") {
-		sb.WriteString(lipgloss.NewStyle().Foreground(theme.DiagWarning.GetForeground()).Render("▲"))
-		sb.WriteString(" ")
+		sb.WriteString(base.Foreground(theme.DiagWarning.GetForeground()).Render("▲"))
+		sb.WriteString(base.Render(" "))
 		rest = strings.TrimPrefix(rest, "▲ ")
 	}
-	sb.WriteString(rest)
+	sb.WriteString(base.Render(rest))
 	return sb.String()
 }
 
@@ -330,7 +346,7 @@ func (tb TabBar) View() string {
 		if i < start || remaining <= 0 {
 			continue
 		}
-		width := min(tabNaturalWidth(texts[i]), remaining)
+		width := min(tabNaturalWidth(tab, texts[i]), remaining)
 		if width <= 0 {
 			break
 		}
@@ -359,7 +375,12 @@ func (tb TabBar) View() string {
 			labelWidth -= tabCloseWidth
 		}
 		label := truncateTabLabel(texts[i], labelWidth)
-		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label, tb.theme)))
+		base := lipgloss.NewStyle().
+			Foreground(labelStyle.GetForeground()).
+			Background(labelStyle.GetBackground()).
+			Bold(labelStyle.GetBold()).
+			Italic(labelStyle.GetItalic())
+		styledLabel := zone.Mark(TabZoneID(tab), labelStyle.Render(styleTabLabel(tab, label, tb.theme, base)))
 		if showClose {
 			styledClose := zone.Mark(TabCloseZoneID(tab), closeStyle.Render(" × "))
 			tabs = append(tabs, styledLabel+styledClose)

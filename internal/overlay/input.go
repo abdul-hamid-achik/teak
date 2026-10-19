@@ -40,12 +40,14 @@ func NewInput(prompt, initial string, theme ui.Theme) *Input {
 	ti.CharLimit = 4096
 	ti.SetValue(initial)
 	ui.ApplyTextInputTheme(&ti, theme)
-	return &Input{
+	in := &Input{
 		Prompt: prompt,
 		input:  ti,
 		theme:  theme,
 		width:  60,
 	}
+	in.input.SetWidth(in.inputWidth())
+	return in
 }
 
 // Focus gives the prompt keyboard focus and returns its blink command.
@@ -56,7 +58,17 @@ func (i *Input) Focus() tea.Cmd {
 // SetWidth limits the prompt to the available terminal width.
 func (i *Input) SetWidth(width int) {
 	i.width = max(1, width)
-	i.input.SetWidth(max(1, min(i.renderWidth()-8, 80)))
+	i.input.SetWidth(i.inputWidth())
+}
+
+// contentWidth is the area inside the border and padding.
+func (i *Input) contentWidth() int {
+	return max(1, i.renderWidth()-6)
+}
+
+// inputWidth sizes the field so prompt, text and cursor fill the content width.
+func (i *Input) inputWidth() int {
+	return max(1, i.contentWidth()-lipgloss.Width(i.input.Prompt)-1)
 }
 
 func (i *Input) renderWidth() int {
@@ -133,7 +145,7 @@ func (i *Input) resultCommand() tea.Cmd {
 func (i *Input) View() string {
 	titleStyle := i.theme.HelpTitle
 	promptStyle := lipgloss.NewStyle().Foreground(i.theme.TreeEntry.GetForeground())
-	hintStyle := lipgloss.NewStyle().Foreground(i.theme.Gutter.GetForeground())
+	hintStyle := lipgloss.NewStyle().Foreground(i.theme.Muted.GetForeground())
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Plugin input"))
@@ -142,7 +154,7 @@ func (i *Input) View() string {
 		sb.WriteString(promptStyle.Render(i.Prompt))
 		sb.WriteString("\n\n")
 	}
-	sb.WriteString(i.input.View())
+	sb.WriteString(fitWidth(i.input.View(), i.contentWidth()))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("Enter to accept • Esc to cancel"))
 
@@ -153,7 +165,7 @@ func (i *Input) View() string {
 		Background(i.theme.HelpBorder.GetBackground()).
 		Padding(1, 2).
 		Width(width).
-		Render(sb.String())
+		Render(keepPanelBackground(sb.String(), panelBackground(i.theme)))
 }
 
 // IsDismissed implements Overlay.

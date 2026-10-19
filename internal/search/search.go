@@ -3,6 +3,10 @@ package search
 import (
 	"context"
 	"fmt"
+	"image/color"
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,18 +131,18 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 	ti.Placeholder = "Search..."
 	ti.CharLimit = 256
 	ti.SetWidth(50)
-	ui.ApplyTextInputTheme(&ti, theme)
+	applyPanelInputTheme(&ti, theme)
 
 	sp := spinner.New(
 		spinner.WithSpinner(spinner.Dot),
-		spinner.WithStyle(theme.PromptMuted),
+		spinner.WithStyle(onPanel(theme, theme.Muted)),
 	)
 
 	ri := textinput.New()
 	ri.Placeholder = "Replace in project results..."
 	ri.CharLimit = 256
 	ri.SetWidth(50)
-	ui.ApplyTextInputTheme(&ri, theme)
+	applyPanelInputTheme(&ri, theme)
 
 	return Model{
 		input:        ti,
@@ -153,9 +157,57 @@ func New(theme ui.Theme, rootDir string, mode Mode) Model {
 // SetTheme updates input and spinner styles without clearing a search.
 func (m *Model) SetTheme(theme ui.Theme) {
 	m.theme = theme
-	ui.ApplyTextInputTheme(&m.input, theme)
-	ui.ApplyTextInputTheme(&m.replaceInput, theme)
-	m.spinner.Style = theme.PromptMuted
+	applyPanelInputTheme(&m.input, theme)
+	applyPanelInputTheme(&m.replaceInput, theme)
+	m.spinner.Style = onPanel(theme, theme.Muted)
+}
+
+// onPanel returns style on the search box background. Lipgloss styles end with
+// a reset, so every segment drawn inside the box has to carry the background
+// itself or it paints a dark chip into the panel.
+func onPanel(theme ui.Theme, style lipgloss.Style) lipgloss.Style {
+	return style.Background(theme.SearchBox.GetBackground())
+}
+
+// applyPanelInputTheme is ui.ApplyTextInputTheme with the panel's text color:
+// the input sits on the box, not on the editor. Its background is painted by
+// paintBackground, because Bubbles renders the idle cursor cell unstyled.
+func applyPanelInputTheme(input *textinput.Model, theme ui.Theme) {
+	ui.ApplyTextInputTheme(input, theme)
+	styles := input.Styles()
+	styles.Focused.Text = styles.Focused.Text.Foreground(theme.Panel.GetForeground())
+	styles.Blurred.Text = styles.Blurred.Text.Foreground(theme.Panel.GetForeground())
+	input.SetStyles(styles)
+}
+
+// paintBackground sets bg for s and re-applies it after every SGR reset, so
+// cells that a component renders without any style (Bubbles draws its idle
+// cursor cell that way) still sit on the panel instead of showing the
+// terminal default.
+func paintBackground(s string, bg color.Color) string {
+	r, g, b, _ := bg.RGBA()
+	set := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r>>8, g>>8, b>>8)
+	var sb strings.Builder
+	sb.WriteString(set)
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				sb.WriteString(s[i : j+1])
+				if params := s[i+2 : j]; s[j] == 'm' && (params == "" || params == "0") {
+					sb.WriteString(set)
+				}
+				i = j + 1
+				continue
+			}
+		}
+		sb.WriteByte(s[i])
+		i++
+	}
+	return sb.String()
 }
 
 // Focus focuses the text input and returns the cursor blink command.
@@ -576,11 +628,19 @@ func (m *Model) ensureCursorVisible() {
 	}
 }
 
+const (
+	searchBoxMinWidth = 60
+	searchBoxMaxWidth = 100
+)
+
+// boxWidth grows with the terminal so previews are not cut after a few words,
+// but never past what fits.
 func (m Model) boxWidth() int {
 	if m.width <= 0 {
-		return 60
+		return searchBoxMinWidth
 	}
-	return min(60, max(m.theme.SearchBox.GetHorizontalFrameSize()+1, m.width))
+	target := min(searchBoxMaxWidth, max(searchBoxMinWidth, m.width*85/100))
+	return min(target, max(m.theme.SearchBox.GetHorizontalFrameSize()+1, m.width))
 }
 
 func (m Model) innerWidth() int {
@@ -590,68 +650,57 @@ func (m Model) innerWidth() int {
 // headerView is also the source of the result rows used for mouse hit testing.
 func (m Model) headerView(markZones bool) string {
 	var sb strings.Builder
+	p := onPanel(m.theme, m.theme.Panel)
+	muted := onPanel(m.theme, m.theme.Muted)
+	accent := onPanel(m.theme, m.theme.PromptAccent)
 
 	// Mode toggle
-	modeStyle := m.theme.PromptMuted
-	activeMode := m.theme.PromptAccent
-	var textLabel, semLabel string
+	textLabel, semLabel := muted.Render("Text"), accent.Render("Semantic")
 	if m.mode == ModeText {
-		textLabel = activeMode.Render("Text")
-		semLabel = modeStyle.Render("Semantic")
-	} else {
-		textLabel = modeStyle.Render("Text")
-		semLabel = activeMode.Render("Semantic")
+		textLabel, semLabel = accent.Render("Text"), muted.Render("Semantic")
 	}
-	sb.WriteString(m.theme.HelpTitle.Render("Search") + "  " + textLabel + modeStyle.Render("  |  ") + semLabel + modeStyle.Render("  (Tab)"))
+	sb.WriteString(onPanel(m.theme, m.theme.HelpTitle).Render("Search") + p.Render("  ") + textLabel + muted.Render("  |  ") + semLabel + muted.Render("  (Tab)"))
 	if m.mode == ModeText {
 		sb.WriteByte('\n')
-		flagOn := m.theme.PromptAccent
-		if m.caseSensitive {
-			sb.WriteString(flagOn.Render("Aa Alt+C"))
-		} else {
-			sb.WriteString(modeStyle.Render("Aa Alt+C"))
+		toggle := func(on bool, label string) string {
+			if on {
+				return accent.Render(label)
+			}
+			return muted.Render(label)
 		}
-		if m.wholeWord {
-			sb.WriteString("  " + flagOn.Render("W Alt+W"))
-		} else {
-			sb.WriteString("  " + modeStyle.Render("W Alt+W"))
-		}
-		if m.regex {
-			sb.WriteString("  " + flagOn.Render(".* Ctrl+R"))
-		} else {
-			sb.WriteString("  " + modeStyle.Render(".* Ctrl+R"))
-		}
+		sb.WriteString(toggle(m.caseSensitive, "Aa Alt+C"))
+		sb.WriteString(p.Render("  ") + toggle(m.wholeWord, "W Alt+W"))
+		sb.WriteString(p.Render("  ") + toggle(m.regex, ".* Ctrl+R"))
 	}
 	sb.WriteByte('\n')
 	sb.WriteByte('\n')
 
 	// Input
-	sb.WriteString(m.input.View())
+	sb.WriteString(paintBackground(m.input.View(), m.theme.SearchBox.GetBackground()))
 	sb.WriteByte('\n')
 	if m.showReplace {
-		arrowStyle := m.theme.PromptMuted
-		sb.WriteString(arrowStyle.Render("  ⤷ ") + m.replaceInput.View() + "\n")
+		sb.WriteString(muted.Render("  ⤷ ") + paintBackground(m.replaceInput.View(), m.theme.SearchBox.GetBackground()) + "\n")
 		replace := m.theme.ReplaceButton.Render("Replace")
 		all := m.theme.ReplaceButton.Render("All")
 		if markZones {
 			replace = zone.Mark("search-replace-btn", replace)
 			all = zone.Mark("search-replace-all-btn", all)
 		}
-		sb.WriteString(replace + " " + all)
+		sb.WriteString(replace + p.Render(" ") + all)
 		sb.WriteByte('\n')
 	}
 	sb.WriteByte('\n')
 
 	if m.indexing {
-		sb.WriteString(m.spinner.View() + " " + m.theme.PromptMuted.Render("Indexing project..."))
+		sb.WriteString(m.spinner.View() + p.Render(" ") + muted.Render("Indexing project..."))
 		sb.WriteByte('\n')
 	} else if m.searching {
-		sb.WriteString(m.theme.PromptMuted.Render("Searching..."))
+		sb.WriteString(muted.Render("Searching..."))
 		sb.WriteByte('\n')
 	}
 
 	if m.errMsg != "" {
-		sb.WriteString(m.theme.PromptDanger.Render(strings.ReplaceAll(m.errMsg, "\n", " ")))
+		sb.WriteString(onPanel(m.theme, m.theme.PromptDanger).Render(strings.ReplaceAll(m.errMsg, "\n", " ")))
 		sb.WriteByte('\n')
 	}
 
@@ -666,6 +715,7 @@ func (m Model) headerView(markZones bool) string {
 func (m Model) View() string {
 	var sb strings.Builder
 	sb.WriteString(m.headerView(true))
+	muted := onPanel(m.theme, m.theme.Muted)
 
 	// Scrollable results
 	visible := m.maxVisibleResults()
@@ -674,39 +724,153 @@ func (m Model) View() string {
 		endIdx = len(m.results)
 	}
 
+	re := m.matchPattern()
 	for i := m.scrollY; i < endIdx; i++ {
-		r := m.results[i]
-		var line string
-		if r.SymbolName != "" {
-			symbol := truncStr(r.SymbolName, 20)
-			line = fmt.Sprintf("%s:%d  %s  %s", truncPath(r.FilePath, 20), r.Line+1, m.theme.PromptAccent.Render(symbol), truncStr(r.Preview, m.innerWidth()))
-		} else {
-			line = fmt.Sprintf("%s:%d  %s", truncPath(r.FilePath, 25), r.Line+1, truncStr(r.Preview, m.innerWidth()))
-		}
-		line = ansi.Truncate(line, m.innerWidth(), "…")
-		if i == m.cursor {
-			sb.WriteString(m.theme.SearchActive.Render(line))
-		} else {
-			sb.WriteString(m.theme.SearchResult.Render(line))
-		}
+		sb.WriteString(m.resultRow(m.results[i], i == m.cursor, re))
 		if i < endIdx-1 {
 			sb.WriteByte('\n')
 		}
 	}
 
 	if len(m.results) == 0 && m.input.Value() != "" && !m.searching && !m.indexing {
-		sb.WriteString(m.theme.PromptMuted.Render("No results"))
+		sb.WriteString(muted.Render("No results"))
 	}
 
-	// Scroll hint
+	// Scroll hint, aligned with the result rows above it.
 	if len(m.results) > visible {
 		sb.WriteByte('\n')
-		hint := fmt.Sprintf("  %d/%d results", min(m.cursor+1, len(m.results)), len(m.results))
-		sb.WriteString(m.theme.PromptMuted.Render(hint))
+		hint := fmt.Sprintf("%d/%d results", min(m.cursor+1, len(m.results)), len(m.results))
+		sb.WriteString(muted.Render(hint))
 	}
 
-	content := sb.String()
-	return m.theme.SearchBox.Width(m.boxWidth()).Render(content)
+	// Pad every row to the content width with the panel background so blank
+	// rows and short rows are painted too, not left to the terminal default.
+	p := onPanel(m.theme, m.theme.Panel)
+	lines := strings.Split(sb.String(), "\n")
+	for i, line := range lines {
+		if gap := m.innerWidth() - ansi.StringWidth(line); gap > 0 {
+			lines[i] = line + p.Render(strings.Repeat(" ", gap))
+		}
+	}
+	return m.theme.SearchBox.Width(m.boxWidth()).Render(strings.Join(lines, "\n"))
+}
+
+// matchPattern compiles the pattern used to highlight matches inside previews.
+// Semantic results are ranked by meaning rather than text, so there is nothing
+// to highlight; an invalid pattern simply highlights nothing.
+func (m Model) matchPattern() *regexp.Regexp {
+	query := m.input.Value()
+	if m.mode != ModeText || query == "" {
+		return nil
+	}
+	re, err := CompilePattern(query, SearchOpts{Regex: m.regex, CaseSensitive: m.caseSensitive, WholeWord: m.wholeWord})
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
+// textSpan is a run of one style inside a result row.
+type textSpan struct {
+	text  string
+	style lipgloss.Style
+}
+
+// resultRow renders one result as `path:line  [symbol  ]preview`, with the
+// location muted and the matched text of the preview highlighted. The row is
+// cut to the content width with a single trailing ellipsis and always filled
+// to that width, so the selected row is one even block.
+func (m Model) resultRow(r Result, selected bool, re *regexp.Regexp) string {
+	width := m.innerWidth()
+	base := onPanel(m.theme, m.theme.SearchResult)
+	matchStyle := m.theme.FindMatch
+	if selected {
+		base = m.theme.SearchActive
+		matchStyle = m.theme.FindMatchCurrent
+	}
+	bg := base.GetBackground()
+	text := lipgloss.NewStyle().Background(bg).Foreground(base.GetForeground())
+	locStyle := text.Foreground(readableForeground(m.theme.Muted.GetForeground(), base.GetForeground(), bg))
+
+	pathMax := min(40, max(25, width/3))
+	spans := []textSpan{
+		{truncPath(r.FilePath, pathMax) + ":" + strconv.Itoa(r.Line+1), locStyle},
+		{"  ", text},
+	}
+	if r.SymbolName != "" {
+		spans = append(spans,
+			textSpan{truncStr(r.SymbolName, 20), text.Foreground(m.theme.PromptAccent.GetForeground())},
+			textSpan{"  ", text},
+		)
+	}
+	if re == nil {
+		spans = append(spans, textSpan{r.Preview, text})
+	} else {
+		last := 0
+		for _, at := range re.FindAllStringIndex(r.Preview, -1) {
+			if at[0] == at[1] {
+				continue
+			}
+			spans = append(spans, textSpan{r.Preview[last:at[0]], text}, textSpan{r.Preview[at[0]:at[1]], matchStyle})
+			last = at[1]
+		}
+		spans = append(spans, textSpan{r.Preview[last:], text})
+	}
+
+	var full strings.Builder
+	for _, span := range spans {
+		full.WriteString(span.text)
+	}
+	cut := ansi.Truncate(full.String(), width, "…")
+	body, ellipsis := cut, false
+	if cut != full.String() && strings.HasSuffix(cut, "…") {
+		body, ellipsis = strings.TrimSuffix(cut, "…"), true
+	}
+
+	var sb strings.Builder
+	offset := 0
+	for _, span := range spans {
+		start, end := offset, offset+len(span.text)
+		offset = end
+		if start >= len(body) || span.text == "" {
+			continue
+		}
+		sb.WriteString(span.style.Render(body[start:min(end, len(body))]))
+	}
+	if ellipsis {
+		sb.WriteString(text.Render("…"))
+	}
+	if gap := width - ansi.StringWidth(cut); gap > 0 {
+		sb.WriteString(text.Render(strings.Repeat(" ", gap)))
+	}
+	return sb.String()
+}
+
+// readableForeground returns preferred when it keeps 4.5:1 contrast on bg and
+// fallback otherwise. Muted text is tuned for the editor and panel backgrounds;
+// the selected row is lighter and may need the regular text color.
+func readableForeground(preferred, fallback, bg color.Color) color.Color {
+	if contrastRatio(preferred, bg) >= 4.5 {
+		return preferred
+	}
+	return fallback
+}
+
+func contrastRatio(a, b color.Color) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	return (math.Max(la, lb) + 0.05) / (math.Min(la, lb) + 0.05)
+}
+
+func relativeLuminance(c color.Color) float64 {
+	linear := func(v uint32) float64 {
+		x := float64(v) / 65535
+		if x <= 0.03928 {
+			return x / 12.92
+		}
+		return math.Pow((x+0.055)/1.055, 2.4)
+	}
+	r, g, b, _ := c.RGBA()
+	return 0.2126*linear(r) + 0.7152*linear(g) + 0.0722*linear(b)
 }
 
 func truncPath(path string, maxLen int) string {

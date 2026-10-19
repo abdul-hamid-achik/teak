@@ -443,9 +443,9 @@ func (m *Model) View() string {
 		var sb strings.Builder
 		sb.WriteString(m.theme.Gutter.Render("  No problems found"))
 		sb.WriteString("\n\n")
-		sb.WriteString(m.theme.Gutter.Render("  LSP diagnostics will appear here"))
+		sb.WriteString(m.theme.Muted.Render("  LSP diagnostics will appear here"))
 		sb.WriteString("\n")
-		sb.WriteString(m.theme.Gutter.Render("  when you open files with errors"))
+		sb.WriteString(m.theme.Muted.Render("  when you open files with errors"))
 		return sb.String()
 	}
 
@@ -465,7 +465,16 @@ func (m *Model) View() string {
 	return sb.String()
 }
 
-// renderProblem renders a single problem line.
+// minLocationWidth is the least room worth spending on a left-clipped
+// location; anything narrower shows too little of the path to be useful.
+const minLocationWidth = 8
+
+// renderProblem renders a single problem as one row: severity icon, the
+// diagnostic message, then the file location in the muted role. The message
+// leads because it is what the user is scanning for; in a narrow sidebar the
+// location is clipped from the left (keeping "file.go:39:2") or dropped
+// before any of the message is. Rows stay one cell-row tall because mouse
+// hit-testing maps a click row straight to a problem index.
 func (m *Model) renderProblem(index int) string {
 	if index >= len(m.problems) {
 		return ""
@@ -474,7 +483,6 @@ func (m *Model) renderProblem(index int) string {
 	p := m.problems[index]
 	isSelected := index == m.selectedIndex
 
-	// Severity icon
 	icon := "•"
 	var severityStyle lipgloss.Style
 	switch p.Severity {
@@ -492,50 +500,45 @@ func (m *Model) renderProblem(index int) string {
 		severityStyle = m.theme.DiagHint
 	}
 
-	// File path (relative)
-	relPath := p.RelativePath(m.rootDir)
+	rowStyle := m.theme.TreeEntry
+	if isSelected {
+		rowStyle = m.theme.TreeCursor
+	}
+	bg := rowStyle.GetBackground()
+	rowBase := lipgloss.NewStyle().Background(bg)
+	textStyle := rowBase.Foreground(rowStyle.GetForeground())
+	mutedStyle := rowBase.Foreground(m.theme.Muted.GetForeground())
 
-	// Line and column
-	location := fmt.Sprintf("%d:%d", p.Line+1, p.Col+1)
-
-	// Message (truncated if needed)
-	maxMessageWidth := max(0, m.width-20) // Reserve space for icon, path, location.
 	// Collapse line breaks: a multi-line LSP message must stay on one row.
-	message := ansi.Truncate(strings.Join(strings.Fields(p.Message), " "), maxMessageWidth, "...")
+	message := strings.Join(strings.Fields(p.Message), " ")
+	location := fmt.Sprintf("%s:%d:%d", p.RelativePath(m.rootDir), p.Line+1, p.Col+1)
 
-	// Build the line
-	var parts []string
-
-	// Icon
-	parts = append(parts, severityStyle.Render(icon))
-
-	// Space
-	parts = append(parts, " ")
-
-	// File path
-	pathStyle := m.theme.TreeEntry
-	if isSelected {
-		pathStyle = m.theme.TreeCursor
-	}
-	parts = append(parts, pathStyle.Render(relPath))
-
-	// Location
-	parts = append(parts, m.theme.Gutter.Render(":"+location))
-
-	// Message
-	msgStyle := m.theme.TreeEntry
-	if isSelected {
-		msgStyle = m.theme.TreeCursor
-	}
-	parts = append(parts, msgStyle.Render(" "+message))
-
-	line := strings.Join(parts, "")
-
-	// Apply selection background
-	if isSelected {
-		line = lipgloss.NewStyle().Background(m.theme.TreeCursor.GetBackground()).Render(line)
+	const gap = "  "
+	var locationPart string
+	if m.width <= 0 {
+		locationPart = location
+	} else {
+		budget := max(0, m.width-2) // icon + space
+		messageWidth := ansi.StringWidth(message)
+		locationWidth := ansi.StringWidth(location)
+		switch room := budget - messageWidth - len(gap); {
+		case room >= locationWidth:
+			locationPart = location
+		case room >= minLocationWidth:
+			locationPart = ansi.TruncateLeft(location, locationWidth-room+1, "…")
+		}
+		if messageWidth > budget {
+			message = ansi.Truncate(message, budget, "…")
+		}
 	}
 
+	line := severityStyle.Background(bg).Render(icon) + textStyle.Render(" "+message)
+	if locationPart != "" {
+		line += textStyle.Render(gap) + mutedStyle.Render(locationPart)
+	}
+	if pad := m.width - ansi.StringWidth(ansi.Strip(line)); isSelected && pad > 0 {
+		line += rowBase.Render(strings.Repeat(" ", pad))
+	}
 	return line
 }
 

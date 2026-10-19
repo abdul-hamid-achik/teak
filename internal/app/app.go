@@ -305,6 +305,7 @@ type modelState struct {
 	cachedFilesReady          bool                          // true after file list has been loaded
 	fileListGeneration        int                           // invalidates stale async file scans
 	fileListCancel            context.CancelFunc            // stops a superseded Quick Open scan
+	fileListStale             bool                          // the tree changed while the in-flight scan ran
 	problemsPanel             problems.Model                // problems panel for diagnostics
 	showSettings              bool                          // settings overlay visible
 	settingsM                 settings.Model                // settings editor model
@@ -2580,7 +2581,9 @@ func (m Model) handleFileList(msg FileListMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.cachedFiles = msg.Files
-	m.cachedFilesReady = true
+	// A scan the tree changed under is shown, but not trusted for reuse.
+	m.cachedFilesReady = !m.fileListStale
+	m.fileListStale = false
 	var filterCmd tea.Cmd
 	// If quick open picker is showing, update its items
 	if !m.overlayStack.IsEmpty() {
@@ -6192,11 +6195,7 @@ func (m *Model) startTreeRefresh(generation uint64) tea.Cmd {
 
 // handleTreeChange refreshes the file tree when the directory structure changes.
 func (m Model) handleTreeChange(msg TreeChangedMsg) (tea.Model, tea.Cmd) {
-	// Invalidate cached file list for quick open
-	m.cancelFileListScan()
-	m.cachedFilesReady = false
-	m.cachedFiles = nil
-	m.fileListGeneration++
+	m.invalidateQuickOpenFiles()
 	search.InvalidateSemanticIndex(m.rootDir)
 	// Reading a directory (and all expanded descendants) is deliberately
 	// deferred. Watcher events can arrive in bursts while build tools generate
@@ -6323,7 +6322,7 @@ func lipglossWidth(s string) int {
 // openQuickOpen pushes a Picker overlay for quick file opening.
 func (m Model) openQuickOpen() (tea.Model, tea.Cmd) {
 	m.cancelActiveEditorDrag()
-	picker := overlay.NewPicker("Open File", nil, m.theme, "quickopen")
+	picker := overlay.NewPendingPicker("Open File", m.theme, "quickopen")
 	picker.SetSize(min(m.width-4, 60), m.height-4)
 
 	var cmds []tea.Cmd
@@ -6354,6 +6353,7 @@ func (m *Model) cancelFileListScan() {
 	}
 	// Invalidate a result even if its goroutine returns after cancellation.
 	m.fileListGeneration++
+	m.fileListStale = false
 }
 
 func (m Model) handlePluginKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
@@ -6472,6 +6472,7 @@ func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 	m.cancelActiveEditorDrag()
 	items := m.buildCommandList()
 	picker := overlay.NewPicker("Command Palette", items, m.theme, "cmdpalette")
+	picker.SetDescriptionsRightAligned(true)
 	picker.SetSize(min(m.width-4, 60), m.height-4)
 	cmd := picker.Focus()
 	m.overlayStack.Push(picker)

@@ -25,13 +25,11 @@ func (m *Model) buildCommandList() []overlay.PickerItem {
 	commands := m.commandRegistry()
 	items := make([]overlay.PickerItem, len(commands))
 	for i, cmd := range commands {
-		label := cmd.Label
-		if cmd.Shortcut != "" {
-			label += "  " + cmd.Shortcut
-		}
+		// The shortcut is the description so the palette can right-align and
+		// dim it; the picker still matches queries against it.
 		items[i] = overlay.PickerItem{
-			Label:       label,
-			Description: "",
+			Label:       cmd.Label,
+			Description: cmd.Shortcut,
 			Value:       cmd,
 		}
 	}

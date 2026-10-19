@@ -2558,8 +2558,8 @@ func (e Editor) buildEditorMenuItems() []ContextMenuItem {
 		items = append(items,
 			ContextMenuItem{Label: ""}, // separator
 			ContextMenuItem{Label: "Go to Definition", Shortcut: "F12", Action: "goto_definition"},
-			ContextMenuItem{Label: "Find References", Action: "find_references"},
-			ContextMenuItem{Label: "Rename Symbol", Action: "rename_symbol"},
+			ContextMenuItem{Label: "Find References", Shortcut: "Shift+F12", Action: "find_references"},
+			ContextMenuItem{Label: "Rename Symbol", Shortcut: "F2", Action: "rename_symbol"},
 			ContextMenuItem{Label: "Format Document", Shortcut: "Ctrl+Alt+F", Action: "format_document"},
 		)
 	}

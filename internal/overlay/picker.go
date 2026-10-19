@@ -85,6 +85,7 @@ type Picker struct {
 	itemsCancel               context.CancelFunc
 	pendingSelect             bool
 	dismissAction             tea.Msg
+	descriptionsRight         bool
 }
 
 type scoredItem = PickerMatch
@@ -109,6 +110,7 @@ func NewPicker(title string, items []PickerItem, theme ui.Theme, zoneID string) 
 		zoneID:     zoneID,
 		instanceID: atomic.AddUint64(&pickerInstanceSequence, 1),
 	}
+	p.input.SetWidth(p.inputWidth())
 	p.refilter()
 	return p
 }
@@ -131,8 +133,33 @@ func (p *Picker) Focus() tea.Cmd {
 func (p *Picker) SetSize(w, h int) {
 	p.width = max(1, w)
 	p.maxHeight = max(1, h)
-	p.input.SetWidth(max(1, min(p.renderWidth()-8, 50)))
+	p.input.SetWidth(p.inputWidth())
 	p.ensureVisible()
+}
+
+// SetDescriptionsRightAligned renders each item's description right-aligned
+// at the end of its row (in the muted color) instead of after the label. It is
+// meant for hints such as keyboard shortcuts. When the label and hint do not
+// both fit, the label is truncated and the hint stays whole.
+func (p *Picker) SetDescriptionsRightAligned(on bool) { p.descriptionsRight = on }
+
+// boxWidth is the rendered width of the picker box including border and padding.
+func (p *Picker) boxWidth() int {
+	// renderWidth already caps the box to the terminal. Widening it to a fixed
+	// minimum here would overflow narrow terminals, so no minimum is applied.
+	return min(p.renderWidth(), 80)
+}
+
+// contentWidth is the width of the area inside the border and padding that
+// the input, item rows and footer all share.
+func (p *Picker) contentWidth() int {
+	return max(1, p.boxWidth()-6)
+}
+
+// inputWidth sizes the text input so prompt, text and the trailing cursor cell
+// fill the content width exactly, matching the item rows below.
+func (p *Picker) inputWidth() int {
+	return max(1, p.contentWidth()-lipgloss.Width(p.input.Prompt)-1)
 }
 
 func (p *Picker) renderWidth() int {
@@ -370,16 +397,8 @@ func (p *Picker) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 
 // View implements Overlay.
 func (p *Picker) View() string {
-	// renderWidth already caps the box to the terminal. Widening it to a fixed
-	// minimum here would overflow narrow terminals, so no minimum is applied.
-	boxWidth := p.renderWidth()
-	if boxWidth > 80 {
-		boxWidth = 80
-	}
-	contentWidth := boxWidth - 6 // border + padding
-	if contentWidth < 1 {
-		contentWidth = 1
-	}
+	boxWidth := p.boxWidth()
+	contentWidth := p.contentWidth()
 
 	var sb strings.Builder
 
@@ -388,59 +407,40 @@ func (p *Picker) View() string {
 	sb.WriteString(titleStyle.Render(p.title))
 	sb.WriteString("\n\n")
 
-	// Input
-	sb.WriteString(p.input.View())
+	// Input: the field spans the full content width on the panel background,
+	// so it lines up with the item rows instead of leaving a ragged strip.
+	sb.WriteString(fitWidth(p.input.View(), contentWidth))
 	sb.WriteByte('\n')
 
 	// Results
 	startIdx, endIdx := p.visibleRange()
 
-	itemStyle := p.theme.AutocompleteItem
-	cursorStyle := p.theme.AutocompleteCursor
-	descStyle := lipgloss.NewStyle().
-		Foreground(p.theme.Gutter.GetForeground())
-
 	for i := startIdx; i < endIdx; i++ {
-		si := p.filtered[i]
-		label := truncStr(si.Item.Label, contentWidth)
-		if si.Item.Description != "" {
-			descWidth := contentWidth - lipgloss.Width(label) - 2
-			if descWidth > 4 {
-				label += "  " + descStyle.Render(truncStr(si.Item.Description, descWidth))
-			}
-		}
-
-		style := itemStyle
-		if i == p.cursor {
-			style = cursorStyle
-		}
-		rendered := zone.Mark(p.itemZoneID(i), style.Width(contentWidth).Render(label))
 		sb.WriteByte('\n')
-		sb.WriteString(rendered)
+		sb.WriteString(zone.Mark(p.itemZoneID(i), p.renderRow(p.filtered[i].Item, i == p.cursor, contentWidth)))
 	}
 
+	muted := lipgloss.NewStyle().Foreground(p.theme.Muted.GetForeground())
 	if p.itemsPending {
 		sb.WriteByte('\n')
-		status := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
-		sb.WriteString(status.Render("  Loading..."))
+		sb.WriteString(muted.Render("  Loading..."))
 	} else if p.filterPending {
 		sb.WriteByte('\n')
-		status := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
-		sb.WriteString(status.Render("  Filtering..."))
+		sb.WriteString(muted.Render("  Filtering..."))
 	} else if len(p.filtered) == 0 {
 		sb.WriteByte('\n')
-		noMatch := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
-		sb.WriteString(noMatch.Render("  No matches"))
+		sb.WriteString(muted.Render("  No matches"))
 	}
 
-	// Scroll hint
+	// Scroll hint, right-aligned to the content width.
 	if len(p.filtered) > p.visibleCount() {
 		sb.WriteByte('\n')
-		hint := lipgloss.NewStyle().Foreground(p.theme.Gutter.GetForeground())
-		sb.WriteString(hint.Render(strings.Repeat(" ", max(0, contentWidth-10)) + countStr(p.cursor+1, len(p.filtered))))
+		count := countStr(p.cursor+1, len(p.filtered))
+		sb.WriteString(strings.Repeat(" ", max(0, contentWidth-lipgloss.Width(count))))
+		sb.WriteString(muted.Render(count))
 	}
 
-	content := sb.String()
+	content := keepPanelBackground(sb.String(), panelBackground(p.theme))
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(p.theme.HelpBorder.GetForeground()).
@@ -452,6 +452,50 @@ func (p *Picker) View() string {
 	// included) so Update can distinguish "inside the picker, missed every
 	// item" from "outside the picker" on mouse clicks.
 	return zone.Mark(p.boxZoneID(), boxStyle.Render(content))
+}
+
+// renderRow draws one item as exactly width cells. Every segment is styled
+// individually with the row's own style: the description needs the muted
+// foreground and the row background at once, which a single outer style
+// wrapped around an already-styled description cannot provide (the inner
+// reset would drop the row background for everything after it).
+func (p *Picker) renderRow(item PickerItem, selected bool, width int) string {
+	style := p.theme.AutocompleteItem
+	if selected {
+		style = p.theme.AutocompleteCursor
+	}
+	style = style.Inline(true)
+	hintStyle := style.Foreground(p.theme.Muted.GetForeground())
+
+	label, hint, gap := item.Label, "", 0
+	switch {
+	case item.Description == "":
+		label = truncStr(label, width)
+	case p.descriptionsRight:
+		hint = truncStr(item.Description, max(0, width-4))
+		hintWidth := lipgloss.Width(hint)
+		label = truncStr(label, max(1, width-hintWidth-2))
+		gap = max(2, width-lipgloss.Width(label)-hintWidth)
+	default:
+		label = truncStr(label, width)
+		if descWidth := width - lipgloss.Width(label) - 2; descWidth > 4 {
+			hint = truncStr(item.Description, descWidth)
+			gap = 2
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(style.Render(label))
+	used := lipgloss.Width(label)
+	if hint != "" {
+		sb.WriteString(style.Render(strings.Repeat(" ", gap)))
+		sb.WriteString(hintStyle.Render(hint))
+		used += gap + lipgloss.Width(hint)
+	}
+	if used < width {
+		sb.WriteString(style.Render(strings.Repeat(" ", width-used)))
+	}
+	return sb.String()
 }
 
 // IsDismissed implements Overlay.

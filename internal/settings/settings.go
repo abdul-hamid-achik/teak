@@ -2,11 +2,13 @@ package settings
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"teak/internal/config"
 	"teak/internal/ui"
 )
@@ -436,21 +438,28 @@ func (m *Model) HandleMouseClick(x, y int) (handled, openThemePicker bool) {
 	}
 	m.selectedSetting = idx
 
-	// A label click selects the row. The bracketed value/control region changes
-	// it, which avoids accidental edits when merely navigating with the mouse.
+	// A click on the label text selects the row. Everything after it (the gap
+	// that aligns the controls, then the bracketed control) acts, which avoids
+	// accidental edits when merely navigating with the mouse. The +/- stepper
+	// only reacts on the rendered control itself.
 	setting := m.SelectedSetting()
-	if setting != nil && x >= m.settingControlStart(setting) {
+	if setting != nil {
+		control := m.settingControlStart(setting)
 		switch setting.Type {
 		case TypeBool:
-			m.ToggleBoolValue()
+			if x >= m.settingActionStart(setting) {
+				m.ToggleBoolValue()
+			}
 		case TypeInt:
-			if x <= m.settingControlStart(setting)+2 {
-				m.DecrementIntValue()
-			} else {
-				m.IncrementIntValue()
+			if x >= control {
+				if x <= control+2 {
+					m.DecrementIntValue()
+				} else {
+					m.IncrementIntValue()
+				}
 			}
 		case TypeString:
-			if setting.ID == "ui.theme" {
+			if setting.ID == "ui.theme" && x >= m.settingActionStart(setting) {
 				return true, true
 			}
 		}
@@ -588,53 +597,85 @@ func (m *Model) Config() (config.Config, error) {
 	return cfg, nil
 }
 
-// View renders the settings UI.
+// View renders the settings UI. Every cell carries the panel background:
+// lipgloss styles end with a reset, so any segment rendered without it would
+// punch a dark chip into the surrounding box.
 func (m *Model) View() string {
 	if len(m.categories) == 0 {
 		return m.theme.Editor.Render("No settings available")
 	}
 
-	var sb strings.Builder
+	panel := m.theme.Panel
+	blank := m.fillLine("", panel)
 
-	// Title (centered)
-	title := m.theme.HelpTitle.Render("Settings")
-	sb.WriteString(title)
-	sb.WriteString("\n\n")
+	var lines []string
+	lines = append(lines, m.fillLine(m.styleOnPanel(m.theme.HelpTitle).Render("Settings"), panel), blank)
 
-	// Config path hint
-	configHint := fmt.Sprintf("Config: %s", m.configPath)
-	if available := m.width - 6; available > 0 && lipgloss.Width(configHint) > available {
-		configHint = truncateDisplay(configHint, available)
+	// Config path hint: the file name is the useful part, so the middle of a
+	// long path is elided instead of its tail.
+	const configPrefix = "Config: "
+	home, _ := os.UserHomeDir()
+	available := 1 << 30
+	if m.width > 0 {
+		available = m.width - len(configPrefix)
 	}
-	configHint = m.theme.Gutter.Render(configHint)
-	sb.WriteString(configHint)
-	sb.WriteString("\n\n")
+	configHint := configPrefix + displayConfigPath(m.configPath, home, available)
+	lines = append(lines, m.fillLine(m.styleOnPanel(m.theme.Muted).Render(configHint), panel), blank)
 
-	// Categories tabs
-	sb.WriteString(m.renderCategoryTabs())
-	sb.WriteString("\n\n")
+	lines = append(lines, m.fillLine(m.renderCategoryTabs(), panel), blank)
 
 	// Settings list with fixed height
-	sb.WriteString(m.renderSettingsList(m.visibleSettings()))
+	lines = append(lines, strings.Split(m.renderSettingsList(m.visibleSettings()), "\n")...)
+
 	if m.status != "" {
-		sb.WriteString("\n\n")
-		sb.WriteString(m.theme.Gutter.Render(m.status))
+		lines = append(lines, blank)
+		style := m.styleOnPanel(m.theme.Muted)
+		if m.width > 0 {
+			style = style.Width(m.width)
+		}
+		lines = append(lines, strings.Split(style.Render(m.status), "\n")...)
 	}
 
-	return sb.String()
+	return strings.Join(lines, "\n")
+}
+
+// styleOnPanel returns style with the panel background.
+func (m *Model) styleOnPanel(style lipgloss.Style) lipgloss.Style {
+	return style.Background(m.theme.Panel.GetBackground())
+}
+
+// fillLine clips line to the view width and pads it with style's background so
+// the row is one even block. A view without a size is left unpadded.
+func (m *Model) fillLine(line string, style lipgloss.Style) string {
+	if m.width <= 0 {
+		return line
+	}
+	if width := ansi.StringWidth(line); width > m.width {
+		line = ansi.Truncate(line, m.width, "")
+	} else if width < m.width {
+		line += style.Render(strings.Repeat(" ", m.width-width))
+	}
+	return line
+}
+
+// categoryTabStyle is the one definition of a tab's look, shared by rendering
+// and by the mouse hit bounds. Inactive tabs are muted text on the panel rather
+// than the editor-colored chip the sidebar tabs use.
+func (m *Model) categoryTabStyle(active bool) lipgloss.Style {
+	if active {
+		return m.styleOnPanel(m.theme.SidebarTabActive)
+	}
+	return m.styleOnPanel(m.theme.Muted).Padding(0, 1)
 }
 
 // renderCategoryTabs renders the category selection tabs.
 func (m *Model) renderCategoryTabs() string {
+	gap := m.theme.Panel.Render("  ")
 	var tabs []string
 	for i, cat := range m.categories {
-		style := m.theme.SidebarTabInactive
-		if i == m.selectedCategory {
-			style = m.theme.SidebarTabActive
-		}
-		tabs = append(tabs, style.Render(cat.Name))
+		tabs = append(tabs, m.categoryTabStyle(i == m.selectedCategory).Render(cat.Name))
 	}
-	return strings.Join(tabs, "  ")
+	return strings.Join(tabs, gap)
 }
 
 // renderSettingsList renders the settings for the current category.
@@ -658,6 +699,25 @@ func (m *Model) renderSettingsList(maxLines int) string {
 	return sb.String()
 }
 
+// labelColumn is the width of the "Label:" column for the active category, so
+// the controls of every row start at the same cell. It is capped so a narrow
+// view still has room for a control after the labels.
+func (m *Model) labelColumn() int {
+	cat := m.SelectedCategory()
+	if cat == nil {
+		return 0
+	}
+	widest := 0
+	for _, setting := range cat.Settings {
+		widest = max(widest, lipgloss.Width(setting.Label)+1)
+	}
+	if m.width > 0 {
+		// Two leading cells, two before the control, and room for "[✗ Disabled]".
+		widest = min(widest, max(8, m.width-2-2-14))
+	}
+	return widest
+}
+
 // renderSetting renders a single setting row.
 func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	var valueStr string
@@ -665,9 +725,9 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 	case TypeBool:
 		if val, ok := setting.Value.(bool); ok {
 			if val {
-				valueStr = m.theme.GitAdded.Render("[✓ Enabled]")
+				valueStr = "[✓ Enabled]"
 			} else {
-				valueStr = m.theme.Gutter.Render("[✗ Disabled]")
+				valueStr = "[✗ Disabled]"
 			}
 		}
 	case TypeInt:
@@ -688,22 +748,28 @@ func (m *Model) renderSetting(setting *Setting, isSelected bool) string {
 		}
 	}
 
-	// Build the line
-	labelStyle := m.theme.TreeEntry
+	// One base style per row: the selected row is a single highlight across the
+	// content width, every other row sits on the panel.
+	base := m.theme.Panel
 	if isSelected {
-		labelStyle = m.theme.TreeCursor
+		base = m.theme.TreeCursor
+	}
+	text := lipgloss.NewStyle().Background(base.GetBackground()).Foreground(base.GetForeground())
+	valueStyle := text
+	if setting.Type == TypeBool {
+		if enabled, _ := setting.Value.(bool); enabled {
+			valueStyle = text.Foreground(m.theme.GitAdded.GetForeground())
+		} else if !isSelected {
+			valueStyle = text.Foreground(m.theme.Muted.GetForeground())
+		}
 	}
 
-	line := fmt.Sprintf("  %s  %s",
-		labelStyle.Render(setting.Label+":"),
-		m.theme.Gutter.Render(valueStr),
-	)
+	labelCol := m.labelColumn()
+	label := ansi.Truncate(setting.Label+":", labelCol, "…")
+	label += strings.Repeat(" ", max(0, labelCol-ansi.StringWidth(label)))
 
-	if isSelected {
-		line = lipgloss.NewStyle().Background(m.theme.TreeCursor.GetBackground()).Render(line)
-	}
-
-	return line
+	line := text.Render("  "+label+"  ") + valueStyle.Render(valueStr)
+	return m.fillLine(line, text)
 }
 
 const (
@@ -753,11 +819,7 @@ func (m *Model) ensureSelectedVisible() {
 func (m *Model) categoryTabBounds(index int) (int, int) {
 	start := 0
 	for i, cat := range m.categories {
-		style := m.theme.SidebarTabInactive
-		if i == m.selectedCategory {
-			style = m.theme.SidebarTabActive
-		}
-		width := lipgloss.Width(style.Render(cat.Name))
+		width := lipgloss.Width(m.categoryTabStyle(i == m.selectedCategory).Render(cat.Name))
 		if i == index {
 			return start, start + width
 		}
@@ -767,22 +829,57 @@ func (m *Model) categoryTabBounds(index int) (int, int) {
 }
 
 func (m *Model) settingControlStart(setting *Setting) int {
-	// Two leading spaces, the label and colon, then two spaces before the
-	// bracketed control. lipgloss.Width handles labels containing non-ASCII.
-	return 2 + lipgloss.Width(setting.Label) + 1 + 2
+	// Two leading spaces, the padded "Label:" column, then two spaces before the
+	// bracketed control.
+	return 2 + m.labelColumn() + 2
 }
 
-func truncateDisplay(s string, width int) string {
-	if width <= 0 {
+// settingActionStart is where a click stops being a label click: just past the
+// row's own "Label:". The padding that aligns the controls belongs to the
+// control, so a short label does not shrink the clickable area.
+func (m *Model) settingActionStart(setting *Setting) int {
+	return min(m.settingControlStart(setting), 2+lipgloss.Width(setting.Label)+1)
+}
+
+// displayConfigPath shortens path for display: the home directory becomes "~"
+// and, when it still does not fit, the middle is elided so the file name stays
+// visible (~/…/teak/config.toml). It never feeds back into the path used for
+// saving.
+func displayConfigPath(path, home string, width int) string {
+	if path == "" || width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= width {
-		return s
+	if home = strings.TrimRight(home, "/"); home != "" && (path == home || strings.HasPrefix(path, home+"/")) {
+		path = "~" + path[len(home):]
 	}
-	if width <= 3 {
-		return lipgloss.NewStyle().MaxWidth(width).Render(s)
+	if ansi.StringWidth(path) <= width {
+		return path
 	}
-	return lipgloss.NewStyle().MaxWidth(width-3).Render(s) + "..."
+
+	prefix, rest := "…/", path
+	switch {
+	case strings.HasPrefix(path, "~/"):
+		prefix, rest = "~/…/", path[2:]
+	case strings.HasPrefix(path, "/"):
+		prefix, rest = "/…/", path[1:]
+	}
+	parts := strings.Split(rest, "/")
+	for keep := len(parts) - 1; keep >= 1; keep-- {
+		candidate := prefix + strings.Join(parts[len(parts)-keep:], "/")
+		if ansi.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+
+	// Not even "<prefix><file name>" fits: keep the end of the file name.
+	name := parts[len(parts)-1]
+	if ansi.StringWidth(name) <= width {
+		return name
+	}
+	if width == 1 {
+		return "…"
+	}
+	return "…" + ansi.TruncateLeft(name, ansi.StringWidth(name)-(width-1), "")
 }
 
 // PreviewTOML generates a TOML preview of current settings.

@@ -41,6 +41,12 @@ type Model struct {
 	connected bool
 	state     AgentState
 
+	// startReason and startHint describe why the last start attempt failed.
+	// They are empty when the agent is merely not configured, which the empty
+	// state tells apart from a configured agent that cannot be launched.
+	startReason string
+	startHint   string
+
 	promptFinalizeGeneration uint64
 	promptFinalizing         bool
 	discardFinalizedPrompt   bool
@@ -140,10 +146,19 @@ func (m *Model) SetTheme(theme ui.Theme) {
 func (m *Model) SetConnected(connected bool) {
 	m.connected = connected
 	if connected {
+		m.startReason, m.startHint = "", ""
 		m.state = AgentIdle
 	} else {
 		m.state = AgentDisconnected
 	}
+	m.invalidateChatCache()
+}
+
+// SetStartFailure records why the configured agent could not be started so the
+// empty state can show the real reason and how to fix it instead of the
+// not-configured instructions. An empty reason clears the failure.
+func (m *Model) SetStartFailure(reason, hint string) {
+	m.startReason, m.startHint = reason, hint
 	m.invalidateChatCache()
 }
 
@@ -1268,7 +1283,7 @@ func (m *Model) View() string {
 		inputView := m.input.View()
 		sb.WriteString(lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Render(" " + inputView))
 	} else {
-		sb.WriteString(lipgloss.NewStyle().Width(innerW).Foreground(m.theme.Gutter.GetForeground()).Render(" Agent not connected"))
+		sb.WriteString(lipgloss.NewStyle().Width(innerW).Foreground(m.theme.Muted.GetForeground()).Render(" Agent not connected"))
 	}
 
 	return sb.String()
@@ -1334,6 +1349,40 @@ func (m Model) renderHeader() string {
 	return title + modelLabel + dashes + ind
 }
 
+// disconnectedLines is the empty state shown while no agent session exists. It
+// distinguishes a configured agent that failed to start, whose reason and
+// install hint are the useful content, from an agent that was never configured.
+// Every wrapped row keeps the same left padding as its first row.
+func (m Model) disconnectedLines(width int) []string {
+	muted := lipgloss.NewStyle().Foreground(m.theme.Muted.GetForeground())
+	var lines []string
+	add := func(indent int, text string) {
+		pad := strings.Repeat(" ", indent)
+		for _, l := range wrapText(text, max(1, width-indent-1)) {
+			lines = append(lines, muted.Render(pad+l))
+		}
+	}
+
+	lines = append(lines, "")
+	add(1, "Agent not connected.")
+	lines = append(lines, "")
+	if m.startReason != "" {
+		add(1, m.startReason)
+		if m.startHint != "" {
+			lines = append(lines, "")
+			add(1, "Install with:")
+			add(3, m.startHint)
+		}
+		return lines
+	}
+	add(1, "Configure in ~/.config/teak/config.toml:")
+	add(3, "[agent]")
+	add(3, "enabled = true")
+	add(3, "command = \"opencode\"")
+	add(3, "args = [\"acp\"]")
+	return lines
+}
+
 func (m Model) buildChatLines(width int) []string {
 	lines, _, _ := m.buildChatLinesWithStreamMetadata(width)
 	return lines
@@ -1345,26 +1394,18 @@ func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int
 	var lines []string
 
 	if !m.connected {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Agent not connected."))
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Configure in ~/.config/teak/config.toml:"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   [agent]"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   enabled = true"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   command = \"opencode\""))
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render("   args = [\"acp\"]"))
-		return strings.Split(strings.Join(lines, "\n"), "\n"), nil, -1
+		return m.disconnectedLines(width), nil, -1
 	}
 
 	hasContent := len(m.messages) > 0 || len(m.streamBlocks) > 0 || m.loading || m.permission != nil || m.pendingWrite != nil
 	if !hasContent {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Try asking:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Muted.GetForeground()).Width(width).Render(" Try asking:"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"explain this function\""))
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"find usages of X\""))
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   \"fix the bug in auth.go\""))
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Width(width).Render(" Commands:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.Muted.GetForeground()).Width(width).Render(" Commands:"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   /model  — switch model"))
 		lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.TreeEntry.GetForeground()).Width(width).Render("   @       — attach file"))
 		return strings.Split(strings.Join(lines, "\n"), "\n"), nil, -1
@@ -1375,7 +1416,7 @@ func (m Model) buildChatLinesWithStreamMetadata(width int) ([]string, []int, int
 		contentW = 1
 	}
 
-	systemStyle := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Italic(true)
+	systemStyle := lipgloss.NewStyle().Foreground(m.theme.Muted.GetForeground()).Italic(true)
 
 	for _, msg := range m.messages {
 		lines = append(lines, "")
@@ -1432,7 +1473,7 @@ func (m Model) renderStreamBlock(block StreamBlock, contentW int) []string {
 			lines = append(lines, "  "+line)
 		}
 	case BlockThought:
-		thoughtStyle := lipgloss.NewStyle().Foreground(m.theme.Gutter.GetForeground()).Italic(true)
+		thoughtStyle := lipgloss.NewStyle().Foreground(m.theme.Muted.GetForeground()).Italic(true)
 		for _, line := range wrapText(block.Content, contentW) {
 			lines = append(lines, "  "+thoughtStyle.Render(line))
 		}

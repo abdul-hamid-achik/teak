@@ -194,6 +194,34 @@ func quickOpenCmd(ctx context.Context, rootDir string, generation int) tea.Cmd {
 	}
 }
 
+// invalidateQuickOpenFiles drops the cached project file list after a tree
+// change. A scan that an open Quick Open picker is still waiting for keeps
+// running instead of being cancelled: the picker has nothing else to show,
+// and tree changes can arrive faster than a scan completes (the git panel's
+// own `git status` churns .git/index.lock), so cancelling or restarting it
+// left the picker reporting "No matches" indefinitely. Its result is
+// displayed but marked stale, so the next Quick Open rescans.
+func (m *Model) invalidateQuickOpenFiles() {
+	m.cachedFilesReady = false
+	m.cachedFiles = nil
+	if m.quickOpenAwaitingScan() {
+		m.fileListStale = true
+		return
+	}
+	m.cancelFileListScan()
+	m.fileListGeneration++
+}
+
+// quickOpenAwaitingScan reports whether the Quick Open picker on top of the
+// overlay stack is still waiting for the in-flight project scan.
+func (m Model) quickOpenAwaitingScan() bool {
+	if m.fileListCancel == nil || m.overlayStack.IsEmpty() {
+		return false
+	}
+	picker, ok := m.overlayStack.Top().(*overlay.Picker)
+	return ok && picker.ZoneID() == "quickopen"
+}
+
 // filesToPickerItems converts file paths to picker items.
 func filesToPickerItems(files []string) []overlay.PickerItem {
 	return filesToPickerItemsWithRecent(files, nil)

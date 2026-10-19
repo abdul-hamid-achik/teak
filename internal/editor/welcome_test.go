@@ -153,11 +153,8 @@ func TestWelcomeViewContainsHints(t *testing.T) {
 	if !strings.Contains(view, "Toggle file tree") {
 		t.Error("expected 'Toggle file tree' hint")
 	}
-	if !strings.Contains(view, "Ctrl+F") {
-		t.Error("expected Ctrl+F hint")
-	}
-	if !strings.Contains(view, "Find in file") {
-		t.Error("expected 'Find in file' hint")
+	if strings.Contains(view, "Find in file") {
+		t.Error("Find in file does nothing without an open file and must not be listed")
 	}
 }
 
@@ -294,8 +291,11 @@ func TestWelcomeHints(t *testing.T) {
 
 	// Check all hints are present
 	expectedHints := []string{
+		"Ctrl+P",
+		"Ctrl+Shift+P",
+		"Ctrl+N",
+		"Ctrl+Shift+F",
 		"Ctrl+B",
-		"Ctrl+F",
 		"Ctrl+Q",
 		"F1",
 	}

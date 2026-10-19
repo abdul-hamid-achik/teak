@@ -43,7 +43,7 @@ type Theme struct {
 func ApplyTextInputTheme(input *textinput.Model, theme Theme) {
 	styles := input.Styles()
 	textStyle := lipgloss.NewStyle().Foreground(theme.Editor.GetForeground())
-	mutedStyle := lipgloss.NewStyle().Foreground(theme.Gutter.GetForeground())
+	mutedStyle := lipgloss.NewStyle().Foreground(theme.Muted.GetForeground())
 	accentStyle := lipgloss.NewStyle().Foreground(theme.PromptAccent.GetForeground())
 	styles.Focused.Text = textStyle
 	styles.Focused.Placeholder = mutedStyle
@@ -192,6 +192,16 @@ type themeStyles struct {
 	PromptAccent lipgloss.Style
 	PromptMuted  lipgloss.Style
 	PromptDanger lipgloss.Style
+
+	// Muted is secondary text: descriptions, hints, placeholders and ignored
+	// entries. It is readable on both the editor and the panel background but
+	// dimmer than normal text. Use it instead of the gutter foreground, which
+	// contrast tuning raises to full text brightness on most themes.
+	Muted lipgloss.Style
+	// Panel is the background and text of floating panels (pickers, dialogs,
+	// help, settings). Content inside a panel must carry this background, or
+	// the editor background shows through as dark patches.
+	Panel lipgloss.Style
 
 	// Syntax highlighting colors
 	SyntaxKeyword   color.Color
@@ -421,7 +431,7 @@ func defaultNordTheme() Theme {
 		GitDeleted: lipgloss.NewStyle().
 			Foreground(Nord11),
 		GitUntracked: lipgloss.NewStyle().
-			Foreground(Nord3),
+			Foreground(Nord14),
 
 		// Diff view
 		DiffRemoved: lipgloss.NewStyle().
@@ -541,6 +551,11 @@ func defaultNordTheme() Theme {
 			Foreground(Nord4),
 		PromptDanger: lipgloss.NewStyle().
 			Foreground(Nord11),
+		Muted: lipgloss.NewStyle().
+			Foreground(mutedForeground(Nord3, []color.Color{Nord4, Nord6}, Nord0, Nord1)),
+		Panel: lipgloss.NewStyle().
+			Background(Nord1).
+			Foreground(Nord4),
 
 		// Syntax highlighting
 		SyntaxKeyword:   Nord9,
@@ -592,6 +607,38 @@ func readableTextOnColor(background color.Color, candidates ...color.Color) colo
 		}
 	}
 	return textOnColor(background)
+}
+
+// mutedForeground returns the dimmest blend from dim toward a bright text
+// color that keeps 4.5:1 contrast on every background, so secondary text stays
+// readable on both the editor and floating panels. Brights are tried in order;
+// low-contrast palettes such as Solarized need their emphasized text color
+// before any blend qualifies. The last resort is black or white.
+func mutedForeground(dim color.Color, brights []color.Color, backgrounds ...color.Color) color.Color {
+	readable := func(candidate color.Color) bool {
+		for _, background := range backgrounds {
+			fg, bg := relativeLuminance(candidate), relativeLuminance(background)
+			if (max(fg, bg)+0.05)/(min(fg, bg)+0.05) < 4.5 {
+				return false
+			}
+		}
+		return true
+	}
+	dr, dg, db, _ := dim.RGBA()
+	mix := func(a, b uint32, t float64) uint8 {
+		return uint8(math.Round(float64(a>>8)*(1-t) + float64(b>>8)*t))
+	}
+	for _, bright := range brights {
+		br, bgr, bb, _ := bright.RGBA()
+		for step := 0; step <= 20; step++ {
+			t := float64(step) / 20
+			candidate := color.RGBA{R: mix(dr, br, t), G: mix(dg, bgr, t), B: mix(db, bb, t), A: 0xff}
+			if readable(candidate) {
+				return candidate
+			}
+		}
+	}
+	return textOnColor(backgrounds[len(backgrounds)-1])
 }
 
 func relativeLuminance(c color.Color) float64 {
@@ -652,7 +699,7 @@ func buildTheme(p palette) Theme {
 		GitAdded:            lipgloss.NewStyle().Foreground(p.green),
 		GitModified:         lipgloss.NewStyle().Foreground(p.yellow),
 		GitDeleted:          lipgloss.NewStyle().Foreground(p.red),
-		GitUntracked:        lipgloss.NewStyle().Foreground(p.bg3),
+		GitUntracked:        lipgloss.NewStyle().Foreground(readableTextOnColor(p.bg0, p.green, p.fg0)),
 		DiffRemoved:         lipgloss.NewStyle().Background(p.diffRemovedBg).Foreground(readableTextOnColor(p.diffRemovedBg, p.fg0)),
 		DiffAdded:           lipgloss.NewStyle().Background(p.diffAddedBg).Foreground(readableTextOnColor(p.diffAddedBg, p.fg0)),
 		DiffEmpty:           lipgloss.NewStyle().Background(p.bg1).Foreground(p.bg3),
@@ -691,6 +738,8 @@ func buildTheme(p palette) Theme {
 		PromptAccent:        lipgloss.NewStyle().Foreground(p.cyan).Bold(true),
 		PromptMuted:         lipgloss.NewStyle().Foreground(p.fg1),
 		PromptDanger:        lipgloss.NewStyle().Foreground(p.red),
+		Muted:               lipgloss.NewStyle().Foreground(mutedForeground(p.bg3, []color.Color{p.fg0, p.fg2}, p.bg0, p.bg1)),
+		Panel:               lipgloss.NewStyle().Background(p.bg1).Foreground(readableTextOnColor(p.bg1, p.fg0, p.fg2)),
 		SyntaxKeyword:       p.keyword,
 		SyntaxFunction:      p.function,
 		SyntaxString:        p.str,

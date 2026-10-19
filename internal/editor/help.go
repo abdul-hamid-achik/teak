@@ -203,7 +203,7 @@ func NewHelpModel(theme ui.Theme) HelpModel {
 	ti.Placeholder = "Filter..."
 	ti.CharLimit = 64
 	ti.SetWidth(36)
-	ui.ApplyTextInputTheme(&ti, theme)
+	applyPanelInputTheme(&ti, theme)
 
 	m := HelpModel{
 		input: ti,
@@ -218,7 +218,7 @@ func NewHelpModel(theme ui.Theme) HelpModel {
 // SetTheme updates pre-rendered help lines without disturbing the filter or scroll.
 func (m *HelpModel) SetTheme(theme ui.Theme) {
 	m.theme = theme
-	ui.ApplyTextInputTheme(&m.input, theme)
+	applyPanelInputTheme(&m.input, theme)
 	m.rebuildLines()
 }
 
@@ -231,6 +231,22 @@ func (m *HelpModel) rebuildLines() {
 		m.filtered = m.filterLines(query)
 	}
 	m.scrollY = min(m.scrollY, m.maxScroll())
+}
+
+// applyPanelInputTheme themes the filter input and gives each of its styles the
+// panel background, so the input row does not paint editor-colored patches
+// inside the box.
+func applyPanelInputTheme(input *textinput.Model, theme ui.Theme) {
+	ui.ApplyTextInputTheme(input, theme)
+	bg := theme.Panel.GetBackground()
+	styles := input.Styles()
+	for _, state := range []*textinput.StyleState{&styles.Focused, &styles.Blurred} {
+		state.Text = state.Text.Background(bg)
+		state.Placeholder = state.Placeholder.Background(bg)
+		state.Suggestion = state.Suggestion.Background(bg)
+		state.Prompt = state.Prompt.Background(bg)
+	}
+	input.SetStyles(styles)
 }
 
 // Focus focuses the search input.
@@ -324,9 +340,10 @@ func (m HelpModel) Update(msg tea.Msg) (HelpModel, tea.Cmd) {
 func (m HelpModel) View() string {
 
 	var sb strings.Builder
+	bg := m.theme.Panel.GetBackground()
 
 	// Title
-	sb.WriteString(m.theme.HelpTitle.Render("Keyboard Shortcuts"))
+	sb.WriteString(m.theme.HelpTitle.Background(bg).Render("Keyboard Shortcuts"))
 	sb.WriteString("\n\n")
 
 	// Search input
@@ -341,7 +358,7 @@ func (m HelpModel) View() string {
 	}
 
 	if len(m.filtered) == 0 {
-		sb.WriteString(lipgloss.NewStyle().Foreground(m.theme.HelpBorder.GetForeground()).Render("No matching shortcuts"))
+		sb.WriteString(m.theme.Muted.Background(bg).Render("No matching shortcuts"))
 	}
 	for i := m.scrollY; i < endIdx; i++ {
 		sb.WriteString(m.filtered[i].rendered)
@@ -353,13 +370,15 @@ func (m HelpModel) View() string {
 	// Scroll indicator
 	if len(m.filtered) > visible {
 		sb.WriteByte('\n')
-		scrollHint := lipgloss.NewStyle().Foreground(m.theme.HelpBorder.GetForeground()).Render("  Use arrows or scroll to navigate")
-		sb.WriteString(scrollHint)
+		sb.WriteString(m.theme.Muted.Background(bg).Render("  Use arrows or scroll to navigate"))
 	}
 
 	content := sb.String()
 
-	helpStyle := m.theme.HelpBorder.
+	// Panel supplies the background for padding and any cell an inner style
+	// leaves untouched; every inner segment carries the same background so no
+	// reset in the middle of a row exposes the editor behind the box.
+	helpStyle := m.theme.Panel.
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.HelpBorder.GetForeground()).
 		Padding(1, 2)
@@ -367,88 +386,100 @@ func (m HelpModel) View() string {
 	return helpStyle.Width(m.boxWidth()).Render(content)
 }
 
+const (
+	helpRowIndent  = 2  // cells before the key column
+	helpKeyGap     = 2  // minimum cells between the key and description columns
+	helpMaxKeyCol  = 28 // a pathological key wraps instead of eating the description
+	helpMinDescCol = 16 // description cells the key column must leave free
+	helpMaxWidth   = 80 // widest the overlay grows on large terminals
+)
+
 func (m HelpModel) buildLines() []helpLine {
-	var lines []helpLine
-	for i, group := range helpGroups {
-		if i > 0 {
-			lines = append(lines, helpLine{rendered: "", text: ""})
+	return m.renderGroups(helpGroups)
+}
+
+func (m HelpModel) filterLines(query string) []helpLine {
+	var groups []bindingGroup
+	for _, group := range helpGroups {
+		groupMatches := strings.Contains(strings.ToLower(group.title), query)
+		var matching []keybinding
+		for _, b := range group.bindings {
+			text := strings.ToLower(b.key + " " + b.desc)
+			if groupMatches || strings.Contains(text, query) {
+				matching = append(matching, b)
+			}
 		}
-		lines = append(lines, helpLine{
-			rendered: m.theme.HelpTitle.Render(group.title),
+		if len(matching) > 0 {
+			groups = append(groups, bindingGroup{title: group.title, bindings: matching})
+		}
+	}
+	return m.renderGroups(groups)
+}
+
+// renderGroups lays the groups out as physical rows. The key column is sized
+// to the longest key shown (capped), and both columns wrap with a hanging
+// indent so a continuation row stays under its own column. Every segment
+// carries the panel background.
+func (m HelpModel) renderGroups(groups []bindingGroup) []helpLine {
+	width := m.contentWidth()
+	bg := m.theme.Panel.GetBackground()
+	panel := m.theme.Panel
+	titleStyle := m.theme.HelpTitle.Background(bg)
+	keyStyle := m.theme.HelpKey.Background(bg)
+
+	keyCol := 0
+	for _, group := range groups {
+		for _, b := range group.bindings {
+			keyCol = max(keyCol, lipgloss.Width(b.key))
+		}
+	}
+	keyCap := max(1, min(helpMaxKeyCol, max(8, width-helpRowIndent-helpKeyGap-helpMinDescCol)))
+	keyCol = max(1, min(keyCol, keyCap))
+	descCol := max(1, width-helpRowIndent-keyCol-helpKeyGap)
+
+	indent := panel.Render(strings.Repeat(" ", helpRowIndent))
+	gap := panel.Render(strings.Repeat(" ", helpKeyGap))
+
+	var rows []helpLine
+	for i, group := range groups {
+		if i > 0 {
+			rows = append(rows, helpLine{rendered: "", text: ""})
+		}
+		rows = append(rows, helpLine{
+			rendered: titleStyle.Render(ansi.Truncate(group.title, width, "")),
 			text:     strings.ToLower(group.title),
 			isTitle:  true,
 		})
 		for _, b := range group.bindings {
-			keyStr := m.theme.HelpKey.Render(padRight(b.key, 16))
-			rendered := "  " + keyStr + " " + b.desc
+			keyLines := wrapCell(b.key, keyCol)
+			descLines := wrapCell(b.desc, descCol)
 			text := strings.ToLower(b.key + " " + b.desc)
-			lines = append(lines, helpLine{rendered: rendered, text: text})
-		}
-	}
-	return m.wrapLines(lines)
-}
-
-func (m HelpModel) filterLines(query string) []helpLine {
-	// Find which groups have matching bindings
-	var result []helpLine
-	for _, group := range helpGroups {
-		var matching []helpLine
-		groupMatches := strings.Contains(strings.ToLower(group.title), query)
-		for _, b := range group.bindings {
-			text := strings.ToLower(b.key + " " + b.desc)
-			if groupMatches || strings.Contains(text, query) {
-				keyStr := m.theme.HelpKey.Render(padRight(b.key, 16))
-				matching = append(matching, helpLine{
-					rendered: "  " + keyStr + " " + b.desc,
-					text:     text,
-				})
-			}
-		}
-		if len(matching) > 0 {
-			if len(result) > 0 {
-				result = append(result, helpLine{rendered: "", text: ""})
-			}
-			result = append(result, helpLine{
-				rendered: m.theme.HelpTitle.Render(group.title),
-				text:     strings.ToLower(group.title),
-				isTitle:  true,
-			})
-			result = append(result, matching...)
-		}
-	}
-	return m.wrapLines(result)
-}
-
-func (m HelpModel) boxWidth() int { return max(1, min(48, m.width-4)) }
-
-// Scroll physical rows so long shortcuts cannot push the help footer outside
-// the viewport. Cut from the original styled line to retain colors even when
-// scrolling starts on a continuation row.
-func (m HelpModel) wrapLines(lines []helpLine) []helpLine {
-	width := max(1, m.boxWidth()-6) // border and horizontal padding
-	var rows []helpLine
-	for _, line := range lines {
-		total := ansi.StringWidth(line.rendered)
-		if total == 0 {
-			rows = append(rows, line)
-			continue
-		}
-		for start := 0; start < total; {
-			span := min(width, total-start)
-			if start+span < total {
-				plain := ansi.Strip(ansi.Cut(line.rendered, start, start+span))
-				if space := strings.LastIndex(plain, " "); space > 2 {
-					span = ansi.StringWidth(plain[:space+1])
+			for r := 0; r < max(len(keyLines), len(descLines)); r++ {
+				var k, d string
+				if r < len(keyLines) {
+					k = keyLines[r]
 				}
+				if r < len(descLines) {
+					d = descLines[r]
+				}
+				row := indent + keyStyle.Render(padRight(k, keyCol)) + gap + panel.Render(padRight(d, descCol))
+				rows = append(rows, helpLine{rendered: ansi.Truncate(row, width, ""), text: text})
 			}
-			row := line
-			row.rendered = ansi.Cut(line.rendered, start, start+span)
-			rows = append(rows, row)
-			start += span
 		}
 	}
 	return rows
 }
+
+// wrapCell wraps plain text to width cells, breaking at spaces and splitting
+// words longer than the column.
+func wrapCell(s string, width int) []string {
+	return strings.Split(ansi.Wrap(s, max(1, width), ""), "\n")
+}
+
+func (m HelpModel) boxWidth() int { return max(1, min(helpMaxWidth, m.width-4)) }
+
+// contentWidth is the cell width available inside the border and padding.
+func (m HelpModel) contentWidth() int { return max(1, m.boxWidth()-6) }
 
 func (m HelpModel) visibleLines() int {
 	// Account for title (1) + blank (1) + input (1) + blank (1) + scroll hint (1) + border/padding (~4)

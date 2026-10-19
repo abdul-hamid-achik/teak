@@ -60,7 +60,7 @@ func (f *Float) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 func (f *Float) View() string {
 	titleStyle := f.theme.HelpTitle
 	contentStyle := lipgloss.NewStyle().Foreground(f.theme.TreeEntry.GetForeground())
-	hintStyle := lipgloss.NewStyle().Foreground(f.theme.Gutter.GetForeground())
+	hintStyle := lipgloss.NewStyle().Foreground(f.theme.Muted.GetForeground())
 	width, height := max(1, f.Width), max(1, f.Height+6)
 	if f.screenWidth > 0 {
 		width = min(width, max(1, f.screenWidth-4))
@@ -93,7 +93,7 @@ func (f *Float) View() string {
 		Width(width).
 		Height(height).
 		MaxHeight(height).
-		Render(sb.String())
+		Render(keepPanelBackground(sb.String(), panelBackground(f.theme)))
 }
 
 // IsDismissed implements Overlay.

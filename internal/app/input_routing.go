@@ -486,9 +486,11 @@ func (m Model) handleGlobalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			if m.focus == FocusAgent {
 				m.setFocus(FocusEditor)
 				m.agentPanel.Blur()
-			} else {
+			} else if m.agentPanelFits() {
 				m.setFocus(FocusAgent)
 				return m, m.agentPanel.Focus(), true
+			} else {
+				m.status = agentNoRoomStatus
 			}
 		}
 		return m, nil, true

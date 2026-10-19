@@ -39,6 +39,40 @@ func (m Model) promptBoxStyle() lipgloss.Style {
 		Background(m.theme.StatusBar.GetBackground())
 }
 
+// settingsHintItems are the key hints below the settings list. They wrap
+// between items, never inside one.
+var settingsHintItems = []string{"↑↓ select", "Enter/click choose", "Ctrl+S keep changes", "Esc cancel"}
+
+// settingsHint renders the settings footer to fit width columns, in the muted
+// color on the panel background so it neither wraps mid-item nor paints
+// editor-colored cells inside the box.
+func (m Model) settingsHint(width int) string {
+	const separator = " • "
+	var rows []string
+	row := ""
+	for _, item := range settingsHintItems {
+		switch {
+		case row == "":
+			row = item
+		case ansi.StringWidth(row)+ansi.StringWidth(separator)+ansi.StringWidth(item) <= width:
+			row += separator + item
+		default:
+			rows = append(rows, row)
+			row = item
+		}
+	}
+	rows = append(rows, row)
+
+	style := lipgloss.NewStyle().
+		Foreground(m.theme.Muted.GetForeground()).
+		Background(m.theme.Panel.GetBackground()).
+		Width(width)
+	for i, r := range rows {
+		rows[i] = style.Render(ansi.Truncate(r, width, "…"))
+	}
+	return strings.Join(rows, "\n")
+}
+
 // promptView keeps the insertion point visible in long paths and names.
 func (m Model) promptView(label, value string, cursor int) string {
 	style := m.promptBoxStyle().Padding(0, 1)
@@ -205,10 +239,8 @@ func (m Model) View() tea.View {
 	} else if m.showSettings {
 		// Settings overlay shares its geometry with mouse hit-testing.
 		settingsView := m.settingsM.View()
-		hint := m.theme.Gutter.Render("\n\n↑↓ select  •  Enter/click choose  •  Ctrl+S keep changes  •  Esc cancel")
-		settingsView += hint
-
 		centerX, centerY, modalWidth, _ := m.settingsModalGeometry()
+		settingsView += "\n\n" + m.settingsHint(max(1, modalWidth-6))
 
 		// Wrap in a box with border
 		settingsBox := m.promptBoxStyle().
@@ -259,6 +291,9 @@ func (m Model) View() tea.View {
 
 	// Unsaved changes confirm dialog (highest priority overlay)
 	if m.unsavedConfirm != nil {
+		// The dialog never receives WindowSizeMsg; without the terminal width
+		// a row of buttons could widen it past the screen edge.
+		m.unsavedConfirm.SetScreenWidth(m.width)
 		content = ui.RenderOverlay(content, m.unsavedConfirm.View(), m.width, m.height)
 	}
 
@@ -529,29 +564,6 @@ func (m Model) renderStatusBar() string {
 	}
 	left := helpHint + m.theme.StatusBar.Render(branchPart)
 
-	var right string
-	if ed := m.activeEditor(); ed != nil {
-		buf := ed.Buffer
-		indentInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
-		if ed.Config.InsertTabs {
-			indentInfo = "Tabs"
-		}
-		ending := "LF"
-		if buf.LineEnding() == text.CRLF {
-			ending = "CRLF"
-		}
-		language := editor.LanguageLabelForFile(buf.FilePath)
-		scrollPos := m.scrollIndicator()
-		lspStatus := m.lspIndicator()
-		procStatus := m.procMonIndicator()
-		problemsStatus := m.problemsStatus()
-		agentStatus := m.agentIndicator()
-		right = m.theme.StatusText.Render(
-			fmt.Sprintf(" Ln %d, Col %d  %s  %s  UTF-8  %s  %s%s%s ",
-				buf.Cursor.Line+1, ed.StatusColumn(), indentInfo, ending, language, scrollPos, lspStatus+procStatus, problemsStatus),
-		) + agentStatus
-	}
-
 	// Center: status message; when idle, surface the diagnostic under the
 	// cursor so the common case does not require opening the problems panel.
 	center := m.status
@@ -560,12 +572,37 @@ func (m Model) renderStatusBar() string {
 			center = ed.DiagnosticMessageAtLine(ed.Buffer.Cursor.Line, m.width/2)
 		}
 	}
+	center = strings.Join(strings.Fields(center), " ")
+	centerWidth := ansi.StringWidth(center)
 
-	// Calculate padding
-	usedWidth := ansi.StringWidth(left) + ansi.StringWidth(right) + ansi.StringWidth(center)
-	padding := max(0, m.width-usedWidth)
+	// The right-hand segments (cursor position, diagnostics, language server)
+	// outrank the message. Shed the least important segments, one at a time,
+	// until the message has a usable amount of room or fits whole; whatever
+	// still does not fit is truncated with an ellipsis.
+	leftWidth := ansi.StringWidth(left)
+	wantMessage := min(centerWidth, statusMessageMinWidth)
+	var right string
+	var rightWidth int
+	for dropped := 0; ; dropped++ {
+		right = m.statusRight(dropped)
+		rightWidth = ansi.StringWidth(right)
+		if m.width-leftWidth-rightWidth-2 >= wantMessage || dropped >= len(statusDropOrder) {
+			break
+		}
+	}
+	avail := m.width - leftWidth - rightWidth - 2 // a space on each side of the message
+	switch {
+	case avail <= 0:
+		center = ""
+	case centerWidth > avail:
+		center = ansi.Truncate(center, avail, "…")
+	}
+	if center != "" {
+		center = " " + center
+	}
+	padding := max(0, m.width-leftWidth-rightWidth-ansi.StringWidth(center))
 
-	bar := left + m.theme.StatusBar.Render(" "+center+strings.Repeat(" ", max(0, padding-1))) + right
+	bar := left + m.theme.StatusBar.Render(center+strings.Repeat(" ", padding)) + right
 	// Lipgloss Width wraps overlong content. A status bar must remain exactly
 	// one terminal row even when its fixed hints cannot fit.
 	bar = ansi.Truncate(bar, m.width, "")
@@ -578,12 +615,76 @@ func (m Model) renderStatusBar() string {
 	return divider + "\n" + m.theme.StatusBar.Width(m.width).Render(bar)
 }
 
+// statusMessageMinWidth is how many columns a status message is guaranteed
+// before right-hand segments start to be dropped to make room for it.
+const statusMessageMinWidth = 24
+
+// statusSegment names a droppable right-hand status bar segment.
+type statusSegment int
+
+const (
+	segEncoding statusSegment = iota
+	segLineEnding
+	segIndent
+	segScroll
+	segProcess
+	segLanguage
+	segLSP
+	segAgent
+)
+
+// statusDropOrder lists segments from least to most important. The cursor
+// position and the problem counts are never dropped.
+var statusDropOrder = []statusSegment{
+	segEncoding, segLineEnding, segIndent, segScroll,
+	segProcess, segLanguage, segLSP, segAgent,
+}
+
+// statusRight renders the right-hand status segments with the first `dropped`
+// entries of statusDropOrder removed.
+func (m Model) statusRight(dropped int) string {
+	ed := m.activeEditor()
+	if ed == nil {
+		return ""
+	}
+	hidden := map[statusSegment]bool{}
+	for _, seg := range statusDropOrder[:min(dropped, len(statusDropOrder))] {
+		hidden[seg] = true
+	}
+	part := func(seg statusSegment, text string) string {
+		if hidden[seg] {
+			return ""
+		}
+		return text
+	}
+
+	buf := ed.Buffer
+	indentInfo := fmt.Sprintf("Spaces: %d", ed.Config.TabSize)
+	if ed.Config.InsertTabs {
+		indentInfo = "Tabs"
+	}
+	ending := "LF"
+	if buf.LineEnding() == text.CRLF {
+		ending = "CRLF"
+	}
+	body := fmt.Sprintf(" Ln %d, Col %d", buf.Cursor.Line+1, ed.StatusColumn()) +
+		part(segIndent, "  "+indentInfo) +
+		part(segLineEnding, "  "+ending) +
+		part(segEncoding, "  UTF-8") +
+		part(segLanguage, "  "+editor.LanguageLabelForFile(buf.FilePath)) +
+		part(segScroll, "  "+m.scrollIndicator()) +
+		part(segLSP, m.lspIndicator()) +
+		part(segProcess, m.procMonIndicator()) +
+		m.problemsStatus() + " "
+	return m.theme.StatusText.Render(body) + part(segAgent, m.agentIndicator())
+}
+
 func (m Model) renderCompactStatusBar() string {
 	label := "F1 Help"
 	if m.status != "" {
 		label = m.status
 	}
-	label = ansi.Truncate(label, m.width, "")
+	label = ansi.Truncate(label, m.width, "…")
 	if missing := m.width - ansi.StringWidth(label); missing > 0 {
 		label += strings.Repeat(" ", missing)
 	}

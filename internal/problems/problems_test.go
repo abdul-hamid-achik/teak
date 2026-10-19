@@ -415,7 +415,7 @@ func TestModelViewNarrowWidthsTruncatesUnicodeMessagesSafely(t *testing.T) {
 			m.SetProblems([]Problem{{
 				FilePath: "/root/a.go",
 				Severity: 1,
-				Message:  "\x1b[31m界界界 diagnostic\x1b[0m",
+				Message:  "\x1b[31m界界界界界界界界界界界界 diagnostic\x1b[0m",
 			}})
 
 			view := m.View()
@@ -424,11 +424,16 @@ func TestModelViewNarrowWidthsTruncatesUnicodeMessagesSafely(t *testing.T) {
 			}
 			if width == 25 {
 				plain := ansi.Strip(view)
-				if !strings.Contains(plain, "界...") {
-					t.Errorf("View() = %q, want display-width truncation containing %q", plain, "界...")
+				// The message leads the row, so a 25-column sidebar keeps as many
+				// whole wide characters as fit and then the ellipsis.
+				if !strings.Contains(plain, "界…") {
+					t.Errorf("View() = %q, want display-width truncation containing %q", plain, "界…")
 				}
-				if strings.Contains(plain, "界界") {
-					t.Errorf("View() = %q, want message truncated before a second wide character", plain)
+				if strings.Contains(plain, "diagnostic") {
+					t.Errorf("View() = %q, want message truncated before its tail", plain)
+				}
+				if got := ansi.StringWidth(view); got > width {
+					t.Errorf("View() width = %d, want <= %d", got, width)
 				}
 			}
 		})

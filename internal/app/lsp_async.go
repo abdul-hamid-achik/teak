@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"teak/internal/lsp"
@@ -144,6 +145,63 @@ func lspRequestRoutineErr(err error, auto bool) bool {
 	return auto && errors.Is(err, context.DeadlineExceeded)
 }
 
+// completionSyncWait bounds how long a completion request waits for the
+// client to stage the document version it was computed for. A newer edit
+// cancels the wait through the request context long before this expires; the
+// bound only matters for a version that never reaches the client. It is a
+// variable so tests can exercise expiry without waiting a full second.
+var completionSyncWait = time.Second
+
+const completionSyncPoll = 2 * time.Millisecond
+
+// awaitDocumentVersion holds a request until the client has staged version
+// for uri. Bubble Tea runs the didChange command and the completion command
+// concurrently, so on fast typing the request is ready a keystroke before the
+// client's snapshot, and the client then rejects the cursor as outside the
+// line. It reports false when the request is superseded: its context was
+// cancelled (a newer edit, cursor move or request) or the client already
+// holds a newer version. A document the client has not opened is not waited
+// on, and an expired wait proceeds, so a version that is never synchronized
+// still surfaces as an error instead of silently disabling completion.
+func awaitDocumentVersion(ctx context.Context, client *lsp.Client, uri string, version int) bool {
+	deadline := time.NewTimer(completionSyncWait)
+	defer deadline.Stop()
+	poll := time.NewTicker(completionSyncPoll)
+	defer poll.Stop()
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		synced, open := client.DocumentVersion(uri)
+		if !open || synced == version {
+			return true
+		}
+		if synced > version {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return true
+		case <-poll.C:
+		}
+	}
+}
+
+// overlayRequestSuperseded reports whether a failed request belongs to a
+// document version or cursor that is no longer current. The client validates
+// positions before it observes cancellation, so a superseded request can
+// fail with a position error rather than context.Canceled; like a stale
+// result, that error must not reach the status bar.
+func overlayRequestSuperseded(ctx context.Context, client *lsp.Client, uri string, version int) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	synced, open := client.DocumentVersion(uri)
+	return open && synced > version
+}
+
 func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 	editor := m.activeEditor()
 	if editor == nil || editor.Buffer.FilePath == "" {
@@ -162,8 +220,15 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 		if client == nil {
 			return nil
 		}
-		items, err := client.CompletionContext(requestContext, lsp.FileURI(filePath), line, column)
+		uri := lsp.FileURI(filePath)
+		if !awaitDocumentVersion(requestContext, client, uri, metadata.Version) {
+			return nil
+		}
+		items, err := client.CompletionContext(requestContext, uri, line, column)
 		if lspRequestRoutineErr(err, false) {
+			return nil
+		}
+		if err != nil && overlayRequestSuperseded(requestContext, client, uri, metadata.Version) {
 			return nil
 		}
 		if err != nil {

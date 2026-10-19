@@ -44,7 +44,7 @@ steps:
         screen:
             contains: "Unsaved Changes"
     - snapshot: confirm_ready
-    - mouse: {x: 19, y: 14, button: left, action: click}
+    - mouse: {x: 61, y: 13, button: left, action: click}
     - snapshot: after_cancel_click
 outcomes:
     - id: cancel_click_closes

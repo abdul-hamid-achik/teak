@@ -617,6 +617,15 @@ func (fw *fileWatcher) processEvent(event fsnotify.Event, now time.Time) {
 	}
 
 	if isGitInternalPath(path, fw.rootDir) {
+		// Lock files and attribute-only changes are side effects of the git
+		// panel's own `git status` (it creates and removes index.lock and can
+		// touch the index's attributes), so reacting to them made every
+		// refresh schedule the next one. The rename that commits a lock still
+		// arrives as an event on the real file (index, HEAD, refs).
+		if strings.HasSuffix(path, ".lock") ||
+			!event.Has(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) {
+			return
+		}
 		fw.publishDebouncedTreeChange(fw.rootDir, path, now)
 		return
 	}

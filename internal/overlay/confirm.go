@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"teak/internal/ui"
 )
@@ -48,7 +49,7 @@ func NewConfirm(title, message string, items []string, buttons []Button, theme u
 		Items:   items,
 		Buttons: buttons,
 		theme:   theme,
-		width:   50,
+		width:   confirmDefaultWidth,
 	}
 }
 
@@ -56,6 +57,11 @@ func NewConfirm(title, message string, items []string, buttons []Button, theme u
 func (c *Confirm) SetWidth(w int) {
 	c.width = w
 }
+
+// SetScreenWidth tells the dialog how wide the terminal is, so a row of buttons
+// that is wider than the requested dialog can widen it up to the terminal edge.
+// Update(tea.WindowSizeMsg) does the same for owners that forward resizes.
+func (c *Confirm) SetScreenWidth(w int) { c.screenWidth = w }
 
 // SetTheme updates rendering without resetting the current selection or result.
 func (c *Confirm) SetTheme(theme ui.Theme) { c.theme = theme }
@@ -139,6 +145,49 @@ func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	return c, nil
 }
 
+const (
+	// confirmDefaultWidth is the width callers get from NewConfirm.
+	confirmDefaultWidth = 50
+	// confirmUnknownScreenMaxWidth bounds auto-widening when the terminal size
+	// is unknown, so the dialog still fits an 80-column terminal.
+	confirmUnknownScreenMaxWidth = 76
+	// confirmBoxChrome is the border plus horizontal padding around the content.
+	confirmBoxChrome = 6
+	confirmButtonGap = 2
+)
+
+// widthLimits returns the dialog width requested by the caller (clamped to the
+// terminal when known) and the widest the dialog may grow to so that a row of
+// buttons fits.
+func (c *Confirm) widthLimits() (base, limit int) {
+	base = c.width
+	switch {
+	case c.screenWidth > 0:
+		base = min(base, max(1, c.screenWidth-4))
+		limit = max(1, c.screenWidth-4)
+	case c.width >= confirmDefaultWidth:
+		limit = confirmUnknownScreenMaxWidth
+	default:
+		// A caller that narrowed the dialog below the default is fitting a
+		// small terminal; do not grow past it without knowing the screen.
+		limit = c.width
+	}
+	return base, max(base, limit)
+}
+
+// buttonStyle resolves the style for button i: the focused style wins, then a
+// caller-supplied style, then the neutral default. An unset lipgloss color is
+// NoColor rather than nil, so it has to be detected explicitly.
+func (c *Confirm) buttonStyle(i int) lipgloss.Style {
+	if i == c.cursor {
+		return c.theme.GitPushPullButton.Padding(0, 2).Bold(true)
+	}
+	if custom := c.Buttons[i].Style; !isNoColor(custom.GetForeground()) || !isNoColor(custom.GetBackground()) {
+		return custom
+	}
+	return c.theme.GitActionButton.Padding(0, 2)
+}
+
 // View implements Overlay.
 func (c *Confirm) View() string {
 	var sb strings.Builder
@@ -166,31 +215,39 @@ func (c *Confirm) View() string {
 		}
 	}
 
-	// Buttons row
-	sb.WriteByte('\n')
-	btnNormal := c.theme.GitActionButton.Padding(0, 2)
-	btnFocused := c.theme.GitPushPullButton.Padding(0, 2).Bold(true)
-
+	// Buttons: one row when they fit (widening the dialog up to the terminal
+	// if necessary), otherwise stacked and aligned. Never wrapped mid-row.
+	base, limit := c.widthLimits()
+	width := base
+	rowWidth := 0
 	for i, btn := range c.Buttons {
-		style := btnNormal
-		if btn.Style.GetForeground() != nil {
-			style = btn.Style
+		rowWidth += lipgloss.Width(c.buttonStyle(i).Render(btn.Label))
+		if i > 0 {
+			rowWidth += confirmButtonGap
 		}
-		if i == c.cursor {
-			style = btnFocused
-		}
-		rendered := zone.Mark(confirmZoneID(i), style.Render(btn.Label))
-		sb.WriteString(rendered)
-		if i < len(c.Buttons)-1 {
-			sb.WriteString("  ")
+	}
+	stacked := false
+	switch {
+	case rowWidth+confirmBoxChrome <= base:
+	case rowWidth+confirmBoxChrome <= limit:
+		width = rowWidth + confirmBoxChrome
+	default:
+		stacked = true
+	}
+
+	sb.WriteByte('\n')
+	if stacked {
+		c.writeStackedButtons(&sb, max(1, width-confirmBoxChrome))
+	} else {
+		for i, btn := range c.Buttons {
+			sb.WriteString(zone.Mark(confirmZoneID(i), c.buttonStyle(i).Render(btn.Label)))
+			if i < len(c.Buttons)-1 {
+				sb.WriteString(strings.Repeat(" ", confirmButtonGap))
+			}
 		}
 	}
 
-	width := c.width
-	if c.screenWidth > 0 {
-		width = min(width, max(1, c.screenWidth-4))
-	}
-	content := sb.String()
+	content := keepPanelBackground(sb.String(), panelBackground(c.theme))
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(c.theme.HelpBorder.GetForeground()).
@@ -199,6 +256,24 @@ func (c *Confirm) View() string {
 		Width(width)
 
 	return boxStyle.Render(content)
+}
+
+// writeStackedButtons renders one button per line, all padded to the same
+// width so their left edges and highlight blocks line up.
+func (c *Confirm) writeStackedButtons(sb *strings.Builder, contentWidth int) {
+	blockWidth := 0
+	for i, btn := range c.Buttons {
+		blockWidth = max(blockWidth, lipgloss.Width(c.buttonStyle(i).Render(btn.Label)))
+	}
+	blockWidth = min(blockWidth, contentWidth)
+	for i, btn := range c.Buttons {
+		style := c.buttonStyle(i)
+		label := ansi.Truncate(btn.Label, max(1, blockWidth-style.GetHorizontalFrameSize()), "…")
+		sb.WriteString(zone.Mark(confirmZoneID(i), style.Width(blockWidth).Render(label)))
+		if i < len(c.Buttons)-1 {
+			sb.WriteByte('\n')
+		}
+	}
 }
 
 // IsDismissed implements Overlay.

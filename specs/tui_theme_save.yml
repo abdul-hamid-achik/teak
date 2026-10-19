@@ -61,7 +61,7 @@ outcomes:
       description: the position indicator uses white text on the blue accent
       verify:
         cell:
-            x: 51
+            x: 57
             y: 23
             char: L
             style: {fg: "#ffffff", bg: "#0969da"}
@@ -75,4 +75,4 @@ outcomes:
             style: {fg: "#24292f", bg: "#f6f8fa"}
 artifacts:
     finalScreen: never
-contractHash: sha256:1f80e2aca496cdb7c86fcbb9e7138a9d94ccc39712b1e7f62ea653872c660b9e
+contractHash: sha256:15a9df032f5c03f220b78a8cfe31617487a314b61d6961b091bf95536f655104
