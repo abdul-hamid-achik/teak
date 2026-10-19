@@ -2,6 +2,22 @@
 
 All notable changes to the Teak editor project.
 
+## [0.25.1] - 2026-10-19
+
+### Fixes
+
+- `teak doctor` reports a language server that exits during the handshake as
+  "client not running" every time. Depending on timing it used to show the raw
+  "broken pipe" write error instead.
+- Diagnostics no longer arrive stale when a newer set replaces one that is
+  still queued for delivery.
+
+### Development
+
+- CI runs the TUI behavior specs with glyphrun v0.22.0, whose terminal
+  emulator gives wide characters and emoji two cells and joins combining marks,
+  as real terminals do.
+
 ## [0.25.0] - 2026-10-19
 
 ### Interface
